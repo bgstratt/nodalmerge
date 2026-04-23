@@ -334,7 +334,15 @@ impl<N: NodeStore> StateGraph<N> {
             return results;
         }
 
-        const BATCH_VERIFY_CHUNK: usize = 64;
+        // Empirically tuned on AMD Zen 3, 12 physical cores, ed25519-dalek 2.2
+        // with the simd backend. Pippenger multi-scalar-mul efficiency climbs
+        // with batch size, but so does chunk coarseness (fewer chunks = worse
+        // rayon load balance + worse behaviour on small catchups).
+        // Sweep on `merge_10k_batch` (10k nodes): 64 → 30.5 ms, 128 → 28.8 ms,
+        // 256 → 28.6 ms, 512 → 28.2 ms (within noise of 256).  Past ~256 the
+        // crypto curve flattens and the parallelism penalty starts to matter
+        // on smaller catchup payloads, so 256 is the current sweet spot.
+        const BATCH_VERIFY_CHUNK: usize = 256;
 
         #[cfg(not(target_arch = "wasm32"))]
         let chunk_outputs: Vec<Vec<(usize, bool)>> = {

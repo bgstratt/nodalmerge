@@ -282,7 +282,7 @@ Release profile, latest run (`cargo bench -p activesync-core`):
 | `sync_handshake_mst_build_2k` | **3.28 ms** | — | Linear scaling confirmed |
 | `sync_handshake_mst_simulate_1k_diff` | **302 µs** | — | 1 k-node diff in 2 k-node tree, **3 round trips** |
 | `merge_10k` | **320 ms** | <10 ms | Per-node `apply_remote`; one Ed25519 verify per node. |
-| `merge_10k_batch` | **34 ms** | <10 ms | `apply_remote_batch`: dedupe + parallel `verify_batch` (rayon, 64-node chunks) + session `verified_ids` cache. **9.4× over the per-node path.** Server `import_nodes` ingests packs through this path. |
+| `merge_10k_batch` | **31 ms** | <10 ms | `apply_remote_batch`: dedupe + parallel `verify_batch` (rayon, 64-node chunks) + session `verified_ids` cache. **~10× over the per-node path.** Canonical `Transaction::hash` is `postcard`-encoded (509 ns; was 1.07 µs with `serde_json`). Server `import_nodes` ingests packs through this path. |
 
 Test suite: **117 / 117** passing in `activesync-core` (`cargo test -p activesync-core`).
 

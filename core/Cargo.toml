@@ -41,3 +41,7 @@ harness = false
 name = "blob_verify"
 harness = false
 
+[[bench]]
+name = "tx_hash"
+harness = false
+

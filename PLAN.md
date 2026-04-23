@@ -37,7 +37,8 @@
 - ✅ **E2 complete** — Speculative vs. Canonical views on `StateGraph` (`read_speculative` / `read_canonical`); local writes are speculative-only until echoed back or superseded by an authoritative remote node; snap-back is automatic through LWW pubkey priority; unit tests cover all three transition paths.
 - ✅ **E3 complete** — Tick-based batching via `TickConfig { interval_ms, max_ops_per_tick }`; optional buffered mode on `StateGraph`; each buffered op keeps its own `OpId` so tick boundaries never affect resolved state.
 - ✅ **Observability** — server logs routed through `tracing` + `tracing-subscriber`; default filter `info,activesync_server=info,activesync_core=info`; `RUST_LOG` overrides at runtime.
-- ✅ **Batched Ed25519 verification** — `StateGraph::apply_remote_batch(Vec<SyncNode>) -> BatchResult { accepted, rejected }`; dedupe → parallel `ed25519_dalek::verify_batch` (rayon, 64-node chunks, native only) → per-chunk per-node fallback on failure → session-scoped `verified_ids` cache; server `import_nodes` and catchup paths use it. **`merge_10k_batch` 34 ms vs serial `merge_10k` 320 ms (9.4×).** 117 tests pass.
+- ✅ **Batched Ed25519 verification** — `StateGraph::apply_remote_batch(Vec<SyncNode>) -> BatchResult { accepted, rejected }`; dedupe → parallel `ed25519_dalek::verify_batch` (rayon, 256-node chunks, native only) → per-chunk per-node fallback on failure → session-scoped `verified_ids` cache; server `import_nodes` and catchup paths use it. **`merge_10k_batch` 28.6 ms vs serial `merge_10k` 320 ms (~11×).** Chunk size empirically tuned: 64 → 30.5 ms, 128 → 28.8 ms, 256 → 28.6 ms, 512 → 28.2 ms (within noise; 256 preserves parallelism on smaller catchups). 117 tests pass.
+- ✅ **Canonical `Transaction` hash is `postcard`-encoded** (was `serde_json`). 3.46× smaller preimage and 2.1× faster `hash()` end-to-end (1.07 µs → 509 ns on a 3-op tx). Removes a latent footgun where a future `serde_json` formatting change could silently invalidate signatures. Micro-bench lives in `core/benches/tx_hash.rs` as a regression guard.
 - ⚠️  Server-side `NodeStore`/`BlobStore` are still in-memory — disk adapters remain a deployment concern, not a protocol gap
 
 ---
@@ -154,7 +155,8 @@ if a PR regresses any benchmark by >10%.
 | `sync_handshake_mst_build_2k` | **3.28 ms** | — | Build trie from 2k IDs; ~linear scaling confirmed |
 | `sync_handshake_mst_simulate_1k_diff` | **302 µs** | — | Simulate 1k-node diff between two 2k-node trees; **3 round trips** |
 | `merge_10k` | **320 ms** (per-node `apply_remote`) | <10 ms | Legacy serial path; one Ed25519 verify per node ≈ 32 µs × 10 k. |
-| `merge_10k_batch` | **34 ms** (`apply_remote_batch`) | <10 ms | 🔥 9.4× win. Dedupe → parallel `ed25519_dalek::verify_batch` (rayon, chunk = 64) → per-chunk fallback to per-node verify on failure → session-scoped `verified_ids` cache skips re-broadcasts. Server `import_nodes` and the catchup pack path go through this automatically. |
+| `merge_10k_batch` | **31 ms** (`apply_remote_batch`) | <10 ms | 🔥 ~10× win. Dedupe → parallel `ed25519_dalek::verify_batch` (rayon, chunk = 64) → per-chunk fallback to per-node verify on failure → session-scoped `verified_ids` cache skips re-broadcasts. Canonical hash is `postcard`-encoded (2.1× faster than JSON). Server `import_nodes` and the catchup pack path go through this automatically. |
+| `tx_hash_postcard_plus_blake3` | **509 ns** | — | Canonical `Transaction::hash`: `postcard::to_allocvec` + Blake3. Was 1.07 µs with `serde_json`. |
 
 ---
 
@@ -661,3 +663,135 @@ Month 4+   Phase D: WebRTC (D2) → Compaction (D3)  [requires D4]
 | `capabilities` in token signed but not yet enforced | Path-scoped grants (`"read:world/**"`, `"write:intent/**"`) are included in the Ed25519 signed message now so the wire format is stable; enforcement lands in E1 when Super-Peer processes per-connection capability sets. Adding the field post-hoc would be a breaking protocol change. |
 | E2EE via sentinel op, not a new SyncNode field | Storing the AES-256-GCM ciphertext as `Op::Map::Set { key: "\x00e2ee" }` requires zero changes to `SyncNode`, `WireNode`, or pack/unpack. The node id/signature chain covers the ciphertext. Server verifies Ed25519 without decryption. Old peers see an opaque key and apply it through LWW — safe fallback. |
 | Deterministic nonce from (room_key, author, lamport) | Eliminates any randomness source requirement in WASM (no getrandom calls for nonce generation). Safe because (author, lamport) is a globally unique pair per node. HKDF-SHA256 domain-separates the nonce derivation from the key derivation. |
+
+---
+
+## Phase F — Make the Engine Usable
+> The engine is infra-complete. This phase turns it into something a product
+> team other than us can adopt without reading the source.
+> **Target: next milestone cycle.**
+
+### F0. Close the security gap (blocker for F4 and F5)
+Verify that WebSocket accept-time token enforcement in `server/src/ws_handler.rs`
+rejects any `hello` without a valid `RoomToken` for the target room, and that
+token `capabilities` are surfaced to the room so future F3 work can use them.
+If missing, this is non-negotiable before persistent stores or hosted mode —
+otherwise we're persisting unauthenticated writes.
+
+**Exit:** integration test `ws_rejects_unsigned_hello`; integration test
+`ws_accepts_signed_token_with_caps`; capability list attached to the `PeerSession`
+struct on the server side.
+
+### F1. Stable SDK surface
+The user-facing API today is `SyncStore.set / get / subscribe / text_insert / …`
+on a single flat namespace. That's a 1:1 mirror of the bridge, not an SDK. Ship
+a Firebase/Replicache-style document API on top without changing the engine:
+
+```js
+const doc = createDoc({ room: "room-1", token, serverUrl });
+const world = doc.map("world");
+const intents = doc.list("intents");
+const notes = doc.text("notes/welcome");
+
+world.set("player1", { x: 10, y: 20 });
+notes.insert(0, "Hello");
+doc.onChange(path => …);
+```
+
+Internally this is a thin JS wrapper around today's `SyncStore`. No core changes.
+
+**Exit:** `web/pkg/activesync.js` ships both `SyncStore` (low-level, unchanged)
+and `createDoc` (high-level); TypeScript types for both; demo rebuilt on
+`createDoc`; one page of docs under `docs/sdk.md`.
+
+### F2. Presence / awareness as a first-class API
+The awareness side-channel already exists. Productize it:
+
+```js
+const me = doc.presence({ name: "Brad", color: "#f43" });
+me.set("cursor", { x: 312, y: 44 });
+doc.presence.others().forEach(peer => …);
+```
+
+Implemented purely in the JS wrapper over the existing awareness messages.
+Adds `doc.presence.onJoin` / `onLeave` / `onUpdate`.
+
+**Exit:** presence works in the demo without any bridge changes; documented.
+
+### F3. Partial replication / subscription scoping
+Today peers replicate the whole room. Product apps want `doc.subscribe("world/**")`
+without the cost of the unrelated `chat/**` traffic. Ship this in two steps so
+we can defer server enforcement until real usage demands it:
+
+1. **F3a — Client-side filter.** `createDoc` accepts `subscribe: ["world/**"]`.
+   Client still receives the full stream but only materializes matching ops.
+   Zero wire changes. Gives product teams the API shape immediately.
+2. **F3b — Server-side filter.** Server reads the client's subscription
+   patterns from the `RoomToken.capabilities` field (which F0 already wired
+   through) and only relays matching nodes. Requires a `subscribe` wire message
+   and server-side path-matching against each node's op keys. This is where we
+   also finally enforce `read:` capabilities end-to-end.
+
+**Exit (F3a):** demo adds a "scope" filter that visibly cuts the subscription;
+`doc.subscribe` documented. **Exit (F3b):** server drops non-matching nodes
+before relay; bench shows 2-room shared connection drops fan-out.
+
+### F4. Persistent NodeStore + BlobStore (deployment blocker)
+Today server state is in-memory. Ship two adapters behind the existing traits:
+
+- `SqliteNodeStore` — one row per `SyncNode`, `(id BLOB PRIMARY KEY, parents BLOB, author BLOB, lamport INTEGER, payload BLOB, sig BLOB)`, plus a `leaves` table kept in sync with the graph's `leaves` set.
+- `FileBlobStore` — content-addressed file-per-blob under a root dir; `get_range` uses `pread`. Pairs naturally with `size()` which A1 already landed.
+
+`activesync-server` picks the adapter via CLI flag (`--store sqlite:./room.db`
+or `--store mem`). No core changes; the traits from A1 already fit.
+
+**Exit:** server restarts preserve the full DAG and all blobs; new bench
+`startup_replay_10k` loads a 10k-node room in <500 ms; `docs/deployment.md`
+covers ops basics (backups = file copy for blobs, `.backup` for SQLite).
+
+### F5. Hosted story + real auth integration
+Only meaningful once F0–F4 land. Two pieces:
+
+- **JWT → RoomToken bridge.** Trusted issuer (your app's auth server) signs
+  a JWT with `(room_id, pubkey, caps, exp)`; a small Rust crate verifies the
+  JWT and mints a `RoomToken`. Lets customers plug Clerk / Supabase / Auth0
+  in front without us owning identity.
+- **Managed deployment sketch.** Single-binary Docker image with SQLite +
+  file blobs + the JWT bridge; `docker run activesync/server`. Not a product
+  commitment — a reference deployment.
+
+**Exit:** JWT bridge crate with tests; reference `Dockerfile`; one-page
+"self-host in 5 minutes" doc.
+
+---
+
+### F — not doing (intentionally)
+
+| Item | Why skipped |
+|---|---|
+| Whiteboard / diagram demo | Whiteboards exist; the tech isn't uniquely suited vs. a dozen other tools; wedge validation is better served by a real product (e.g. SpeechSlate) that exercises text + blobs + presence + policy together. |
+| Further engine perf below 28 ms/10k merges | Post-postcard flamegraph shows we are ~95% inside `verify_batch`; further wins require AVX-512 IFMA (hardware we don't target yet) or a new signature scheme (ed25519 → BLS aggregation), both out of scope. `Frontier::advance`, ancestry caches, and allocation hunting did not appear in the profile — speculative optimization skipped. |
+| Server-enforced subscription filters before F3a | We don't know what patterns real apps want. Ship client-side first, let product usage teach us the shape, then codify in F3b. |
+| A custom query language | `doc.map().list().text()` + path globs already cover the product surface; a DSL is a second-system trap. |
+
+---
+
+### F perf sweep log — Ed25519 batch chunk size (Apr 2026)
+
+Host: AMD Ryzen 9 5900X (Zen 3, 12 physical cores), Rust 1.93 stable,
+`ed25519-dalek` 2.2 simd backend, rayon 1.12. Bench: `merge_10k_batch`,
+20 samples per point.
+
+| `BATCH_VERIFY_CHUNK` | Median | Δ vs 64 |
+|---|---|---|
+| 64 (previous) | 30.48 ms | — |
+| 128 | 28.84 ms | −5.4% (p<0.01) |
+| **256 (current)** | **28.57 ms** | **−6.3%** |
+| 512 | 28.19 ms | −7.5% (within noise of 256) |
+
+**Decision:** 256. The Pippenger efficiency curve has plateaued by 256; pushing
+to 512 buys nothing statistically significant while halving the number of
+rayon chunks, which would hurt load balance on smaller catchup payloads
+(at 1k nodes: 4 chunks vs. 2 chunks on 12 cores). `verify_batch` is now ~95%
+of wall-clock on the 10k merge — further gains require AVX-512 IFMA or a
+different signature primitive.

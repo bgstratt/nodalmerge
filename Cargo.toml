@@ -19,3 +19,8 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
+
+# Bench builds keep full optimization but emit debuginfo so flamegraph/blondie
+# can resolve symbols. No effect on `cargo build --release` artifacts.
+[profile.bench]
+debug = "line-tables-only"

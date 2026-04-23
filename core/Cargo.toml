@@ -1,0 +1,43 @@
+[package]
+name = "activesync-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core CRDT sync engine for ActiveSync"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aes-gcm = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+getrandom = { workspace = true }
+hkdf = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1.10"
+
+[[bench]]
+name = "merge_10k"
+harness = false
+
+[[bench]]
+name = "sync_handshake"
+harness = false
+
+[[bench]]
+name = "resolve_1k"
+harness = false
+
+[[bench]]
+name = "blob_verify"
+harness = false
+

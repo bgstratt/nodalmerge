@@ -73,7 +73,7 @@ async fn metrics_endpoint_exposes_baseline_series() {
     // Drive some activity so the baseline series have recorded values.
     let persistence: SharedPersistence = Arc::new(NoPersistence);
     let server_key = SigningKey::from_bytes(&[0x42u8; 32]);
-    let rooms = Rooms::new(server_key, Arc::clone(&persistence));
+    let rooms = Rooms::new(server_key, Arc::clone(&persistence), 512);
     let room = rooms.get_or_create("metrics-test").await;
     room.register_peer("deadbeef".into()).await;
 

@@ -1023,6 +1023,40 @@ in `server/src/metrics.rs` doc-comments so they stay discoverable.
 second install returns `Err`. All metrics integration coverage stays in
 `metrics_endpoint.rs` so no two tests race for the slot.
 
-**Next (Phase G).** G1 — backpressure (send timeout, 4001 lagged close,
-`--broadcast-capacity`). G3 — rate limit (governor token buckets,
+**Next (Phase G).** G3 — rate limit (governor token buckets,
+`--peer-rate-nodes` / `--peer-rate-bytes`, 4008 close).
+
+### G1 — Backpressure & slow-client policy (SHIPPED, Apr 2026)
+
+**Problem.** Per-room `broadcast::channel(512)` silently swallowed
+`RecvError::Lagged`, so a slow consumer kept receiving fresh packs while
+missing the dropped ones — divergence with no signal until the next
+reconnect. `sink.send()` had no timeout, so a stalled TCP write could
+wedge a WS task indefinitely.
+
+**What shipped.**
+- `ws_send` helper in `server/src/ws_handler.rs` wraps every
+  application-level send in `tokio::time::timeout(5s, …)`. On timeout it
+  bumps `activesync_ws_send_timeout_total{room}`, emits a
+  `1011 server overload` close (bounded by a 1s send timeout), and
+  drops the peer.
+- Lagged arm now closes with custom code `4001 resync required` and
+  bumps `activesync_broadcast_lagged_total{room}`. The SDK's existing
+  exp-backoff reconnect runs the normal recovery (hello → IBF → catch-up).
+- `--broadcast-capacity <N>` CLI (default `512`, `0` rejected) plumbed
+  through `Rooms::new` → `Room::new`. Tradeoff: larger = more slack for
+  brief stalls, smaller = faster divergence detection.
+- Both counters registered via `describe_counter!` in
+  `server/src/metrics.rs`.
+
+**Tests.** `server/tests/backpressure_lagged.rs` boots a real axum server
+on an ephemeral loopback port with `broadcast_capacity=2`, connects a
+tungstenite client, drains the welcome, then floods 5 000 synchronous
+`room.tx.send(...)` calls with no `.await` between them so the handler
+task stays parked while the size-2 ring buffer overflows. Asserts a
+`Close { code: 4001 }` arrives in ≤ 5 s and `connected_peers` drains
+in ≤ 2 s. Deterministic because `broadcast::Sender::send` is
+non-yielding. Full server suite: 24/24 pass.
+
+**Next (Phase G).** G3 — rate limit (governor token buckets,
 `--peer-rate-nodes` / `--peer-rate-bytes`, 4008 close).

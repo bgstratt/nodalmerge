@@ -60,8 +60,11 @@ pub struct Room {
 }
 
 impl Room {
-    pub fn new(room_id: String, persistence: SharedPersistence) -> Arc<Self> {
-        let (tx, _) = broadcast::channel(512);
+    pub fn new(room_id: String, persistence: SharedPersistence, broadcast_capacity: usize) -> Arc<Self> {
+        // G1: channel capacity plumbed from the CLI. Smaller = faster
+        // divergence detection on slow clients; larger = more slack for
+        // brief stalls. Zero is rejected at arg-parse time.
+        let (tx, _) = broadcast::channel(broadcast_capacity);
         // F4: hydrate graph + blobs from disk before the room becomes visible.
         let mut graph = StateGraph::new();
         let persisted_nodes = persistence.load_room_nodes(&room_id);
@@ -221,14 +224,17 @@ pub struct Rooms {
     pub server_key: Arc<SigningKey>,
     /// F4: shared persistence handle threaded into every newly-created room.
     pub persistence: SharedPersistence,
+    /// G1: per-room broadcast channel capacity. Threaded into `Room::new`.
+    pub broadcast_capacity: usize,
 }
 
 impl Rooms {
-    pub fn new(server_key: SigningKey, persistence: SharedPersistence) -> Self {
+    pub fn new(server_key: SigningKey, persistence: SharedPersistence, broadcast_capacity: usize) -> Self {
         Rooms {
             rooms: Arc::new(RwLock::new(HashMap::new())),
             server_key: Arc::new(server_key),
             persistence,
+            broadcast_capacity,
         }
     }
 
@@ -244,7 +250,7 @@ impl Rooms {
         let room = w.entry(id.to_string())
             .or_insert_with(|| {
                 created = true;
-                Room::new(id.to_string(), Arc::clone(&self.persistence))
+                Room::new(id.to_string(), Arc::clone(&self.persistence), self.broadcast_capacity)
             })
             .clone();
         if created {

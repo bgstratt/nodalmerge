@@ -98,6 +98,15 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
         "activesync_eviction_total",
         "Rooms evicted by the idle sweeper (F4 follow-up)."
     );
+    // G1 — backpressure & slow-client policy.
+    describe_counter!(
+        "activesync_broadcast_lagged_total",
+        "Peers disconnected with close code 4001 after falling behind the per-room broadcast ring buffer."
+    );
+    describe_counter!(
+        "activesync_ws_send_timeout_total",
+        "Peers disconnected with close code 1011 after a WS send exceeded the 5-second timeout."
+    );
     Ok(())
 }
 

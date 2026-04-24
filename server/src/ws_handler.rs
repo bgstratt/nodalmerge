@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 use axum::{
-    extract::{Path, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{Path, State, WebSocketUpgrade, ws::{CloseFrame, Message, WebSocket}},
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
@@ -399,7 +399,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
         "pubkey": pubkey_hex,
     }).to_string());
 
-    if sink.send(Message::Text(welcome_json.into())).await.is_err() {
+    if !ws_send(&mut sink, &room_id, welcome_json).await {
         tracing::warn!(peer = %short, "welcome send failed");
         room.deregister_peer(&pubkey_hex).await;
         return;
@@ -412,7 +412,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
         let env = serde_json::json!({"type":"pack","from":"server","nodes":catchup_b64}).to_string();
         let sub = subscription.read().unwrap().clone();
         if let Some(filtered) = filter_pack_for_subscriber(&env, &sub) {
-            if sink.send(Message::Text(filtered.into())).await.is_err() {
+            if !ws_send(&mut sink, &room_id, filtered).await {
                 room.deregister_peer(&pubkey_hex).await;
                 return;
             }
@@ -471,9 +471,34 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
                             Some(s) => s,
                             None => continue,
                         };
-                        if sink.send(Message::Text(out.into())).await.is_err() { break; }
+                        if !ws_send(&mut sink, &room_id, out).await { break; }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // G1: slow consumer fell behind the ring buffer.
+                        // Previously silently ignored, which left the peer
+                        // desynced without any signal. Now: increment the
+                        // metric, send a 4001 close frame, and break so the
+                        // SDK's exp-backoff reconnect path rebuilds via the
+                        // normal hello → IBF diff → catch-up pack handshake.
+                        metrics::counter!(
+                            "activesync_broadcast_lagged_total",
+                            "room" => room_id.clone(),
+                        ).increment(1);
+                        tracing::warn!(
+                            peer = %short,
+                            room = %room_id,
+                            lagged = n,
+                            "broadcast lagged — closing with 4001 resync required"
+                        );
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(1),
+                            sink.send(Message::Close(Some(CloseFrame {
+                                code: 4001,
+                                reason: std::borrow::Cow::Borrowed("resync required"),
+                            }))),
+                        ).await;
+                        break;
+                    }
                     Err(_) => break,
                 }
             }
@@ -496,7 +521,7 @@ async fn handle_client_message(
     text: &str,
     room: &Arc<Room>,
     pubkey_hex: &str,
-    _room_id: &str,
+    room_id: &str,
     server_key: &Arc<SigningKey>,
     sink: &mut SplitSink<WebSocket, Message>,
     subscription: &Arc<std::sync::RwLock<Subscription>>,
@@ -513,7 +538,7 @@ async fn handle_client_message(
             let sub = Subscription::from_hello_value(&msg["patterns"]);
             *subscription.write().unwrap() = sub;
             let reply = serde_json::json!({"type":"subscribe-ack"}).to_string();
-            if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+            if !ws_send(sink, room_id, reply).await { return false; }
         }
 
         // Client pushes a pack of new nodes --------------------------------
@@ -570,7 +595,7 @@ async fn handle_client_message(
                 "type":  "mst-response",
                 "nodes": nodes,
             }).to_string();
-            if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+            if !ws_send(sink, room_id, reply).await { return false; }
         }
 
         // Client completed MST descent, requests specific missing nodes -------
@@ -591,7 +616,7 @@ async fn handle_client_message(
                     "root":  graph.merkle_root().to_hex(),
                 }).to_string();
                 drop(graph);
-                if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+                if !ws_send(sink, room_id, reply).await { return false; }
             }
         }
 
@@ -609,7 +634,7 @@ async fn handle_client_message(
                 "nodes": nodes_b64,
                 "root":  graph.merkle_root().to_hex(),
             }).to_string();
-            if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+            if !ws_send(sink, room_id, reply).await { return false; }
         }
 
         // Client uploads blobs ---------------------------------------------
@@ -668,7 +693,7 @@ async fn handle_client_message(
                 "blobs":     entries,
                 "requested": hashes,
             }).to_string();
-            if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+            if !ws_send(sink, room_id, reply).await { return false; }
         }
 
         // Ephemeral presence — forward, do not store -----------------------
@@ -695,7 +720,7 @@ async fn handle_client_message(
                             "type":   "room-locked",
                             "pubkey": vk_hex,
                         }).to_string();
-                        if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+                        if !ws_send(sink, room_id, reply).await { return false; }
                     } else {
                         send_error(sink, "room already locked").await;
                     }
@@ -719,7 +744,7 @@ async fn handle_client_message(
                 Some(p) => {
                     room.set_policy(p).await;
                     let reply = serde_json::json!({"type":"policy-set"}).to_string();
-                    if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+                    if !ws_send(sink, room_id, reply).await { return false; }
                 }
                 None => {} // parse_policy already sent the error
             }
@@ -733,7 +758,7 @@ async fn handle_client_message(
                 "type":   "server-info",
                 "pubkey": vk_hex,
             }).to_string();
-            if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+            if !ws_send(sink, room_id, reply).await { return false; }
         }
 
         // E1: start the Authoritative tick loop for this room -----------------
@@ -759,14 +784,14 @@ async fn handle_client_message(
                 "type": if started { "tick-started" } else { "tick-already-running" },
                 "interval_ms": interval_ms,
             }).to_string();
-            if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+            if !ws_send(sink, room_id, reply).await { return false; }
         }
 
         // E1: stop the tick loop for this room --------------------------------
         "stop-tick" => {
             room.stop_tick();
             let reply = serde_json::json!({"type":"tick-stopped"}).to_string();
-            if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+            if !ws_send(sink, room_id, reply).await { return false; }
         }
 
         // D3: Compact the room graph into a snapshot --------------------------
@@ -820,7 +845,7 @@ async fn handle_client_message(
                 "type":          "compact-ack",
                 "snapshot_hash": hash_hex,
             }).to_string();
-            if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+            if !ws_send(sink, room_id, reply).await { return false; }
         }
 
         // D2: WebRTC signaling relay ----------------------------------------
@@ -856,6 +881,51 @@ async fn handle_client_message(
 async fn send_error(sink: &mut SplitSink<WebSocket, Message>, msg: &str) {
     let j = serde_json::json!({"type":"error","msg":msg}).to_string();
     let _ = sink.send(Message::Text(j.into())).await;
+}
+
+// G1 — backpressure & slow-client policy.
+//
+// `ws_send` wraps every application-level outbound message in a 5-second
+// timeout. A stalled TCP write (dead TLS terminator, kernel socket buffer
+// full for a peer whose NIC is gone, etc.) would otherwise wedge the WS
+// task until the OS times out — potentially minutes.
+//
+// On timeout we:
+//   1. increment `activesync_ws_send_timeout_total{room}` (G7-registered),
+//   2. best-effort deliver a `1011 server overload` close frame (bounded
+//      by another short timeout so a fully-wedged socket can't re-trap us),
+//   3. return `false` so the caller exits the loop, which triggers the
+//      normal cleanup path (deregister_peer, peer-left broadcast).
+//
+// Non-timeout send errors (peer already hung up) also return `false`; no
+// metric because that's the common graceful-close path and not a defect.
+const WS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const WS_CLOSE_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn ws_send(
+    sink: &mut SplitSink<WebSocket, Message>,
+    room_id: &str,
+    text: String,
+) -> bool {
+    match tokio::time::timeout(WS_SEND_TIMEOUT, sink.send(Message::Text(text.into()))).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => false,
+        Err(_) => {
+            metrics::counter!(
+                "activesync_ws_send_timeout_total",
+                "room" => room_id.to_string(),
+            ).increment(1);
+            tracing::warn!(room = %room_id, "ws send timed out — closing with 1011 server overload");
+            let _ = tokio::time::timeout(
+                WS_CLOSE_FRAME_TIMEOUT,
+                sink.send(Message::Close(Some(CloseFrame {
+                    code: 1011,
+                    reason: std::borrow::Cow::Borrowed("server overload"),
+                }))),
+            ).await;
+            false
+        }
+    }
 }
 
 /// Parse a `set-policy` JSON message into a `Policy`.

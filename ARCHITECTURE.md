@@ -512,24 +512,40 @@ and lifecycle pieces that remain open. Listed in the order we intend to ship
 them. Each entry names the concrete surface change so the gap stays
 falsifiable.
 
-### G1 — Backpressure & slow-client policy
+### G1 — Backpressure & slow-client policy *(SHIPPED)*
 
-**Where it lives today.** Per-room `broadcast::channel(512)` in
-[server/src/room.rs](server/src/room.rs#L64). Slow consumers get
-`RecvError::Lagged`, which the handler silently swallows at
-[server/src/ws_handler.rs](server/src/ws_handler.rs#L476); `sink.send()` has
-no timeout.
+**Problem.** Pre-G1 the per-room `broadcast::channel(512)` silently dropped
+lagged consumers (`RecvError::Lagged` was swallowed) and `sink.send()` had
+no timeout — a stalled TCP write could wedge a WS task until the OS gave
+up. Slow clients diverged silently until the next reconnect/IBF cycle.
 
-**Risk.** Memory is bounded (ring buffer drops oldest), but a lagged client
-loses messages *silently* and keeps receiving new packs as if nothing
-happened — it diverges until the next reconnect/IBF cycle. A stalled TCP
-write can wedge the WS task until the OS times out.
+**What shipped.**
+- `ws_send` helper in [server/src/ws_handler.rs](server/src/ws_handler.rs)
+  wraps every application-level `sink.send` in
+  `tokio::time::timeout(Duration::from_secs(5), …)`; on timeout it
+  increments `activesync_ws_send_timeout_total{room}`, emits a
+  `1011 server overload` close frame (bounded by a 1s send timeout), and
+  signals the caller to drop the peer.
+- `RecvError::Lagged` arm now closes the WS with a `4001 resync required`
+  custom close code and increments
+  `activesync_broadcast_lagged_total{room}`. The SDK's exp-backoff
+  reconnect path runs the normal recovery (hello → IBF diff → catch-up).
+- `--broadcast-capacity <N>` CLI flag (default `512`); `0` is rejected
+  (would panic `broadcast::channel`). Plumbed through `Rooms::new` →
+  `Room::new` so every per-room channel uses the configured capacity.
+  Tradeoff: larger = more slack for brief stalls; smaller = faster
+  divergence detection.
+- Metrics registered via `describe_counter!` in
+  [server/src/metrics.rs](server/src/metrics.rs).
 
-**Plan.**
-- Wrap every `sink.send` in `tokio::time::timeout(Duration::from_secs(5), …)`; on timeout, close the WS with a `1011 server overload` frame.
-- On `RecvError::Lagged`, close the WS with a `4001 resync required` custom close code instead of silently continuing. The SDK's existing exp-backoff reconnect path does the correct recovery (hello → IBF diff → catch-up pack).
-- Expose `--broadcast-capacity <N>` (default 512) and document the tradeoff: larger = more slack for brief stalls, smaller = faster divergence detection.
-- Emit `activesync_broadcast_lagged_total` and `activesync_ws_send_timeout_total` metrics (see G7).
+**Tests.** `server/tests/backpressure_lagged.rs` — boots the real axum
+server on an ephemeral loopback port with `broadcast_capacity=2`,
+connects a tungstenite client, drains the welcome, then floods 5 000
+synchronous `room.tx.send(...)` calls with no `.await` between them so
+the handler task stays parked while the size-2 ring buffer overflows.
+Asserts the client receives a `Close { code: 4001 }` frame within 5s and
+that `room.connected_peers` empties within 2s of the close. Deterministic
+because `broadcast::Sender::send` is non-yielding.
 
 ### G2 — WebRTC mesh cap
 

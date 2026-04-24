@@ -34,7 +34,7 @@ async fn room_survives_restart_with_nodes_and_blobs() {
 
     // --- lifetime 1 -----------------------------------------------------
     {
-        let room = Room::new(room_id.clone(), Arc::clone(&persistence));
+        let room = Room::new(room_id.clone(), Arc::clone(&persistence), 512);
         // Push 3 nodes through import_nodes (simulates the server's accept path).
         let n1 = make_node(&sk, "hello", b"world");
         let n2 = make_node(&sk, "answer", b"42");
@@ -51,7 +51,7 @@ async fn room_survives_restart_with_nodes_and_blobs() {
 
     // --- lifetime 2 (simulated restart) ---------------------------------
     {
-        let room = Room::new(room_id.clone(), Arc::clone(&persistence));
+        let room = Room::new(room_id.clone(), Arc::clone(&persistence), 512);
         let graph = room.graph.read().await;
         let state = graph.resolve();
         let map: std::collections::HashMap<String, Vec<u8>> = state.into_iter().collect();
@@ -83,7 +83,7 @@ async fn large_room_hydrates_quickly() {
     // Lifetime 1: write N nodes. We feed them through a single StateGraph so
     // they chain properly, then persist each one in insertion order.
     {
-        let room = Room::new(room_id.clone(), Arc::clone(&persistence));
+        let room = Room::new(room_id.clone(), Arc::clone(&persistence), 512);
         let mut batch = Vec::with_capacity(N);
         let mut g = StateGraph::new();
         for i in 0..N {
@@ -101,7 +101,7 @@ async fn large_room_hydrates_quickly() {
 
     // Lifetime 2: measure hydrate time.
     let t0 = std::time::Instant::now();
-    let room = Room::new(room_id.clone(), Arc::clone(&persistence));
+    let room = Room::new(room_id.clone(), Arc::clone(&persistence), 512);
     let elapsed = t0.elapsed();
     println!("[startup_replay_10k] hydrated {N} nodes in {:.2?}", elapsed);
     let graph = room.graph.read().await;

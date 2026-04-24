@@ -91,6 +91,16 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
 - **Sentinel keys:** the subscription filter always passes through keys that
   begin with `\x00` (E2EE envelopes, snapshot meta). Don't try to scope them
   via patterns — they must reach every peer verbatim.
+- **Backpressure:** the per-room broadcast ring buffer holds
+  `--broadcast-capacity <N>` messages (default `512`; `0` is rejected). A
+  consumer that falls behind is closed with WS code `4001 resync required`
+  and bumps `activesync_broadcast_lagged_total{room}`; the SDK's
+  exp-backoff reconnect runs the normal recovery (hello → IBF → catch-up).
+  Every application send is wrapped in a 5 s timeout — on timeout the
+  peer is closed with `1011 server overload` and
+  `activesync_ws_send_timeout_total{room}` is incremented. Tradeoff:
+  larger capacity = more slack for brief stalls; smaller = faster
+  divergence detection.
 
 ## Metrics (`--metrics-addr <ip:port>`)
 
@@ -117,6 +127,8 @@ Baseline series:
 | `activesync_merge_batch_seconds` | histogram | — |
 | `activesync_persistence_write_seconds` | histogram | `kind=node\|nodes_batch\|blob` |
 | `activesync_eviction_total` | counter | — |
+| `activesync_broadcast_lagged_total` | counter | `room` |
+| `activesync_ws_send_timeout_total` | counter | `room` |
 
 Histograms ship with hand-tuned buckets (µs-scale for merges and persistence
 writes) so Prometheus `histogram_quantile(0.99, …)` works without extra

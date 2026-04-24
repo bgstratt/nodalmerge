@@ -51,7 +51,7 @@ async fn main() {
         }
     };
 
-    let rooms = room::Rooms::new(server_key, persistence);
+    let rooms = room::Rooms::new(server_key, persistence, parse_broadcast_capacity_arg(&args).unwrap_or(512));
 
     // G7: optional Prometheus metrics endpoint on an admin port. `--metrics-addr
     // <ip:port>` enables it; absent, no recorder is installed. Install failure
@@ -139,6 +139,40 @@ fn parse_idle_timeout_arg(args: &[String]) -> Option<u64> {
                 Ok(n) => Some(n),
                 Err(_) => {
                     eprintln!("warning: --idle-timeout expects a non-negative integer (seconds); got {s:?}, using default 300");
+                    None
+                }
+            };
+        }
+        i += 1;
+    }
+    None
+}
+
+/// G1: Parse `--broadcast-capacity <N>` (or `--broadcast-capacity=<N>`).
+/// Returns `None` to fall through to the default (512). Zero or invalid
+/// values log a warning and fall back to the default — the server does
+/// not refuse to start on a typo, and `tokio::sync::broadcast::channel`
+/// rejects capacity=0 outright.
+fn parse_broadcast_capacity_arg(args: &[String]) -> Option<usize> {
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == "--broadcast-capacity" {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix("--broadcast-capacity=") {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match s.parse::<usize>() {
+                Ok(0) => {
+                    eprintln!("warning: --broadcast-capacity must be > 0; got 0, using default 512");
+                    None
+                }
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!("warning: --broadcast-capacity expects a positive integer; got {s:?}, using default 512");
                     None
                 }
             };

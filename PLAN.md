@@ -641,11 +641,19 @@ Month 4+   Phase D: WebRTC (D2) → Compaction (D3)  [requires D4]
 
 | Decision | Rationale |
 |---|---|
-| postcard before FlatBuffers/rkyv | Serde-compatible, zero schema friction, prove the bottleneck first |
-| IBF before MST | IBF is 1 week, MST is 1 month; get the wins fast, validate with benchmarks |
+| postcard before FlatBuffers/rkyv | Serde-compatible, zero schema friction. Validated: we shipped it, benchmarked it (3.46× smaller than JSON, 1.83× faster to produce), and extended it to canonical hashing. rkyv/FlatBuffers would only pay off for mmap-scale snapshots or cross-language wire sharing — neither applies. |
+| Canonical `Transaction::hash` uses `postcard`, not `serde_json` | Protocol-level: the signed preimage is now the same format as the wire. 3.46× smaller, 2.1× faster. Removes a latent footgun where a future `serde_json` formatting change would silently invalidate every existing signature. Wire-breaking — acceptable because pre-1.0 and no persisted deployments. |
+| IBF **and** MST, negotiated per session (supersedes "IBF before MST") | Both shipped; they are complementary, not alternatives. IBF handles the 99% case (small diffs, 2.9 KB hello) and MST handles large or structural diffs (≤3 round trips, ~50 KB). Capability flags (`supports_ibf`, `supports_mst`) pick at join time; a peer that speaks neither falls back to the pack path. |
+| `BATCH_VERIFY_CHUNK = 256` for `verify_batch` | Empirically tuned on Zen 3, 12 cores, `ed25519-dalek` 2.2 simd backend. Sweep: 64→30.5 ms, 128→28.8 ms, 256→28.6 ms, 512→28.2 ms (noise). 256 plateaus the Pippenger curve while preserving chunk count for rayon load balance on smaller catchups. Further wins require AVX-512 IFMA (hardware out of scope) or a different signature primitive. |
 | S3 as BlobStore adapter | Core never pushes bytes; `resolve_url()` returns presigned URL, client fetches CDN directly |
 | E2EE via op-level encryption | Server keeps relay role without decryption capability; outer signature still verifiable |
-| RGA over LSEQ/Logoot | RGA is the best-studied, most compatible with our DAG model; Loro/Diamond Types are inspiration not dependency |
+| RGA over LSEQ/Logoot | RGA is the best-studied, most compatible with our DAG model; Loro/Diamond Types are inspiration not dependency. Known limits are documented in separate entries (move op, run compression, rich text) rather than hidden. |
+| Text is per-character RGA with tombstones — no move op, no rich text | Correct for concurrent typing, interleaving, and offline convergence (what C1 demonstrates). Three known gaps, each tracked as separate future work: (1) **Move** — not representable as delete+insert under concurrent edit of the moved block; lives in the future List CRDT (fractional-index with stable block IDs), not in Text. (2) **Run compression** — large paste = N char ops; an RGA-run variant would compress to a single op with length, no wire break. Schedulable when text throughput is a real constraint. (3) **Rich-text spans** — Peritext-style attributed ranges; deferred until a product actually needs it. |
+| Merge strategy is type-selected, not value-configurable | `Op::Map` = LWW, `Op::Text` = RGA, `Op::List` = fractional-index (future). Apps pick the right type per field — same model as Automerge/Yjs. A "pluggable merge strategy per key" would let two peers with different config diverge on merge; that is strictly worse than LWW. The opaque `Vec<u8>` Map value is the escape hatch for custom semantics (app-level sub-CRDTs, e.g. an `Op::Map::Increment` counter if/when needed). |
+| LWW tie-break is fixed at `(lamport desc, pubkey desc)` | This is a protocol contract, not an implementation detail. Every peer must use the exact same rule or they diverge. `pubkey desc` rather than asc is arbitrary but stable; Super-Peer authority sorts after peers because the server pubkey is listed first in `Policy.can_write` and the resolver prefers authoritative rules before falling back to pubkey order. |
+| Session-scoped `verified_ids` cache, never persisted | The cache lives on a `StateGraph` instance and resets on restart. Intentional: signatures are always re-checkable from the stored bytes, so a persistent cache would add a consistency surface with zero benefit. F4 persistent NodeStores inherit this property — restart reverifies. |
+| Idle-room eviction is gated on durable persistence | Dropping an in-memory `Room` is data loss. `--idle-timeout` (default 300 s, 0 disables) runs a 60 s sweeper that evicts rooms with zero connected peers past the timeout *only* when `ServerPersistence::is_durable()` returns true (`DirPersistence` yes, `NoPersistence` no). On an in-memory build with `--idle-timeout` set the server logs a warning and the sweeper does not start. Double-safeguard: the sweep also requires `Arc::strong_count(&Room) == 1` so a mid-handshake join that has cloned the Arc but not yet called `register_peer` isn't evicted out from under it. |
+| No nested rooms, no sub-rooms — use Policy + F3 subscriptions instead | "Sub-rooms" / "rooms within rooms" / "soft partitions" always decompose into one of three primitives we already have (or will): **separate top-level rooms** for hard isolation, **Policy rules** for authority over key-path subtrees inside one room (A5, shipped), **F3 subscription scoping** for bandwidth/visibility slicing inside one room (client-side F3a, server-side F3b). Nested rooms would duplicate every one of these with a worse trust boundary (who signs the child's genesis? who authorizes promotion?) and force every consumer of `StateGraph` to recurse. Rooms stay flat. |
 | IndexedDB before disk persistence | Browser first; server-side disk is a `NodeStore` adapter, same interface |
 | Super-Peer over separate server logic | Running the same `activesync-core` on server eliminates dual codebases; policy is the only distinction between a peer and an authority |
 | Scoped Write Policies in core (A5) before Super-Peer (E1) | Policy enforcement must live in `apply_remote` so every peer (not just the server) validates and drops unauthorized nodes; enforcement cannot be server-only |
@@ -663,6 +671,7 @@ Month 4+   Phase D: WebRTC (D2) → Compaction (D3)  [requires D4]
 | `capabilities` in token signed but not yet enforced | Path-scoped grants (`"read:world/**"`, `"write:intent/**"`) are included in the Ed25519 signed message now so the wire format is stable; enforcement lands in E1 when Super-Peer processes per-connection capability sets. Adding the field post-hoc would be a breaking protocol change. |
 | E2EE via sentinel op, not a new SyncNode field | Storing the AES-256-GCM ciphertext as `Op::Map::Set { key: "\x00e2ee" }` requires zero changes to `SyncNode`, `WireNode`, or pack/unpack. The node id/signature chain covers the ciphertext. Server verifies Ed25519 without decryption. Old peers see an opaque key and apply it through LWW — safe fallback. |
 | Deterministic nonce from (room_key, author, lamport) | Eliminates any randomness source requirement in WASM (no getrandom calls for nonce generation). Safe because (author, lamport) is a globally unique pair per node. HKDF-SHA256 domain-separates the nonce derivation from the key derivation. |
+| WebRTC lives in the SDK, not the engine | Transport and authority are orthogonal. The engine already exposes transport-agnostic primitives (`export_nodes_missing_from`, `import_pack`, `store_blob_bytes`, `compute_ibf_b64`, `diff_with_ibf_b64`) — everything a non-WS transport needs. The SDK owns both WS and WebRTC; rule is **WS always** (server = persistence + authority + guaranteed relay for peers without a direct channel), **WebRTC additionally** per-peer when a data channel is open. Content-addressed dedup in `import_pack` makes double delivery free. Putting RTC inside `activesync-core` would leak a browser-only concern into a crate that also compiles for servers and CLI tools. |
 
 ---
 
@@ -688,40 +697,83 @@ on a single flat namespace. That's a 1:1 mirror of the bridge, not an SDK. Ship
 a Firebase/Replicache-style document API on top without changing the engine:
 
 ```js
-const doc = createDoc({ room: "room-1", token, serverUrl });
+const doc = await createDoc({ room: "room-1", serverUrl });
 const world = doc.map("world");
-const intents = doc.list("intents");
+const intents = doc.map("intents");
 const notes = doc.text("notes/welcome");
 
 world.set("player1", { x: 10, y: 20 });
 notes.insert(0, "Hello");
-doc.onChange(path => …);
+doc.onChange(ev => …);
 ```
 
 Internally this is a thin JS wrapper around today's `SyncStore`. No core changes.
 
+**Status (Apr 2026 — SHIPPED):** `web/sdk.js` exports `createDoc` with
+`MapHandle` + `TextHandle` + `PresenceHandle` + `onChange` + full WS transport
+(hello/welcome/pack/request + IBF + MST + blob round-trip + exponential-backoff
+reconnect) + WebRTC peer mesh (F1b, see below). `web/sdk.d.ts` ships
+TypeScript types including `MeshPeer` + `transport: 'ws' | 'webrtc'` on change
+events. `docs/sdk.md` covers quickstart + API + known limitations. Token
+signing (C3) is wired through `roomSeed` + `tokenCaps`. `doc.list()`
+deliberately throws — List CRDT is tracked post-F. `doc.store` is the escape
+hatch for anything the SDK doesn't surface yet (speculative reads, raw wire).
+`web/demo.js` has been ported onto `createDoc` and is now the reference
+consumer of the SDK rather than a parallel impl.
+
+**F1b — WebRTC peer mesh inside the SDK (shipped).** `makePeerMesh` in
+`web/sdk.js` opens two `RTCDataChannel`s per remote peer (`sync` JSON,
+`blobs` binary `[32-byte hash][bytes]` frames). Initiation is tie-broken by
+pubkey hex order. Handshake uses `compute_ibf_b64` → `diff_with_ibf_b64` →
+`export_nodes_missing_from` for node reconciliation, and
+`local_blob_hashes_json` → `blob-have` → binary frames for blob exchange.
+Signaling rides the existing WS relay (`webrtc-offer`/`-answer`/`-ice`, all
+already intact in `server/src/ws_handler.rs` from D2). Policy: WS is the
+authoritative path always; WebRTC is additive per peer when a data channel is
+open; `import_pack` dedupes on node id so double delivery is free.
+`createDoc({ transport: 'auto' | 'ws-only' })` controls mesh creation;
+`iceServers` overrides the default Google STUN pair. `doc.peers()` returns
+`[{ pubkey, transport, syncReady, blobsReady, connectionState }, …]`. Runtime
+gate falls back to `ws-only` when `RTCPeerConnection` is undefined (Node / old
+environments). Zero engine, bridge, or server changes.
+
 **Exit:** `web/pkg/activesync.js` ships both `SyncStore` (low-level, unchanged)
 and `createDoc` (high-level); TypeScript types for both; demo rebuilt on
-`createDoc`; one page of docs under `docs/sdk.md`.
+`createDoc`; one page of docs under `docs/sdk.md`. ✅
 
 ### F2. Presence / awareness as a first-class API
 The awareness side-channel already exists. Productize it:
 
 ```js
-const me = doc.presence({ name: "Brad", color: "#f43" });
-me.set("cursor", { x: 312, y: 44 });
+doc.presence.set({ name: "Brad", color: "#f43" });
+doc.presence.set({ cursor: { x: 312, y: 44 } });
 doc.presence.others().forEach(peer => …);
+doc.presence.onJoin(cb); doc.presence.onLeave(cb); doc.presence.onUpdate(cb);
 ```
 
-Implemented purely in the JS wrapper over the existing awareness messages.
-Adds `doc.presence.onJoin` / `onLeave` / `onUpdate`.
+Implemented purely in the JS wrapper over the existing awareness messages —
+no bridge or server changes. `doc.presence.set(patch)` merges and broadcasts;
+the SDK heartbeats on `presenceHeartbeatMs` (default 15s) so joiners see
+everyone, and sweeps stale peers after `presenceStaleMs` (default 45s). Leave
+events fire on server `peer-left`, on `clear()`, or on heartbeat staleness.
+
+**Status (Apr 2026):** shipped in [web/sdk.js](web/sdk.js) + types in
+[web/sdk.d.ts](web/sdk.d.ts) + docs in [docs/sdk.md](docs/sdk.md). Zero
+bridge/server changes. Demo port still rides with the rest of the F1 demo
+rewrite (post-F3a).
 
 **Exit:** presence works in the demo without any bridge changes; documented.
 
-### F3. Partial replication / subscription scoping
+### F3. Partial replication / subscription scoping (a.k.a. soft partitions, doc slicing)
 Today peers replicate the whole room. Product apps want `doc.subscribe("world/**")`
-without the cost of the unrelated `chat/**` traffic. Ship this in two steps so
-we can defer server enforcement until real usage demands it:
+without the cost of the unrelated `chat/**` traffic. This is the engine answer
+to "sub-rooms" / "rooms within rooms" / "soft partitions" — we do **not** nest
+room objects (see decision log). Instead, a single room carries multiple path
+subtrees and each peer subscribes to the slice it cares about. Rooms stay flat
+and independent; subscriptions carve the room internally.
+
+Ship this in two steps so we can defer server enforcement until real usage
+demands it:
 
 1. **F3a — Client-side filter.** `createDoc` accepts `subscribe: ["world/**"]`.
    Client still receives the full stream but only materializes matching ops.
@@ -731,6 +783,26 @@ we can defer server enforcement until real usage demands it:
    through) and only relays matching nodes. Requires a `subscribe` wire message
    and server-side path-matching against each node's op keys. This is where we
    also finally enforce `read:` capabilities end-to-end.
+
+**Status (Apr 2026 — F3a):** shipped. `createDoc({ subscribe })` accepts
+glob patterns; `doc.subscription` / `doc.isSubscribed(path)` / `doc.subscribe(patterns)`
+/ `doc.onSubscriptionChange(cb)` exposed on the Doc. `MapHandle.all/get/onChange`
+filter by subscription; `TextHandle` construction throws if the key is outside
+the subscription. Glob compiler handles `**`, `/**` as optional-subtree, `*`,
+and literals (unit-tested 16/16). Zero wire or core changes.
+
+**Status (Apr 2026 — F3b):** shipped. SDK's `hello` carries an optional
+`subscribe: [patterns]` field, and a runtime `{type:"subscribe", patterns}`
+message re-scopes an open connection. Server-side `Subscription` wraps a
+pure-Rust glob matcher (no regex dep) with identical semantics to the SDK;
+`filter_pack_for_subscriber` unpacks each relayed pack, drops nodes whose op
+keys don't match, and suppresses the send entirely when nothing remains.
+Sentinel-prefixed keys (`\x00…` — E2EE envelopes, snapshot meta) are always
+passed through so encrypted rooms keep working. Default subscription is `**`
+(zero-overhead fast path). 10 Rust unit tests cover trailing `/**`, middle
+`/**/`, leading `**/`, segment-local `*`, literals, and or-of-patterns.
+Filtering applies to both the catch-up pack and the steady-state broadcast.
+Writes are **not** filtered — path authority is still Policy's job (A5).
 
 **Exit (F3a):** demo adds a "scope" filter that visibly cuts the subscription;
 `doc.subscribe` documented. **Exit (F3b):** server drops non-matching nodes
@@ -748,6 +820,22 @@ or `--store mem`). No core changes; the traits from A1 already fit.
 **Exit:** server restarts preserve the full DAG and all blobs; new bench
 `startup_replay_10k` loads a 10k-node room in <500 ms; `docs/deployment.md`
 covers ops basics (backups = file copy for blobs, `.backup` for SQLite).
+
+**Status (Apr 2026 — F4):** shipped. `--store <path>` flag enables a
+SQLite (`<path>/activesync.db`) + file-per-blob (`<path>/blobs/<room>/<hash>`)
+backend rooted at a single directory. Absent, the server stays in-memory
+(default). Persistence is a narrow write-through hook (`ServerPersistence`
+trait in `server/src/store.rs`) that sits *above* the core
+`NodeStore`/`BlobStore` traits — `Room::new` hydrates from disk first, then
+every accepted node and blob is persisted immediately. SQLite uses
+`journal_mode=WAL`, `synchronous=NORMAL`, and `INSERT OR IGNORE` for idempotency;
+blob writes go through tmp-file + rename; hydrate re-verifies blob hashes and
+drops tampered files. `room_id → filesystem name` sanitization escapes
+non-`[A-Za-z0-9_-]` bytes as `_HH`. Integration test
+`large_room_hydrates_quickly` (10k nodes, full write + read cycle) passes
+under a 5s hydrate ceiling; `room_survives_restart_with_nodes_and_blobs`
+covers mixed node+blob round-trip. `docs/deployment.md` documents layout,
+backups, and tuning.
 
 ### F5. Hosted story + real auth integration
 Only meaningful once F0–F4 land. Two pieces:
@@ -795,3 +883,86 @@ rayon chunks, which would hurt load balance on smaller catchup payloads
 (at 1k nodes: 4 chunks vs. 2 chunks on 12 cores). `verify_batch` is now ~95%
 of wall-clock on the 10k merge — further gains require AVX-512 IFMA or a
 different signature primitive.
+
+
+---
+
+## F5 — Trusted issuer bridge + Docker self-host (SHIPPED)
+
+Crate `jwt-bridge/` (`activesync-jwt-bridge`) verifies a JWT signed by your
+auth provider (HS256 / RS256 / ES256 supported via `jsonwebtoken 9`) and
+mints a `RoomToken` using the room's Ed25519 key. Claim shape:
+`{ room, pubkey(hex), exp, caps[] }`; standard JWT claims `exp/nbf/iss/aud`
+are validated by the JWT layer. Optional `allowed_issuers` and
+`allowed_audiences` allow-lists applied per-call. 7 unit tests + 1 doctest.
+
+Reference `Dockerfile` at repo root: multi-stage
+(`rust:1.82-slim-bookworm` → `debian:bookworm-slim`), non-root user,
+`--store /data` by default, `EXPOSE 7878`. Stubs dep-only manifests for
+cache-friendly layer reuse. Build is rot-guarded by
+`.github/workflows/docker.yml`, which rebuilds and smoke-tests the image on
+every push/PR that touches the Dockerfile or any crate it compiles in.
+
+`docs/self-host.md` is the 5-minute walkthrough: build image, run with a
+mounted volume, wrap the bridge in a 30-line Axum service, point your
+issuer at the claim shape, wire the client. Cross-linked from
+`docs/deployment.md`.
+
+---
+
+## F4 follow-up — Room eviction on idle (SHIPPED)
+
+Long-running deployments accumulate per-room state in memory (the
+hydrated `StateGraph` + `MemoryBlobStore` + broadcast channel + tick-loop
+slot) for every room that was ever joined, even after all peers leave.
+With persistence on, this in-memory state is pure cache — we can drop it
+and rehydrate on next join. With persistence off, dropping it is data
+loss, so eviction must be gated.
+
+**What shipped.** `--idle-timeout <seconds>` CLI flag, default 300 s
+(5 min); `0` disables. A 60 s background sweeper
+(`room::spawn_idle_sweeper`) checks every durable room, evicts those
+with zero connected peers whose idle clock has exceeded the timeout, and
+logs `room=<id> evicted idle room`. On the next `get_or_create` the room
+is rebuilt fresh from `DirPersistence` — identical path to a server
+restart, which F4's `room_survives_restart_with_nodes_and_blobs` test
+already exercises.
+
+**Model.** Idle means *zero connected peers*, not *no recent activity*.
+A room with one silent but connected peer stays in memory. The clock
+starts the moment `connected_peers` drops to empty (`deregister_peer`
+stamps `Instant::now()`) and clears the moment anyone rejoins
+(`register_peer` → `idle_since = None`).
+
+**Safety guards** (all three required before eviction):
+1. `ServerPersistence::is_durable()` — `NoPersistence` returns `false`,
+   `DirPersistence` returns `true`. In-memory builds with
+   `--idle-timeout` set log a warning at startup and the sweeper is
+   never spawned.
+2. `Arc::strong_count(&room) == 1` — only the registry holds a
+   reference. Prevents evicting a room mid-handshake where a handler
+   has cloned the Arc but not yet called `register_peer`.
+3. `connected_peers.read().await.is_empty()` re-checked under the peers
+   lock immediately before removal, closing the
+   register-between-decision-and-removal race.
+
+On eviction the room's tick loop is aborted via `stop_tick()`; the
+broadcast sender is dropped (any lagging subscriber gets
+`RecvError::Closed`, which clients already handle as a reconnect
+trigger).
+
+**Tests.** `server/tests/idle_eviction.rs`:
+- `durable_idle_room_is_evicted_and_rehydrates` — full round-trip:
+  write a node, disconnect, sweep, rejoin, state is still there.
+- `in_memory_rooms_are_never_evicted` — `NoPersistence` + timeout-zero
+  sweep returns empty.
+- `connected_room_is_not_evicted` — sweep with a live peer registered
+  (or with a caller-held extra Arc) returns empty; after deregister +
+  drop, sweep evicts.
+
+**Not shipped / deferred.** No per-room override (every room shares the
+global timeout); no metrics counter (add under a `metrics` feature if we
+ever ship one); no graceful drain on SIGTERM (tokio runtime drop
+suffices). Sweeper interval is a const rather than a flag — 60 s is
+fine-grained enough for a 5-minute default and coarse enough to cost
+nothing.

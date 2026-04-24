@@ -3,6 +3,7 @@ members = [
     "core",
     "server",
     "bridge",
+    "jwt-bridge",
 ]
 resolver = "2"
 

@@ -1,6 +1,4 @@
-mod keypair;
-mod room;
-mod ws_handler;
+use activesync_server::{keypair, room, store, ws_handler};
 
 use axum::{Router, routing::get};
 use tower_http::cors::{CorsLayer, Any};
@@ -32,7 +30,51 @@ async fn main() {
     let server_pubkey = keypair::pubkey_hex(&server_key);
     tracing::info!(pubkey = %server_pubkey, "server keypair ready");
 
-    let rooms = room::Rooms::new(server_key);
+    // F4: optional on-disk persistence. `--store <path>` enables a SQLite+files
+    // backend rooted at `<path>`; absent it, the server is in-memory only.
+    let persistence: store::SharedPersistence = match parse_store_arg(&args) {
+        Some(path) => {
+            match store::DirPersistence::open(&path) {
+                Ok(p) => {
+                    tracing::info!(store = %path.display(), "persistence enabled (SQLite + blobs)");
+                    std::sync::Arc::new(p)
+                }
+                Err(e) => {
+                    eprintln!("error: --store open failed at {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => {
+            tracing::info!("persistence disabled (in-memory only)");
+            std::sync::Arc::new(store::NoPersistence)
+        }
+    };
+
+    let rooms = room::Rooms::new(server_key, persistence);
+
+    // Idle-eviction sweeper: drop in-memory rooms whose peer count has been
+    // zero for longer than `--idle-timeout`. Default 300 s (5 min). `0`
+    // disables eviction. Also disabled automatically when persistence is
+    // in-memory (otherwise eviction would be data loss).
+    let idle_timeout = parse_idle_timeout_arg(&args).unwrap_or(300);
+    if idle_timeout > 0 {
+        if rooms.persistence.is_durable() {
+            tracing::info!(secs = idle_timeout, "idle-room eviction enabled");
+            let _handle = room::spawn_idle_sweeper(
+                rooms.clone(),
+                std::time::Duration::from_secs(idle_timeout),
+                std::time::Duration::from_secs(60),
+            );
+        } else {
+            tracing::warn!(
+                "--idle-timeout set but persistence is in-memory; eviction disabled \
+                 (would cause data loss). Pass --store <path> to enable."
+            );
+        }
+    } else {
+        tracing::info!("idle-room eviction disabled (idle-timeout = 0)");
+    }
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -50,10 +92,55 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
+/// F4: Parse `--store <path>` (or `--store=<path>`) from the CLI.
+/// Returns `None` when absent, so the default stays in-memory.
+fn parse_store_arg(args: &[String]) -> Option<std::path::PathBuf> {
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--store" {
+            return args.get(i + 1).map(std::path::PathBuf::from);
+        }
+        if let Some(val) = a.strip_prefix("--store=") {
+            return Some(std::path::PathBuf::from(val));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parse `--idle-timeout <seconds>` (or `--idle-timeout=<seconds>`).
+/// `0` disables eviction. Returns `None` to fall through to the default
+/// (300 s, 5 min). Invalid values also fall back to the default with a
+/// warning — the server does not refuse to start on a typo.
+fn parse_idle_timeout_arg(args: &[String]) -> Option<u64> {
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == "--idle-timeout" {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix("--idle-timeout=") {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match s.parse::<u64>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!("warning: --idle-timeout expects a non-negative integer (seconds); got {s:?}, using default 300");
+                    None
+                }
+            };
+        }
+        i += 1;
+    }
+    None
+}
+
 /// D4: Replay a base64-encoded node pack and print resolved state + hash.
 /// `source` is a file path, or "-" to read from stdin.
-fn run_replay(source: &str) {
-    use activesync_core::{unpack_nodes, replay};
+fn run_replay(source: &str) {    use activesync_core::{unpack_nodes, replay};
 
     // Read raw bytes from file or stdin.
     let raw_bytes: Vec<u8> = if source == "-" {

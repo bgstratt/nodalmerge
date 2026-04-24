@@ -1,0 +1,72 @@
+name: docker
+
+# Rot protection for the reference Dockerfile shipped with F5.
+# Builds the image on every push/PR touching server code, the Dockerfile,
+# or this workflow. Does NOT publish — this is a "did it still build?" gate.
+# If we ever want a published image, add a `docker/login-action` + `push: true`
+# step gated on `github.ref == 'refs/heads/main'` or a tag.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'core/**'
+      - 'server/**'
+      - 'bridge/**'
+      - 'jwt-bridge/**'
+      - '.github/workflows/docker.yml'
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'core/**'
+      - 'server/**'
+      - 'bridge/**'
+      - 'jwt-bridge/**'
+      - '.github/workflows/docker.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: activesync/server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test image
+        run: |
+          # Boot the server in the background with an in-memory store, wait for
+          # the "listening" log line, then shut it down. Fails the build if the
+          # binary segfaults, panics on startup, or never binds.
+          docker run -d --name activesync-ci -p 7878:7878 activesync/server:ci
+          for i in $(seq 1 30); do
+            if docker logs activesync-ci 2>&1 | grep -qi 'listening'; then
+              echo "server started"
+              docker logs activesync-ci
+              docker rm -f activesync-ci
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not start within 30s"
+          docker logs activesync-ci
+          docker rm -f activesync-ci
+          exit 1

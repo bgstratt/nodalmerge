@@ -31,6 +31,179 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 
 use crate::room::{Rooms, Room, import_nodes};
 
+// -----------------------------------------------------------------------------
+// F3b — server-side subscription filter.
+// -----------------------------------------------------------------------------
+// Each peer may declare `subscribe: ["world/**", …]` in its hello (or send a
+// subsequent `subscribe` message). The server filters every relayed `pack` to
+// drop nodes whose ops fall entirely outside the peer's subscription. Default
+// subscription is `["**"]` (see `Subscription::everything`) which short-circuits
+// filtering. Writes are NOT filtered — authority over paths is Policy's job
+// (A5); subscriptions are a bandwidth/visibility tool only.
+
+#[derive(Clone)]
+struct Subscription {
+    /// Compiled path matchers. An empty vec means "match everything" (fast path).
+    matchers: Vec<GlobMatcher>,
+    /// Original patterns (kept for diagnostics / token-scope derivation).
+    #[allow(dead_code)]
+    patterns: Vec<String>,
+}
+
+impl Subscription {
+    fn everything() -> Self {
+        Self { matchers: vec![], patterns: vec!["**".to_string()] }
+    }
+
+    fn from_patterns(patterns: Vec<String>) -> Self {
+        // Empty list or explicit `**` → fast path.
+        if patterns.is_empty() || patterns.iter().any(|p| p == "**") {
+            return Self::everything();
+        }
+        let matchers = patterns.iter().map(|p| GlobMatcher::compile(p)).collect();
+        Self { matchers, patterns }
+    }
+
+    /// Parse from a JSON value: accepts a JSON array of strings, else defaults.
+    fn from_hello_value(v: &Value) -> Self {
+        match v.as_array() {
+            Some(arr) => {
+                let patterns: Vec<String> = arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect();
+                Self::from_patterns(patterns)
+            }
+            None => Self::everything(),
+        }
+    }
+
+    /// Returns true when every node passes (i.e. `**`).
+    #[inline]
+    fn matches_everything(&self) -> bool { self.matchers.is_empty() }
+
+    /// Does any compiled pattern match this path?
+    fn matches_path(&self, path: &str) -> bool {
+        if self.matches_everything() { return true; }
+        self.matchers.iter().any(|m| m.is_match(path))
+    }
+
+    /// Should the node be relayed to the subscriber?
+    /// Policy:
+    ///   - nodes with no ops → always relayed (structural/empty)
+    ///   - nodes with a sentinel-key op (key starts with `\x00`) → always
+    ///     relayed (E2EE envelope, snapshot meta). Filtering these would
+    ///     silently corrupt encrypted rooms.
+    ///   - otherwise: at least one op's key must match the subscription.
+    fn accepts_node(&self, node: &SyncNode) -> bool {
+        if self.matches_everything() { return true; }
+        let ops = &node.transaction.ops;
+        if ops.is_empty() { return true; }
+        for op in ops {
+            let k = match op.key() { Some(k) => k, None => continue };
+            if k.as_bytes().first().copied() == Some(0u8) { return true; }
+            if self.matches_path(k) { return true; }
+        }
+        false
+    }
+}
+
+/// Compiled glob matcher. Semantics match the SDK's `compileGlob` in `web/sdk.js`:
+///   - `**` on its own = any path
+///   - `/**` trailing = optional subtree (so `world/**` matches `world`)
+///   - `/**/` in the middle = optional subtree (so `a/**/c` matches `a/c` and `a/b/c`)
+///   - `**` elsewhere = any chars including `/`
+///   - `*` = any chars excluding `/`
+///   - everything else literal
+#[derive(Clone)]
+struct GlobMatcher {
+    pattern: Vec<u8>,
+}
+
+impl GlobMatcher {
+    fn compile(pattern: &str) -> Self {
+        Self { pattern: pattern.as_bytes().to_vec() }
+    }
+
+    fn is_match(&self, s: &str) -> bool {
+        if self.pattern == b"**" { return true; }
+        glob_match(&self.pattern, s.as_bytes())
+    }
+}
+
+fn glob_match(mut pattern: &[u8], mut path: &[u8]) -> bool {
+    loop {
+        // `/**` at the very end — optional subtree.
+        if pattern == b"/**" {
+            return path.is_empty() || path.starts_with(b"/");
+        }
+        // `/**/` in the middle — optional subtree; require a leading `/` in path,
+        // then match `rest` at every subsequent segment boundary.
+        if pattern.starts_with(b"/**/") {
+            let rest = &pattern[4..];
+            if !path.starts_with(b"/") { return false; }
+            let mut idx = 1usize;
+            loop {
+                if glob_match(rest, &path[idx..]) { return true; }
+                while idx < path.len() && path[idx] != b'/' { idx += 1; }
+                if idx >= path.len() { return false; }
+                idx += 1;
+            }
+        }
+        // `**/` at the very start / after a `/` — optional prefix subtree.
+        // Lets `**/msg` match bare `msg` as well as `a/msg`, `a/b/msg`.
+        if pattern.starts_with(b"**/") {
+            let rest = &pattern[3..];
+            // Zero-segment case: the `**/` consumes nothing.
+            if glob_match(rest, path) { return true; }
+            // One-or-more-segments case: fall through to the generic `**` handler.
+        }
+        // `**` — match any substring (including empty, including slashes).
+        if pattern.starts_with(b"**") {
+            let rest = &pattern[2..];
+            if rest.is_empty() { return true; }
+            for i in 0..=path.len() {
+                if glob_match(rest, &path[i..]) { return true; }
+            }
+            return false;
+        }
+        // `*` — match any substring without crossing `/`.
+        if pattern.first() == Some(&b'*') {
+            let rest = &pattern[1..];
+            for i in 0..=path.len() {
+                if glob_match(rest, &path[i..]) { return true; }
+                if i < path.len() && path[i] == b'/' { return false; }
+            }
+            return false;
+        }
+        // Literal char.
+        if pattern.is_empty() { return path.is_empty(); }
+        if path.is_empty() { return false; }
+        if pattern[0] != path[0] { return false; }
+        pattern = &pattern[1..];
+        path = &path[1..];
+    }
+}
+
+/// Apply the peer's subscription to a broadcast envelope. Returns the original
+/// envelope string when no filtering is needed, an owned string when nodes
+/// were filtered, or `None` when every node was filtered out (caller should
+/// skip the send entirely).
+fn filter_pack_for_subscriber(env: &str, sub: &Subscription) -> Option<String> {
+    if sub.matches_everything() { return Some(env.to_string()); }
+    // Parse just enough to decide.
+    let v: Value = match serde_json::from_str(env) { Ok(v) => v, Err(_) => return Some(env.to_string()) };
+    if v["type"] != "pack" { return Some(env.to_string()); }
+    let nodes_b64 = match v["nodes"].as_str() { Some(s) => s, None => return Some(env.to_string()) };
+    let bytes = match base64_decode(nodes_b64) { Ok(b) => b, Err(_) => return Some(env.to_string()) };
+    let nodes: Vec<SyncNode> = match unpack_nodes(&bytes) { Ok(n) => n, Err(_) => return Some(env.to_string()) };
+    let kept: Vec<SyncNode> = nodes.into_iter().filter(|n| sub.accepts_node(n)).collect();
+    if kept.is_empty() { return None; }
+    let kept_refs: Vec<&SyncNode> = kept.iter().collect();
+    let mut out = v.clone();
+    out["nodes"] = Value::String(base64_encode(&pack_nodes(&kept_refs)));
+    Some(out.to_string())
+}
+
 pub async fn handler(
     ws: WebSocketUpgrade,
     Path(room_id): Path<String>,
@@ -98,6 +271,12 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     let pubkey_hex = hello["pubkey"].as_str().unwrap_or("").to_string();
     let short = &pubkey_hex[..8.min(pubkey_hex.len())];
     tracing::info!(room = %room_id, peer = %short, "peer connected");
+
+    // F3b: parse this peer's subscription from hello. Defaults to everything.
+    // Updated at runtime via the `subscribe` client message.
+    let subscription = Arc::new(std::sync::RwLock::new(
+        Subscription::from_hello_value(&hello["subscribe"]),
+    ));
 
     // C3: if the room is locked, verify the capability token before proceeding.
     {
@@ -213,7 +392,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     };
 
     // D2: register this peer and broadcast peer-joined to the room.
-    room.connected_peers.write().await.insert(pubkey_hex.clone());
+    room.register_peer(pubkey_hex.clone()).await;
     let _ = room.tx.send(serde_json::json!({
         "type":   "peer-joined",
         "from":   pubkey_hex,
@@ -222,17 +401,21 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
 
     if sink.send(Message::Text(welcome_json.into())).await.is_err() {
         tracing::warn!(peer = %short, "welcome send failed");
-        room.connected_peers.write().await.remove(&pubkey_hex);
+        room.deregister_peer(&pubkey_hex).await;
         return;
     }
     tracing::debug!(peer = %short, "welcome sent, entering main loop");
 
-    // Send catch-up pack if non-empty
+    // Send catch-up pack if non-empty. F3b: filter through the peer's
+    // subscription before sending.
     if has_catchup {
-        let msg = serde_json::json!({"type":"pack","from":"server","nodes":catchup_b64}).to_string();
-        if sink.send(Message::Text(msg.into())).await.is_err() {
-            room.connected_peers.write().await.remove(&pubkey_hex);
-            return;
+        let env = serde_json::json!({"type":"pack","from":"server","nodes":catchup_b64}).to_string();
+        let sub = subscription.read().unwrap().clone();
+        if let Some(filtered) = filter_pack_for_subscriber(&env, &sub) {
+            if sink.send(Message::Text(filtered.into())).await.is_err() {
+                room.deregister_peer(&pubkey_hex).await;
+                return;
+            }
         }
     }
 
@@ -246,7 +429,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
             msg = stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if !handle_client_message(&text, &room, &pubkey_hex, &room_id, &server_key, &mut sink).await {
+                        if !handle_client_message(&text, &room, &pubkey_hex, &room_id, &server_key, &mut sink, &subscription).await {
                             break;
                         }
                     }
@@ -279,7 +462,16 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
                                 continue;
                             }
                         }
-                        if sink.send(Message::Text(env.into())).await.is_err() { break; }
+                        // F3b: subscription filter. Pack envelopes may be rewritten
+                        // to drop nodes outside this peer's subscription, or
+                        // dropped entirely when nothing matches. All other
+                        // message types pass through unchanged.
+                        let sub = subscription.read().unwrap().clone();
+                        let out = match filter_pack_for_subscriber(&env, &sub) {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        if sink.send(Message::Text(out.into())).await.is_err() { break; }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(_) => break,
@@ -291,7 +483,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     tracing::debug!(peer = %short, "cleanup: deregistering peer");
     // D2: deregister peer and notify remaining peers so they can close their
     // WebRTC connections.
-    room.connected_peers.write().await.remove(&pubkey_hex);
+    room.deregister_peer(&pubkey_hex).await;
     let _ = room.tx.send(serde_json::json!({
         "type": "peer-left",
         "from": pubkey_hex,
@@ -307,6 +499,7 @@ async fn handle_client_message(
     _room_id: &str,
     server_key: &Arc<SigningKey>,
     sink: &mut SplitSink<WebSocket, Message>,
+    subscription: &Arc<std::sync::RwLock<Subscription>>,
 ) -> bool {
     let msg: Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -314,6 +507,14 @@ async fn handle_client_message(
     };
 
     match msg["type"].as_str().unwrap_or("") {
+
+        // F3b: update this peer's subscription at runtime -------------------
+        "subscribe" => {
+            let sub = Subscription::from_hello_value(&msg["patterns"]);
+            *subscription.write().unwrap() = sub;
+            let reply = serde_json::json!({"type":"subscribe-ack"}).to_string();
+            if sink.send(Message::Text(reply.into())).await.is_err() { return false; }
+        }
 
         // Client pushes a pack of new nodes --------------------------------
         "pack" => {
@@ -325,8 +526,9 @@ async fn handle_client_message(
                 Some(n) => n,
                 None => { send_error(sink, "invalid pack: bad postcard/base64").await; return true; }
             };
+            let incoming = nodes.len();
             let (accepted, errs) = import_nodes(room, nodes).await;
-            tracing::info!(peer = %&pubkey_hex[..8.min(pubkey_hex.len())], accepted, errs = errs.len(), "pack received");
+            tracing::info!(peer = %&pubkey_hex[..8.min(pubkey_hex.len())], incoming, accepted, errs = errs.len(), "pack received");
             if !errs.is_empty() {
                 tracing::warn!(errors = %errs.join("; "), "pack errors");
                 let err = serde_json::json!({"type":"error","msg":errs.join("; ")}).to_string();
@@ -426,6 +628,8 @@ async fn handle_client_message(
                 {
                     let actual = activesync_core::Hash::of(&bytes);
                     if actual == expected {
+                        // F4: write-through persistence for accepted blobs.
+                        room.persistence.persist_blob(&room.room_id, &actual, &bytes);
                         blob_store.put(bytes);
                         stored += 1;
                     }
@@ -837,4 +1041,86 @@ fn base64_encode(data: &[u8]) -> String {
         if chunk.len() > 2 { out.push(CHARS[b2 & 0x3f] as char); } else { out.push('='); }
     }
     out
+}
+
+
+#[cfg(test)]
+mod subscription_tests {
+    use super::*;
+
+    fn m(p: &str, s: &str) -> bool { glob_match(p.as_bytes(), s.as_bytes()) }
+
+    #[test]
+    fn trailing_slash_star_star_is_optional_subtree() {
+        assert!(m("world/**", "world"));
+        assert!(m("world/**", "world/a"));
+        assert!(m("world/**", "world/a/b"));
+        assert!(!m("world/**", "worldx"));
+        assert!(!m("world/**", "other"));
+    }
+
+    #[test]
+    fn segment_star_does_not_cross_slash() {
+        assert!(m("world/*", "world/a"));
+        assert!(!m("world/*", "world/a/b"));
+        assert!(!m("world/*", "world"));
+    }
+
+    #[test]
+    fn literal_match() {
+        assert!(m("notes/welcome", "notes/welcome"));
+        assert!(!m("notes/welcome", "notes/other"));
+    }
+
+    #[test]
+    fn double_star_alone_matches_everything() {
+        assert!(GlobMatcher::compile("**").is_match(""));
+        assert!(GlobMatcher::compile("**").is_match("a/b/c"));
+    }
+
+    #[test]
+    fn star_dot_escapes_are_literal() {
+        assert!(m("chat.*/msg", "chat.v1/msg"));
+        assert!(!m("chat.*/msg", "chatXv1/msg"));
+    }
+
+    #[test]
+    fn leading_double_star_then_literal() {
+        assert!(m("**/msg", "msg"));
+        assert!(m("**/msg", "a/msg"));
+        assert!(m("**/msg", "a/b/msg"));
+        assert!(!m("**/msg", "a/msgx"));
+    }
+
+    #[test]
+    fn middle_double_star_optional_subtree() {
+        assert!(m("a/**/c", "a/c"));
+        assert!(m("a/**/c", "a/b/c"));
+        assert!(m("a/**/c", "a/b/x/c"));
+        assert!(!m("a/**/c", "a/cx"));
+        assert!(!m("a/**/c", "ax/c"));
+    }
+
+    #[test]
+    fn subscription_accepts_everything_by_default() {
+        let s = Subscription::everything();
+        assert!(s.matches_everything());
+        assert!(s.matches_path("anything/at/all"));
+    }
+
+    #[test]
+    fn subscription_from_patterns_or() {
+        let s = Subscription::from_patterns(vec!["world/**".into(), "chat/*".into()]);
+        assert!(s.matches_path("world"));
+        assert!(s.matches_path("world/a/b"));
+        assert!(s.matches_path("chat/x"));
+        assert!(!s.matches_path("chat/x/y"));
+        assert!(!s.matches_path("other"));
+    }
+
+    #[test]
+    fn empty_pattern_list_means_everything() {
+        let s = Subscription::from_patterns(vec![]);
+        assert!(s.matches_everything());
+    }
 }

@@ -116,3 +116,33 @@ impl Transaction {
         Hash::of(&bytes)
     }
 }
+
+impl MapOp {
+    /// Key this op acts on.
+    pub fn key(&self) -> &str {
+        match self {
+            MapOp::Set { key, .. } | MapOp::Delete { key } | MapOp::SetBlob { key, .. } => key,
+        }
+    }
+}
+
+impl TextOp {
+    /// Key this op acts on.
+    pub fn key(&self) -> &str {
+        match self {
+            TextOp::Insert { key, .. } | TextOp::Delete { key, .. } => key,
+        }
+    }
+}
+
+impl Op {
+    /// Path-key this op targets, if any. `None` only for the uninhabited
+    /// `Op::List` stub (and any future structural op that doesn't carry a key).
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            Op::Map(m) => Some(m.key()),
+            Op::Text(t) => Some(t.key()),
+            Op::List(_) => None,
+        }
+    }
+}

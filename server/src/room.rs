@@ -3,11 +3,13 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
-use activesync_core::{MemoryBlobStore, Op, MapOp, Policy, StateGraph, SyncNode, pack_nodes};
+use activesync_core::{MemoryBlobStore, BlobStore, Op, MapOp, Policy, StateGraph, SyncNode, pack_nodes};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use tokio::sync::{broadcast, RwLock};
+
+use crate::store::SharedPersistence;
 
 /// A JSON-encoded server→client push message.
 pub type Envelope = String;
@@ -46,19 +48,66 @@ pub struct Room {
     /// D2: set of currently-connected peer pubkeys (hex). Used to populate
     /// the `peers` field of the `welcome` message and to drive WebRTC initiation.
     pub connected_peers: RwLock<HashSet<String>>,
+    /// F4: shared persistence handle. `NoPersistence` in the default in-memory build.
+    pub persistence: SharedPersistence,
+    /// F4: this room's id, passed to every `persistence.persist_*` call.
+    pub room_id: String,
+    /// Idle-eviction clock. `Some(t)` once `connected_peers` first empties,
+    /// reset to `None` the moment any peer (re)connects. The background
+    /// sweeper in [`Rooms::sweep_idle`] drops rooms whose idle timer has
+    /// exceeded the configured timeout. `None` while any peer is connected.
+    pub idle_since: Mutex<Option<Instant>>,
 }
 
 impl Room {
-    pub fn new() -> Arc<Self> {
+    pub fn new(room_id: String, persistence: SharedPersistence) -> Arc<Self> {
         let (tx, _) = broadcast::channel(512);
+        // F4: hydrate graph + blobs from disk before the room becomes visible.
+        let mut graph = StateGraph::new();
+        let persisted_nodes = persistence.load_room_nodes(&room_id);
+        if !persisted_nodes.is_empty() {
+            let res = graph.apply_remote_batch(persisted_nodes);
+            if !res.rejected.is_empty() {
+                tracing::warn!(
+                    room = %room_id,
+                    rejected = res.rejected.len(),
+                    "rejected nodes during hydrate (corrupt/tampered persisted row)"
+                );
+            }
+        }
+        let mut blobs = MemoryBlobStore::new();
+        for (_h, bytes) in persistence.load_room_blobs(&room_id) {
+            blobs.put(bytes);
+        }
         Arc::new(Room {
-            graph:           RwLock::new(StateGraph::new()),
-            blobs:           RwLock::new(MemoryBlobStore::new()),
+            graph:           RwLock::new(graph),
+            blobs:           RwLock::new(blobs),
             auth_key:        RwLock::new(None),
             tx,
             tick_abort:      Mutex::new(None),
             connected_peers: RwLock::new(HashSet::new()),
+            persistence,
+            room_id,
+            // Brand-new room has no peers yet, so the idle clock starts now.
+            // The first `register_peer` call will clear it.
+            idle_since:      Mutex::new(Some(Instant::now())),
         })
+    }
+
+    /// Register a newly-connected peer. Clears the idle-eviction clock.
+    pub async fn register_peer(&self, pubkey_hex: String) {
+        self.connected_peers.write().await.insert(pubkey_hex);
+        *self.idle_since.lock().expect("idle_since poisoned") = None;
+    }
+
+    /// Deregister a departing peer. If this was the last connected peer,
+    /// starts the idle-eviction clock.
+    pub async fn deregister_peer(&self, pubkey_hex: &str) {
+        let mut peers = self.connected_peers.write().await;
+        peers.remove(pubkey_hex);
+        if peers.is_empty() {
+            *self.idle_since.lock().expect("idle_since poisoned") = Some(Instant::now());
+        }
     }
 
     /// Install a room-level write policy.  Called when a client sends
@@ -144,6 +193,10 @@ impl Room {
         let b64 = {
             let graph = self.graph.read().await;
             let nodes: Vec<&SyncNode> = graph.get_nodes(&[node_id]);
+            // F4: write-through persistence for the authoritative tick node.
+            if let Some(n) = nodes.first() {
+                self.persistence.persist_node(&self.room_id, n);
+            }
             base64_encode(&pack_nodes(&nodes))
         };
 
@@ -160,13 +213,16 @@ pub struct Rooms {
     rooms:  Arc<RwLock<HashMap<String, Arc<Room>>>>,
     /// Persistent server keypair generated/loaded at startup.
     pub server_key: Arc<SigningKey>,
+    /// F4: shared persistence handle threaded into every newly-created room.
+    pub persistence: SharedPersistence,
 }
 
 impl Rooms {
-    pub fn new(server_key: SigningKey) -> Self {
+    pub fn new(server_key: SigningKey, persistence: SharedPersistence) -> Self {
         Rooms {
             rooms: Arc::new(RwLock::new(HashMap::new())),
             server_key: Arc::new(server_key),
+            persistence,
         }
     }
 
@@ -178,8 +234,91 @@ impl Rooms {
             }
         }
         let mut w = self.rooms.write().await;
-        w.entry(id.to_string()).or_insert_with(Room::new).clone()
+        w.entry(id.to_string())
+            .or_insert_with(|| Room::new(id.to_string(), Arc::clone(&self.persistence)))
+            .clone()
     }
+
+    /// Evict rooms that have had no connected peers for longer than `timeout`.
+    ///
+    /// Only safe when `self.persistence.is_durable()` — otherwise dropping a
+    /// `Room` loses its in-memory DAG. When the caller skips this guard,
+    /// eviction becomes outright data loss.
+    ///
+    /// Returns the list of evicted room ids (for logging / tests).
+    ///
+    /// Eviction model: peer-count == 0 AND the idle clock has elapsed. We
+    /// also require `Arc::strong_count == 1` (only the map holds the Arc) so
+    /// a mid-handshake join that has cloned the Arc but not yet called
+    /// `register_peer` isn't evicted out from under it. On eviction the
+    /// room's tick loop is aborted; persisted nodes and blobs remain intact
+    /// and are re-hydrated by the next `get_or_create` call.
+    pub async fn sweep_idle(&self, timeout: Duration, now: Instant) -> Vec<String> {
+        if !self.persistence.is_durable() {
+            return Vec::new();
+        }
+        let mut evicted = Vec::new();
+        let mut map = self.rooms.write().await;
+        // Two-pass: first decide, then remove. `retain_async` doesn't exist,
+        // and we want to release per-room locks before dropping the Arc.
+        let candidate_ids: Vec<String> = {
+            let mut out = Vec::new();
+            for (id, room) in map.iter() {
+                if Arc::strong_count(room) != 1 {
+                    continue; // someone else is using it
+                }
+                let idle = *room.idle_since.lock().expect("idle_since poisoned");
+                if let Some(since) = idle {
+                    if now.duration_since(since) >= timeout {
+                        // Double-check under the peers lock that nobody reconnected.
+                        if room.connected_peers.read().await.is_empty() {
+                            out.push(id.clone());
+                        }
+                    }
+                }
+            }
+            out
+        };
+        for id in candidate_ids {
+            if let Some(room) = map.remove(&id) {
+                room.stop_tick();
+                drop(room); // may or may not free; any surviving Arc (e.g. a
+                            // stray broadcast subscriber) drops naturally.
+                evicted.push(id);
+            }
+        }
+        evicted
+    }
+}
+
+/// Spawn the background idle-eviction sweeper.
+///
+/// Wakes every `interval` and calls [`Rooms::sweep_idle`]. `timeout == 0`
+/// disables eviction (this function returns `None`). Callers store the
+/// returned `JoinHandle` if they want to `abort()` on shutdown; the handle
+/// can be dropped in normal operation — aborting the tokio runtime drops
+/// the task.
+pub fn spawn_idle_sweeper(
+    rooms: Rooms,
+    timeout: Duration,
+    interval: Duration,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if timeout.is_zero() {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Skip the immediate first tick (interval fires at t=0).
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let evicted = rooms.sweep_idle(timeout, Instant::now()).await;
+            for id in evicted {
+                tracing::info!(room = %id, "evicted idle room");
+            }
+        }
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +388,7 @@ pub fn spawn_tick_loop(
 pub async fn import_nodes(room: &Room, nodes: Vec<SyncNode>) -> (usize, Vec<String>) {
     let mut pending = nodes;
     let mut accepted = 0usize;
+    let mut accepted_ids: Vec<activesync_core::NodeId> = Vec::new();
     let mut errors = Vec::new();
     let mut graph = room.graph.write().await;
 
@@ -264,6 +404,7 @@ pub async fn import_nodes(room: &Room, nodes: Vec<SyncNode>) -> (usize, Vec<Stri
 
         let result = graph.apply_remote_batch(batch);
         accepted += result.accepted.len();
+        accepted_ids.extend(result.accepted.iter().copied());
 
         let mut still_pending = Vec::new();
         for (id, err) in result.rejected {
@@ -280,6 +421,25 @@ pub async fn import_nodes(room: &Room, nodes: Vec<SyncNode>) -> (usize, Vec<Stri
 
         pending = still_pending;
         if pending.len() == before { break; } // no progress
+    }
+
+    // Anything still in `pending` at this point is MissingParent — couldn't
+    // resolve within this pack. Surface the count so the caller can log it;
+    // a sustained non-zero here means the client isn't catching the server up.
+    if !pending.is_empty() {
+        errors.push(format!("missing_parent: {} node(s) unresolved", pending.len()));
+    }
+
+    // F4: write-through persistence for accepted nodes. Batched so the
+    // SQLite backend fsyncs once per pack instead of once per node.
+    if !accepted_ids.is_empty() {
+        let nodes_ref: Vec<&SyncNode> = accepted_ids
+            .iter()
+            .filter_map(|id| graph.get_nodes(&[*id]).into_iter().next())
+            .collect();
+        if !nodes_ref.is_empty() {
+            room.persistence.persist_nodes(&room.room_id, &nodes_ref);
+        }
     }
 
     (accepted, errors)

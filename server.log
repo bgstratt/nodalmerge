@@ -1,0 +1,22 @@
+[2m2026-04-24T00:34:11.582481Z[0m [32m INFO[0m tokio multi-thread runtime started [3mworkers[0m[2m=[0m24
+[2m2026-04-24T00:34:11.582675Z[0m [32m INFO[0m loaded server keypair [3mpubkey[0m[2m=[0m8e8819a26eeace11
+[2m2026-04-24T00:34:11.582688Z[0m [32m INFO[0m server keypair ready [3mpubkey[0m[2m=[0m8e8819a26eeace117c19920cc902cd8dfc93ece91df18f4905b1dec1d850cac8
+[2m2026-04-24T00:34:11.582693Z[0m [32m INFO[0m persistence disabled (in-memory only)
+[2m2026-04-24T00:34:11.582765Z[0m [32m INFO[0m ActiveSync server listening on ws://127.0.0.1:7878/ws/<room> [3maddr[0m[2m=[0m127.0.0.1:7878
+[2m2026-04-24T00:34:11.672652Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0m3c3ae9ad
+[2m2026-04-24T00:34:11.681097Z[0m [32m INFO[0m pack received [3mpeer[0m[2m=[0m3c3ae9ad [3mincoming[0m[2m=[0m121 [3maccepted[0m[2m=[0m121 [3merrs[0m[2m=[0m0
+[2m2026-04-24T00:34:13.248127Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0m936e61f1
+[2m2026-04-24T00:34:29.668069Z[0m [32m INFO[0m pack received [3mpeer[0m[2m=[0m3c3ae9ad [3mincoming[0m[2m=[0m1 [3maccepted[0m[2m=[0m1 [3merrs[0m[2m=[0m0
+[2m2026-04-24T01:00:07.939288Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0ma148b73a
+[2m2026-04-24T01:00:09.661181Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0md6e8b233
+[2m2026-04-24T01:00:18.559340Z[0m [32m INFO[0m pack received [3mpeer[0m[2m=[0md6e8b233 [3mincoming[0m[2m=[0m1 [3maccepted[0m[2m=[0m1 [3merrs[0m[2m=[0m0
+[2m2026-04-24T01:00:24.368264Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0m034422be
+[2m2026-04-24T01:00:44.394569Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0mf5032eff
+[2m2026-04-24T01:00:52.460721Z[0m [32m INFO[0m pack received [3mpeer[0m[2m=[0m034422be [3mincoming[0m[2m=[0m1 [3maccepted[0m[2m=[0m1 [3merrs[0m[2m=[0m0
+[2m2026-04-24T01:02:35.913133Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0md6e8b233
+[2m2026-04-24T01:02:54.300828Z[0m [32m INFO[0m pack received [3mpeer[0m[2m=[0md6e8b233 [3mincoming[0m[2m=[0m1 [3maccepted[0m[2m=[0m1 [3merrs[0m[2m=[0m0
+[2m2026-04-24T01:10:34.826274Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0mf5032eff
+[2m2026-04-24T01:10:35.816252Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0m9879ada1
+[2m2026-04-24T01:10:36.826423Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0ma148b73a
+[2m2026-04-24T01:10:38.590211Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0md6e8b233
+[2m2026-04-24T02:10:47.242473Z[0m [32m INFO[0m peer connected [3mroom[0m[2m=[0mdefault [3mpeer[0m[2m=[0m17e8f364

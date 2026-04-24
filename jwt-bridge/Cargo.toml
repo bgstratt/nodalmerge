@@ -1,0 +1,16 @@
+[package]
+name = "activesync-jwt-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Trusted-issuer JWT → ActiveSync RoomToken minting bridge"
+
+[dependencies]
+activesync-core = { path = "../core" }
+ed25519-dalek = { workspace = true }
+jsonwebtoken = "9"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rand = "0.8"

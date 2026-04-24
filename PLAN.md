@@ -966,3 +966,63 @@ ever ship one); no graceful drain on SIGTERM (tokio runtime drop
 suffices). Sweeper interval is a const rather than a flag — 60 s is
 fine-grained enough for a 5-minute default and coarse enough to cost
 nothing.
+
+
+---
+
+## Phase G — Operational gaps (in progress)
+
+### G7 — Metrics / observability (SHIPPED, Apr 2026)
+
+**Problem.** Pre-G7 the server emitted only 	racing logs. No counters, no
+histograms, no scrape endpoint — you couldn't answer "is the merge queue
+falling behind?" without attaching a profiler.
+
+**What shipped.**
+- metrics 0.23 + metrics-exporter-prometheus 0.15 (`default-features = false`,
+  `features = ["http-listener"]`) in ctivesync-server.
+- `server/src/metrics.rs`: `init(addr)` installs the global Prometheus
+  recorder + HTTP listener; `parse_arg(&args)` reads
+  `--metrics-addr <ip:port>` (and `--metrics-addr=…`); `peer_label(hex)`
+  returns the 12-char pubkey prefix used by G3.
+- Admin port is a separate listener — the public WS port is never
+  mixed with `/metrics`. Default off; install failure is logged and the
+  server keeps running without observability.
+- Custom histogram buckets via `PrometheusBuilder::set_buckets_for_metric`
+  so p50/p95/p99 queries come out clean:
+  - `activesync_merge_batch_seconds`: 50µs, 100µs, 250µs, 500µs, 1ms, 2.5ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s.
+  - `activesync_persistence_write_seconds`: 100µs, 250µs, 500µs, 1ms, 2.5ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms.
+
+**Baseline metrics.**
+
+| Metric | Kind | Labels | Source |
+|---|---|---|---|
+| `activesync_rooms_total` | gauge | — | `Rooms::get_or_create` + `sweep_idle` |
+| `activesync_peers_total` | gauge | `room` | `Room::register_peer` / `deregister_peer` |
+| `activesync_nodes_accepted_total` | counter | `room` | `import_nodes` |
+| `activesync_merge_batch_seconds` | histogram | — | `import_nodes` (wall time) |
+| `activesync_persistence_write_seconds` | histogram | `kind=node` \| `nodes_batch` \| `blob` | `DirPersistence` |
+| `activesync_eviction_total` | counter | — | `Rooms::sweep_idle` |
+
+Gap-specific counters (`activesync_broadcast_lagged_total`,
+`_ws_send_timeout_total`, `_rate_limit_drops_total`, `_blob_gc_deleted_total`,
+`_lamport_rejected_total`, `_token_expired_disconnects_total`) are
+registered by G1/G3/G4/G5/G6 at their instrumentation sites — documented
+in `server/src/metrics.rs` doc-comments so they stay discoverable.
+
+**Tests.** `server/tests/metrics_endpoint.rs`:
+- `metrics_endpoint_exposes_baseline_series` — installs the recorder on
+  loopback, drives a room + peer + import, scrapes `/metrics` via a raw
+  HTTP/1.1 GET on a `spawn_blocking` task, asserts the baseline metric
+  names + `# HELP` lines appear.
+- `parse_arg_accepts_flag_and_equals_form` — both CLI forms + missing +
+  malformed cases.
+- `peer_label_truncates_to_12_chars` — G3 label invariant.
+
+**Constraints.** `metrics::init` installs a *process-global* recorder; a
+second install returns `Err`. All metrics integration coverage stays in
+`metrics_endpoint.rs` so no two tests race for the slot.
+
+**Next (Phase G).** G1 — backpressure (send timeout, 4001 lagged close,
+`--broadcast-capacity`). G3 — rate limit (governor token buckets,
+`--peer-rate-nodes` / `--peer-rate-bytes`, 4008 close).

@@ -11,7 +11,10 @@
 # runtime beyond libc + ca-certificates.
 
 # ─── Builder ───────────────────────────────────────────────────────────────
-FROM rust:1.82-slim-bookworm AS builder
+# Rust 1.85+ required: some transitive deps (e.g. `time-core`) have adopted
+# `edition = "2024"`, which was stabilized in 1.85. Pinning to a recent
+# stable keeps the build reproducible without chasing nightly.
+FROM rust:1.86-slim-bookworm AS builder
 
 WORKDIR /src
 
@@ -24,11 +27,17 @@ COPY server/Cargo.toml       server/Cargo.toml
 COPY jwt-bridge/Cargo.toml   jwt-bridge/Cargo.toml
 
 # Stub source trees so cargo can resolve + fetch without real code.
-RUN mkdir -p core/src bridge/src server/src jwt-bridge/src \
+# Core's Cargo.toml declares several `[[bench]]` targets; cargo validates
+# their files exist at manifest-parse time, so we stub them too. Same for
+# any integration-test targets we add later.
+RUN mkdir -p core/src core/benches bridge/src server/src server/tests jwt-bridge/src \
     && echo 'fn main(){}'     > server/src/main.rs \
     && echo ''                > core/src/lib.rs \
     && echo ''                > bridge/src/lib.rs \
     && echo ''                > jwt-bridge/src/lib.rs \
+    && for b in merge_10k sync_handshake resolve_1k blob_verify tx_hash; do \
+           echo 'fn main(){}' > "core/benches/$b.rs"; \
+       done \
     && cargo fetch --locked || cargo fetch
 
 # Now bring in the real sources and build release.

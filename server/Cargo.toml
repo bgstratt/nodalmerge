@@ -21,3 +21,5 @@ futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+metrics = "0.23"
+metrics-exporter-prometheus = { version = "0.15", default-features = false, features = ["http-listener"] }

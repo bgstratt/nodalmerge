@@ -91,3 +91,34 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
 - **Sentinel keys:** the subscription filter always passes through keys that
   begin with `\x00` (E2EE envelopes, snapshot meta). Don't try to scope them
   via patterns — they must reach every peer verbatim.
+
+## Metrics (`--metrics-addr <ip:port>`)
+
+When set, the server installs a Prometheus exporter on a **separate admin
+port** and serves `/metrics` there. The public WS port is unchanged. Default
+off — absent the flag, no recorder is installed.
+
+```
+activesync-server --store ./data --metrics-addr 127.0.0.1:9090
+curl http://127.0.0.1:9090/metrics
+```
+
+Bind to loopback or a private subnet; the endpoint has no auth. If the
+install fails (port taken, already installed in-process) the server logs a
+warning and continues without observability.
+
+Baseline series:
+
+| Metric | Kind | Labels |
+|---|---|---|
+| `activesync_rooms_total` | gauge | — |
+| `activesync_peers_total` | gauge | `room` |
+| `activesync_nodes_accepted_total` | counter | `room` |
+| `activesync_merge_batch_seconds` | histogram | — |
+| `activesync_persistence_write_seconds` | histogram | `kind=node\|nodes_batch\|blob` |
+| `activesync_eviction_total` | counter | — |
+
+Histograms ship with hand-tuned buckets (µs-scale for merges and persistence
+writes) so Prometheus `histogram_quantile(0.99, …)` works without extra
+config. Additional counters land as Phase G gaps ship (backpressure,
+rate-limit, blob GC, token expiry).

@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use activesync_core::{unpack_nodes, pack_nodes, Hash, SyncNode};
 use rusqlite::{params, Connection};
@@ -138,6 +139,7 @@ impl ServerPersistence for DirPersistence {
     }
 
     fn persist_node(&self, room_id: &str, node: &SyncNode) {
+        let t0 = Instant::now();
         let bytes = pack_nodes(&[node]);
         let conn = self.conn.lock().unwrap();
         if let Err(e) = conn.execute(
@@ -146,10 +148,14 @@ impl ServerPersistence for DirPersistence {
         ) {
             tracing::warn!(?e, "persist_node failed");
         }
+        drop(conn);
+        metrics::histogram!("activesync_persistence_write_seconds", "kind" => "node")
+            .record(t0.elapsed().as_secs_f64());
     }
 
     fn persist_nodes(&self, room_id: &str, nodes: &[&SyncNode]) {
         if nodes.is_empty() { return; }
+        let t0 = Instant::now();
         // Pre-encode outside the lock so we hold the connection mutex for the
         // minimum possible time. Each row is still one postcard pack, same as
         // persist_node — the win is collapsing N autocommits into one txn.
@@ -204,6 +210,8 @@ impl ServerPersistence for DirPersistence {
                 }
             }
         }
+        metrics::histogram!("activesync_persistence_write_seconds", "kind" => "nodes_batch")
+            .record(t0.elapsed().as_secs_f64());
     }
 
     fn load_room_blobs(&self, room_id: &str) -> Vec<(Hash, Vec<u8>)> {
@@ -231,6 +239,7 @@ impl ServerPersistence for DirPersistence {
     }
 
     fn persist_blob(&self, room_id: &str, hash: &Hash, bytes: &[u8]) {
+        let t0 = Instant::now();
         let dir = self.blobs_dir_for(room_id);
         if let Err(e) = std::fs::create_dir_all(&dir) {
             tracing::warn!(?e, "persist_blob: create_dir_all failed");
@@ -248,6 +257,8 @@ impl ServerPersistence for DirPersistence {
             tracing::warn!(?e, "persist_blob: rename failed");
             let _ = std::fs::remove_file(&tmp);
         }
+        metrics::histogram!("activesync_persistence_write_seconds", "kind" => "blob")
+            .record(t0.elapsed().as_secs_f64());
     }
 }
 

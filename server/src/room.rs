@@ -96,17 +96,23 @@ impl Room {
 
     /// Register a newly-connected peer. Clears the idle-eviction clock.
     pub async fn register_peer(&self, pubkey_hex: String) {
-        self.connected_peers.write().await.insert(pubkey_hex);
+        let inserted = self.connected_peers.write().await.insert(pubkey_hex);
         *self.idle_since.lock().expect("idle_since poisoned") = None;
+        if inserted {
+            metrics::gauge!("activesync_peers_total", "room" => self.room_id.clone()).increment(1.0);
+        }
     }
 
     /// Deregister a departing peer. If this was the last connected peer,
     /// starts the idle-eviction clock.
     pub async fn deregister_peer(&self, pubkey_hex: &str) {
         let mut peers = self.connected_peers.write().await;
-        peers.remove(pubkey_hex);
+        let removed = peers.remove(pubkey_hex);
         if peers.is_empty() {
             *self.idle_since.lock().expect("idle_since poisoned") = Some(Instant::now());
+        }
+        if removed {
+            metrics::gauge!("activesync_peers_total", "room" => self.room_id.clone()).decrement(1.0);
         }
     }
 
@@ -234,9 +240,17 @@ impl Rooms {
             }
         }
         let mut w = self.rooms.write().await;
-        w.entry(id.to_string())
-            .or_insert_with(|| Room::new(id.to_string(), Arc::clone(&self.persistence)))
-            .clone()
+        let mut created = false;
+        let room = w.entry(id.to_string())
+            .or_insert_with(|| {
+                created = true;
+                Room::new(id.to_string(), Arc::clone(&self.persistence))
+            })
+            .clone();
+        if created {
+            metrics::gauge!("activesync_rooms_total").increment(1.0);
+        }
+        room
     }
 
     /// Evict rooms that have had no connected peers for longer than `timeout`.
@@ -285,6 +299,8 @@ impl Rooms {
                 drop(room); // may or may not free; any surviving Arc (e.g. a
                             // stray broadcast subscriber) drops naturally.
                 evicted.push(id);
+                metrics::counter!("activesync_eviction_total").increment(1);
+                metrics::gauge!("activesync_rooms_total").decrement(1.0);
             }
         }
         evicted
@@ -386,6 +402,7 @@ pub fn spawn_tick_loop(
 /// or in a follow-up pack); other rejections are recorded as errors and
 /// surfaced to the caller.
 pub async fn import_nodes(room: &Room, nodes: Vec<SyncNode>) -> (usize, Vec<String>) {
+    let t0 = Instant::now();
     let mut pending = nodes;
     let mut accepted = 0usize;
     let mut accepted_ids: Vec<activesync_core::NodeId> = Vec::new();
@@ -440,6 +457,12 @@ pub async fn import_nodes(room: &Room, nodes: Vec<SyncNode>) -> (usize, Vec<Stri
         if !nodes_ref.is_empty() {
             room.persistence.persist_nodes(&room.room_id, &nodes_ref);
         }
+    }
+
+    metrics::histogram!("activesync_merge_batch_seconds").record(t0.elapsed().as_secs_f64());
+    if accepted > 0 {
+        metrics::counter!("activesync_nodes_accepted_total", "room" => room.room_id.clone())
+            .increment(accepted as u64);
     }
 
     (accepted, errors)

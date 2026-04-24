@@ -590,27 +590,32 @@ expiry window (could be days).
 
 Metric: `activesync_token_expired_disconnects_total`.
 
-### G7 — Metrics / observability (server)
+### G7 — Metrics / observability (server) *(SHIPPED)*
 
-**Where it lives today.** `tracing` only. No counters, no histograms, no
+**Where it lived before.** `tracing` only. No counters, no histograms, no
 scrape endpoint.
 
-**Plan.**
-- Add `metrics` + `metrics-exporter-prometheus` to `activesync-server`.
-- Admin server on a **separate** port (`--metrics-addr 127.0.0.1:9090`, default off) exposes `/metrics`. Never mix with the public WS port — metrics should not be internet-reachable by default.
-- Initial set (cardinality-conscious: room label where it helps, peer label only as short-hash for rate-limit drops):
+**Shipped.**
+- `metrics` 0.23 + `metrics-exporter-prometheus` 0.15 in `activesync-server`.
+- Admin server on a **separate** port: `--metrics-addr 127.0.0.1:9090` (default off) exposes `/metrics`. Public WS port is untouched — metrics must not be internet-reachable by default.
+- Global recorder installs exactly once per process; install failure is logged and the server keeps running without observability.
+- Baseline set (cardinality-conscious: `room` label where it helps, `peer` label is a 12-char pubkey prefix):
   - `activesync_rooms_total` (gauge)
   - `activesync_peers_total{room}` (gauge)
   - `activesync_nodes_accepted_total{room}` (counter)
-  - `activesync_merge_batch_seconds` (histogram)
-  - `activesync_persistence_write_seconds{kind}` (histogram)
-  - `activesync_broadcast_lagged_total{room}` (counter) — feeds G1
-  - `activesync_ws_send_timeout_total{room}` (counter) — feeds G1
+  - `activesync_merge_batch_seconds` (histogram, custom buckets 50µs–2.5s)
+  - `activesync_persistence_write_seconds{kind=node|nodes_batch|blob}` (histogram, custom buckets 100µs–500ms)
   - `activesync_eviction_total` (counter)
-  - `activesync_rate_limit_drops_total{peer}` (counter) — feeds G3
-  - `activesync_blob_gc_deleted_total{room}` (counter) — feeds G4
-  - `activesync_lamport_rejected_total{reason}` (counter) — feeds G5
-  - `activesync_token_expired_disconnects_total` (counter) — feeds G6
+- Histogram buckets set via `PrometheusBuilder::set_buckets_for_metric(Matcher::Full(...), &buckets)` so Grafana p50/p95/p99 queries work out-of-the-box.
+- Remaining counters below are registered by their own gap at instrumentation time:
+  - `activesync_broadcast_lagged_total{room}` — feeds G1
+  - `activesync_ws_send_timeout_total{room}` — feeds G1
+  - `activesync_rate_limit_drops_total{peer}` — feeds G3
+  - `activesync_blob_gc_deleted_total{room}` — feeds G4
+  - `activesync_lamport_rejected_total{reason}` — feeds G5
+  - `activesync_token_expired_disconnects_total` — feeds G6
+
+Integration test: `server/tests/metrics_endpoint.rs` installs the recorder on a loopback port, exercises room + peer + import paths, and scrapes `/metrics` via a raw HTTP/1.1 GET to assert the baseline series are present.
 
 ### G8 — Metrics surface in the SDK (thin, BYO backend)
 

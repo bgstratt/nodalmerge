@@ -1,4 +1,4 @@
-use activesync_server::{keypair, room, store, ws_handler};
+use activesync_server::{keypair, metrics, room, store, ws_handler};
 
 use axum::{Router, routing::get};
 use tower_http::cors::{CorsLayer, Any};
@@ -52,6 +52,16 @@ async fn main() {
     };
 
     let rooms = room::Rooms::new(server_key, persistence);
+
+    // G7: optional Prometheus metrics endpoint on an admin port. `--metrics-addr
+    // <ip:port>` enables it; absent, no recorder is installed. Install failure
+    // (port taken, etc.) is logged — server continues without observability.
+    if let Some(addr) = metrics::parse_arg(&args) {
+        match metrics::init(addr) {
+            Ok(()) => tracing::info!(%addr, "metrics endpoint listening on http://{addr}/metrics"),
+            Err(e) => tracing::warn!(?e, "failed to install metrics recorder; continuing without metrics"),
+        }
+    }
 
     // Idle-eviction sweeper: drop in-memory rooms whose peer count has been
     // zero for longer than `--idle-timeout`. Default 300 s (5 min). `0`

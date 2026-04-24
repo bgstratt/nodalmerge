@@ -4,6 +4,7 @@
 //! canonical consumer.
 
 pub mod keypair;
+pub mod metrics;
 pub mod room;
 pub mod store;
 pub mod ws_handler;

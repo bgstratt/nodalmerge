@@ -47,6 +47,22 @@ pub struct SyncCapabilities {
     /// Maximum tick-batching interval this peer will accept, in milliseconds (E3).
     /// `None` means the peer does not support tick batching.
     pub max_tick_interval_ms: Option<u64>,
+
+    /// F8: fractional-index List CRDT.
+    /// When true the peer understands `Op::List(ListOp::{Insert,Delete,Move})`.
+    /// Older peers without this flag silently drop list ops via postcard
+    /// decode failure (the node fails the integrity check and is rejected).
+    pub supports_list_crdt: bool,
+
+    /// F6: direct blob I/O via presigned URLs.
+    /// When true the peer understands the `blob-redirect`,
+    /// `request-upload`, `upload-granted`, `upload-denied`, and
+    /// `blob-uploaded` wire messages and will use them for large blobs
+    /// when the server's BlobPersistence backend supplies presigned URLs.
+    /// Older peers without this flag transparently fall back to bytes-
+    /// over-WS (the existing `blob` message), so this flag is purely an
+    /// optimization gate.
+    pub supports_direct_blob_io: bool,
 }
 
 impl Default for SyncCapabilities {
@@ -58,6 +74,8 @@ impl Default for SyncCapabilities {
             supports_encryption:  true,   // D1 implemented
             supports_webrtc:      false,
             max_tick_interval_ms: None,
+            supports_list_crdt:   true,   // F8 implemented
+            supports_direct_blob_io: true, // F6 implemented
         }
     }
 }
@@ -79,6 +97,8 @@ impl SyncCapabilities {
                 (Some(a), Some(b)) => Some(a.max(b)), // use the larger of the two intervals
                 _ => None,                             // either peer doesn't support batching
             },
+            supports_list_crdt:   self.supports_list_crdt   && other.supports_list_crdt,
+            supports_direct_blob_io: self.supports_direct_blob_io && other.supports_direct_blob_io,
         }
     }
 }

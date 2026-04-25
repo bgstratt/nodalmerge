@@ -36,9 +36,10 @@ window.addEventListener('unhandledrejection', ev => {
 const ROOM_ID    = 'default';
 const SERVER_URL = 'ws://127.0.0.1:7878';
 const COLORS     = ['#60a5fa','#4ade80','#f472b6','#fb923c','#a78bfa','#34d399','#fbbf24','#f87171'];
-const IDB_NAME    = 'activesync-v5';
+const IDB_NAME    = 'activesync-v6';
 const IDB_VERSION = 1;
 const COLLAB_KEY  = 'collab/doc';
+const LIST_KEY    = 'demo/list';
 
 // ---------------------------------------------------------------------------
 // Identity — Ed25519 seed in sessionStorage (survives refresh, not close)
@@ -265,10 +266,17 @@ doc.onError((err) => {
   logEvent('del', `⚠ ${err.message ?? err}`);
 });
 
-doc.onChange(() => {
+doc.onChange((ev) => {
+  if (ev && ev.source === 'remote') {
+    const via = ev.transport ? ` via ${ev.transport}` : '';
+    const from = ev.from ? ` from ${String(ev.from).slice(0, 8)}…` : '';
+    const kind = ev.type === 'blob' ? `blob ${String(ev.hash || '').slice(0, 8)}…` : (ev.type || 'delta');
+    logEvent('sync', `← received ${kind}${via}${from}`);
+  }
   saveState();
   renderState();
   renderCollabText();
+  renderList();
   // Persist any newly-arrived blobs to IDB.
   try {
     const hashes = JSON.parse(doc.store.local_blob_hashes_json());
@@ -464,6 +472,127 @@ function renderCollabText() {
     ta.setSelectionRange(newCursor, newCursor);
   });
 })();
+
+// ---------------------------------------------------------------------------
+// Ordered List (F8) — drag-to-reorder + drop-onto-to-replace.
+//
+// Uses `doc.list(LIST_KEY)` whose ordering lives in Op::List. Item content
+// (just a string label here) lives in the sidecar Map at
+// `${LIST_KEY}/items/<itemId>`. The SDK composes the two automatically.
+// ---------------------------------------------------------------------------
+const listHandle = doc.list(LIST_KEY);
+
+// drag state — tracked here because HTML5 DnD's dataTransfer is awkward
+// for intra-page IDs across subtle browser differences.
+let listDragId = null;
+
+function renderList() {
+  const ul = document.getElementById('list-items');
+  if (!ul) return;
+  const items = listHandle.toArray();
+  const stats = document.getElementById('list-stats');
+  if (stats) stats.textContent = `${items.length} item${items.length !== 1 ? 's' : ''}`;
+
+  if (items.length === 0) {
+    ul.innerHTML = '<li style="color:#475569;font-style:italic;border:none;background:none;cursor:default">'
+      + 'Empty — add an item above, or open another tab and drag.</li>';
+    return;
+  }
+
+  ul.innerHTML = items.map(({ id, content }) => {
+    const label = content && typeof content.label === 'string' ? content.label : '(no label)';
+    return `<li draggable="true" data-id="${esc(id)}">
+      <span style="color:#64748b;font-family:monospace;font-size:0.7rem">${esc(id.slice(0, 6))}</span>
+      <span>${esc(label)}</span>
+      <button data-del="${esc(id)}" title="Delete">✕</button>
+    </li>`;
+  }).join('');
+
+  // Wire delete buttons.
+  ul.querySelectorAll('button[data-del]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      listHandle.delete(btn.dataset.del);
+      saveState();
+      renderList();
+    });
+  });
+
+  // Wire DnD on each row.
+  ul.querySelectorAll('li[draggable="true"]').forEach(li => {
+    li.addEventListener('dragstart', (e) => {
+      listDragId = li.dataset.id;
+      li.classList.add('dragging');
+      try { e.dataTransfer.effectAllowed = 'move'; } catch (_) {}
+      try { e.dataTransfer.setData('text/plain', listDragId); } catch (_) {}
+    });
+    li.addEventListener('dragend', () => {
+      li.classList.remove('dragging');
+      clearDropHints(ul);
+      listDragId = null;
+    });
+    li.addEventListener('dragover', (e) => {
+      if (!listDragId || li.dataset.id === listDragId) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = 'move'; } catch (_) {}
+      clearDropHints(ul);
+      const region = dropRegion(e, li); // 'before' | 'onto' | 'after'
+      li.classList.add(region === 'onto' ? 'drop-onto'
+                      : region === 'before' ? 'drop-before' : 'drop-after');
+    });
+    li.addEventListener('dragleave', () => li.classList.remove('drop-before', 'drop-after', 'drop-onto'));
+    li.addEventListener('drop', (e) => {
+      e.preventDefault();
+      clearDropHints(ul);
+      const dragged = listDragId;
+      const target  = li.dataset.id;
+      listDragId = null;
+      if (!dragged || dragged === target) return;
+      const region = dropRegion(e, li);
+      // Gesture dispatch — convergence is the SDK's job.
+      if (region === 'onto')        listHandle.gestures.dropOnto(dragged, target);
+      else if (region === 'before') listHandle.gestures.dropBefore(dragged, target);
+      else                          listHandle.gestures.dropAfter(dragged, target);
+      saveState();
+      renderList();
+    });
+  });
+}
+
+function clearDropHints(ul) {
+  ul.querySelectorAll('li').forEach(x => x.classList.remove('drop-before', 'drop-after', 'drop-onto'));
+}
+
+// Split each row into thirds vertically: top→drop-before, middle→drop-onto,
+// bottom→drop-after. Mirrors VS Code / Finder drag affordances.
+function dropRegion(e, li) {
+  const r = li.getBoundingClientRect();
+  const y = e.clientY - r.top;
+  if (y < r.height / 3)      return 'before';
+  if (y > (2 * r.height) / 3) return 'after';
+  return 'onto';
+}
+
+(function wireListControls() {
+  const input = document.getElementById('list-input');
+  const addBtn = document.getElementById('list-add');
+  if (!input || !addBtn) return;
+  const add = () => {
+    const label = input.value.trim();
+    if (!label) return;
+    listHandle.push({ label });
+    input.value = '';
+    saveState();
+    renderList();
+  };
+  addBtn.addEventListener('click', add);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(); });
+})();
+
+listHandle.onChange(() => { renderList(); });
+
+// Initial list render.
+renderList();
 
 // ---------------------------------------------------------------------------
 // Render — resolved state + peer list

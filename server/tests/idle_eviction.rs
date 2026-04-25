@@ -37,7 +37,7 @@ async fn durable_idle_room_is_evicted_and_rehydrates() {
     let dir = tmpdir("evict");
     let persistence: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap());
     let server_key = SigningKey::from_bytes(&[0x11u8; 32]);
-    let rooms = Rooms::new(server_key, Arc::clone(&persistence), 512);
+    let rooms = Rooms::new(server_key, Arc::clone(&persistence), 512, 0, 0);
 
     // Create a room, connect a peer, persist a node, disconnect.
     {
@@ -70,7 +70,7 @@ async fn durable_idle_room_is_evicted_and_rehydrates() {
 async fn in_memory_rooms_are_never_evicted() {
     let persistence: SharedPersistence = Arc::new(NoPersistence);
     let server_key = SigningKey::from_bytes(&[0x33u8; 32]);
-    let rooms = Rooms::new(server_key, persistence, 512);
+    let rooms = Rooms::new(server_key, persistence, 512, 0, 0);
 
     {
         let room = rooms.get_or_create("r2").await;
@@ -87,7 +87,7 @@ async fn connected_room_is_not_evicted() {
     let dir = tmpdir("connected");
     let persistence: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap());
     let server_key = SigningKey::from_bytes(&[0x44u8; 32]);
-    let rooms = Rooms::new(server_key, Arc::clone(&persistence), 512);
+    let rooms = Rooms::new(server_key, Arc::clone(&persistence), 512, 0, 0);
 
     let room = rooms.get_or_create("r3").await;
     room.register_peer("peer-c".into()).await;

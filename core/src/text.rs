@@ -128,9 +128,9 @@ mod tests {
 
     /// Compute the `OpId` that `graph.apply_local(key, wall_ms, [op])` will
     /// assign, without actually inserting anything.  Mirrors the formula
-    /// `(graph.lamport() + 1).max(wall_ms)`.
-    fn next_op_id(graph: &StateGraph, key: &SigningKey, wall_ms: u64) -> OpId {
-        let lamport = (graph.lamport() + 1).max(wall_ms);
+    /// `graph.lamport() + 1`.
+    fn next_op_id(graph: &StateGraph, key: &SigningKey, _wall_ms: u64) -> OpId {
+        let lamport = graph.lamport() + 1;
         OpId { lamport, author: key.verifying_key().to_bytes() }
     }
 

@@ -910,6 +910,697 @@ issuer at the claim shape, wire the client. Cross-linked from
 
 ---
 
+## F6 — Pluggable persistence: S3-compatible blobs + split trait (SHIPPED)
+
+> **Status.** Implemented end-to-end. Trait split, S3 store crate (Direct +
+> Delegate auth), capability negotiation, wire protocol, SDK bifurcation,
+> and a live MinIO integration test all green. See "Implementation
+> locations" at the end of this section for the file map.
+
+### Problem
+
+Today `ServerPersistence` in `server/src/store.rs` is a single trait that
+owns both nodes and blobs. Two impls ship: `NoPersistence` (memory) and
+`DirPersistence` (SQLite + file-per-blob). Neither fits a production
+SpeechSlate-class deployment:
+
+- **Nodes** belong in whatever database the product already runs (Mongo
+  for SpeechSlate, Postgres for others). Standing up SQLite alongside
+  the existing DB is pure ops burden.
+- **Blobs** (audio recordings, board images) belong in S3/R2/MinIO with
+  a CDN in front. `FileBlobStore` works for self-host demos but doesn't
+  scale past one server; forces egress through the sync server even
+  when a CDN would serve 1000× faster.
+
+The `core::BlobStore` trait already anticipated this — `resolve_url()`
+returns `Option<String>` so a backend can redirect instead of transmitting
+bytes. F6 wires that redirect through `ServerPersistence` → WS protocol →
+SDK, and splits the trait so Mongo-nodes + S3-blobs is a one-line compose.
+
+### Shape
+
+**Split the trait.** `ServerPersistence` becomes a composition of two
+narrower traits:
+
+```rust
+// server/src/store.rs
+
+pub trait NodePersistence: Send + Sync + Debug {
+    fn load_room_nodes(&self, room_id: &str) -> Vec<SyncNode>;
+    fn persist_node(&self, room_id: &str, node: &SyncNode);
+    fn persist_nodes(&self, room_id: &str, nodes: &[&SyncNode]) { /* default loops */ }
+    fn is_durable(&self) -> bool { true }
+}
+
+pub trait BlobPersistence: Send + Sync + Debug {
+    fn load_room_blobs(&self, room_id: &str) -> Vec<(Hash, Vec<u8>)>;
+    fn persist_blob(&self, room_id: &str, hash: &Hash, bytes: &[u8]);
+    fn blob_gc_sweep(&self, room_id: &str, live: &HashSet<Hash>, grace: Duration) -> usize { 0 }
+    /// F6: redirect target for the client. `Some(url)` tells the SDK to
+    /// fetch this blob directly from the URL and skips sending the bytes
+    /// down the WS. `None` = serve bytes inline (today's behavior).
+    fn resolve_get_url(&self, _room_id: &str, _hash: &Hash) -> Option<String> { None }
+    /// F6: direct-upload path. `Some(url)` tells the SDK to PUT bytes
+    /// straight to this URL (presigned); server is notified of completion
+    /// by the client via a new `blob-uploaded` wire message. `None` =
+    /// client sends bytes over WS as today.
+    fn resolve_put_url(&self, _room_id: &str, _hash: &Hash, _size: u64) -> Option<String> { None }
+    fn is_durable(&self) -> bool { true }
+}
+
+pub trait ServerPersistence: NodePersistence + BlobPersistence {}
+impl<T: NodePersistence + BlobPersistence + ?Sized> ServerPersistence for T {}
+```
+
+A blanket `impl<N: NodePersistence, B: BlobPersistence> ServerPersistence for
+(N, B)` (or a `Composite<N, B>` struct) lets you write:
+
+```rust
+let store = Composite::new(MongoNodeStore::connect(...)?, S3BlobStore::new(...)?);
+let rooms = Rooms::with_persistence(Arc::new(store));
+```
+
+`DirPersistence` continues to exist — it implements both halves. Existing
+code that passes `Arc<dyn ServerPersistence>` is unchanged.
+
+### New crate: `activesync-s3-blobs`
+
+Workspace crate `s3-blobs/` publishing `activesync_s3_blobs::S3BlobStore`.
+
+- **S3 client.** `object_store 0.11` (abstracts AWS, R2, MinIO, GCS,
+  Azure behind one API). Avoids locking to the AWS SDK and lets SpeechSlate
+  switch to R2 for egress cost without touching sync code.
+- **Config.**
+
+  ```rust
+  pub struct S3BlobStoreConfig {
+      pub endpoint: Option<String>,           // None = AWS; set for R2/MinIO
+      pub bucket: String,
+      pub region: String,
+      pub path_prefix: String,                // e.g. "blobs/" — multi-tenant safe
+      pub auth: S3Auth,
+      pub presign_get_ttl: Duration,          // default 1 h
+      pub presign_put_ttl: Duration,          // default 15 min
+      pub direct_upload_threshold: u64,       // default 1 MiB
+  }
+
+  pub enum S3Auth {
+      /// Server holds IAM creds (env vars, IAM role, shared config).
+      Direct { /* object_store's credential chain handles this */ },
+      /// Server asks the app's API for presigned URLs on demand.
+      /// The app API is the credential holder; sync server never
+      /// sees S3 keys.
+      Delegate {
+          presign_endpoint: String,           // e.g. "https://api.speechslate.app/blobs/presign"
+          auth_header: HeaderValue,           // shared secret sync-server→app-api
+          http_client: reqwest::Client,
+      },
+  }
+  ```
+
+- **`Direct` mode.** `resolve_get_url` signs a GET with `presign_get_ttl`
+  and returns the URL. `resolve_put_url` signs a PUT if `size >=
+  direct_upload_threshold`, else returns `None` (bytes ride WS).
+  `persist_blob` writes via the S3 client (for the < threshold case,
+  after server receives bytes). `load_room_blobs` is rarely called —
+  blobs are pulled on demand via `resolve_get_url` — but when it *is*
+  called (cold-start hydration), it streams from S3 with a concurrency
+  cap (default 8).
+- **`Delegate` mode.** `resolve_get_url` / `resolve_put_url` POST to
+  `presign_endpoint` with `{room_id, hash, op: "get"|"put", size}` and
+  expect `{url, expires_at}`. Sync server is a dumb proxy for URL
+  minting; AWS creds stay in SpeechSlate's existing API. Timeouts,
+  retries, circuit breaker on API outage → fall back to bytes-through-WS.
+
+### Wire protocol additions
+
+Three new messages, all backwards-compatible (clients that don't speak
+them fall through to the existing bytes-inline path):
+
+```jsonc
+// Server → client. Replaces the binary blob frame when resolve_get_url is Some.
+{ "type": "blob-redirect", "hash": "<hex>", "url": "https://...", "expires_at": 1714000000 }
+
+// Client → server. Request a direct-upload URL. Server either grants it
+// or replies "send via WS" and the client uses the existing path.
+{ "type": "request-upload", "hash": "<hex>", "size": 52428800 }
+{ "type": "upload-granted", "hash": "<hex>", "url": "https://...", "expires_at": ... }
+{ "type": "upload-denied",  "hash": "<hex>", "reason": "use-ws" }
+
+// Client → server. Notify that a presigned PUT completed. Server does a
+// HEAD to verify the object exists and the size matches, then broadcasts
+// blob-have to the room so peers can pull via resolve_get_url.
+{ "type": "blob-uploaded", "hash": "<hex>" }
+```
+
+`request-upload` / `blob-uploaded` messages are guarded by a new
+capability flag `supports_direct_blob_io` in `A7` capability negotiation
+so old SDKs never see them.
+
+### SDK changes (`web/sdk.js`)
+
+- **Download path.** Existing `getBlob(hash)` gets one extra branch: if
+  the server replies with `blob-redirect`, the SDK does `fetch(url)` and
+  returns the bytes. Caller API unchanged. Retry on 403/expired → ask
+  server for a fresh redirect.
+- **Upload path.** `setBlob(bytes)` bifurcates on size:
+  - `bytes.length < threshold` (server-advertised in `welcome`): send
+    via WS as today.
+  - `bytes.length >= threshold`: send `request-upload`; on
+    `upload-granted`, `fetch(url, { method: 'PUT', body: bytes })`, then
+    send `blob-uploaded`. On `upload-denied` or `request-upload` timeout,
+    fall back to WS.
+- **Progress callbacks.** New optional `onProgress` hook on `setBlob` /
+  `getBlob` — uses `fetch` with a `ReadableStream` for direct transfers,
+  no-op for WS transfers (SDK knows the size up front, can emit
+  synthetic 0 → 100% events).
+- **Caching.** SDK caches presigned URLs until 60 s before expiry —
+  avoids round-tripping the server on every `getBlob` in a render loop.
+- **API compat.** No breaking changes. `setBlob` / `getBlob` signatures
+  are identical; the threshold + URL handling is internal.
+
+### Tests
+
+- `activesync-s3-blobs` unit tests against a **MinIO** container started
+  by the test harness (docker-compose or testcontainers-rs). Covers
+  both `Direct` and `Delegate` modes, GC sweep, presigned URL minting,
+  threshold-based upload routing.
+- Server integration test: two clients, one uploads a 10 MB blob, other
+  downloads. Assert bytes never appear on either WS (fully off-loaded
+  to MinIO). Mirror test with a 1 KB blob: assert bytes *do* appear on
+  WS (below threshold).
+- Wire-compat test: SDK with `supports_direct_blob_io=false` talking to
+  a server with S3 backend. Should transparently fall back to bytes-WS.
+- Trait split regression: existing `DirPersistence` tests
+  (`room_survives_restart_with_nodes_and_blobs`, `blob_gc_*`) must pass
+  unchanged.
+
+### SpeechSlate integration sketch
+
+```toml
+# Cargo.toml of a SpeechSlate-specific server binary
+[dependencies]
+activesync-server  = { path = "..." }
+activesync-s3-blobs = { path = "..." }
+# future:
+# activesync-mongo-store = { path = "..." }
+```
+
+```rust
+// main.rs
+let nodes = MongoNodeStore::connect(&env::var("MONGO_URI")?).await?;
+let blobs = S3BlobStore::new(S3BlobStoreConfig {
+    endpoint: Some(env::var("S3_ENDPOINT")?),   // R2
+    bucket:   "speechslate-blobs".into(),
+    region:   "auto".into(),
+    path_prefix: "activesync/".into(),
+    auth: S3Auth::Delegate {
+        presign_endpoint: "https://api.speechslate.app/blobs/presign".into(),
+        auth_header: HeaderValue::from_str(&env::var("SS_API_SHARED_SECRET")?)?,
+        http_client: reqwest::Client::new(),
+    },
+    presign_get_ttl: Duration::from_secs(3600),
+    presign_put_ttl: Duration::from_secs(900),
+    direct_upload_threshold: 1024 * 1024,
+})?;
+
+let store = Composite::new(nodes, blobs);
+let rooms = Rooms::with_persistence(Arc::new(store));
+// ... rest of activesync-server bootstrap
+```
+
+### Non-goals for F6
+
+- **Node storage in S3.** Thought about it; not worth it. Nodes are
+  small, frequent, need indexed lookup by `(room_id, seq)`. S3 gives
+  neither efficient indexed lookup nor affordable per-node IOPS.
+  Mongo/Postgres is the right shape for nodes.
+- **Server-to-server replication.** Multi-region deployments are a
+  separate problem (room ownership, consensus, etc.). F6 assumes one
+  sync server per region; S3 is shared.
+- **Blob encryption at rest beyond S3's server-side encryption.**
+  D1's op-level E2EE already covers the crypto path; blobs in an E2EE
+  room are already encrypted by the client before `setBlob` sees them.
+
+### Relationship to other phases
+
+- **Depends on:** F4 (trait exists); A7 (capability negotiation for the
+  new wire messages).
+- **Unblocks:** SpeechSlate integration; any product that wants
+  CDN-fronted blob delivery.
+- **Adjacent:** F7 (future) — same split-trait treatment for nodes
+  (`activesync-mongo-store`, `activesync-postgres-store`).
+
+### Decision log additions (when F6 ships)
+
+| Decision | Rationale |
+|---|---|
+| Split `ServerPersistence` into `NodePersistence + BlobPersistence` | Mongo + S3 is the single most common combo; a composite trait is the clean way to mix-and-match without per-backend boilerplate. Blanket impl for `(N, B)` keeps the public surface unchanged. |
+| `object_store` crate over `aws-sdk-s3` | One dependency covers AWS, R2, MinIO, GCS, Azure. R2 egress cost is a real knob SpeechSlate will want to turn; lock-in would force a re-implementation. |
+| Two auth modes (`Direct` / `Delegate`) | Self-hosters want simple IAM; SaaS integrators already have an auth API and want sync-server to not be another credential holder. Single code path cannot satisfy both. |
+| Direct-upload threshold (SDK bifurcates on size) | Phones uploading 50 MB audio cannot afford the WS round-trip; 1 KB symbol icons cannot afford the presigned-URL round-trip. The threshold is the only way to be optimal for both. |
+| Capability flag gates new wire messages | F6 must not break pre-F6 SDK + post-F6 server combinations. Zero-behavior-change fall-through is a hard constraint. |
+
+### Implementation locations
+
+- `core/src/capabilities.rs` — `supports_direct_blob_io: bool` (default `true`, intersect on negotiate).
+- `server/src/store.rs` — trait split into `NodePersistence` + `BlobPersistence`; `ServerPersistence` is now a supertrait with a blanket impl. `Composite<N, B>` lets callers mix-and-match. `PresignedUrl { url, expires_at_unix }` with `with_ttl(url, Duration)` helper. Sub-traits use `nodes_durable()` / `blobs_durable()` to avoid method-name collision; supertrait's `is_durable()` defaults to AND.
+- `s3-blobs/` — new crate `activesync-s3-blobs`. `S3BlobStore` implements `BlobPersistence`. Two auth modes: `S3Auth::Direct { access_key_id, secret_access_key, session_token }` (uses `object_store::aws::AmazonS3` + `Signer::signed_url`) and `S3Auth::Delegate { presign_endpoint, auth_header }` (POSTs `{op,room_id,hash,size,ttl_seconds}` to the integrating app and trusts its returned URL). Sync→async bridge via owned `Arc<tokio::runtime::Runtime>` per store so callers from inside the server's main runtime don't block-on the same runtime. Object key layout: `{path_prefix}{sanitized_room}/{hash_hex}` with non-`[A-Za-z0-9_-]` chars escaped as `_XX`.
+- `server/src/ws_handler.rs` — wire handlers for `blob-redirect`, `request-upload`, `upload-granted`, `upload-denied`, `upload-rejected`, `blob-uploaded`. Each new path is gated on `negotiated_caps.supports_direct_blob_io`; falsy ⇒ legacy `blob-pack` / `blob-upload` path.
+- `web/sdk.js` — `sendBlobs` bifurcates on `DIRECT_UPLOAD_THRESHOLD = 1 MiB`; below that or when capability is off, uses legacy WS upload. `directUpload(hash, bytes)` requests a PUT URL, fetches it, then sends `blob-uploaded`. `fetchBlobViaUrl(hash, url)` handles `blob-redirect` payloads with 403/expired retry that falls back to WS. Cache map `blobUrlCache` reuses GET URLs; on 403 the entry is evicted and the caller falls back.
+- `s3-blobs/tests/minio_round_trip.rs` — live MinIO integration test (Docker required, gracefully skips if Docker is unavailable). Spins up `minio/minio:latest`, creates the bucket via `aws-sdk-s3` (dev-dep only), then exercises `resolve_put_url` → HTTP PUT → `verify_uploaded` → `resolve_get_url` → HTTP GET → byte-equality assertion → `blob_gc_sweep` → post-GC HEAD-fails assertion.
+
+---
+
+## F7 — Database node-store adapters (SHIPPED)
+
+> **Status.** Implemented end-to-end. `MongoNodeStore` (mongodb 3.x async
+> driver) and `PostgresNodeStore` (sqlx 0.8) ship as separate crates under
+> `node-stores/`, both pass the shared conformance suite live against
+> `mongo:7` and `postgres:16` containers.
+
+### Problem
+
+`DirPersistence` stores DAG nodes in a local SQLite file. Fine for self-host,
+wrong for production SaaS:
+- Can't share state across horizontally scaled sync-server replicas.
+- Operators already run Mongo/Postgres and don't want a second durable store.
+- Backups, monitoring, and access controls are already wired for the primary DB.
+
+F7 ships two first-party `NodePersistence` adapters plus documentation for
+rolling your own.
+
+### Crates
+
+Two workspace crates, same shape:
+
+```
+node-stores/
+  mongo/     → activesync-mongo-store    (publishes MongoNodeStore)
+  postgres/  → activesync-postgres-store (publishes PostgresNodeStore)
+```
+
+Both are thin. Nodes are opaque bytes keyed by `(room_id, node_id)`; the
+adapter just needs to index by room + preserve insertion order. Neither
+touches `StateGraph`, `Op`, or the wire format — they're byte-level stores
+under the `NodePersistence` trait (see F6).
+
+### MongoNodeStore
+
+- **Driver.** `mongodb 3.x` async Rust driver.
+- **Collection.** `activesync_nodes` (configurable).
+- **Document shape:**
+
+  ```jsonc
+  {
+    "_id":     "<room_id>:<node_id_hex>",   // compound primary key
+    "room_id": "<room_id>",                 // indexed
+    "node_id": <BinData 32>,
+    "seq":     <auto-increment via ordered insert>,
+    "bytes":   <BinData postcard-packed SyncNode>,
+    "created_at": <ISODate>
+  }
+  ```
+
+- **Indexes.** `{ room_id: 1, seq: 1 }` for ordered hydration. Compound `_id`
+  makes re-inserts idempotent (duplicate key = drop, matches
+  `INSERT OR IGNORE` semantics from DirPersistence).
+- **Seq.** Mongo doesn't have auto-increment. Use a dedicated counter
+  collection `activesync_seq { room_id, next }` with `$inc` on every batch —
+  one round trip per pack, not per node. Alternatively use ObjectId timestamps
+  (monotonic per room) and sort on those.
+- **Batching.** `persist_nodes` uses `insert_many` with `ordered: false`
+  so duplicate keys inside a batch don't kill the whole write.
+- **Config.**
+
+  ```rust
+  pub struct MongoNodeStoreConfig {
+      pub connection_uri: String,
+      pub database:       String,
+      pub collection:     String,   // default "activesync_nodes"
+      pub seq_collection: String,   // default "activesync_seq"
+      pub write_concern:  WriteConcern,  // default Majority
+      pub read_concern:   ReadConcern,   // default Local (hydrate)
+  }
+  ```
+
+### PostgresNodeStore
+
+- **Driver.** `sqlx 0.8` with `postgres` feature, compile-time checked queries.
+- **Schema:**
+
+  ```sql
+  CREATE TABLE activesync_nodes (
+    room_id    TEXT NOT NULL,
+    node_id    BYTEA NOT NULL,
+    seq        BIGSERIAL PRIMARY KEY,
+    bytes      BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(room_id, node_id)
+  );
+  CREATE INDEX idx_activesync_nodes_room_seq ON activesync_nodes(room_id, seq);
+  ```
+
+- **Upserts.** `INSERT ... ON CONFLICT (room_id, node_id) DO NOTHING`.
+- **Batching.** `COPY ... FROM STDIN` via `sqlx::copy_in_raw` for `persist_nodes`
+  batches over ~16 nodes; single `INSERT` below that. `COPY` beats multi-row
+  insert by 5–10× on real hardware.
+- **Connection pool.** `sqlx::PgPool` with operator-configurable max
+  connections. Default 20.
+- **Migrations.** Schema lives in the crate as a `sqlx::migrate!()` macro
+  pointing at `migrations/`; applied on startup via
+  `MIGRATOR.run(&pool).await`.
+
+### Shared concerns
+
+- **Error policy.** Transient errors (network, pool exhaustion) → retry with
+  jitter, log at `warn`. Permanent errors (schema mismatch, auth failure)
+  → `tracing::error!` and mark the backend as failed; sync-server continues
+  running on in-memory cache but logs that persistence is degraded. Same
+  policy `DirPersistence` uses today.
+- **Observability.** Both adapters re-use the existing
+  `activesync_persistence_write_seconds{kind=node|nodes_batch}` histogram
+  (G7). Adds one label: `backend=mongo|postgres|dir`.
+- **Hydration order.** Nodes returned by `load_room_nodes` **must** be in
+  insertion order so the DAG's parent edges resolve. Both backends order
+  by `seq` ascending. Tests verify this under concurrent writers.
+- **Blob-side pairing.** F7 doesn't change blob storage. A typical
+  SpeechSlate server is `Composite::new(MongoNodeStore, S3BlobStore)`;
+  a Postgres shop is `Composite::new(PostgresNodeStore, S3BlobStore)`.
+  `DirPersistence` stays as the self-host default.
+
+### Tests
+
+- Per-adapter unit tests against a real DB container (testcontainers-rs
+  spins up Mongo / Postgres; CI runs both).
+- Shared conformance test suite — same scenarios that exercise
+  `DirPersistence` today, parameterized over the adapter. Catches accidental
+  behavioral drift.
+- Concurrency test: two sync-server processes sharing one DB, both writing
+  to the same room. Covers the multi-replica scenario that SQLite flatly
+  can't do.
+- Regression: 100% of existing `DirPersistence` tests stay green.
+
+### Non-goals for F7
+
+- **Cross-region replication.** Both Mongo and Postgres solve this at the
+  DB layer (replica sets, logical replication). F7 doesn't try to add
+  sync-server-level replication — the DB is the source of truth.
+- **Read-your-writes across sync-server replicas.** That's a sticky-session
+  or leader-election problem at the load balancer. F7 assumes room-to-server
+  affinity (consistent hashing on `room_id` → replica) as the deployment
+  pattern.
+- **SQLite driver replacement.** `DirPersistence` keeps rusqlite. Different
+  adapter, different lifecycle.
+
+### Decision log additions (when F7 ships)
+
+| Decision | Rationale |
+|---|---|
+| `mongodb` driver over raw BSON | Stable 3.x API, async-native, owned by MongoDB Inc. Alternatives (mongo-rust-driver forks) have lagged on async. |
+| `sqlx` over `tokio-postgres` / `diesel` | Compile-time checked queries, async-native, migrations built in, no runtime schema drift. Diesel's sync API would block the tokio reactor. |
+| `BYTEA` node storage, not `JSONB` | Nodes are postcard bytes. Decoding to JSONB would force a re-encode on every read, double storage, and lose signature bit-for-bit fidelity. Opaque bytes is the right shape. |
+| Compound primary key `(room_id, node_id)` | Idempotent inserts without a round trip. Makes at-least-once delivery safe (duplicate sends just no-op). |
+| Separate sequence counter on Mongo | Mongo has no native autoincrement. A single counter doc per room is cheap (`$inc` is O(1)) and keeps hydration order deterministic. Alternative (ObjectId timestamps) leaks server clock into the protocol. |
+
+### Implementation locations
+
+- `node-stores/postgres/` — `activesync-postgres-store`. `PostgresNodeStore::connect_and_migrate(cfg)` builds a `sqlx::PgPool`, applies embedded migrations from `migrations/`. `persist_node` uses `INSERT ... ON CONFLICT (room_id, node_id) DO NOTHING`; `persist_nodes` uses `UNNEST($1::text[], $2::bytea[], $3::bytea[])` for one-round-trip batch inserts. Sync→async via owned `Arc<tokio::runtime::Runtime>` (same pattern as `S3BlobStore`).
+- `node-stores/mongo/` — `activesync-mongo-store`. `MongoNodeStore::connect(cfg)` parses URI, creates the `(room_id, seq)` compound index. Sequence allocation: `find_one_and_update` with `$inc` on a per-room counter doc in `activesync_seq` (one round trip per batch, not per node). `persist_nodes` uses `insert_many(... ).ordered(false)` so duplicate-key entries inside a batch don't poison the rest; `E11000` is treated as success (idempotent re-insert). Uses mongodb's vendored bson (`mongodb::bson`) — never add `bson` as a separate workspace dep, the namespace re-export collides.
+- `node-stores/conformance/` — `activesync-nodestore-conformance`. Shared `pub fn run_all(p: &dyn NodePersistence, room: &str)` covering: `nodes_durable() == true`, empty-room load, single-node round-trip, idempotent duplicate persist, batch round-trip + idempotency, per-room isolation, hydration order matches insertion. `tests/dir_persistence.rs` runs the suite against the existing `DirPersistence` to prove the suite itself is correct.
+- `node-stores/mongo/tests/mongo_round_trip.rs`, `node-stores/postgres/tests/postgres_round_trip.rs` — live testcontainers integration tests; spin up `mongo:7` / `postgres:16`, connect with retries, then call `run_all`. Skip gracefully if Docker is unavailable.
+- Composition: callers wire `Composite::new(PostgresNodeStore::connect_and_migrate(...)?, S3BlobStore::new(...)?)` (or the Mongo equivalent) and pass the result to `Rooms::with_persistence(Arc::new(...))`. The blanket `impl<N+B> ServerPersistence` from F6 means no per-combination boilerplate.
+
+---
+
+## F8 — List CRDT with move semantics (SHIPPED)
+
+> **Status.** Shipped. Core: `core/src/list.rs` with `FracIdx` fractional
+> indexing, `Op::List { Insert, Move, Delete }`, and `resolve_list_seq` —
+> 23 tests green (fractional-index + multi-peer convergence + gesture
+> sequences). Bridge: WASM exports `list_insert_at` / `list_move_to` /
+> `list_delete` / `list_resolve_json` / `list_length` / `list_ids_json`.
+> SDK: `doc.list<T>(key)` → `ListHandle<T>` with `push`, `insert`,
+> `insertAfter/Before`, `move`, `delete`, `update`, `toArray`, `onChange`,
+> `onReorder`, plus `list.gestures.{dropOnto, dropBetween, swap,
+> dropBefore, dropAfter}`. Demo: drag-to-reorder + drop-onto-to-replace
+> wired into `web/demo.js`. Capability flag `supports_list_crdt` defaults
+> true; old SDKs ignore List ops cleanly.
+
+> **Target.** Shipping data model for ordered collections with concurrent
+> editors (SpeechSlate buttons, boards, playlists, kanban columns). Unblocks
+> any product where "this thing is a list" is the natural shape and multiple
+> users may reorder at the same time. Promotes the long-deferred "post-F
+> List CRDT" item into an actual plan.
+>
+> **Depends on:** nothing (self-contained core + SDK work). Runs in parallel
+> with F6 and F7.
+
+### Problem
+
+Today `doc.list()` throws. Apps model ordered collections as:
+1. Map with an app-level `sortKey` field — works under single-editor, silently
+   corrupts under concurrent reorder (two clients computing the same
+   "between A and B" key collide).
+2. Whole-JSON overwrite on every change — loses concurrent content edits.
+3. Text — insane (but technically merges).
+
+For SpeechSlate: a board is a list of buttons. Drag-to-reorder is the
+primary editing gesture. A clinic team editing a shared board must not
+lose each other's moves, and a user editing a button's label while someone
+else drags it must not lose the label edit. None of the three workarounds
+handles that.
+
+### Design: fractional-index List + stable item IDs + orthogonal content
+
+The element in the list is **just a reference + position**:
+
+```rust
+pub enum Op {
+    Map(MapOp),
+    Text(TextOp),
+    List(ListOp),   // NEW
+}
+
+pub enum ListOp {
+    /// Insert `item_id` at `position`. Duplicate (same `item_id`) is ignored.
+    /// `item_id` is UUIDv4, generated client-side.
+    Insert { list_key: String, item_id: ItemId, position: FracIdx },
+    /// Tombstone an item. Further Move/Insert ops targeting the same id
+    /// are ignored (delete wins).
+    Delete { list_key: String, item_id: ItemId },
+    /// Reposition an existing item. LWW on (lamport, pubkey) per item_id
+    /// resolves concurrent moves.
+    Move   { list_key: String, item_id: ItemId, position: FracIdx },
+}
+
+pub struct ItemId(pub [u8; 16]);         // UUIDv4
+pub struct FracIdx(pub String);          // lexicographic fractional index
+```
+
+Item **content** lives in a sidecar Map. The SDK composes them:
+
+```js
+const buttons = doc.list('boards/abc/buttons');    // ordered list of item ids
+const items   = doc.map('buttons');                // keyed content store
+
+// Push a new button
+const id = buttons.push({ label: 'Hello', imageId: 'img-42' });
+// Under the hood:
+//   item id uuid-xyz
+//   items.set('uuid-xyz', { label, imageId })
+//   buttons op: Insert { item_id: uuid-xyz, position: <after last> }
+
+buttons.move(id, 0);                                // reorder to front
+items.set(id, { label: 'Hola', imageId: 'img-42' }); // edit content, orthogonal
+
+buttons.toArray();                                   // [{ id, content }, …]
+buttons.onChange(ev => …);                           // fires on order + content
+```
+
+**Why this shape:**
+- **Move is a position update, not delete+insert.** Concurrent "Alice moves X"
+  + "Bob edits X" compose cleanly — different ops touching different state.
+- **Concurrent moves resolve deterministically** via the same LWW rule Map
+  uses (`lamport desc, pubkey desc`). No new tie-break protocol.
+- **Content and order are separable.** Apps can subscribe to just the list
+  (fires on reorder) or just the content (fires on label edit) or both.
+- **No interleaving hazards.** Fractional indices don't have text's
+  character-level concurrency problem because each item has a stable
+  UUID — concurrent insertions at "the same spot" get different UUIDs
+  and stable, if arbitrary, order.
+
+### Fractional indexing
+
+- Algorithm: `fractional-indexing`-style base-62 strings. `"a"` < `"b"`,
+  insert between `"a"` and `"b"` = `"am"`, etc. Well-known, two small
+  published references (npm `fractional-indexing`, crates.io several).
+- Pure function, no coordination. Client generates the position locally
+  from the neighbors' positions.
+- **Rebalance.** Worst-case adversarial inserts grow positions unboundedly
+  (`"a"` → `"am"` → `"amm"` → ...). In practice 32 chars handles millions
+  of inserts. When a position exceeds `REBALANCE_THRESHOLD = 128` chars,
+  emit a "rebalance" op that rewrites every position in the list to evenly
+  spaced values. Rebalance is a standard op set; merges like any other.
+  Server can drive rebalance in authoritative rooms (E1) or any peer can
+  do it in cooperative rooms.
+- **Tie-break on identical positions.** Two clients concurrently inserting
+  at "end of list" compute the same position independently. Tie-break on
+  `item_id` (UUIDv4 is unique → deterministic).
+
+### Move semantics
+
+```rust
+// apply_remote semantics for Move:
+match existing_position_for(item_id) {
+    None => ignore,                 // item deleted or not yet seen — drop
+    Some(existing) if node.lamport > existing.lamport
+        || (node.lamport == existing.lamport && node.author > existing.author)
+        => update position,
+    _ => ignore,                    // older move, LWW loses
+}
+```
+
+Concurrent Alice-moves-X-to-A and Bob-moves-X-to-B:
+- Both peers eventually see both ops.
+- LWW on `(lamport, pubkey)` picks one winner deterministically.
+- Both converge to the same final position. No user intervention.
+
+Concurrent Alice-deletes-X and Bob-moves-X:
+- Delete wins (tombstone is absorbing). Bob's move is no-op on apply.
+- Matches user intuition: "X was removed, where it was moving to doesn't matter."
+
+### Wire / protocol
+
+- `ListOp` is a new `Op` enum variant. Existing messages carry it in
+  `Transaction::ops` unchanged. Canonical hash covers it via postcard.
+- A7 capability flag `supports_list_crdt: bool`. Peers without it see
+  `Op::List` ops as unknown and drop them (same behavior as any future
+  op — postcard decode fails, node is dropped with a `warn` log). This
+  is acceptable because lists are additive: old peers don't get list
+  semantics, but they also can't corrupt new peers.
+- F3 subscription filtering: list ops match against `list_key` the same
+  way Map ops match against their key. Zero special-case code.
+- E1 Policy: `can_write` rules apply to `list_key`. SpeechSlate can lock
+  `boards/*/buttons` to the board owner's pubkey.
+
+### SDK (`web/sdk.js`)
+
+- **`doc.list(key)`** returns a `ListHandle` instead of throwing.
+- **`ListHandle` API:**
+
+  | Method | Semantics |
+  |---|---|
+  | `push(content)` | Insert at end, return new item id. |
+  | `insert(index, content)` | Insert at numeric index. |
+  | `insertAfter(afterId, content)` | Insert after a known id. |
+  | `move(id, newIndex)` | Reposition. |
+  | `delete(id)` | Tombstone. |
+  | `update(id, content)` | Update sidecar Map content. |
+  | `get(id)` | `{ id, content, position }`. |
+  | `toArray()` | `[{ id, content }, …]` in current order. |
+  | `length` | Count excluding tombstones. |
+  | `onChange(cb)` | Fires on insert/delete/move/content update. |
+  | `onReorder(cb)` | Fires only on order changes, not content. |
+
+- **Content sidecar.** SDK manages the `items` sidecar Map
+  automatically — `list.push({label: 'x'})` writes content to
+  `<listKey>:items` and the list entry references the item id. Caller
+  never sees the composition.
+- **Cursor-friendly.** `ListHandle.cursor(id)` returns a stable cursor
+  that survives reorders, for UI libraries that track "the item the
+  user right-clicked on."
+
+### Gesture helpers (ships with F8)
+
+Drag-and-drop gestures decompose into multi-op sequences. The CRDT
+guarantees convergence on any sequence, but the app has to decide *which*
+sequence a given gesture emits. Bare LWW on replace-on-drop is bad UX
+(the loser's button silently vanishes). The SDK ships a small
+`list.gestures` namespace with composed helpers so apps get sensible
+concurrent behavior for free:
+
+| Helper | Behavior |
+|---|---|
+| `list.gestures.dropOnto(draggedId, targetId)` | If `targetId` is still present locally → `delete(targetId)` + `move(draggedId, targetPosition)` (replace semantics). If already tombstoned → `insertAt(draggedId, lastKnownIndexOf(targetId))` (insert-and-shift). Under a concurrent race where Alice and Bob both drop onto the same target, both deletes are idempotent and the two moves land at tied fractional positions — LWW + `item_id` tie-break places them adjacent, so **neither drop vanishes**. |
+| `list.gestures.dropBetween(draggedId, beforeId, afterId)` | Pure `move(draggedId, fracIdxBetween(before, after))`. Standard drag-between-two-neighbors. |
+| `list.gestures.swap(aId, bId)` | Two `move` ops exchanging positions. Concurrent swaps of overlapping pairs resolve via LWW; identity is preserved. |
+| `list.gestures.dropBefore(draggedId, targetId)` / `dropAfter(…)` | `move(draggedId, fracIdxBefore(target))` / `fracIdxAfter(target)`. |
+
+**Why these live in the SDK, not `Op::List`:** gestures are
+app-layer intent. Keeping the core CRDT to three ops (`Insert`, `Delete`,
+`Move`) means any app can build its own gesture vocabulary; the helpers
+are just the good defaults. Apps that prefer "replace wins, loser
+vanishes" can skip them and call the primitives directly.
+
+**Tests.** Each helper has a two-peer property test: both peers issue
+the same gesture concurrently against the same target(s), assert
+deterministic convergence and that **no primary dragged item is lost**
+(tombstoned targets are expected to be gone; dragged items are not).
+
+### Tests
+
+- **Property: convergence.** Random sequences of insert/delete/move/update
+  applied in different orders across peers always converge to the same
+  array, same content.
+- **Property: move preserves identity.** After N concurrent moves of the
+  same item, every peer sees the same single item (not duplicated, not
+  deleted).
+- **Property: delete is absorbing.** After delete, later concurrent
+  inserts/moves with the same id have no effect on any peer.
+- **Fractional rebalance.** Force 10k sequential "insert at position 0"
+  ops, assert rebalance triggers ≤2× and final positions are bounded.
+- **SDK integration.** Two browser docs, drag-to-reorder 100 items
+  concurrently, both converge within one round trip.
+- **Wire compat.** v1 SDK (pre-F8) joining a room with List ops ignores
+  them cleanly; v2 SDK sees the full list. Zero crashes.
+
+### Non-goals for F8
+
+- **Rich-text spans inside list items.** Items are `Vec<u8>` map values —
+  the app's content shape. If an item needs collaborative text, the app
+  layer composes `doc.text(itemKey)` alongside. Keeps the list primitive
+  small.
+- **Nested lists.** Lists-of-lists work by convention (a list item's
+  content is a Map whose value is another list key). Engine doesn't need
+  to know.
+- **Undo/redo.** Requires an undo log layer above the CRDT; separate
+  problem, separate feature (post-F8).
+
+### SpeechSlate integration sketch
+
+```js
+// Board = content + ordered list of button refs
+const board    = doc.map('boards').get(boardId);
+const buttons  = doc.list(`boards/${boardId}/buttons`);
+const contents = doc.map('buttons');
+
+// Add a button
+const id = buttons.push({ label: 'Yes', imageHash: await assets.setBlob(fileBytes) });
+
+// Reorder (drag-and-drop)
+buttons.move(id, targetIndex);
+
+// Edit label while someone else drags — no lost edits
+contents.set(id, { ...contents.get(id), label: 'Yeah' });
+
+// Render in order
+buttons.toArray().forEach(({ id, content }) => drawButton(id, content));
+```
+
+### Decision log additions (when F8 ships)
+
+| Decision | Rationale |
+|---|---|
+| Fractional-index list, not RGA | RGA is for per-character text where every element has content. List elements have stable UUIDs and the content lives in a sidecar Map — that's a different problem shape. Fractional indexing gives clean move semantics; RGA does not. |
+| Move = position update, not delete+insert | delete+insert loses concurrent content edits. Orthogonal position + content ops are the only way to make concurrent "Alice moves X, Bob edits X" work. |
+| Item content in a sidecar Map, not inline in List ops | Keeps the list primitive small, lets content use Map's full LWW semantics, enables content updates without writing a list op. SDK composes them so the app API looks unified. |
+| UUIDv4 item ids, not OpId-derived | OpId is tied to the creating node; an item that's been moved 50 times would have 50 OpIds for the same logical item. UUIDs are stable for the lifetime of the item. |
+| Rebalance as a standard op | A room never gets into an unfixable state. Any peer (or the Super-Peer) can rebalance; the op merges like any other. Alternative ("rebalance is an offline admin tool") loses the invariant that the DAG fully describes state. |
+| Capability flag gates List ops | Old SDKs must not crash on new op variants. A7's model already handles this; `supports_list_crdt` is the next flag. |
+
+---
+
 ## F4 follow-up — Room eviction on idle (SHIPPED)
 
 Long-running deployments accumulate per-room state in memory (the
@@ -980,7 +1671,7 @@ falling behind?" without attaching a profiler.
 
 **What shipped.**
 - metrics 0.23 + metrics-exporter-prometheus 0.15 (`default-features = false`,
-  `features = ["http-listener"]`) in ctivesync-server.
+  `features = ["http-listener"]`) in Activesync-server.
 - `server/src/metrics.rs`: `init(addr)` installs the global Prometheus
   recorder + HTTP listener; `parse_arg(&args)` reads
   `--metrics-addr <ip:port>` (and `--metrics-addr=…`); `peer_label(hex)`
@@ -1060,3 +1751,440 @@ non-yielding. Full server suite: 24/24 pass.
 
 **Next (Phase G).** G3 — rate limit (governor token buckets,
 `--peer-rate-nodes` / `--peer-rate-bytes`, 4008 close).
+
+### G3 — Rate limiting per peer (SHIPPED, Apr 2026)
+
+**Problem.** A peer past the handshake could flood signed packs and burn
+Ed25519 verify cycles indefinitely. No ingress cap.
+
+**What shipped.**
+- `governor` 0.7 direct rate limiters, per WS session, one for
+  nodes/sec and one for decoded-pack bytes/sec. Both checked *before*
+  `import_nodes` so rejected floods never hit Ed25519 batch verify.
+- CLI: `--peer-rate-nodes <N>` (default 200; 0 disables) and
+  `--peer-rate-bytes <MiB>` (default 4; 0 disables) — threaded via
+  `Rooms` into every session.
+- Violation → WS close `4008 rate limit exceeded` (bounded 1 s send
+  timeout) + `activesync_rate_limit_drops_total{peer=<12-char-prefix>}`.
+  Both `NotUntil` (rate exceeded) and `InsufficientCapacity` (single
+  pack > 1 s burst) count as violations.
+- Super-Peer server key exempt: no limiter when peer pubkey matches
+  `rooms.server_key`.
+- `describe_counter!` registration in `server/src/metrics.rs`.
+
+**Tests.** `server/tests/rate_limit.rs::oversized_pack_closes_with_4008`
+— real axum server on loopback with `peer_rate_nodes=2`, handshake, one
+pack of 5 signed nodes (`check_n(5)` → `InsufficientCapacity`), assert
+`Close{4008}` within 5 s. Runs in ~270 ms. Fast-path suite
+(lib + idle + metrics + backpressure + rate-limit): 23/23 green.
+
+**Next (Phase G).** G4 — blob GC (`--blob-gc-interval`, two-phase sweep
+with tombstone grace, `activesync_blob_gc_deleted_total`).
+
+### G4 — Blob GC (SHIPPED, Apr 2026)
+
+**Problem.** `DirPersistence` wrote `blobs/<room>/<hash>` forever. Every
+`Op::Map::SetBlob` overwrite leaked the old file. No refcount, no sweep.
+Disk grew monotonically for the lifetime of the room.
+
+**What shipped.**
+- `ServerPersistence::blob_gc_sweep(room, live, grace) -> usize` trait
+  method with a no-op default (non-durable backends always return 0).
+- `DirPersistence::blob_gc_sweep` — two-phase tombstone protocol:
+  - Tombstones at `<root>/blob-tombstones/<sanitized_room>/<hash>` —
+    **sibling** of `blobs/`, so F4 hydration (`load_room_blobs`)
+    doesn't need to filter them out.
+  - Phase 1: orphan (not in `live`) without a tombstone → write empty
+    tombstone file (mtime=now), leave blob alone. Live blob with a
+    stale tombstone → clear tombstone.
+  - Phase 2 (or later): orphan whose tombstone mtime is older than
+    `grace` → delete blob + tombstone, increment counter.
+  - `grace = Duration::ZERO` collapses both phases — useful for tests
+    and aggressive-GC operators.
+- Live set = union of `Op::Map::SetBlob { blob_hash }` across **every**
+  node in the DAG (not just `resolve()` winners), via
+  `room::collect_live_blob_hashes`. Guarantees peers catching up from
+  far behind still find historical blobs.
+- `Rooms::sweep_blobs(grace)` snapshots the hot-room list and iterates;
+  cold-on-disk rooms wait until they hydrate, same policy as the idle
+  sweeper.
+- `room::spawn_blob_gc_sweeper(rooms, interval, grace)` mirrors
+  `spawn_idle_sweeper` (`MissedTickBehavior::Skip`, skip t=0).
+- CLI: `--blob-gc-interval <secs>` (default 0 = disabled) and
+  `--blob-gc-grace <secs>` (default 86400 = 24 h). Durable-only: warn
+  + skip spawn when persistence is in-memory. Shared `parse_u64_flag`
+  helper added to `main.rs`.
+- Metric: `activesync_blob_gc_deleted_total{room}` (counter) registered
+  in `server/src/metrics.rs`.
+
+**Tests.** `server/tests/blob_gc.rs` — 3/3 green in ~130 ms, real
+`DirPersistence` in a tmpdir:
+- `blob_gc_two_phase_deletes_orphans_only` — two blobs persisted, one
+  referenced; first sweep returns 0 (tombstone only); after 50 ms grace
+  second sweep returns 1; third sweep 0.
+- `blob_gc_clears_tombstone_when_blob_becomes_live_again` — tombstone
+  gets cleared when `SetBlob` re-references the blob; `grace=0` sweep
+  does not delete because live set wins.
+- `blob_gc_is_noop_on_in_memory_persistence` — `NoPersistence` always
+  returns 0.
+
+Full server test suite after G4: 3/3 lib + 2/2 persistence + 1/1
+rate-limit + 3/3 blob-gc + (backpressure + metrics + idle) all green.
+
+**Next (Phase G).** G5 — Lamport ceiling / wall-clock sanity
+(`LAMPORT_SLACK = 1<<20`, 24 h wall skew soft-reject,
+`activesync_lamport_rejected_total{reason}`).
+
+### G5 — Lamport ceiling & wall-clock sanity (SHIPPED, Apr 2026)
+
+**Problem.** `apply_remote` trusted any `lamport: u64`. A peer that
+published `lamport = u64::MAX` would win every LWW comparison forever
+*and* poison the room's Lamport clock into the same range. `wall_ms`
+was equally unchecked — informational, but a "sort-me-to-the-top"
+vector for apps that render timelines by wall clock.
+
+**What shipped.**
+- Two public constants in `core/src/graph.rs`, re-exported from
+  `activesync_core`:
+  - `LAMPORT_SLACK: u64 = 1 << 20` (~1.05 M) — max gap between a
+    node's Lamport and `graph.lamport()`.
+  - `WALL_SKEW_MAX_MS: u64 = 86_400_000` — 24 h forward skew ceiling
+    on `Transaction::wall_ms`.
+- Two new `SyncError` variants (`LamportCeiling`, `WallClockSkew`),
+  both with full diagnostic context (`id`, values, ceiling / now_ms).
+- Two new `StateGraph` entry points:
+  - `apply_remote_checked(node, now_ms: Option<u64>)`
+  - `apply_remote_batch_checked(nodes, now_ms: Option<u64>)`
+  Existing `apply_remote` / `apply_remote_batch` stay as
+  `None`-passthrough wrappers so the WASM bridge and `compaction.rs`
+  (neither has a trusted clock) are unchanged.
+- Check order: hash → **Lamport ceiling → wall-skew** → ed25519 batch
+  verify → parent/policy → insert. Sanity rejects never burn signature
+  CPU.
+- `wall_ms == 0` always passes (compaction snapshots + legacy unsigned
+  clients). Lamport check uses `saturating_add` against
+  `u64::MAX` attacks.
+- Server wiring in `server/src/room.rs::import_nodes`: one
+  `SystemTime::now() → millis` sample per pack, passed as
+  `Some(now_ms)` into `apply_remote_batch_checked`. Rejected variants
+  increment `activesync_lamport_rejected_total{reason=ceiling|wall_skew}`
+  (registered via `describe_counter!` in `server/src/metrics.rs`) and
+  are surfaced in the `errors` vec for the WS pack logger.
+- No wire change, no SDK change.
+
+**Tests.**
+- `core/src/graph.rs` — 7 unit tests (boundary accept, over-ceiling
+  reject, batch-mixed, wall-skew hit/miss, `None`-skips-check,
+  zero-wall-accepted, batch wall-skew). 124/124 core lib tests green.
+- `server/tests/lamport_ceiling.rs` — 2 integration tests driving
+  `Rooms` + `import_nodes`. The rejection test pads `bad_wall` to
+  `now + 24h + 1h` so the `SystemTime::now()` re-sample inside
+  `import_nodes` can't push it back inside the ceiling.
+
+**Next (Phase G).** G6 — token expiry enforced mid-session
+(short-lived tokens, WS close `4002 token expired` once `expiry_secs`
+lapses).
+
+### G6 — Token expiry enforced mid-session (SHIPPED, Apr 2026)
+
+**Problem.** `RoomToken` was validated only at `hello` — the stored
+`expiry_secs` gated *admission*, not session length. Once the WS was
+open the server never looked at it again. A leaked or extended token
+kept working until the client disconnected of its own accord, which on
+a long-lived editing session could be hours or days.
+
+**What shipped.** Option (a) from the architecture plan — short-lived
+tokens plus an SDK refresh pattern — is now the supported mechanism.
+Option (b) revocation-list polling was **not** implemented (no network
+dependency, no new endpoint, revisit only when a product actually
+requires instant revocation rather than short-TTL rotation).
+
+- `server/src/ws_handler.rs::verify_hello_token` return type changed
+  from `Result<(), String>` to `Result<u64, String>`; on accept it now
+  yields the token's `expiry_secs` to the caller. `RoomToken::verify`
+  still performs the `now >= expiry` admission check, so already-dead
+  tokens continue to fail `hello` with `4001 unauthorized` — G6 only
+  covers tokens that expire while a session is live.
+- Per-session state gains `token_deadline: Option<tokio::time::Instant>`.
+  For unlocked rooms (`auth_key = None`) it stays `None`; for locked
+  rooms it is computed exactly once at auth time as
+  `Some(Instant::now() + Duration::from_secs(expiry_secs.saturating_sub(now_secs)))`.
+- The main `tokio::select!` loop has a new first arm: when the deadline
+  is `Some(d)` it awaits `tokio::time::sleep_until(d)`; when `None` it
+  awaits `std::future::pending::<()>()` (the arm is never chosen, zero
+  overhead on unlocked rooms). On fire:
+  - increments `activesync_token_expired_disconnects_total{room}`
+  - sends a best-effort `Close{4002, "token expired"}` with a 1 s
+    timeout so a stuck sink can't block shutdown
+  - breaks the session loop
+- Close code `4002` is distinct from `4001 unauthorized` (bad/expired
+  at hello) and `4008 rate limited`. SDKs read it as "refetch token
+  and reconnect", not "user lost access".
+- No wire change, no new CLI flag, no new server state. Tokens already
+  carried `expiry`; G6 just honours it for the duration of the session.
+
+**Tests.** `server/tests/token_expiry.rs` — 2 WS integration tests
+against a live locked room:
+- `expired_token_closes_with_4002`: 2 s-expiry token completes the
+  handshake and then gets a `Close{4002}` within the 6 s poll window.
+- `valid_token_does_not_close_prematurely`: 60 s-expiry token receives
+  its welcome and is **not** closed within the first 3 s (regression
+  guard against the deadline firing too early).
+
+Both tests pass. Full server test suite after G6: 15 lib + 2 token-expiry
++ all G1/G3/G4/G5/backpressure/metrics/persistence/idle suites green.
+
+**Phase G — Operational Safety: complete.** G1, G3, G4, G5, G6, G7 all
+shipped. Next: product-polish wave (G8 SDK metrics hook, G9 conflict
+surfacing, G10 migration docs).
+
+### G8 — SDK metrics hook (not started)
+
+**Problem.** The server exposes a rich Prometheus surface from G7
+(`activesync_*` histograms, gauges, counters). The SDK is a black box
+from the ops side: no visibility into sync latency, WS reconnect
+frequency, bytes up/down, blob cache hit rate, or direct-upload (F6)
+success rate. SpeechSlate and any other integrator needs to correlate
+"server says p99 = 40 ms" with "client saw 800 ms apply latency" to
+diagnose regressions. Today there is no hook to do this.
+
+**Scope.** Add an SDK-side metrics emitter that fires on well-defined
+events. The SDK does **not** push metrics anywhere itself — it
+invokes a user-supplied callback. Integrators wire that callback to
+their existing metrics pipeline (Prometheus pushgateway, Datadog,
+OpenTelemetry, console.log for dev).
+
+**Shape.**
+
+```js
+const doc = new Doc({
+  url,
+  token,
+  onMetric: (ev) => { /* app owns shipping */ },
+});
+```
+
+Each metric event is a plain object:
+
+```jsonc
+{
+  "kind":      "pack_applied" | "ws_reconnect" | "blob_upload" |
+               "blob_download" | "direct_upload_fallback" |
+               "op_apply_latency" | "presence_latency",
+  "timestamp": <ms since epoch>,
+  "value":     <number, meaning depends on kind>,
+  "labels":    { "path": "...", "result": "ok|err|timeout", ... }
+}
+```
+
+**Kinds to ship.**
+
+| Kind | Value | Labels | Fires when |
+|---|---|---|---|
+| `pack_applied` | node count | `{from: "initial" \| "live"}` | Server pack applied to local graph |
+| `op_apply_latency` | ms | `{kind: "map" \| "text" \| "list" \| "blob"}` | Local apply → broadcast roundtrip |
+| `ws_reconnect` | attempt # | `{reason, outcome}` | WS reconnect attempt completes |
+| `blob_upload` | bytes | `{transport: "ws" \| "direct", result}` | Blob upload completes |
+| `blob_download` | bytes | `{transport: "ws" \| "redirect" \| "cache", result}` | Blob fetch completes |
+| `direct_upload_fallback` | bytes | `{reason}` | F6 direct upload fell back to WS |
+| `presence_latency` | ms | — | Presence heartbeat → server ack |
+
+**Implementation sketch.** One helper `emit(kind, value, labels)` in
+`web/sdk.js`. Call sites: `handleServerPack`, `sendBlobs`, `directUpload`,
+`fetchBlobViaUrl`, the WS reconnect loop, presence handler. Gate every
+callsite on `this.onMetric` being set — zero-cost when not configured.
+No allocation unless the hook is installed.
+
+**Wire/server impact.** None. Pure client-side observability on top of
+existing flows.
+
+**Tests.** Unit tests via `node --test` (or a small harness) that drive
+a fake WS and assert the emitter fires the expected kinds. Integration
+sanity: demo page wires `onMetric` to `console.log` and confirms the
+expected cascade on load + one setBlob + one reconnect.
+
+**Docs.** Document the kind list + labels in `docs/sdk.md`; add a
+"Shipping metrics to Prometheus" snippet (pushgateway example).
+
+**Non-goals.**
+- Client-side histograms / aggregation. The hook emits point events; the
+  app owns bucketing. Keeps the SDK small and lets apps pick their stack.
+- Automatic correlation with server metrics. That's an ops-side join
+  (trace id / request id propagation) — out of scope for G8.
+
+### G9 — Conflict surfacing (not started)
+
+**Problem.** The CRDT layer silently resolves every conflict: Map uses
+LWW on `(lamport, author)`, List absorbs on Delete, Text merges
+character-level. From the user's perspective a concurrent edit can
+disappear with no feedback. SpeechSlate's AAC use case is forgiving
+(users overwrite their own symbols intentionally), but any editor-class
+product needs a "your change was overridden" affordance — even if the
+merge is correct, the *user* needs to know it happened.
+
+**Definition of "conflict".** A node whose operation(s) lost the LWW
+race against a concurrent peer's node. Specifically:
+- **Map:** `Set(k, v_a)` loses when a concurrent `Set(k, v_b)` has a
+  higher `(lamport, author)`.
+- **List:** `Move` loses when a concurrent `Move` or `Delete` on the
+  same item wins LWW. `Insert` losing is rare (collides only on
+  `ItemId`, which is random).
+- **Text:** `insert`/`delete` on the same position from concurrent
+  authors doesn't "lose" — both apply — but the *visible ordering*
+  may surprise the user.
+
+**Scope.** Observability, not policy. The SDK exposes losing edits as
+events; the app decides whether to show a toast, a revert button, an
+audit log, or nothing. Server semantics unchanged.
+
+**Shape.**
+
+```js
+doc.onConflict((ev) => {
+  // ev = {
+  //   at:        timestamp,
+  //   key:       "<map key or list key>",
+  //   kind:      "map_overwrite" | "list_move_lost" | "list_delete_won",
+  //   localOp:   { kind, value },
+  //   winningOp: { kind, value, author, lamport },
+  //   byYou:     bool,  // was the winning op from this client?
+  // };
+});
+```
+
+Also expose a post-hoc query: `doc.recentConflicts(sinceMs)` returning
+the same events for apps that want to show a history panel instead of
+a live toast.
+
+**Implementation sketch.** Conflict detection already happens in
+`core/src/graph.rs::resolve_map` (and the list resolver); they drop
+losers on the floor. Add a second pass that returns a `Vec<ConflictEvent>`
+alongside the resolved state. Bridge surfaces this via a new WASM
+export `take_conflicts_json`; SDK polls after every pack-apply and
+fires `onConflict` for each. Keep the in-memory buffer bounded (last
+256 events).
+
+**Tests.**
+- Unit: concurrent Map `Set(k, a)` + `Set(k, b)` with `b` winning
+  LWW emits one `map_overwrite` with `localOp = {value: a}` and
+  `winningOp = {value: b}`.
+- Unit: concurrent List `Move` on same item emits `list_move_lost`
+  for the loser.
+- Bridge round-trip: WASM → SDK → `onConflict` fires.
+- SDK regression: events emitted in the order the CRDT applied the
+  winning nodes (same order peers would see them).
+
+**Wire/server impact.** None. Purely a derived view over data the
+graph already has.
+
+**Non-goals.**
+- Conflict *resolution UI*. That's a product decision per integrator.
+- Automatic revert. Apps can call the existing `MapHandle.set(...)` to
+  re-apply a losing value if they want to.
+- Text-level character attribution. RGA already gives you "who
+  inserted this char"; that's a different feature (inline blame).
+
+### G10 — Migration + operator docs (not started)
+
+**Problem.** F6 and F7 just landed a trait split + two new adapters +
+capability negotiation + new wire messages. Anyone integrating
+activesync today reads `PLAN.md` top-to-bottom and reverse-engineers
+the path. That worked when we had one user; it will not scale.
+
+**Scope.** A short, linear migration guide plus an operator runbook.
+Target readers:
+1. **SpeechSlate backend engineer** wiring Mongo + S3 into sync-server.
+2. **Self-host operator** upgrading past F6 (new capability flag,
+   `DirPersistence` still works unchanged).
+3. **Frontend developer** upgrading past F8 (`doc.list<T>`) or F6
+   (opaque direct-upload behind `setBlob`).
+
+**Deliverables.**
+
+- `docs/migration.md` — version-to-version delta. Sections per phase
+  boundary: "Before F4 → after F4", "Before F6 → after F6", etc. Each
+  section has: schema changes (if any), config knobs added, wire-level
+  back-compat story, required code changes (usually none).
+
+- `docs/operator.md` — steady-state operations for a deployed server.
+  Sections:
+  - **Config reference.** Every CLI flag + env var, with defaults.
+  - **Metrics reference.** Every `activesync_*` metric, its kind
+    (counter/gauge/histogram), labels, and what an alert should look
+    like.
+  - **Backup + restore.** `DirPersistence`, `PostgresNodeStore`,
+    `MongoNodeStore`, `S3BlobStore` — each with "what to back up,
+    how to restore, consistency guarantees".
+  - **Capacity planning.** Rules of thumb: node bytes per op, blob
+    bytes per room, peers per replica. Numbers drawn from the bench
+    suite (`cargo bench`).
+  - **Upgrading sync-server.** Rolling-restart procedure given
+    room-to-server affinity; capability negotiation handles the
+    mixed-version window automatically.
+
+- `docs/integration.md` — "how to embed activesync in your product".
+  One example each for:
+  - Self-host with `DirPersistence` (smallest config).
+  - SpeechSlate-shape (`Composite<MongoNodeStore, S3BlobStore>`).
+  - Postgres-shape (`Composite<PostgresNodeStore, S3BlobStore>`).
+  - JWT bridge config for trusted-issuer auth (F5).
+
+**Non-goals.**
+- API reference for every type. `cargo doc` covers that; duplicating
+  it in Markdown is a maintenance drag.
+- Tutorial-style "build an AAC app in 5 minutes". The demo app
+  (`web/`) is the tutorial; docs point to it.
+
+**Tests.** Docs aren't tested by CI, but every code snippet in
+`docs/*.md` must round-trip through `cargo check` / `node --check`
+at authoring time. Call out the snippet's source file so it stays
+honest.
+
+### G11 — Hot-room memory bound (not started)
+
+**Problem.** A long-lived room holds its full `StateGraph` + (in dev)
+`MemoryBlobStore` + `verified_ids` cache + presence map in RAM for as
+long as any peer is connected. Every axis that could grow unboundedly
+on disk or over the wire now has a ceiling — G4 (blob GC), G3 (peer
+ingress), G1 (broadcast backlog), G5 (Lamport), F4 follow-up (idle
+eviction) — but a *hot* room (continuously connected, never idle) has
+no per-room RAM cap. First >24 h continuous-activity production room
+is the latent blast radius.
+
+**What's already on the shelf.** D3 compaction (`core/src/compaction.rs`,
+snapshot + `rebuild_from_snapshot` + `verify_snapshot`) and D4
+deterministic replay (`core/src/replay.rs`, `canonical_hash`) both
+shipped. The primitive to truncate DAG history while preserving
+verifiable state exists; G11 is about wiring it into the server's
+hot-room lifecycle, not inventing it.
+
+**Options (not yet chosen).**
+- **A. Compaction-driven.** Server periodically calls `compact()` on
+  rooms past a node-count or byte threshold, signs the snapshot with
+  its own key (same pattern as E1 authoritative writes), drops
+  subsumed ancestors from RAM, keeps them on disk for late joiners.
+  Cleanest bound; requires the server to hold `can_write` on a
+  sentinel snapshot path (trivial in Authoritative mode, needs a new
+  Policy rule in Cooperative mode).
+- **B. LRU hot window.** Keep last N nodes + leaves in RAM; demand-page
+  older nodes from `SqliteNodeStore` on lookup. No wire or policy
+  change; trades p99 latency on ancestry walks for bounded RAM.
+- **C. Size-triggered force-evict.** Reuse the F4 idle-evictor path
+  with a byte-count trigger. Simplest, but disconnects live peers
+  briefly to rehydrate — same UX as a server restart.
+
+**First step regardless of option.** Observability before enforcement.
+Add `activesync_room_bytes_resident{room}` gauge (node count ×
+per-node estimate + blob-store resident bytes + verified_ids len) so
+the trend is measurable before we pick a cap. Pairs with G7's metrics
+infrastructure; zero wire impact.
+
+**Revisit trigger.** First production room with >24 h continuous
+activity, or RSS SLO breach in a hosted deployment, whichever comes
+first. Until then the gauge alone is enough — don't pre-optimize a
+shape we haven't seen.
+
+**Not in G11.** `verified_ids` unbounded growth (bounded in practice
+by node count, falls with compaction); presence map growth (bounded
+by concurrent peers × F4 idle eviction); dev-mode `MemoryBlobStore`
+(not a production configuration — use `--store` with `FileBlobStore`).

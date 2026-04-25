@@ -99,7 +99,10 @@ impl SyncStore {
         let final_ops = if let Some(ref key) = self.room_key {
             // Pre-compute the lamport clock the graph will assign so the
             // nonce derivation matches the transaction's actual value.
-            let next_lamport = (self.graph.lamport() + 1).max(wall_ms);
+            // Must mirror `StateGraph::apply_local` exactly — pure logical
+            // clock, no wall-time fold.
+            let _ = wall_ms; // wall-clock is never part of the Lamport value.
+            let next_lamport = self.graph.lamport() + 1;
             let author = self.signing_key.verifying_key().to_bytes();
             wrap_encrypted_ops(key, &author, next_lamport, &ops)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?
@@ -386,6 +389,103 @@ impl SyncStore {
     /// Returns an empty string if no text ops for this key exist yet.
     pub fn resolve_text(&self, key: &str) -> String {
         self.graph.resolve_text(key)
+    }
+
+    // -------------------------------------------------------------------------
+    // F8: Fractional-index List CRDT
+    // -------------------------------------------------------------------------
+    //
+    // The list stores only ordering — `(ItemId, FracIdx)` pairs. Item *content*
+    // lives in a sidecar Map keyed by hex(item_id); the SDK composes the two.
+    // Each list op commits one signed node so concurrent edits get unique
+    // `(lamport, author)` LWW priorities.
+    //
+    // Index-based helpers (`list_insert_at`, `list_move_to`) hide fractional-
+    // index math from the SDK: pass an index, get an op committed.
+
+    /// Insert `item_id` at `index` (0-based) in the list at `key`.
+    ///
+    /// `index = 0` puts it before all existing items; `index >= length` appends.
+    /// `item_id_hex` must be 32 hex chars (a 16-byte id, typically a v4 UUID
+    /// without dashes — the SDK generates it).
+    pub fn list_insert_at(&mut self, key: &str, index: u32, item_id_hex: &str)
+        -> Result<(), JsValue>
+    {
+        let item_id = parse_item_id(item_id_hex)?;
+        let seq = self.graph.resolve_list(key);
+        let position = position_for_index(&seq, index as usize, None);
+        let op = Op::List(activesync_core::ListOp::Insert {
+            list_key: key.to_string(),
+            item_id,
+            position,
+        });
+        let now_ms = js_sys::Date::now() as u64;
+        // Bypass tick buffer — each list op needs its own (lamport, author) id
+        // to LWW correctly against concurrent edits.
+        self.commit_ops_immediate(vec![op], now_ms).map(|_| ())
+    }
+
+    /// Move `item_id` to `index` (0-based) in the list at `key`. Returns an
+    /// error if the item is not currently present (deleted or never inserted).
+    ///
+    /// The destination index is interpreted in the list **with the moved item
+    /// removed**, so `move_to(item, length-1)` always lands the item at the end.
+    pub fn list_move_to(&mut self, key: &str, item_id_hex: &str, index: u32)
+        -> Result<(), JsValue>
+    {
+        let item_id = parse_item_id(item_id_hex)?;
+        let seq = self.graph.resolve_list(key);
+        if !seq.iter().any(|(id, _)| *id == item_id) {
+            return Err(JsValue::from_str("list_move_to: item not in list"));
+        }
+        let position = position_for_index(&seq, index as usize, Some(item_id));
+        let op = Op::List(activesync_core::ListOp::Move {
+            list_key: key.to_string(),
+            item_id,
+            position,
+        });
+        let now_ms = js_sys::Date::now() as u64;
+        self.commit_ops_immediate(vec![op], now_ms).map(|_| ())
+    }
+
+    /// Tombstone `item_id` in the list at `key`. Idempotent — deleting an
+    /// already-deleted or unknown item is a no-op (returns Ok).
+    pub fn list_delete(&mut self, key: &str, item_id_hex: &str)
+        -> Result<(), JsValue>
+    {
+        let item_id = parse_item_id(item_id_hex)?;
+        let op = Op::List(activesync_core::ListOp::Delete {
+            list_key: key.to_string(),
+            item_id,
+        });
+        let now_ms = js_sys::Date::now() as u64;
+        self.commit_ops_immediate(vec![op], now_ms).map(|_| ())
+    }
+
+    /// Resolve the visible list at `key` as JSON:
+    /// `[{ "id": "<hex32>", "position": "<frac>" }, ...]` sorted by position.
+    /// Tombstoned items are omitted. Returns `"[]"` for an unknown key.
+    pub fn list_resolve_json(&self, key: &str) -> String {
+        let seq = self.graph.resolve_list(key);
+        let arr: Vec<serde_json::Value> = seq.into_iter().map(|(id, pos)| {
+            serde_json::json!({ "id": id.to_hex(), "position": pos.0 })
+        }).collect();
+        serde_json::Value::Array(arr).to_string()
+    }
+
+    /// Number of visible items in the list at `key`.
+    pub fn list_length(&self, key: &str) -> u32 {
+        self.graph.resolve_list(key).len() as u32
+    }
+
+    /// Hex item ids of the visible list at `key`, in order — convenience for
+    /// the SDK when it doesn't need positions.
+    pub fn list_ids_json(&self, key: &str) -> String {
+        let ids: Vec<String> = self.graph.resolve_list(key)
+            .into_iter()
+            .map(|(id, _)| id.to_hex())
+            .collect();
+        serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into())
     }
 
     // -------------------------------------------------------------------------
@@ -803,6 +903,47 @@ fn hex_nibble(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+/// Parse a 32-char hex string into an `ItemId` (16 raw bytes).
+fn parse_item_id(hex: &str) -> Result<activesync_core::ItemId, JsValue> {
+    if hex.len() != 32 {
+        return Err(JsValue::from_str("item_id must be 32 hex chars"));
+    }
+    let mut bytes = [0u8; 16];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let hi = hex_nibble(chunk[0])
+            .ok_or_else(|| JsValue::from_str("item_id: invalid hex"))?;
+        let lo = hex_nibble(chunk[1])
+            .ok_or_else(|| JsValue::from_str("item_id: invalid hex"))?;
+        bytes[i] = (hi << 4) | lo;
+    }
+    Ok(activesync_core::ItemId(bytes))
+}
+
+/// Compute the fractional position to drop a (possibly-moving) item at logical
+/// `index` within the resolved list `seq`.
+///
+/// `exclude_id = Some(id)` is used by `list_move_to`: the moving item's current
+/// position is filtered out before the index is interpreted, so
+/// `move_to(item, len-1)` always lands the item at the end regardless of its
+/// current position. `exclude_id = None` is used by `list_insert_at`.
+///
+/// The index is clamped: any value `>= filtered_len` becomes "append".
+fn position_for_index(
+    seq: &[(activesync_core::ItemId, activesync_core::FracIdx)],
+    index: usize,
+    exclude_id: Option<activesync_core::ItemId>,
+) -> activesync_core::FracIdx {
+    let filtered: Vec<&activesync_core::FracIdx> = seq
+        .iter()
+        .filter(|(id, _)| Some(*id) != exclude_id)
+        .map(|(_, p)| p)
+        .collect();
+    let i = index.min(filtered.len());
+    let left  = if i == 0              { None } else { Some(filtered[i - 1]) };
+    let right = if i >= filtered.len() { None } else { Some(filtered[i])     };
+    activesync_core::between(left, right)
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, ()> {

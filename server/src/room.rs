@@ -226,15 +226,30 @@ pub struct Rooms {
     pub persistence: SharedPersistence,
     /// G1: per-room broadcast channel capacity. Threaded into `Room::new`.
     pub broadcast_capacity: usize,
+    /// G3: per-peer rate limit on accepted nodes per second. `0` disables
+    /// node-count limiting. Read by the WS handler at session start to
+    /// build a per-peer [`governor`] direct rate limiter.
+    pub peer_rate_nodes: u32,
+    /// G3: per-peer rate limit on accepted bytes per second (raw decoded
+    /// pack bytes, not wire JSON). `0` disables byte-rate limiting.
+    pub peer_rate_bytes: u32,
 }
 
 impl Rooms {
-    pub fn new(server_key: SigningKey, persistence: SharedPersistence, broadcast_capacity: usize) -> Self {
+    pub fn new(
+        server_key: SigningKey,
+        persistence: SharedPersistence,
+        broadcast_capacity: usize,
+        peer_rate_nodes: u32,
+        peer_rate_bytes: u32,
+    ) -> Self {
         Rooms {
             rooms: Arc::new(RwLock::new(HashMap::new())),
             server_key: Arc::new(server_key),
             persistence,
             broadcast_capacity,
+            peer_rate_nodes,
+            peer_rate_bytes,
         }
     }
 
@@ -311,6 +326,63 @@ impl Rooms {
         }
         evicted
     }
+
+    /// G4 — blob garbage collection across every currently-loaded room.
+    ///
+    /// For each live room this computes the set of blob hashes referenced
+    /// by any `Op::Map::SetBlob` op across the *entire* DAG (not just
+    /// `resolve()` output, because older SetBlob ops still need to carry
+    /// their blob to catching-up peers) and calls
+    /// [`ServerPersistence::blob_gc_sweep`] with the caller's grace
+    /// window. Aggregates the total number of deleted blobs for logging
+    /// and bumps `activesync_blob_gc_deleted_total{room}` per room.
+    ///
+    /// Rooms that are persisted on disk but not currently loaded are
+    /// **not** swept — they will be covered the next time they hydrate
+    /// and the sweeper runs afterwards. This keeps the lock surface
+    /// minimal and matches the "only GC what's hot" operational model.
+    ///
+    /// No-op on non-durable backends.
+    pub async fn sweep_blobs(&self, grace: Duration) -> usize {
+        if !self.persistence.is_durable() {
+            return 0;
+        }
+        // Snapshot the room list so we don't hold the outer lock while
+        // reading per-room graphs.
+        let rooms: Vec<(String, Arc<Room>)> = {
+            let map = self.rooms.read().await;
+            map.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect()
+        };
+        let mut total = 0;
+        for (id, room) in rooms {
+            let live = collect_live_blob_hashes(&room).await;
+            let deleted = self.persistence.blob_gc_sweep(&id, &live, grace);
+            if deleted > 0 {
+                metrics::counter!("activesync_blob_gc_deleted_total", "room" => id.clone())
+                    .increment(deleted as u64);
+                tracing::info!(room = %id, deleted, "blob GC reclaimed blobs");
+            }
+            total += deleted;
+        }
+        total
+    }
+}
+
+/// G4 helper — union of every `SetBlob.blob_hash` across all nodes in the
+/// room's DAG. Called with a read lock on the graph; does no I/O.
+async fn collect_live_blob_hashes(room: &Arc<Room>) -> std::collections::HashSet<activesync_core::Hash> {
+    use activesync_core::{Op, MapOp};
+    let mut live = std::collections::HashSet::new();
+    let graph = room.graph.read().await;
+    let ids = graph.all_node_ids();
+    for node in graph.get_nodes(&ids) {
+        for op in &node.transaction.ops {
+            if let Op::Map(MapOp::SetBlob { blob_hash, .. }) = op {
+                live.insert(*blob_hash);
+            }
+        }
+    }
+    live
 }
 
 /// Spawn the background idle-eviction sweeper.
@@ -339,6 +411,34 @@ pub fn spawn_idle_sweeper(
             for id in evicted {
                 tracing::info!(room = %id, "evicted idle room");
             }
+        }
+    }))
+}
+
+/// G4 — spawn the background blob GC sweeper.
+///
+/// Wakes every `interval` and calls [`Rooms::sweep_blobs`] with the
+/// configured `grace` window. `interval.is_zero()` disables GC (this
+/// function returns `None`); `grace == ZERO` collapses the two-phase
+/// tombstone protocol into a single-pass delete.
+///
+/// Callers can drop the returned `JoinHandle` — aborting the tokio
+/// runtime drops the task.
+pub fn spawn_blob_gc_sweeper(
+    rooms: Rooms,
+    interval: Duration,
+    grace: Duration,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if interval.is_zero() {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await; // skip t=0
+        loop {
+            ticker.tick().await;
+            let _deleted = rooms.sweep_blobs(grace).await;
         }
     }))
 }
@@ -415,6 +515,16 @@ pub async fn import_nodes(room: &Room, nodes: Vec<SyncNode>) -> (usize, Vec<Stri
     let mut errors = Vec::new();
     let mut graph = room.graph.write().await;
 
+    // G5: server-side wall-clock anchor. Passed to core so nodes whose
+    // `wall_ms` is more than `WALL_SKEW_MAX_MS` past our clock are
+    // rejected with `SyncError::WallClockSkew`. Computed once per
+    // `import_nodes` call — cheap and good enough (a 24 h window
+    // doesn't care about sub-second drift).
+    let now_ms: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
     loop {
         if pending.is_empty() { break; }
         let before = pending.len();
@@ -425,7 +535,7 @@ pub async fn import_nodes(room: &Room, nodes: Vec<SyncNode>) -> (usize, Vec<Stri
             pending.drain(..).map(|n| (n.id, n)).collect();
         let batch: Vec<SyncNode> = by_id.values().cloned().collect();
 
-        let result = graph.apply_remote_batch(batch);
+        let result = graph.apply_remote_batch_checked(batch, Some(now_ms));
         accepted += result.accepted.len();
         accepted_ids.extend(result.accepted.iter().copied());
 
@@ -438,6 +548,23 @@ pub async fn import_nodes(room: &Room, nodes: Vec<SyncNode>) -> (usize, Vec<Stri
                     }
                 }
                 activesync_core::SyncError::DuplicateNode(_) => {}
+                // G5: bucket sanity-check rejects into a labeled counter
+                // so operators can spot misbehaving clients (or their own
+                // clock drift) without scraping logs.
+                e @ activesync_core::SyncError::LamportCeiling { .. } => {
+                    metrics::counter!(
+                        "activesync_lamport_rejected_total",
+                        "reason" => "ceiling"
+                    ).increment(1);
+                    errors.push(e.to_string());
+                }
+                e @ activesync_core::SyncError::WallClockSkew { .. } => {
+                    metrics::counter!(
+                        "activesync_lamport_rejected_total",
+                        "reason" => "wall_skew"
+                    ).increment(1);
+                    errors.push(e.to_string());
+                }
                 e => { errors.push(e.to_string()); }
             }
         }

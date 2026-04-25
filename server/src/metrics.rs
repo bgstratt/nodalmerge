@@ -21,8 +21,11 @@
 //! | `activesync_broadcast_lagged_total` | counter | `room` | G1 |
 //! | `activesync_ws_send_timeout_total` | counter | `room` | G1 |
 //! | `activesync_rate_limit_drops_total` | counter | `peer` | G3 |
+//! | `activesync_blob_gc_deleted_total` | counter | `room` | G4 |
+//! | `activesync_lamport_rejected_total` | counter | `reason` | G5 |
+//! | `activesync_token_expired_disconnects_total` | counter | `room` | G6 |
 //!
-//! Subsequent gaps (G4/G5/G6) will register their counters at their own
+//! All Phase G gaps now have metrics instrumentation registered at their
 //! instrumentation sites; describing the whole list here keeps the doc in
 //! one place.
 
@@ -106,6 +109,26 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
     describe_counter!(
         "activesync_ws_send_timeout_total",
         "Peers disconnected with close code 1011 after a WS send exceeded the 5-second timeout."
+    );
+    // G3 — per-peer rate limiting.
+    describe_counter!(
+        "activesync_rate_limit_drops_total",
+        "Peers disconnected with close code 4008 after tripping the per-peer nodes/sec or bytes/sec rate limit."
+    );
+    // G4 — blob GC.
+    describe_counter!(
+        "activesync_blob_gc_deleted_total",
+        "On-disk blobs deleted by the two-phase blob GC sweeper after falling out of the per-room live set."
+    );
+    // G5 — Lamport ceiling & wall-clock sanity.
+    describe_counter!(
+        "activesync_lamport_rejected_total",
+        "Nodes rejected by the G5 sanity checks; label `reason` = `ceiling` (lamport > local + LAMPORT_SLACK) or `wall_skew` (wall_ms > now + 24h)."
+    );
+    // G6 — capability token expiry.
+    describe_counter!(
+        "activesync_token_expired_disconnects_total",
+        "Peers disconnected with WS close code 4002 after their capability token's `expiry` lapsed mid-session."
     );
     Ok(())
 }

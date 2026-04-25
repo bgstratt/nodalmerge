@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::hash::Hash;
+use crate::list::FracIdx;
 
 /// Stable identity of a character in the RGA text sequence.
 ///
@@ -39,9 +40,74 @@ pub enum MapOp {
     SetBlob { key: String, blob_hash: Hash },
 }
 
-/// Stub for Phase C (RGA list CRDT). No variants yet.
+/// Stable identity of a list item (UUIDv4, 16 random bytes).
+///
+/// Independent of position — survives moves. The inserter generates a fresh
+/// random `ItemId` per item; collisions are cosmologically unlikely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ItemId(pub [u8; 16]);
+
+impl ItemId {
+    /// Format as a 32-char lowercase hex string. Used by the bridge as a
+    /// dictionary key on the JS side.
+    pub fn to_hex(&self) -> String {
+        let mut s = String::with_capacity(32);
+        for b in &self.0 {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    }
+
+    /// Parse a 32-char hex string. Returns `None` on malformed input.
+    pub fn from_hex(s: &str) -> Option<Self> {
+        if s.len() != 32 {
+            return None;
+        }
+        let mut bytes = [0u8; 16];
+        for i in 0..16 {
+            bytes[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+        }
+        Some(ItemId(bytes))
+    }
+}
+
+/// F8: Fractional-index list operations.
+///
+/// `Insert` and `Move` are LWW per `(item_id, list_key)` on `(lamport, author)`.
+/// `Delete` is absorbing — once observed, all later/concurrent ops on the
+/// same item id lose. See [`crate::list`] for the resolution algorithm.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ListOp {}
+pub enum ListOp {
+    /// Add `item_id` to the list at `position`. The item's content lives in
+    /// a sidecar Map; the SDK manages that composition.
+    Insert {
+        list_key: String,
+        item_id: ItemId,
+        position: FracIdx,
+    },
+    /// Tombstone `item_id`. Idempotent and absorbing.
+    Delete {
+        list_key: String,
+        item_id: ItemId,
+    },
+    /// Reposition an existing item. LWW with Insert on `(lamport, author)`.
+    Move {
+        list_key: String,
+        item_id: ItemId,
+        position: FracIdx,
+    },
+}
+
+impl ListOp {
+    /// Key this op acts on.
+    pub fn key(&self) -> &str {
+        match self {
+            ListOp::Insert { list_key, .. }
+            | ListOp::Delete { list_key, .. }
+            | ListOp::Move   { list_key, .. } => list_key,
+        }
+    }
+}
 
 /// RGA text operations (Phase C1).
 ///
@@ -136,13 +202,12 @@ impl TextOp {
 }
 
 impl Op {
-    /// Path-key this op targets, if any. `None` only for the uninhabited
-    /// `Op::List` stub (and any future structural op that doesn't carry a key).
+    /// Path-key this op targets. Every current op variant carries a key.
     pub fn key(&self) -> Option<&str> {
         match self {
             Op::Map(m) => Some(m.key()),
             Op::Text(t) => Some(t.key()),
-            Op::List(_) => None,
+            Op::List(l) => Some(l.key()),
         }
     }
 }

@@ -51,7 +51,13 @@ async fn main() {
         }
     };
 
-    let rooms = room::Rooms::new(server_key, persistence, parse_broadcast_capacity_arg(&args).unwrap_or(512));
+    let rooms = room::Rooms::new(
+        server_key,
+        persistence,
+        parse_broadcast_capacity_arg(&args).unwrap_or(512),
+        parse_peer_rate_nodes_arg(&args).unwrap_or(200),
+        parse_peer_rate_bytes_arg(&args).unwrap_or(4 * 1024 * 1024),
+    );
 
     // G7: optional Prometheus metrics endpoint on an admin port. `--metrics-addr
     // <ip:port>` enables it; absent, no recorder is installed. Install failure
@@ -84,6 +90,33 @@ async fn main() {
         }
     } else {
         tracing::info!("idle-room eviction disabled (idle-timeout = 0)");
+    }
+
+    // G4: optional blob GC sweeper. `--blob-gc-interval <secs>` (default 0 =
+    // disabled) arms the task; `--blob-gc-grace <secs>` (default 86400 = 24 h)
+    // is the tombstone-to-delete grace window. Like idle eviction, this is
+    // durable-only: on in-memory builds blobs never hit disk so there is
+    // nothing to collect.
+    let blob_gc_interval = parse_u64_flag(&args, "--blob-gc-interval", 0).unwrap_or(0);
+    if blob_gc_interval > 0 {
+        if rooms.persistence.is_durable() {
+            let grace = parse_u64_flag(&args, "--blob-gc-grace", 86400).unwrap_or(86400);
+            tracing::info!(
+                interval_secs = blob_gc_interval,
+                grace_secs = grace,
+                "blob GC enabled"
+            );
+            let _handle = room::spawn_blob_gc_sweeper(
+                rooms.clone(),
+                std::time::Duration::from_secs(blob_gc_interval),
+                std::time::Duration::from_secs(grace),
+            );
+        } else {
+            tracing::warn!(
+                "--blob-gc-interval set but persistence is in-memory; GC disabled \
+                 (no on-disk blobs to collect). Pass --store <path> to enable."
+            );
+        }
     }
 
     let cors = CorsLayer::new()
@@ -173,6 +206,86 @@ fn parse_broadcast_capacity_arg(args: &[String]) -> Option<usize> {
                 Ok(n) => Some(n),
                 Err(_) => {
                     eprintln!("warning: --broadcast-capacity expects a positive integer; got {s:?}, using default 512");
+                    None
+                }
+            };
+        }
+        i += 1;
+    }
+    None
+}
+
+/// G3: Parse `--peer-rate-nodes <N>` (or `--peer-rate-nodes=<N>`), the
+/// per-peer ceiling on inbound nodes per second. Returns `None` to fall
+/// through to the default (200 nodes/s). `0` explicitly disables the
+/// node-count limiter. Invalid values log a warning and fall back to the
+/// default.
+fn parse_peer_rate_nodes_arg(args: &[String]) -> Option<u32> {
+    parse_u32_flag(args, "--peer-rate-nodes", 200)
+}
+
+/// G3: Parse `--peer-rate-bytes <MIB>` (or `--peer-rate-bytes=<MIB>`), the
+/// per-peer ceiling on inbound decoded-pack *bytes* per second. The CLI
+/// value is in MiB for ergonomics; we convert to bytes here. Returns
+/// `None` to fall through to the default (4 MiB/s = 4 194 304 B/s). `0`
+/// explicitly disables the byte-rate limiter. Values that would overflow
+/// `u32` after MiB→bytes conversion fall back to the default with a
+/// warning.
+fn parse_peer_rate_bytes_arg(args: &[String]) -> Option<u32> {
+    // Read as u32 MiB, multiply by 1 MiB, saturating (u32::MAX ≈ 4 GiB).
+    let mib = parse_u32_flag(args, "--peer-rate-bytes", 4)?;
+    Some(mib.saturating_mul(1024 * 1024))
+}
+
+/// Shared helper for `--peer-rate-*` flags: parses a non-negative `u32`.
+/// `default_for_msg` is only used in the warning text so the operator
+/// sees the correct fallback per flag. Returns `None` when the flag is
+/// absent or invalid.
+fn parse_u32_flag(args: &[String], flag: &str, default_for_msg: u32) -> Option<u32> {
+    let eq_prefix = format!("{flag}=");
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == flag {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match s.parse::<u32>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!("warning: {flag} expects a non-negative integer; got {s:?}, using default {default_for_msg}");
+                    None
+                }
+            };
+        }
+        i += 1;
+    }
+    None
+}
+
+/// G4: shared helper for `--blob-gc-*` flags (and anything else that wants
+/// a non-negative `u64`). Mirrors `parse_u32_flag`.
+fn parse_u64_flag(args: &[String], flag: &str, default_for_msg: u64) -> Option<u64> {
+    let eq_prefix = format!("{flag}=");
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == flag {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match s.parse::<u64>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!("warning: {flag} expects a non-negative integer; got {s:?}, using default {default_for_msg}");
                     None
                 }
             };

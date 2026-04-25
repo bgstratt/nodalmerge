@@ -10,6 +10,25 @@ use crate::{
     storage::{NodeStore, MemoryNodeStore},
 };
 
+/// G5 — maximum gap between a node's Lamport clock and the local
+/// `graph.lamport()`. Legitimate concurrent fan-out on a busy room stays
+/// well under this window; anything larger is almost certainly tampering
+/// (e.g. a node crafted with `lamport = u64::MAX` trying to win every LWW
+/// comparison forever *and* poison the room's clock into the same range).
+///
+/// The bound is deliberately generous: `2^20 ≈ 1 048 576` — at one write
+/// per millisecond that's ~17 minutes of pure concurrent-author divergence
+/// before any peer has merged with any other, which no real app approaches.
+pub const LAMPORT_SLACK: u64 = 1 << 20;
+
+/// G5 — maximum forward skew accepted for `Transaction::wall_ms`, in
+/// milliseconds. `wall_ms` is *informational* (never used for merge
+/// ordering) so rejecting here doesn't affect correctness; it just closes
+/// the "sort-me-to-the-top-of-the-display-timeline" class of abuse for
+/// apps that render by wall clock. 24 h comfortably absorbs client clock
+/// drift, timezone mistakes, and NTP stumbles.
+pub const WALL_SKEW_MAX_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// The resolved, queryable state of the LWW-Map after applying all nodes.
 pub type ResolvedMap = HashMap<String, Vec<u8>>;
 
@@ -71,6 +90,33 @@ fn verify_chunk(nodes: &[SyncNode], indices: &[usize]) -> Vec<(usize, bool)> {
         }
     }
     out
+}
+
+/// G5 — reject nodes whose Lamport clock jumps ahead of the local
+/// `graph.lamport()` by more than [`LAMPORT_SLACK`].
+#[inline]
+fn check_lamport_ceiling(local_lamport: u64, node: &SyncNode) -> Result<(), SyncError> {
+    let ceiling = local_lamport.saturating_add(LAMPORT_SLACK);
+    let nl = node.lamport();
+    if nl > ceiling {
+        return Err(SyncError::LamportCeiling { id: node.id, lamport: nl, ceiling });
+    }
+    Ok(())
+}
+
+/// G5 — reject nodes whose `wall_ms` is more than [`WALL_SKEW_MAX_MS`]
+/// past `now_ms`. `wall_ms == 0` is always accepted (compaction nodes
+/// and unsigned legacy nodes carry a zero wall clock).
+#[inline]
+fn check_wall_skew(now_ms: u64, node: &SyncNode) -> Result<(), SyncError> {
+    let w = node.transaction.wall_ms;
+    if w == 0 {
+        return Ok(());
+    }
+    if w > now_ms.saturating_add(WALL_SKEW_MAX_MS) {
+        return Err(SyncError::WallClockSkew { id: node.id, wall_ms: w, now_ms });
+    }
+    Ok(())
 }
 
 /// E3: Configuration for tick-based op batching.
@@ -160,9 +206,9 @@ impl<N: NodeStore> StateGraph<N> {
         &self.policy
     }
 
-    /// Current Lamport clock value.  The next `apply_local` call will use
-    /// `(lamport + 1).max(wall_ms)` — expose this so callers (e.g. the
-    /// bridge's E2EE layer) can pre-compute the lamport that a forthcoming
+    /// Current Lamport clock value.  The next `apply_local` call will
+    /// assign `lamport + 1` — expose this so callers (e.g. the bridge's
+    /// E2EE layer) can pre-compute the lamport that a forthcoming
     /// transaction will carry.
     pub fn lamport(&self) -> u64 {
         self.lamport
@@ -183,7 +229,11 @@ impl<N: NodeStore> StateGraph<N> {
         wall_ms: u64,
         ops: Vec<Op>,
     ) -> Result<NodeId, SyncError> {
-        self.lamport = (self.lamport + 1).max(wall_ms);
+        // Lamport is a pure logical clock — never fold `wall_ms` into it.
+        // `wall_ms` lives on `Transaction` as a separate informational
+        // field; mixing them blows past `LAMPORT_SLACK` (G5) and poisons
+        // every peer's clock with wall-clock-scale values.
+        self.lamport += 1;
         let author: [u8; 32] = signing_key.verifying_key().to_bytes();
         let parents: Vec<Hash> = self.leaves.iter().copied().collect();
         let tx = Transaction { author, lamport: self.lamport, wall_ms, ops, parents };
@@ -202,13 +252,36 @@ impl<N: NodeStore> StateGraph<N> {
     /// Validates that:
     /// - The node's ID matches the hash of its transaction.
     /// - The Ed25519 signature is valid (unsigned/zero-sig nodes pass through).
+    /// - The node's Lamport clock is within `LAMPORT_SLACK` of `self.lamport` (G5).
     /// - No parent references an unknown node (use `missing_hashes` first).
     /// - Every op key is permitted for the node's author under the room policy.
+    ///
+    /// Skips the wall-clock sanity check; see
+    /// [`apply_remote_checked`](Self::apply_remote_checked) to enable it.
     pub fn apply_remote(&mut self, node: SyncNode) -> Result<(), SyncError> {
+        self.apply_remote_checked(node, None)
+    }
+
+    /// Like [`apply_remote`](Self::apply_remote), but additionally enforces
+    /// the G5 wall-clock skew ceiling when `now_ms` is `Some`. Pass the
+    /// caller's current wall-clock time in milliseconds since the Unix
+    /// epoch; nodes whose `wall_ms` is more than [`WALL_SKEW_MAX_MS`] past
+    /// `now_ms` are rejected with [`SyncError::WallClockSkew`].
+    ///
+    /// `None` disables the wall-clock check (same semantics as the plain
+    /// `apply_remote`) — used by the WASM client and by compaction code
+    /// that doesn't have a trusted clock.
+    pub fn apply_remote_checked(&mut self, node: SyncNode, now_ms: Option<u64>) -> Result<(), SyncError> {
         // Verify content-addressable integrity.
         let expected = node.transaction.hash();
         if expected != node.id {
             return Err(SyncError::HashMismatch { expected, actual: node.id });
+        }
+        // G5: cheap pre-crypto rejects. Run before ed25519 verify so a
+        // flood of tampered nodes can't burn CPU on signatures.
+        check_lamport_ceiling(self.lamport, &node)?;
+        if let Some(now) = now_ms {
+            check_wall_skew(now, &node)?;
         }
         // Verify Ed25519 signature (no-op for zero/unsigned nodes, and skipped
         // if we already verified this id earlier in the session).
@@ -241,7 +314,7 @@ impl<N: NodeStore> StateGraph<N> {
                     Op::Map(MapOp::SetBlob{ key, .. }) => key.as_str(),
                     Op::Text(TextOp::Insert { key, .. })
                     | Op::Text(TextOp::Delete { key, .. }) => key.as_str(),
-                    Op::List(_) => continue,
+                    Op::List(lop) => lop.key(),
                 };
                 if !self.policy.can_write(key, author) {
                     return Err(SyncError::PolicyViolation {
@@ -276,6 +349,17 @@ impl<N: NodeStore> StateGraph<N> {
     /// pairs. The function never panics on bad input — every node is
     /// accounted for in exactly one bucket.
     pub fn apply_remote_batch(&mut self, nodes: Vec<SyncNode>) -> BatchResult {
+        self.apply_remote_batch_checked(nodes, None)
+    }
+
+    /// Like [`apply_remote_batch`](Self::apply_remote_batch) but additionally
+    /// enforces the G5 wall-clock skew ceiling when `now_ms` is `Some`.
+    /// `None` disables the wall-clock check.
+    ///
+    /// Both G5 checks (Lamport ceiling + wall skew) run *before* the batch
+    /// signature verification so malformed nodes are rejected for the cheap
+    /// reason and never consume ed25519 verify cycles.
+    pub fn apply_remote_batch_checked(&mut self, nodes: Vec<SyncNode>, now_ms: Option<u64>) -> BatchResult {
         let mut result = BatchResult::default();
 
         // Step 1 + 2: dedupe and hash check.
@@ -292,6 +376,18 @@ impl<N: NodeStore> StateGraph<N> {
             if expected != node.id {
                 result.rejected.push((node.id, SyncError::HashMismatch { expected, actual: node.id }));
                 continue;
+            }
+            // G5: Lamport ceiling and (optionally) wall-clock skew,
+            // pre-crypto.
+            if let Err(e) = check_lamport_ceiling(self.lamport, &node) {
+                result.rejected.push((node.id, e));
+                continue;
+            }
+            if let Some(now) = now_ms {
+                if let Err(e) = check_wall_skew(now, &node) {
+                    result.rejected.push((node.id, e));
+                    continue;
+                }
             }
             to_verify.push(node);
         }
@@ -615,6 +711,28 @@ impl<N: NodeStore> StateGraph<N> {
             .collect();
         crate::text::resolve_text(&nodes, key)
     }
+
+    // -------------------------------------------------------------------------
+    // List resolution (F8 — fractional-index list CRDT)
+    // -------------------------------------------------------------------------
+
+    /// Resolve the visible items of `list_key` as `(ItemId, FracIdx)` pairs
+    /// in current order. Tombstoned items are excluded; concurrent moves
+    /// resolve via LWW on `(lamport, author)` per item id.
+    ///
+    /// Item *content* lives in the sidecar Map keyed by hex(item_id) — the
+    /// SDK composes the two; core stays neutral.
+    pub fn resolve_list(
+        &self,
+        list_key: &str,
+    ) -> Vec<(crate::op::ItemId, crate::list::FracIdx)> {
+        let node_ids = self.nodes.all_ids();
+        let nodes: Vec<&SyncNode> = node_ids
+            .iter()
+            .filter_map(|id| self.nodes.get(id))
+            .collect();
+        crate::list::resolve_list_seq(&nodes, list_key)
+    }
 }
 
 // =============================================================================
@@ -631,6 +749,31 @@ mod tests {
 
     fn set(key: &str, val: &str) -> Op {
         Op::Map(MapOp::Set { key: key.into(), value: val.as_bytes().to_vec() })
+    }
+
+    /// G5 regression — `apply_local` must NEVER fold `wall_ms` into the
+    /// Lamport counter. A pre-G5 implementation used
+    /// `self.lamport = (self.lamport + 1).max(wall_ms)` which, combined
+    /// with the browser passing `Date.now()` (~1.77e12) as `wall_ms`,
+    /// produced nodes that blew past `LAMPORT_SLACK` on the very first
+    /// local write and were then rejected by every peer with a
+    /// `LamportCeiling` error. This test locks the fix in: Lamport is a
+    /// pure logical clock, even when `wall_ms` is astronomical.
+    #[test]
+    fn apply_local_ignores_wall_ms_for_lamport() {
+        let mut g = StateGraph::new();
+        // Realistic JS `Date.now()` value (≈ 2026-04-24 in ms since epoch).
+        let wall = 1_777_000_000_000u64;
+        let id = g.apply_local(&key_a(), wall, vec![set("k", "v")]).unwrap();
+        let node = g.get_nodes(&[id]).into_iter().next().unwrap();
+        assert_eq!(node.transaction.lamport, 1, "lamport must be pure logical counter");
+        assert_eq!(node.transaction.wall_ms, wall, "wall_ms must be preserved as informational");
+        assert_eq!(g.lamport(), 1);
+        // A second local write still increments by exactly 1.
+        let id2 = g.apply_local(&key_a(), wall + 1, vec![set("k", "v2")]).unwrap();
+        let node2 = g.get_nodes(&[id2]).into_iter().next().unwrap();
+        assert_eq!(node2.transaction.lamport, 2);
+        assert!(g.lamport() < LAMPORT_SLACK, "local clock must stay well under G5 ceiling");
     }
 
     #[test]
@@ -939,5 +1082,106 @@ mod tests {
         // speculative state must be identical for the same content.
         assert_eq!(g1.read_speculative("x"), g2.read_speculative("x"));
         assert_eq!(g1.read_speculative("y"), g2.read_speculative("y"));
+    }
+
+    // -------------------------------------------------------------------------
+    // G5 — Lamport ceiling & wall-clock skew tests
+    // -------------------------------------------------------------------------
+
+    /// Build a signed node with a caller-specified lamport and wall_ms,
+    /// empty parents, and a single benign `Set` op. Used to probe G5
+    /// sanity checks without going through `apply_local` (which would
+    /// clamp the lamport to sensible values).
+    fn g5_node(sk: &SigningKey, lamport: u64, wall_ms: u64) -> SyncNode {
+        let tx = Transaction {
+            author: sk.verifying_key().to_bytes(),
+            lamport,
+            wall_ms,
+            ops: vec![Op::Map(MapOp::Set { key: "k".into(), value: b"v".to_vec() })],
+            parents: vec![],
+        };
+        SyncNode::new_signed(tx, sk)
+    }
+
+    #[test]
+    fn g5_lamport_ceiling_rejects_wild_future_clock() {
+        let mut g = StateGraph::new();
+        // Local clock starts at 0, ceiling = LAMPORT_SLACK.
+        let bad = g5_node(&key_a(), LAMPORT_SLACK + 1, 0);
+        let err = g.apply_remote(bad).unwrap_err();
+        assert!(matches!(err, SyncError::LamportCeiling { .. }), "got {err:?}");
+        assert_eq!(g.node_count(), 0);
+    }
+
+    #[test]
+    fn g5_lamport_ceiling_allows_boundary() {
+        let mut g = StateGraph::new();
+        // Exactly at the ceiling must pass.
+        let ok = g5_node(&key_a(), LAMPORT_SLACK, 0);
+        g.apply_remote(ok).expect("boundary lamport must be accepted");
+        assert_eq!(g.node_count(), 1);
+    }
+
+    #[test]
+    fn g5_lamport_ceiling_batch_rejects_only_the_bad_node() {
+        let mut g = StateGraph::new();
+        let ka = key_a();
+        let good = g5_node(&ka, 1, 0);
+        let bad = g5_node(&ka, LAMPORT_SLACK + 42, 0);
+        let good_id = good.id;
+        let bad_id = bad.id;
+        let res = g.apply_remote_batch(vec![good, bad]);
+        assert_eq!(res.accepted, vec![good_id]);
+        assert_eq!(res.rejected.len(), 1);
+        assert_eq!(res.rejected[0].0, bad_id);
+        assert!(matches!(res.rejected[0].1, SyncError::LamportCeiling { .. }));
+    }
+
+    #[test]
+    fn g5_wall_skew_rejects_far_future_when_now_supplied() {
+        let mut g = StateGraph::new();
+        let now: u64 = 1_700_000_000_000; // arbitrary, 2023-ish
+        let too_far = now + WALL_SKEW_MAX_MS + 1;
+        let bad = g5_node(&key_a(), 1, too_far);
+        let err = g.apply_remote_checked(bad, Some(now)).unwrap_err();
+        assert!(matches!(err, SyncError::WallClockSkew { .. }), "got {err:?}");
+        assert_eq!(g.node_count(), 0);
+    }
+
+    #[test]
+    fn g5_wall_skew_ignored_when_now_is_none() {
+        // Bridge / WASM path: no trusted clock, so skew check must be a no-op.
+        let mut g = StateGraph::new();
+        let too_far = 10 * WALL_SKEW_MAX_MS;
+        let n = g5_node(&key_a(), 1, too_far);
+        g.apply_remote_checked(n, None).expect("no clock → no check");
+        assert_eq!(g.node_count(), 1);
+    }
+
+    #[test]
+    fn g5_wall_skew_accepts_zero_wall_ms() {
+        // Compaction nodes and legacy unsigned clients carry wall_ms=0;
+        // those must never be flagged even when `now_ms` is supplied.
+        let mut g = StateGraph::new();
+        let now: u64 = 1_700_000_000_000;
+        let n = g5_node(&key_a(), 1, 0);
+        g.apply_remote_checked(n, Some(now)).unwrap();
+        assert_eq!(g.node_count(), 1);
+    }
+
+    #[test]
+    fn g5_wall_skew_batch_rejects_only_the_bad_node() {
+        let mut g = StateGraph::new();
+        let ka = key_a();
+        let now: u64 = 1_700_000_000_000;
+        let good = g5_node(&ka, 1, now); // right now — fine
+        let bad  = g5_node(&ka, 2, now + WALL_SKEW_MAX_MS + 1);
+        let good_id = good.id;
+        let bad_id = bad.id;
+        let res = g.apply_remote_batch_checked(vec![good, bad], Some(now));
+        assert_eq!(res.accepted, vec![good_id]);
+        assert_eq!(res.rejected.len(), 1);
+        assert_eq!(res.rejected[0].0, bad_id);
+        assert!(matches!(res.rejected[0].1, SyncError::WallClockSkew { .. }));
     }
 }

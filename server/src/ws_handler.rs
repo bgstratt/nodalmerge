@@ -8,12 +8,18 @@
 //!   request   { type, known:[hex] }
 //!   blob-upload  { type, blobs:[{hash,data_b64}] }
 //!   blob-request { type, hashes:[hex] }
+//!   request-upload { type, hash, size }              ← F6
+//!   blob-uploaded  { type, hash }                    ← F6
 //!   presence  { type, data:{...} }   ← ephemeral, not stored
 //!
 //! Server → Client:
 //!   welcome   { type, root, missing:[hex] }
 //!   pack      { type, from, nodes:[SyncNode] }
 //!   blob-pack { type, blobs:[{hash,data_b64}] }
+//!   blob-redirect { type, redirects:[{hash,url,expires_at_unix}] }  ← F6
+//!   upload-granted  { type, hash, url, expires_at_unix }            ← F6
+//!   upload-denied   { type, hash, reason }                          ← F6
+//!   upload-rejected { type, hash, reason }                          ← F6
 //!   presence  { type, from, data:{...} }
 //!   error     { type, msg }
 
@@ -28,8 +34,15 @@ use activesync_core::{BlobStore, Ibf, MerkleSearchTree, Policy, PolicyDefault, P
                       RoomToken, SyncCapabilities, SyncNode, pack_nodes, unpack_nodes,
                       compact, rebuild_from_snapshot, pack_snapshot_pack, verify_snapshot};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use governor::{Quota, RateLimiter, clock::DefaultClock, state::{InMemoryState, NotKeyed}};
+use std::num::NonZeroU32;
 
 use crate::room::{Rooms, Room, import_nodes};
+
+/// G3: per-peer direct rate limiter. `None` = limit disabled for this
+/// session (either the CLI default is `0`, or the peer is the server
+/// itself — the authoritative tick loop and internal writes are exempt).
+type PeerLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
 // -----------------------------------------------------------------------------
 // F3b — server-side subscription filter.
@@ -272,6 +285,19 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     let short = &pubkey_hex[..8.min(pubkey_hex.len())];
     tracing::info!(room = %room_id, peer = %short, "peer connected");
 
+    // G3: per-peer rate limiters. The server's own pubkey is exempt so
+    // authoritative tick writes are never throttled. Zero disables the
+    // corresponding limiter outright.
+    let is_server_peer = pubkey_hex == server_pubkey_hex;
+    let node_limiter: Option<PeerLimiter> = match (is_server_peer, NonZeroU32::new(rooms.peer_rate_nodes)) {
+        (false, Some(nz)) => Some(RateLimiter::direct(Quota::per_second(nz))),
+        _ => None,
+    };
+    let byte_limiter: Option<PeerLimiter> = match (is_server_peer, NonZeroU32::new(rooms.peer_rate_bytes)) {
+        (false, Some(nz)) => Some(RateLimiter::direct(Quota::per_second(nz))),
+        _ => None,
+    };
+
     // F3b: parse this peer's subscription from hello. Defaults to everything.
     // Updated at runtime via the `subscribe` client message.
     let subscription = Arc::new(std::sync::RwLock::new(
@@ -279,18 +305,31 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     ));
 
     // C3: if the room is locked, verify the capability token before proceeding.
-    {
+    // G6: record the token's expiry so the main loop can disconnect the
+    // session the instant it lapses (short-lived tokens + SDK refresh hook).
+    let token_deadline: Option<tokio::time::Instant> = {
         let auth_key = room.auth_key.read().await;
         if let Some(ref room_vk) = *auth_key {
             match verify_hello_token(&hello, room_vk, &pubkey_hex, &room_id) {
-                Ok(()) => {}
+                Ok(expiry_secs) => {
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    // `verify` already rejected `now >= expiry`, so this
+                    // subtraction is safe; guard anyway for belt-and-braces.
+                    let remaining = expiry_secs.saturating_sub(now_secs);
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_secs(remaining))
+                }
                 Err(e) => {
                     send_error(&mut sink, &format!("auth: {e}")).await;
                     return;
                 }
             }
+        } else {
+            None
         }
-    }
+    };
 
     let client_known: Vec<activesync_core::NodeId> = hello["frontier"]
         .as_array()
@@ -425,11 +464,39 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     // -------------------------------------------------------------------------
     loop {
         tokio::select! {
+            // --- G6: capability token expired mid-session ---
+            // `sleep_until` is driven by an absolute `Instant`, so each
+            // iteration reconstructs the future idempotently. The `if` guard
+            // suppresses the arm entirely when the room is unlocked (no
+            // token = no deadline). On fire we bump the metric, close with
+            // `4002 token expired`, and break so cleanup runs. The SDK's
+            // `getToken` refresh hook re-fetches a fresh token and
+            // reconnects via the normal hello handshake.
+            _ = async {
+                match token_deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                metrics::counter!(
+                    "activesync_token_expired_disconnects_total",
+                    "room" => room_id.clone(),
+                ).increment(1);
+                tracing::info!(peer = %short, room = %room_id, "token expired — closing with 4002");
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    sink.send(Message::Close(Some(CloseFrame {
+                        code: 4002,
+                        reason: std::borrow::Cow::Borrowed("token expired"),
+                    }))),
+                ).await;
+                break;
+            }
             // --- inbound from this client ---
             msg = stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if !handle_client_message(&text, &room, &pubkey_hex, &room_id, &server_key, &mut sink, &subscription).await {
+                        if !handle_client_message(&text, &room, &pubkey_hex, &room_id, &server_key, &mut sink, &subscription, node_limiter.as_ref(), byte_limiter.as_ref(), &negotiated_caps).await {
                             break;
                         }
                     }
@@ -525,6 +592,9 @@ async fn handle_client_message(
     server_key: &Arc<SigningKey>,
     sink: &mut SplitSink<WebSocket, Message>,
     subscription: &Arc<std::sync::RwLock<Subscription>>,
+    node_limiter: Option<&PeerLimiter>,
+    byte_limiter: Option<&PeerLimiter>,
+    negotiated_caps: &SyncCapabilities,
 ) -> bool {
     let msg: Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -544,14 +614,36 @@ async fn handle_client_message(
         // Client pushes a pack of new nodes --------------------------------
         "pack" => {
             let nodes_b64 = msg["nodes"].as_str().unwrap_or("");
-            let nodes: Vec<SyncNode> = match base64_decode(nodes_b64)
-                .ok()
-                .and_then(|bytes| unpack_nodes(&bytes).ok())
-            {
-                Some(n) => n,
-                None => { send_error(sink, "invalid pack: bad postcard/base64").await; return true; }
+            let decoded = match base64_decode(nodes_b64) {
+                Ok(b) => b,
+                Err(_) => { send_error(sink, "invalid pack: bad base64").await; return true; }
+            };
+            let nodes: Vec<SyncNode> = match unpack_nodes(&decoded) {
+                Ok(n) => n,
+                Err(_) => { send_error(sink, "invalid pack: bad postcard").await; return true; }
             };
             let incoming = nodes.len();
+            let incoming_bytes = decoded.len();
+
+            // G3: rate-limit BEFORE kicking off Ed25519 verification so a
+            // flood can't burn CPU even once. Either limiter tripping ends
+            // the session with a 4008 close; the SDK treats 4008 as fatal
+            // and surfaces it to the app (unlike 4001 resync-required).
+            if let Some(lim) = node_limiter {
+                if let Some(n) = NonZeroU32::new(incoming as u32) {
+                    if check_peer_rate(lim, n, pubkey_hex, room_id, sink, "nodes").await.is_err() {
+                        return false;
+                    }
+                }
+            }
+            if let Some(lim) = byte_limiter {
+                if let Some(n) = NonZeroU32::new(incoming_bytes.min(u32::MAX as usize) as u32) {
+                    if check_peer_rate(lim, n, pubkey_hex, room_id, sink, "bytes").await.is_err() {
+                        return false;
+                    }
+                }
+            }
+
             let (accepted, errs) = import_nodes(room, nodes).await;
             tracing::info!(peer = %&pubkey_hex[..8.min(pubkey_hex.len())], incoming, accepted, errs = errs.len(), "pack received");
             if !errs.is_empty() {
@@ -680,8 +772,37 @@ async fn handle_client_message(
             let hashes: Vec<String> = msg["hashes"]
                 .as_array().unwrap_or(&vec![])
                 .iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+
+            // F6: split into "redirect" and "fall-through" buckets. Only
+            // peers that negotiated `supports_direct_blob_io` get redirects.
+            let mut redirects: Vec<serde_json::Value> = Vec::new();
+            let mut fallthrough: Vec<String> = Vec::new();
+            if negotiated_caps.supports_direct_blob_io {
+                for h in &hashes {
+                    let Some(hash) = parse_hex_hash(h) else { fallthrough.push(h.clone()); continue };
+                    match room.persistence.resolve_get_url(&room.room_id, &hash, None) {
+                        Some(p) => redirects.push(serde_json::json!({
+                            "hash": h,
+                            "url": p.url,
+                            "expires_at_unix": p.expires_at_unix,
+                        })),
+                        None => fallthrough.push(h.clone()),
+                    }
+                }
+            } else {
+                fallthrough = hashes.clone();
+            }
+            if !redirects.is_empty() {
+                let reply = serde_json::json!({
+                    "type": "blob-redirect",
+                    "redirects": redirects,
+                }).to_string();
+                if !ws_send(sink, room_id, reply).await { return false; }
+            }
+
+            // For everything not redirected, fall through to bytes-over-WS.
             let blob_store = room.blobs.read().await;
-            let entries: Vec<_> = hashes.iter().filter_map(|h| {
+            let entries: Vec<_> = fallthrough.iter().filter_map(|h| {
                 let hash = parse_hex_hash(h)?;
                 let data = blob_store.get(&hash)?;
                 Some(serde_json::json!({"hash": h, "data": base64_encode(&data)}))
@@ -691,9 +812,74 @@ async fn handle_client_message(
             let reply = serde_json::json!({
                 "type":      "blob-pack",
                 "blobs":     entries,
-                "requested": hashes,
+                "requested": fallthrough,
             }).to_string();
             if !ws_send(sink, room_id, reply).await { return false; }
+        }
+
+        // F6: client wants a presigned PUT URL ----------------------------
+        // C→S: { type:"request-upload", hash, size }
+        // S→C: { type:"upload-granted", hash, url, expires_at_unix }
+        //   or { type:"upload-denied",  hash, reason }
+        "request-upload" => {
+            if !negotiated_caps.supports_direct_blob_io {
+                send_error(sink, "request-upload not negotiated").await;
+                return true;
+            }
+            let hash_hex = msg["hash"].as_str().unwrap_or("");
+            let size = msg["size"].as_u64().unwrap_or(0);
+            let Some(hash) = parse_hex_hash(hash_hex) else {
+                send_error(sink, "request-upload: bad hash").await;
+                return true;
+            };
+            let reply = match room.persistence.resolve_put_url(&room.room_id, &hash, size) {
+                Some(p) => serde_json::json!({
+                    "type": "upload-granted",
+                    "hash": hash_hex,
+                    "url":  p.url,
+                    "expires_at_unix": p.expires_at_unix,
+                }),
+                None => serde_json::json!({
+                    "type":   "upload-denied",
+                    "hash":   hash_hex,
+                    "reason": "use-ws",
+                }),
+            };
+            if !ws_send(sink, room_id, reply.to_string()).await { return false; }
+        }
+
+        // F6: client claims a presigned PUT completed --------------------
+        // C→S: { type:"blob-uploaded", hash }
+        // Server verifies via BlobPersistence::verify_uploaded (HEAD on S3)
+        // and broadcasts blob-available so other peers can fetch it.
+        "blob-uploaded" => {
+            if !negotiated_caps.supports_direct_blob_io {
+                send_error(sink, "blob-uploaded not negotiated").await;
+                return true;
+            }
+            let hash_hex = msg["hash"].as_str().unwrap_or("");
+            let Some(hash) = parse_hex_hash(hash_hex) else {
+                send_error(sink, "blob-uploaded: bad hash").await;
+                return true;
+            };
+            match room.persistence.verify_uploaded(&room.room_id, &hash) {
+                Ok(()) => {
+                    let bcast = serde_json::json!({
+                        "type":   "blob-available",
+                        "hashes": [hash_hex],
+                    }).to_string();
+                    let _ = room.tx.send(bcast);
+                }
+                Err(e) => {
+                    tracing::warn!(?e, hash = %hash_hex, "blob-uploaded verify failed");
+                    let reply = serde_json::json!({
+                        "type":   "upload-rejected",
+                        "hash":   hash_hex,
+                        "reason": e,
+                    }).to_string();
+                    if !ws_send(sink, room_id, reply).await { return false; }
+                }
+            }
         }
 
         // Ephemeral presence — forward, do not store -----------------------
@@ -928,6 +1114,72 @@ async fn ws_send(
     }
 }
 
+// G3 — per-peer rate limiting.
+//
+// `check_peer_rate` charges `n` units against the supplied limiter. On
+// success returns `Ok(())`. On either (a) `NotUntil` (rate exceeded) or
+// (b) `InsufficientCapacity` (single request larger than the 1-second
+// burst), the peer is closed with WS code `4008 rate limit exceeded`,
+// `activesync_rate_limit_drops_total{peer=<12-char hex>}` is incremented,
+// and `Err(())` is returned so the handler can break out of its loop.
+//
+// The close frame itself is sent under the same bounded timeout used for
+// 1011 in G1 — we don't want a wedged TCP write to trap a violator's
+// cleanup. We deliberately do NOT send a JSON `error` message first; the
+// SDK treats 4008 as fatal and shouldn't see inconsistent state.
+async fn check_peer_rate(
+    lim: &PeerLimiter,
+    n: NonZeroU32,
+    peer_hex: &str,
+    room_id: &str,
+    sink: &mut SplitSink<WebSocket, Message>,
+    dim: &'static str,
+) -> Result<(), ()> {
+    match lim.check_n(n) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_not_until)) => {
+            deny_peer_rate(peer_hex, room_id, sink, dim, "exceeded").await;
+            Err(())
+        }
+        Err(_insufficient_capacity) => {
+            // Single pack larger than the configured 1-second burst. We
+            // still disconnect with 4008: a well-behaved client should
+            // split large packs; an unsplit one is either malicious or
+            // mis-configured relative to the operator's ceiling.
+            deny_peer_rate(peer_hex, room_id, sink, dim, "oversized").await;
+            Err(())
+        }
+    }
+}
+
+async fn deny_peer_rate(
+    peer_hex: &str,
+    room_id: &str,
+    sink: &mut SplitSink<WebSocket, Message>,
+    dim: &'static str,
+    kind: &'static str,
+) {
+    let peer_label = crate::metrics::peer_label(peer_hex);
+    metrics::counter!(
+        "activesync_rate_limit_drops_total",
+        "peer" => peer_label.clone(),
+    ).increment(1);
+    tracing::warn!(
+        peer = %peer_label,
+        room = %room_id,
+        dim,
+        kind,
+        "peer rate limit tripped — closing with 4008"
+    );
+    let _ = tokio::time::timeout(
+        WS_CLOSE_FRAME_TIMEOUT,
+        sink.send(Message::Close(Some(CloseFrame {
+            code: 4008,
+            reason: std::borrow::Cow::Borrowed("rate limit exceeded"),
+        }))),
+    ).await;
+}
+
 /// Parse a `set-policy` JSON message into a `Policy`.
 /// Sends an error and returns `None` on any parse failure.
 async fn parse_policy(
@@ -982,12 +1234,15 @@ fn hex_from_bytes(bytes: &[u8]) -> String {
 
 
 /// Verify the capability token in a `hello` message against the room's key (C3).
+///
+/// On success returns the token's `expiry_secs` (Unix seconds) so the
+/// session loop can disconnect the peer the moment it expires (G6).
 fn verify_hello_token(
     hello: &Value,
     room_vk: &VerifyingKey,
     peer_pubkey_hex: &str,
     room_id: &str,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let tok = hello.get("token").ok_or("room is locked — include a capability token in hello")?;
     let peer_hex   = tok["peer_pubkey"].as_str().ok_or("missing token.peer_pubkey")?;
     let expiry     = tok["expiry"].as_u64().ok_or("missing token.expiry")?;
@@ -1012,7 +1267,8 @@ fn verify_hello_token(
         .as_secs();
 
     token.verify(room_id, room_vk, &peer_bytes, now)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(expiry)
 }
 
 /// Parse a 32-byte Ed25519 verifying key from a 64-char hex string.

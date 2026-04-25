@@ -86,6 +86,27 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
   // Track in-flight blob requests to avoid re-asking for the same hash.
   const pendingBlobFetches = new Set();
 
+  // ── F6: direct blob I/O state ─────────────────────────────────────────
+  // Latest negotiated capabilities (assigned at welcome). When
+  // `supports_direct_blob_io` is true we may bifurcate large blob I/O off
+  // the WebSocket onto presigned URLs.
+  let negotiatedCaps = {};
+  // Pending request-upload calls awaiting a server response. Keyed by
+  // hash hex; value is a resolver function `(reply) => void` that takes
+  // either an `upload-granted` or `upload-denied` envelope.
+  const pendingUploadGrants = new Map();
+  // GET URL cache: hash → { url, expiresAtMs }. Refreshed by
+  // `blob-redirect` messages and by re-asking the server when expiry
+  // approaches or a fetch returns 403.
+  const blobUrlCache = new Map();
+  // Threshold below which we don't even ask for a presigned PUT — the WS
+  // round-trip is cheaper. Server may also enforce its own threshold;
+  // this is just the client-side optimization.
+  const DIRECT_UPLOAD_THRESHOLD = 1 * 1024 * 1024;
+  // Refresh GET URLs this many ms before they expire so an in-flight
+  // fetch doesn't 403.
+  const URL_REFRESH_LEAD_MS = 60_000;
+
   function refreshSentToServer() {
     sentToServer.clear();
     for (const id of JSON.parse(store.all_node_ids_json())) sentToServer.add(id);
@@ -106,13 +127,99 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
 
   // Upload specific blob hashes to the server so other peers can fetch them.
   // Called by `doc.map(...).setBlob(...)` after a local blob is stored.
+  //
+  // F6: when `supports_direct_blob_io` is negotiated and the blob is
+  // ≥ DIRECT_UPLOAD_THRESHOLD, ask the server for a presigned PUT URL,
+  // upload directly to S3, then send `blob-uploaded`. Falls back to the
+  // existing `blob-upload` (bytes-over-WS) path on any failure.
   function sendBlobs(hashes) {
     if (!hashes || hashes.length === 0) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     try {
-      const blobs = JSON.parse(store.export_blobs_json(JSON.stringify(hashes)));
-      if (blobs.length > 0) send({ type: 'blob-upload', blobs });
+      const direct = [];
+      const wsBytes = [];
+      for (const h of hashes) {
+        let bytes;
+        try { bytes = store.get_blob_bytes(h); } catch (_) { continue; }
+        if (!bytes) continue;
+        if (negotiatedCaps.supports_direct_blob_io && bytes.length >= DIRECT_UPLOAD_THRESHOLD) {
+          direct.push({ hash: h, bytes });
+        } else {
+          wsBytes.push(h);
+        }
+      }
+      if (wsBytes.length > 0) {
+        const blobs = JSON.parse(store.export_blobs_json(JSON.stringify(wsBytes)));
+        if (blobs.length > 0) send({ type: 'blob-upload', blobs });
+      }
+      for (const { hash, bytes } of direct) {
+        directUpload(hash, bytes).catch(err => {
+          log('warn', '[sdk] direct upload failed; falling back to ws', err);
+          // Fallback: ship the bytes over WS.
+          try {
+            const blobs = JSON.parse(store.export_blobs_json(JSON.stringify([hash])));
+            if (blobs.length > 0) send({ type: 'blob-upload', blobs });
+          } catch (_) {}
+        });
+      }
     } catch (e) { log('warn', '[sdk] sendBlobs', e); }
+  }
+
+  // F6: ask the server for a presigned PUT, upload, then notify.
+  async function directUpload(hash, bytes) {
+    const reply = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingUploadGrants.delete(hash);
+        reject(new Error('request-upload timeout'));
+      }, 30_000);
+      pendingUploadGrants.set(hash, (envelope) => {
+        clearTimeout(timer);
+        pendingUploadGrants.delete(hash);
+        resolve(envelope);
+      });
+      send({ type: 'request-upload', hash, size: bytes.length });
+    });
+    if (reply.type === 'upload-denied') {
+      throw new Error('upload-denied: ' + (reply.reason ?? 'unknown'));
+    }
+    if (reply.type !== 'upload-granted') {
+      throw new Error('unexpected reply: ' + reply.type);
+    }
+    const resp = await fetch(reply.url, {
+      method: 'PUT',
+      body: bytes,
+      // Avoid the browser appending `Content-Type: text/plain;...` which
+      // would mismatch the presign signature on some providers.
+      headers: { 'Content-Type': 'application/octet-stream' },
+    });
+    if (!resp.ok) {
+      throw new Error('PUT failed: ' + resp.status);
+    }
+    // Tell the server the object exists; server HEAD-verifies and
+    // broadcasts blob-available so other peers can pull.
+    send({ type: 'blob-uploaded', hash });
+  }
+
+  // F6: download a blob via presigned URL and stash it in the store.
+  // On 403 (URL expired or revoked) re-issues a `blob-request` so the
+  // server can mint a fresh URL. On any other error, throws so the
+  // caller can fall back to the WS path.
+  async function fetchBlobViaUrl(hash, url) {
+    const resp = await fetch(url, { method: 'GET', cache: 'no-store' });
+    if (resp.status === 403) {
+      blobUrlCache.delete(hash);
+      throw new Error('presigned URL rejected (403)');
+    }
+    if (!resp.ok) {
+      throw new Error('GET failed: ' + resp.status);
+    }
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    try {
+      store.store_blob_bytes(hash, bytes);
+    } finally {
+      pendingBlobFetches.delete(hash);
+    }
+    onRemotePack({ from: 'direct', kind: 'blobs' });
   }
 
   function requestMissingBlobs() {
@@ -153,6 +260,7 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
 
     // MST descent when supported + roots differ; else request full catchup.
     const caps = msg.caps ?? {};
+    negotiatedCaps = caps; // F6: stash for sendBlobs / blob-redirect.
     if (caps.supports_mst && msg.mst_root && msg.mst_root !== store.mst_root_hex()) {
       mstDescentRoot = msg.mst_root;
       send({ type: 'mst-request', paths: [''] });
@@ -227,6 +335,35 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
           } catch (_) {}
         }
         if (touched) onRemotePack({ from: msg.from ?? 'server', kind: 'blobs' });
+        break;
+      }
+
+      // F6: server told us to fetch some blobs from a presigned URL
+      // instead of bytes-over-WS. Cache the URLs and kick off downloads.
+      case 'blob-redirect': {
+        const redirects = msg.redirects ?? [];
+        for (const r of redirects) {
+          if (!r.hash || !r.url) continue;
+          const expiresAtMs = (r.expires_at_unix ?? 0) * 1000;
+          blobUrlCache.set(r.hash, { url: r.url, expiresAtMs });
+          fetchBlobViaUrl(r.hash, r.url).catch(err => {
+            log('warn', '[sdk] direct blob fetch failed; retrying via ws', err);
+            pendingBlobFetches.delete(r.hash);
+            blobUrlCache.delete(r.hash);
+            // Fall back to the bytes-over-WS path.
+            send({ type: 'blob-request', hashes: [r.hash] });
+            pendingBlobFetches.add(r.hash);
+          });
+        }
+        break;
+      }
+
+      // F6: response to our `request-upload`. Hand it to the waiting promise.
+      case 'upload-granted':
+      case 'upload-denied':
+      case 'upload-rejected': {
+        const cb = msg.hash ? pendingUploadGrants.get(msg.hash) : null;
+        if (cb) cb(msg);
         break;
       }
 
@@ -1024,6 +1161,251 @@ export async function createDoc(opts) {
     };
   }
 
+  // ---- List handle (fractional-index CRDT, F8) ----
+  //
+  // The ordering lives in Op::List on `key`; item content lives in the Map
+  // sidecar under `${key}/items/<itemIdHex>`. The SDK composes the two so
+  // callers see a flat ordered array of `{id, content}` entries. Subscription
+  // patterns covering `key` automatically cover the sidecar (they share a
+  // prefix), so no extra subscription work is needed.
+  function makeList(key) {
+    if (!subscription.matches(key)) {
+      throw new Error(`doc.list(${JSON.stringify(key)}): path is outside the current subscription ${JSON.stringify(subscription.patterns)}`);
+    }
+    const itemsPrefix = key + '/items/';
+    const changeE   = makeEmitter();
+    const reorderE  = makeEmitter();
+    const unsubRoot = anyChange.on(ev => {
+      // Local list mutations: ordering events come through type='list',
+      // content updates ride on type='map' under itemsPrefix.
+      if (ev.type === 'list' && ev.path === key) {
+        reorderE.emit(ev);
+        changeE.emit(ev);
+        return;
+      }
+      if (ev.type === 'map' && typeof ev.path === 'string' && ev.path.startsWith(itemsPrefix)) {
+        changeE.emit(ev);
+        return;
+      }
+      // Remote ops arrive as 'pack' / 'bulk' — we can't tell ordering from
+      // content cheaply here, so emit on both channels and let consumers
+      // re-resolve. Cheap because re-resolve is HashMap-pass over local nodes.
+      if (ev.type === 'pack' || ev.type === 'bulk') {
+        reorderE.emit(ev);
+        changeE.emit(ev);
+      }
+    });
+
+    function sidecarKey(idHex) { return itemsPrefix + idHex; }
+
+    function readContent(idHex, allMap) {
+      const fullKey = sidecarKey(idHex);
+      const b64 = allMap[fullKey];
+      if (b64 === undefined) return undefined;
+      return bytesToJson(b64decode(b64));
+    }
+
+    function newItemId() {
+      const a = new Uint8Array(16);
+      crypto.getRandomValues(a);
+      let out = '';
+      for (let i = 0; i < 16; i++) out += a[i].toString(16).padStart(2, '0');
+      return out;
+    }
+
+    function writeContent(idHex, content) {
+      // Sidecar lives under the same subscription prefix as the list key,
+      // so it round-trips with the ordering.
+      store.set(sidecarKey(idHex), jsonToBytes(content));
+    }
+
+    return {
+      get length() { return store.list_length(key); },
+
+      ids() {
+        return JSON.parse(store.list_ids_json(key));
+      },
+
+      get(idHex) {
+        const all = JSON.parse(store.resolve_json());
+        return readContent(idHex, all);
+      },
+
+      toArray() {
+        const ids = JSON.parse(store.list_ids_json(key));
+        const all = JSON.parse(store.resolve_json());
+        const out = new Array(ids.length);
+        for (let i = 0; i < ids.length; i++) {
+          out[i] = { id: ids[i], content: readContent(ids[i], all) };
+        }
+        return out;
+      },
+
+      push(content) {
+        const id = newItemId();
+        writeContent(id, content);
+        store.list_insert_at(key, this.length, id);
+        afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'insert', id, index: this.length - 1 });
+        return id;
+      },
+
+      insert(index, content) {
+        const id = newItemId();
+        writeContent(id, content);
+        const i = Math.max(0, Math.min(index | 0, this.length));
+        store.list_insert_at(key, i, id);
+        afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'insert', id, index: i });
+        return id;
+      },
+
+      insertAfter(anchorIdHex, content) {
+        const ids = JSON.parse(store.list_ids_json(key));
+        const at  = ids.indexOf(anchorIdHex);
+        // Anchor missing → fall back to append. Avoids throwing on a stale
+        // id the caller may be holding from before a delete arrived.
+        const i = at < 0 ? ids.length : at + 1;
+        return this.insert(i, content);
+      },
+
+      insertBefore(anchorIdHex, content) {
+        const ids = JSON.parse(store.list_ids_json(key));
+        const at  = ids.indexOf(anchorIdHex);
+        const i = at < 0 ? ids.length : at;
+        return this.insert(i, content);
+      },
+
+      move(idHex, index) {
+        const len = this.length;
+        if (len === 0) return; // nothing to move
+        const i = Math.max(0, Math.min(index | 0, len - 1));
+        store.list_move_to(key, idHex, i);
+        afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'move', id: idHex, index: i });
+      },
+
+      delete(idHex) {
+        store.list_delete(key, idHex);
+        // Tombstone the sidecar too — keeps resolve_json() free of orphan
+        // content bytes for items no peer can ever reference again.
+        try { store.delete(sidecarKey(idHex)); } catch (_) {}
+        afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'delete', id: idHex });
+      },
+
+      update(idHex, content) {
+        writeContent(idHex, content);
+        // No list op — pure content edit. Map-level event suffices.
+        afterLocalMutation({ source: 'local', type: 'map', namespace: '', key: sidecarKey(idHex), path: sidecarKey(idHex) });
+      },
+
+      onChange(cb)  { return changeE.on(cb); },
+      onReorder(cb) { return reorderE.on(cb); },
+
+      // ---- Gesture helpers (F8) ----
+      //
+      // Each helper is a fixed sequence of primitive ops (insert/move/delete)
+      // chosen so concurrent gestures from different peers converge to a
+      // sensible UX, *not* "loser silently vanishes". Apps that prefer
+      // different semantics can call the primitives directly.
+      gestures: {
+        /**
+         * Drop `draggedId` onto `targetId`. If target is still present:
+         * tombstone target and move dragged into target's slot (replace).
+         * If target was concurrently deleted: append dragged to the end
+         * (graceful fallback rather than throwing on a stale anchor).
+         *
+         * Concurrent dropOnto from two peers against the same target:
+         * both deletes are idempotent; both moves operate on different
+         * dragged ids so neither overrides the other — both dragged
+         * items survive in the converged list.
+         */
+        dropOnto: (draggedId, targetId) => {
+          const ids = JSON.parse(store.list_ids_json(key));
+          const at  = ids.indexOf(targetId);
+          if (at < 0) {
+            // Target already gone. Just position dragged at the end.
+            const len = store.list_length(key);
+            store.list_move_to(key, draggedId, Math.max(0, len - 1));
+            afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'gesture-dropOnto', dragged: draggedId, target: targetId, fallback: 'append' });
+            return;
+          }
+          // Tombstone target first so the subsequent move targets the now-
+          // vacant slot. Both ops commit independently and idempotently.
+          store.list_delete(key, targetId);
+          try { store.delete(sidecarKey(targetId)); } catch (_) {}
+          // After delete, the slot at `at` shifted: items that were after
+          // target moved up by one. Index `at` now points to where target
+          // used to be (or to end if target was last). list_move_to clamps.
+          store.list_move_to(key, draggedId, at);
+          afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'gesture-dropOnto', dragged: draggedId, target: targetId });
+        },
+
+        /**
+         * Drop `draggedId` between `beforeId` and `afterId`. Either anchor
+         * may be `null` to mean "list start" or "list end" respectively.
+         * Stale anchors fall through gracefully (use the surviving anchor;
+         * if both are stale, append).
+         */
+        dropBetween: (draggedId, beforeId, afterId) => {
+          const ids = JSON.parse(store.list_ids_json(key));
+          let index;
+          if (afterId != null) {
+            const at = ids.indexOf(afterId);
+            if (at >= 0)      index = at;       // land just before `after`
+            else if (beforeId != null) {
+              const ab = ids.indexOf(beforeId);
+              index = ab >= 0 ? ab + 1 : ids.length;
+            } else            index = 0;
+          } else if (beforeId != null) {
+            const ab = ids.indexOf(beforeId);
+            index = ab >= 0 ? ab + 1 : ids.length;
+          } else              index = ids.length;
+          // The bridge clamps & filters dragged, so concurrent
+          // dropBetween operations using the same anchors converge by LWW
+          // on the dragged item id (last writer wins for that single item).
+          store.list_move_to(key, draggedId, index);
+          afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'gesture-dropBetween', dragged: draggedId, before: beforeId, after: afterId, index });
+        },
+
+        /**
+         * Swap two items' positions. Concurrent swaps of overlapping pairs
+         * resolve via LWW per moved item — identity is preserved (no item
+         * is duplicated or lost).
+         */
+        swap: (aId, bId) => {
+          if (aId === bId) return;
+          const ids = JSON.parse(store.list_ids_json(key));
+          const ia = ids.indexOf(aId);
+          const ib = ids.indexOf(bId);
+          if (ia < 0 || ib < 0) return; // either side stale → no-op
+          // Move a → b's slot first, then b → a's original slot. Each
+          // list_move_to interprets the index in the list with the moved
+          // id filtered out, so consecutive swaps don't interfere.
+          store.list_move_to(key, aId, ib);
+          store.list_move_to(key, bId, ia);
+          afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'gesture-swap', a: aId, b: bId });
+        },
+
+        /** Move `draggedId` to land immediately before `targetId`. */
+        dropBefore: (draggedId, targetId) => {
+          const ids = JSON.parse(store.list_ids_json(key));
+          const at  = ids.indexOf(targetId);
+          const index = at < 0 ? ids.length : at;
+          store.list_move_to(key, draggedId, index);
+          afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'gesture-dropBefore', dragged: draggedId, target: targetId });
+        },
+
+        /** Move `draggedId` to land immediately after `targetId`. */
+        dropAfter: (draggedId, targetId) => {
+          const ids = JSON.parse(store.list_ids_json(key));
+          const at  = ids.indexOf(targetId);
+          const index = at < 0 ? ids.length : at + 1;
+          store.list_move_to(key, draggedId, index);
+          afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'gesture-dropAfter', dragged: draggedId, target: targetId });
+        },
+      },
+    };
+  }
+
+
   // ---- Doc ----
   const doc = {
     get pubkeyHex() { return pubkeyHex; },
@@ -1033,7 +1415,7 @@ export async function createDoc(opts) {
 
     map: makeMap,
     text: makeText,
-    list(_key) { throw new Error('doc.list() is not implemented yet — see PLAN.md (post-F List CRDT with fractional indexing + move op).'); },
+    list: makeList,
     presence,
 
     // F3a subscription API -------------------------------------------------

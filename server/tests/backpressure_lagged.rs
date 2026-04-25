@@ -31,7 +31,7 @@ use tokio_tungstenite::tungstenite::Message as TMessage;
 async fn spawn_server(broadcast_capacity: usize) -> (std::net::SocketAddr, Rooms) {
     let server_key = SigningKey::from_bytes(&[7u8; 32]);
     let persistence: SharedPersistence = Arc::new(NoPersistence);
-    let rooms = Rooms::new(server_key, persistence, broadcast_capacity);
+    let rooms = Rooms::new(server_key, persistence, broadcast_capacity, 0, 0);
 
     let app = Router::new()
         .route("/ws/:room_id", get(ws_handler::handler))

@@ -4,6 +4,10 @@ members = [
     "server",
     "bridge",
     "jwt-bridge",
+    "s3-blobs",
+    "node-stores/mongo",
+    "node-stores/postgres",
+    "node-stores/conformance",
 ]
 resolver = "2"
 

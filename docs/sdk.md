@@ -53,7 +53,7 @@ doc.onChange(ev => {
 
 - `doc.map(namespace)` → `MapHandle` — LWW-Map over `<namespace>/<key>` paths.
 - `doc.text(key)` → `TextHandle` — per-character RGA with tombstones.
-- `doc.list(key)` → **throws**. Deferred to post-F (fractional-index + move op).
+- `doc.list(key)` → `ListHandle<T>` — ordered list with fractional-index CRDT semantics (F8).
 - `doc.onChange(cb)`, `doc.onConnect(cb)`, `doc.onDisconnect(cb)`, `doc.onError(cb)` — each returns an unsubscribe function.
 - `doc.connect()`, `doc.disconnect()`, `doc.close()`.
 - `doc.pubkeyHex`, `doc.authorSeed`, `doc.isConnected`.
@@ -62,9 +62,9 @@ doc.onChange(ev => {
 ### `MapHandle`
 
 - `set(key, value)` — `value` is any JSON-serializable value.
-- `setBlob(key, bytes)` — stores `bytes` in the CAS, sets the key to its blob hash.
+- `setBlob(key, bytes)` — stores `bytes` in the CAS, sets the key to its blob hash. When the server advertises `supports_direct_blob_io` (F6) and `bytes.length >= 1 MiB`, the SDK requests a presigned S3 PUT URL and uploads directly to object storage; smaller blobs and pre-F6 servers fall back transparently to the WebSocket `blob-upload` path.
 - `get(key)` — returns the JSON value or `undefined`.
-- `getBlob(hashOrKey)` — returns the blob bytes, looking the key up if needed.
+- `getBlob(hashOrKey)` — returns the blob bytes, looking the key up if needed. Under F6, the server may respond to a `blob-request` with `blob-redirect` payloads carrying presigned GET URLs; the SDK fetches the URL, caches it for reuse, and falls back to WebSocket transport on `403`/expired or any network failure.
 - `delete(key)`.
 - `all()` — returns every key currently resolved under this namespace, stripped of the prefix.
 - `onChange(cb)`.
@@ -74,6 +74,69 @@ doc.onChange(ev => {
 - `insert(pos, str)`, `delete(pos, len = 1)`.
 - `toString()`.
 - `onChange(cb)`.
+
+### `ListHandle<T>`
+
+Ordered list with fractional-index CRDT. Ordering lives in `Op::List` for
+`key`; item content lives in the sidecar Map at `${key}/items/<itemId>` and
+is composed transparently. Each item has a stable 32-char hex id that
+survives moves and reorderings.
+
+- `length` — number of visible (non-tombstoned) items.
+- `ids()` — item ids in order (cheap; no content decode).
+- `get(id)` — decoded content for `id`, or `undefined`.
+- `toArray()` — `[{ id, content }, …]` in order.
+- `push(content)` / `insert(index, content)` — returns new item id.
+- `insertAfter(anchorId, content)` / `insertBefore(anchorId, content)` —
+  stale anchor falls back to append.
+- `move(id, index)` — destination index is interpreted with the moved
+  item removed, so `move(id, length-1)` always lands at the end.
+- `delete(id)` — idempotent tombstone.
+- `update(id, content)` — content-only edit; ordering unchanged. Concurrent
+  `update` and `move` on the same item both take effect.
+- `onChange(cb)` — any change (order or content).
+- `onReorder(cb)` — only when ordering changes.
+- `gestures` — composed drag-and-drop helpers, see below.
+
+#### `ListHandle.gestures`
+
+Drag-and-drop gestures decompose into multi-op sequences. Bare "last-writer-
+wins on replace-on-drop" is bad UX (the loser's item vanishes). These
+helpers emit op sequences designed so concurrent gestures converge to
+sensible outcomes:
+
+- `dropOnto(draggedId, targetId)` — tombstones target and moves dragged
+  into its slot. Concurrent `dropOnto` against the same target from two
+  peers preserves **both** dragged items (deletes are idempotent; the two
+  moves land at adjacent tied positions).
+- `dropBetween(draggedId, beforeId, afterId)` — drop into the gap between
+  two anchors. Either anchor may be `null` for list-start / list-end.
+  Stale anchors fall through gracefully.
+- `swap(aId, bId)` — exchange two items' positions. Concurrent swaps of
+  overlapping pairs resolve via LWW per moved item; no item is lost.
+- `dropBefore(draggedId, targetId)` / `dropAfter(draggedId, targetId)` —
+  land dragged immediately adjacent to target.
+
+Apps that prefer "replace wins, loser vanishes" semantics can skip these
+and call `delete` / `move` / `insert` directly.
+
+```js
+const list = doc.list('boards/main/buttons');
+
+const id = list.push({ label: 'Yes' });
+list.insertAfter(id, { label: 'No' });
+list.move(id, list.length - 1);
+list.update(id, { label: 'Yeah' });  // edit without reordering
+list.delete(id);
+
+// Drag-and-drop
+list.gestures.dropOnto(draggedId, targetId);
+list.gestures.dropBetween(draggedId, leftId, rightId);
+
+// Render
+for (const { id, content } of list.toArray()) draw(id, content);
+list.onReorder(() => rerender());
+```
 
 ### `doc.presence` (ephemeral awareness)
 Ephemeral side-channel for cursors, selections, typing indicators, viewport

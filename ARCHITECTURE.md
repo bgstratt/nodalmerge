@@ -559,52 +559,141 @@ O(N²) ≈ 2 450 channels per peer.
 - `doc.peers()` already surfaces `transport`; surface the reason (`'mesh-cap'` vs `'ws-only'` vs `'negotiating'`) too.
 - Zero server change. Falls out of existing D2 fallback path.
 
-### G3 — Rate limiting per peer
+### G3 — Rate limiting per peer *(SHIPPED)*
 
-**Where it lives today.** Nothing. A well-formed malicious peer can spam
-signed nodes and force Ed25519 batch work.
+**Problem.** Pre-G3 a well-formed but malicious peer could flood the
+server with signed packs and burn Ed25519 verify cycles; nothing capped
+the ingress rate once a peer was past the handshake.
 
-**Plan.**
-- Token bucket per `PeerSession` over (a) accepted nodes/sec, (b) accepted bytes/sec. Use `governor` (already in the dep tree via axum).
-- CLI: `--peer-rate-nodes <n/s>` (default 200), `--peer-rate-bytes <mib/s>` (default 4).
-- Violation → close WS with `4008 rate limit exceeded`; metric increment `activesync_rate_limit_drops_total{peer}` (short-hash label).
-- Super-Peer server key is exempt.
+**What shipped.**
+- `governor` 0.7 direct rate limiters per WS session in
+  [server/src/ws_handler.rs](server/src/ws_handler.rs). Two independent
+  buckets: (a) inbound nodes/sec, (b) inbound decoded-pack bytes/sec.
+  Both are checked **before** `import_nodes` so rejected floods never
+  reach batched Ed25519 verification.
+- CLI: `--peer-rate-nodes <N>` (default `200`; `0` disables the
+  node-count limiter) and `--peer-rate-bytes <MiB>` (default `4`; `0`
+  disables the byte-rate limiter). Values are parsed in
+  [server/src/main.rs](server/src/main.rs) and threaded via `Rooms`
+  into every session.
+- Violation → WS close with custom code `4008 rate limit exceeded`
+  (bounded by the 1 s close-send timeout so a wedged socket can't
+  trap cleanup) and an increment of
+  `activesync_rate_limit_drops_total{peer}` where the `peer` label is
+  the 12-char pubkey prefix (`metrics::peer_label`). Both quota
+  overruns (`NotUntil`) and oversized single packs
+  (`InsufficientCapacity`, i.e. the pack alone exceeds the 1 s burst)
+  are treated as violations — a well-behaved client splits large packs.
+- Super-Peer server key is exempt: when the WS pubkey matches
+  `rooms.server_key`, no limiter is constructed for the session.
+- Metric registered via `describe_counter!` in
+  [server/src/metrics.rs](server/src/metrics.rs).
 
-### G4 — Blob GC
+**Tests.** `server/tests/rate_limit.rs` —
+`oversized_pack_closes_with_4008` spins up the real axum server on an
+ephemeral loopback with `peer_rate_nodes = 2`, completes the handshake,
+pushes a single pack of 5 signed nodes (exceeds the 2-node burst so
+`check_n(5)` returns `InsufficientCapacity`), and asserts a
+`Close { code: 4008 }` frame arrives within 5 s. Runs in ~270 ms.
 
-**Where it lives today.** `DirPersistence` writes `blobs/<room>/<hash>`
-forever. No refcount, no sweep. `Op::Map::SetBlob` can overwrite a previous
-blob reference; the old file survives indefinitely.
+### G4 — Blob GC *(SHIPPED)*
 
-**Plan.**
-- Per-room sweep: walk current `resolve()` output for `SetBlob { blob_hash }` + walk every retained snapshot frontier → live set.
-- Two-phase deletion: mark (write `blobs/<room>/.tombstones/<hash>` with timestamp) on first sweep; delete on next sweep if still orphaned *and* tombstone age > `blob_grace_secs` (default 24 h). Grace window absorbs concurrent uploads by offline peers.
-- Opt-in: `--blob-gc-interval <secs>` (default 0 = disabled). Runs inside the idle sweeper's task budget so it inherits the durable-only gate.
-- Safe because blobs are re-uploadable from any peer that still has the bytes (the same guarantee F4 already relies on).
-- Metric: `activesync_blob_gc_deleted_total{room}`.
+**Where it lived before.** `DirPersistence` wrote `blobs/<room>/<hash>`
+forever. No refcount, no sweep. `Op::Map::SetBlob` could overwrite a
+previous blob reference and the old file survived indefinitely.
 
-### G5 — Lamport ceiling & wall-clock sanity
+**Shipped.**
+- New trait method `ServerPersistence::blob_gc_sweep(room, live, grace) -> usize` in [server/src/store.rs](server/src/store.rs). Default impl is a no-op (0), so non-durable `NoPersistence` silently skips GC. `DirPersistence` implements it against on-disk state.
+- **Tombstone layout.** Tombstones live at `<root>/blob-tombstones/<sanitized_room>/<hash>` — a **sibling** of `blobs/`, *not* `blobs/<room>/.tombstones/<hash>`. Keeping them outside the blobs tree means `load_room_blobs` (F4 hydration) doesn't need to filter them out; it reads every file it finds.
+- **Two-phase protocol.** First sweep: for each blob on disk, if `hash ∉ live` and no tombstone yet, drop an empty tombstone file whose mtime = now, and leave the blob in place; if `hash ∈ live`, delete any stale tombstone. Second (or later) sweep: if `hash ∉ live` AND tombstone mtime is older than `grace`, delete both the blob and its tombstone, then increment `activesync_blob_gc_deleted_total{room}` and the return value. `grace = Duration::ZERO` collapses the two phases into one — useful for tests and aggressive-GC operators.
+- **Live set** (computed in [server/src/room.rs](server/src/room.rs) `collect_live_blob_hashes`) = union of `Op::Map::SetBlob { blob_hash }` across **every** node in the DAG, not just the current `resolve()` output. Rationale: a peer catching up from far behind still needs blobs referenced by older `SetBlob` ops; `resolve()` only yields the LWW winner per key.
+- **Only currently-loaded rooms are swept.** `Rooms::sweep_blobs` snapshots `self.inner.read().await.keys()` and iterates hot rooms. Cold-on-disk rooms wait until they hydrate. Same policy as the idle sweeper.
+- **CLI wiring** in [server/src/main.rs](server/src/main.rs):
+  - `--blob-gc-interval <secs>` (default `0` = disabled)
+  - `--blob-gc-grace <secs>` (default `86400` = 24 h)
+  - Both parsed via a new shared `parse_u64_flag` helper (sibling to `parse_u32_flag`).
+  - Durable-only: if the persistence layer isn't durable we log a warning and skip spawning; otherwise `room::spawn_blob_gc_sweeper` is launched with `MissedTickBehavior::Skip`, mirroring `spawn_idle_sweeper`.
+- **Safety.** Still correct under crash-during-GC: an orphan crash between tombstone-write and final delete just costs one extra grace window. A crash mid-delete leaves a file whose referencing hash is gone from the live set — the next sweep finishes the job.
+- **Metric registered** via `describe_counter!` in [server/src/metrics.rs](server/src/metrics.rs).
 
-**Where it lives today.** `apply_remote` accepts any `lamport: u64`. A
-malicious peer publishing `lamport = u64::MAX` would win every LWW forever
-and poison the room's Lamport clock to boot.
+**Tests.** `server/tests/blob_gc.rs` — three tests against real `DirPersistence` in a tmpdir:
+1. `blob_gc_two_phase_deletes_orphans_only`: persists two blobs, references only one via `SetBlob`, asserts first sweep tombstones the orphan (returns 0), waits past a 50 ms grace, asserts second sweep deletes exactly 1, asserts third sweep is a no-op.
+2. `blob_gc_clears_tombstone_when_blob_becomes_live_again`: tombstones an unreferenced blob, then installs a `SetBlob` node, then sweeps with `grace=0` — the tombstone is cleared and the blob survives (live set wins over an expired tombstone).
+3. `blob_gc_is_noop_on_in_memory_persistence`: asserts `NoPersistence` always returns 0.
 
-**Plan.**
-- Reject nodes where `lamport > graph.lamport() + LAMPORT_SLACK` (const `1 << 20`). Legitimate concurrent-writer fanout stays well under this; anything larger is tampering.
-- Soft-reject nodes with `wall_ms` more than 24 h past server `wall_ms` (log + drop). Doesn't affect correctness (wall_ms is informational), but closes a "sort me to the top of the display timeline" attack for apps that render by wall clock.
-- Surfaces as `activesync_lamport_rejected_total{reason}`. No wire change; both checks live in `StateGraph::apply_remote` / `apply_remote_batch`.
+### G5 — Lamport ceiling & wall-clock sanity *(SHIPPED)*
 
-### G6 — Token revocation / re-validation
+**Where it lived before.** `apply_remote` accepted any `lamport: u64`.
+A malicious peer publishing `lamport = u64::MAX` would win every LWW
+forever and poison the room's Lamport clock to boot. `wall_ms` was
+equally unchecked — informational, but still a "sort-me-to-the-top"
+vector for apps that render by wall clock.
 
-**Where it lives today.** `RoomToken` is validated once on `hello`; the WS
-stays open until `exp` or disconnect. A leaked token is valid for its full
-expiry window (could be days).
+**Shipped.**
+- Two public constants in [core/src/graph.rs](core/src/graph.rs), re-exported from the crate root:
+  - `LAMPORT_SLACK: u64 = 1 << 20` — max gap between a node's Lamport and the local `graph.lamport()`. `2^20 ≈ 1 048 576` absorbs any realistic concurrent-writer fan-out.
+  - `WALL_SKEW_MAX_MS: u64 = 24 * 60 * 60 * 1000` — max forward skew for `Transaction::wall_ms`. 24 h comfortably covers client clock drift and timezone mistakes.
+- Two new error variants in [core/src/error.rs](core/src/error.rs): `SyncError::LamportCeiling { id, lamport, ceiling }` and `SyncError::WallClockSkew { id, wall_ms, now_ms }`. Both surface through `BatchResult::rejected`.
+- Two new public entry points in `StateGraph`:
+  - `apply_remote_checked(node, now_ms: Option<u64>)`
+  - `apply_remote_batch_checked(nodes, now_ms: Option<u64>)`
+  The existing `apply_remote` / `apply_remote_batch` stay as `None`-passthrough wrappers so the WASM bridge and compaction code (neither has a trusted clock) keep working unchanged.
+- **Check order.** Both G5 checks run **before** the batch Ed25519 verify so a flood of malformed nodes never burns signature CPU. Integrity order: hash check → Lamport ceiling → wall-skew → ed25519 batch verify → parent + policy → insert.
+- **`wall_ms == 0` is always accepted.** Compaction snapshots and legacy unsigned nodes carry a zero wall clock; skipping them keeps the check a pure anti-abuse tool rather than a correctness-hazardous timestamp gate.
+- **Lamport ceiling uses `saturating_add`** so a u64-overflow-crafted attack is a simple reject rather than a wraparound surprise.
+- **Server wiring** in [server/src/room.rs](server/src/room.rs): `import_nodes` samples `SystemTime::now().duration_since(UNIX_EPOCH)` once per pack and passes `Some(now_ms)` to `apply_remote_batch_checked`. Rejects are bucketed into `activesync_lamport_rejected_total{reason="ceiling"|"wall_skew"}` (registered in [server/src/metrics.rs](server/src/metrics.rs)). `LamportCeiling` and `WallClockSkew` variants are also surfaced in the `errors` return so `import_nodes` callers (WS pack handler) can log.
+- **No wire change.** All checks are additive, local rejects — no new fields in hello/welcome/pack and no client SDK changes required.
 
-**Plan, prefer (a) first:**
-- **(a) Short-lived tokens + SDK refresh hook.** `createDoc({ getToken: async () => "…" })` refetches before expiry (10-minute default lifetime). Server disconnects at `exp` with `4002 token expired`. Zero protocol change, zero new state.
-- **(b) Revocation list, if (a) is insufficient.** `ws_handler` periodically (`--revocation-poll <secs>`) checks an app-supplied endpoint; hits disconnect the WS. Adds a network dependency — only ship if a product actually needs it.
+**Tests.**
+- Core (`core/src/graph.rs`): 7 unit tests — boundary accept + over-ceiling reject, batch-mixed reject, wall-skew reject + reject-skipped-when-now-is-None + zero-wall-accepted + batch-mixed-wall-reject.
+- Server (`server/tests/lamport_ceiling.rs`): 2 integration tests against live `Rooms` + `import_nodes` — the rejection test is resilient against the small `SystemTime::now()` drift between test setup and the server's own re-sample by pushing `bad_wall` a full hour past the 24 h ceiling.
 
-Metric: `activesync_token_expired_disconnects_total`.
+### G6 — Token expiry enforced mid-session *(SHIPPED)*
+
+**Where it lived before.** `RoomToken` was validated once on `hello`; the
+WS then stayed open until the client disconnected. A token valid at
+handshake time was effectively valid forever — its `expiry` field was a
+one-shot admission check, not a session bound. A leaked token paid for
+the rest of its declared window (could be hours or days).
+
+**Shipped.** Expiry is now a hard session deadline. Option (a) from the
+plan — short-lived tokens + SDK refresh hook — is the supported pattern;
+option (b) revocation-list polling is deliberately **not** implemented
+(no network dependency, no new state, no new endpoint — revisit only
+when a product actually needs instant revocation).
+
+- `server/src/ws_handler.rs::verify_hello_token` now returns
+  `Result<u64, String>` — on accept it hands the caller the token's
+  `expiry_secs` (UNIX seconds). `RoomToken::verify` still runs the
+  `now >= expiry` admission check, so an already-expired token is
+  rejected at hello with `4001 unauthorized` as before; G6 only
+  concerns tokens that expire *during* a session.
+- Per-session state carries `token_deadline: Option<tokio::time::Instant>`.
+  Unlocked rooms (`auth_key` = `None`) leave it `None` — no deadline,
+  session lives until disconnect. Locked rooms compute
+  `Some(Instant::now() + Duration::from_secs(expiry_secs.saturating_sub(now_secs)))`
+  once at authentication time.
+- The main `tokio::select!` loop gets a first arm that awaits
+  `tokio::time::sleep_until(d)` when the deadline is `Some`, or
+  `std::future::pending::<()>()` when `None` (i.e. the arm is never
+  chosen for unlocked rooms — free). On fire, the server increments
+  `activesync_token_expired_disconnects_total{room}`, sends a best-effort
+  `Close{4002, "token expired"}` (bounded by a 1 s timeout so a stuck
+  sink can't delay shutdown), and drops the session.
+- **No wire change**, no new CLI flags, no new server state. Tokens
+  already carried `expiry`; G6 just honours it for the full session.
+  Close code `4002` is distinct from `4001 unauthorized` (wrong/expired
+  at hello) and `4008 rate limited` so SDKs can react differently —
+  `4002` means "refetch token and reconnect", not "user is unauthorized".
+
+**Tests.** `server/tests/token_expiry.rs` — 2 WS integration tests
+against a live locked room: a 2-second-expiry token completes the
+handshake and is then disconnected with close code `4002` within the
+6-second poll window; a 60-second-expiry token is **not** closed
+within the first 3 seconds (regression guard against the deadline
+firing too early).
+
+Metric: `activesync_token_expired_disconnects_total{room}`.
 
 ### G7 — Metrics / observability (server) *(SHIPPED)*
 
@@ -696,8 +785,8 @@ both behind the existing glob layer:
 
 | Wave | Items | Why this bundle |
 |---|---|---|
-| **Operational safety** | G1, G7, G3 | Backpressure + metrics + rate limiting are load-bearing on every other operational claim. Can't diagnose G4/G5/G6 without G7. |
-| **Before real users** | G4, G5 | Disk-bloat and Lamport-skew both produce garbage you can't clean up after the fact. |
-| **Product polish** | G6, G8, G9, G10 | Revocation, SDK metrics hook, conflict surfacing, migration docs. All small, all app-adjacent. |
+| **Operational safety** | G1, G7, G3, G4, G5, G6 | Backpressure + metrics + rate limiting + blob GC + Lamport ceiling + token-expiry enforcement. All shipped — the full load-bearing operational floor. |
+| **Before real users** | — | Subsumed into the Operational-safety wave. |
+| **Product polish** | G8, G9, G10 | SDK metrics hook, conflict surfacing, migration docs. All small, all app-adjacent. |
 | **Never unless asked** | G2 (cap only), G11 | G2 is trivial if mesh scale ever bites; G11 is expensive and speculative. |
 

@@ -1,52 +1,234 @@
-//! F4 — server-side persistence.
+//! F4 — server-side persistence. F6 — trait split.
 //!
-//! The `ServerPersistence` trait is a narrow write-through hook that sits
-//! *above* the `NodeStore`/`BlobStore` traits in `activesync-core`: every time
-//! a room accepts a node or a blob we append it to durable storage; every
-//! time a room is created we hydrate it from durable storage first.
+//! The persistence layer is split along the axis products actually want to
+//! mix and match: **nodes** (small, frequent, want indexed SQL/Mongo/Postgres)
+//! and **blobs** (large, rare, want S3/R2/filesystem). Each half is its own
+//! trait; a `ServerPersistence` supertrait exists so call sites that want
+//! "the whole persistence surface" (room hydration, write-through) don't
+//! have to name two trait objects.
 //!
-//! Keeping persistence outside the core stores avoids making `Room` /
-//! `StateGraph` generic over the backend — the write-through stays local to
-//! the server crate, while the in-memory `MemoryNodeStore` / `MemoryBlobStore`
-//! continue to satisfy `&SyncNode` borrowing.
+//! A blanket impl means any tuple `(N, B)` where `N: NodePersistence` and
+//! `B: BlobPersistence` automatically implements `ServerPersistence` — so
+//! `Arc::new((MongoNodeStore::…, S3BlobStore::…))` works out of the box.
 //!
-//! Two implementations ship:
+//! Two bundled implementations ship:
 //!
-//! * [`NoPersistence`] — the default. In-memory only; matches pre-F4 behavior.
+//! * [`NoPersistence`] — in-memory only; matches pre-F4 behavior.
 //! * [`DirPersistence`] — SQLite for nodes (`<root>/activesync.db`) plus a
 //!   content-addressed blob dir (`<root>/blobs/<room>/<hash>`). Hydrates on
 //!   room creation; write-through on every accepted node/blob.
+//!
+//! External backends (e.g. `activesync-s3-blobs::S3BlobStore`) implement
+//! just `BlobPersistence` and compose with any `NodePersistence`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use activesync_core::{unpack_nodes, pack_nodes, Hash, SyncNode};
 use rusqlite::{params, Connection};
 
-/// Write-through persistence backing the server's in-memory rooms.
-pub trait ServerPersistence: Send + Sync + std::fmt::Debug {
+/// F6 — a presigned URL plus its absolute Unix-second expiration.
+///
+/// The SDK caches URLs and refreshes ~60 s before `expires_at_unix`, so
+/// returning an accurate timestamp lets clients minimize round-trips. If
+/// the backend genuinely doesn't know the lifetime, return `u64::MAX` for
+/// `expires_at_unix` and the SDK will only refresh on 403/expired error.
+#[derive(Debug, Clone)]
+pub struct PresignedUrl {
+    pub url: String,
+    pub expires_at_unix: u64,
+}
+
+impl PresignedUrl {
+    /// Helper: build from a TTL relative to *now*.
+    pub fn with_ttl(url: impl Into<String>, ttl: Duration) -> Self {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self { url: url.into(), expires_at_unix: now.saturating_add(ttl.as_secs()) }
+    }
+}
+
+// ─── Trait split (F6) ───────────────────────────────────────────────────────
+
+/// Node-side persistence. See module docs for rationale.
+pub trait NodePersistence: Send + Sync + std::fmt::Debug {
     /// Return every previously-persisted node for `room_id`, in insertion order.
     fn load_room_nodes(&self, room_id: &str) -> Vec<SyncNode>;
     /// Persist a single accepted node.
     fn persist_node(&self, room_id: &str, node: &SyncNode);
     /// Persist many accepted nodes in a single batch. Default impl loops
-    /// [`persist_node`]; backends with transactional semantics should override
-    /// to amortize fsync / commit cost across the whole batch.
+    /// [`persist_node`]; backends with transactional semantics should
+    /// override to amortize fsync / commit cost across the whole batch.
     fn persist_nodes(&self, room_id: &str, nodes: &[&SyncNode]) {
         for n in nodes { self.persist_node(room_id, n); }
     }
+    /// `true` if this backend survives process restarts. See
+    /// [`ServerPersistence::is_durable`] for the combined durability used
+    /// by the idle-eviction sweeper.
+    fn nodes_durable(&self) -> bool { true }
+}
+
+/// Blob-side persistence. See module docs for rationale.
+pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
     /// Return every previously-persisted blob for `room_id`.
     fn load_room_blobs(&self, room_id: &str) -> Vec<(Hash, Vec<u8>)>;
     /// Persist a single blob.
     fn persist_blob(&self, room_id: &str, hash: &Hash, bytes: &[u8]);
-    /// `true` if this backend survives process restarts. The in-memory
-    /// default returns `false`; durable backends (SQLite + files) return
-    /// `true`. The idle-eviction sweeper refuses to evict rooms when this
-    /// is `false`, because dropping an in-memory room would be pure data
-    /// loss.
-    fn is_durable(&self) -> bool { true }
+
+    /// G4 — two-phase blob GC sweep for one room.
+    ///
+    /// Walk every persisted blob for `room_id`. A blob is *live* when its
+    /// hash is in `live`. Non-live blobs are tombstoned on the first
+    /// sweep that sees them; they are deleted on a subsequent sweep once
+    /// the tombstone's age exceeds `grace`. A blob that reappears in
+    /// `live` after tombstoning has its tombstone cleared.
+    ///
+    /// `grace = Duration::ZERO` collapses the two phases. Returns the
+    /// number of blobs actually deleted in this call. Default impl is a
+    /// no-op (non-durable backends have nothing to GC).
+    fn blob_gc_sweep(
+        &self,
+        _room_id: &str,
+        _live: &std::collections::HashSet<Hash>,
+        _grace: Duration,
+    ) -> usize { 0 }
+
+    /// F6 — redirect target for blob *downloads*.
+    ///
+    /// Return `Some(url)` to tell the SDK to fetch the blob directly from
+    /// `url` (typically a presigned S3 GET). The server emits a
+    /// `blob-redirect` wire message instead of sending the bytes.
+    /// Returning `None` falls through to the existing bytes-over-WS path.
+    ///
+    /// `size_hint` lets backends skip redirect for below-threshold blobs
+    /// (the round-trip to mint a URL isn't worth it for a 1 KB icon). If
+    /// the backend doesn't know the size, pass `None`; backends that care
+    /// about size can still call `load_room_blobs` or consult their own
+    /// metadata.
+    fn resolve_get_url(
+        &self,
+        _room_id: &str,
+        _hash: &Hash,
+        _size_hint: Option<u64>,
+    ) -> Option<PresignedUrl> { None }
+
+    /// F6 — direct-upload target for blob *uploads*.
+    ///
+    /// Return `Some(url)` to tell the SDK to PUT bytes straight to `url`
+    /// (typically a presigned S3 PUT). The SDK then sends `blob-uploaded`
+    /// when the PUT completes. Returning `None` falls through to
+    /// bytes-over-WS.
+    ///
+    /// Backends should typically gate this on `size` (e.g. only redirect
+    /// for blobs >= 1 MiB) since the presign round-trip costs one request.
+    fn resolve_put_url(
+        &self,
+        _room_id: &str,
+        _hash: &Hash,
+        _size: u64,
+    ) -> Option<PresignedUrl> { None }
+
+    /// F6 — verify a presigned upload completed. Called when the SDK
+    /// sends `blob-uploaded`. Backends with server-side visibility (S3
+    /// HEAD object) should verify the object exists and matches the
+    /// claimed hash/size; backends without should return `Ok(())`.
+    ///
+    /// Returning `Err` causes the server to reject the `blob-uploaded`
+    /// message and ignore the blob; the client falls back to WS.
+    fn verify_uploaded(
+        &self,
+        _room_id: &str,
+        _hash: &Hash,
+    ) -> Result<(), String> { Ok(()) }
+
+    /// `true` if this backend survives process restarts.
+    fn blobs_durable(&self) -> bool { true }
 }
+
+/// The whole-persistence surface — everything `Rooms` needs. Existing call
+/// sites that hold `Arc<dyn ServerPersistence>` are unchanged.
+pub trait ServerPersistence: NodePersistence + BlobPersistence {
+    /// Combined durability: a room is safe to evict only when both halves
+    /// survive a restart. The idle-eviction sweeper reads this; call sites
+    /// that care only about one axis can call `nodes_durable()` /
+    /// `blobs_durable()` directly.
+    fn is_durable(&self) -> bool {
+        self.nodes_durable() && self.blobs_durable()
+    }
+}
+
+/// Blanket impl: any type that implements both halves implements the
+/// whole. Covers `DirPersistence`, `NoPersistence`, `Composite`, and any
+/// future single-backend type.
+impl<T: NodePersistence + BlobPersistence + ?Sized> ServerPersistence for T {}
+
+// ─── Composite<N, B> ─────────────────────────────────────────────────────────
+
+/// Compose a `NodePersistence` and a `BlobPersistence` into one
+/// `ServerPersistence`. Lets you wire mixed backends without writing a
+/// bespoke struct:
+///
+/// ```ignore
+/// let store = Composite::new(MongoNodeStore::connect(uri)?, S3BlobStore::new(cfg)?);
+/// let rooms = Rooms::with_persistence(Arc::new(store));
+/// ```
+#[derive(Debug)]
+pub struct Composite<N, B> {
+    pub nodes: N,
+    pub blobs: B,
+}
+
+impl<N, B> Composite<N, B> {
+    pub fn new(nodes: N, blobs: B) -> Self { Self { nodes, blobs } }
+}
+
+impl<N: NodePersistence, B: BlobPersistence> NodePersistence for Composite<N, B> {
+    fn load_room_nodes(&self, room_id: &str) -> Vec<SyncNode> {
+        self.nodes.load_room_nodes(room_id)
+    }
+    fn persist_node(&self, room_id: &str, node: &SyncNode) {
+        self.nodes.persist_node(room_id, node)
+    }
+    fn persist_nodes(&self, room_id: &str, nodes: &[&SyncNode]) {
+        self.nodes.persist_nodes(room_id, nodes)
+    }
+    fn nodes_durable(&self) -> bool {
+        self.nodes.nodes_durable()
+    }
+}
+
+impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B> {
+    fn load_room_blobs(&self, room_id: &str) -> Vec<(Hash, Vec<u8>)> {
+        self.blobs.load_room_blobs(room_id)
+    }
+    fn persist_blob(&self, room_id: &str, hash: &Hash, bytes: &[u8]) {
+        self.blobs.persist_blob(room_id, hash, bytes)
+    }
+    fn blob_gc_sweep(
+        &self,
+        room_id: &str,
+        live: &std::collections::HashSet<Hash>,
+        grace: Duration,
+    ) -> usize {
+        self.blobs.blob_gc_sweep(room_id, live, grace)
+    }
+    fn resolve_get_url(&self, room_id: &str, hash: &Hash, size_hint: Option<u64>) -> Option<PresignedUrl> {
+        self.blobs.resolve_get_url(room_id, hash, size_hint)
+    }
+    fn resolve_put_url(&self, room_id: &str, hash: &Hash, size: u64) -> Option<PresignedUrl> {
+        self.blobs.resolve_put_url(room_id, hash, size)
+    }
+    fn verify_uploaded(&self, room_id: &str, hash: &Hash) -> Result<(), String> {
+        self.blobs.verify_uploaded(room_id, hash)
+    }
+    fn blobs_durable(&self) -> bool {
+        self.blobs.blobs_durable()
+    }
+}
+
 
 // ─── NoPersistence ──────────────────────────────────────────────────────────
 
@@ -54,12 +236,16 @@ pub trait ServerPersistence: Send + Sync + std::fmt::Debug {
 #[derive(Debug, Default)]
 pub struct NoPersistence;
 
-impl ServerPersistence for NoPersistence {
+impl NodePersistence for NoPersistence {
     fn load_room_nodes(&self, _room_id: &str) -> Vec<SyncNode> { Vec::new() }
     fn persist_node(&self, _room_id: &str, _node: &SyncNode) {}
+    fn nodes_durable(&self) -> bool { false }
+}
+
+impl BlobPersistence for NoPersistence {
     fn load_room_blobs(&self, _room_id: &str) -> Vec<(Hash, Vec<u8>)> { Vec::new() }
     fn persist_blob(&self, _room_id: &str, _hash: &Hash, _bytes: &[u8]) {}
-    fn is_durable(&self) -> bool { false }
+    fn blobs_durable(&self) -> bool { false }
 }
 
 // ─── DirPersistence ─────────────────────────────────────────────────────────
@@ -113,9 +299,15 @@ impl DirPersistence {
     fn blobs_dir_for(&self, room_id: &str) -> PathBuf {
         self.root.join("blobs").join(sanitize(room_id))
     }
+
+    /// G4: sibling directory tree for tombstones, kept out of
+    /// `blobs/<room>/` so `load_room_blobs` never has to skip them.
+    fn tombstones_dir_for(&self, room_id: &str) -> PathBuf {
+        self.root.join("blob-tombstones").join(sanitize(room_id))
+    }
 }
 
-impl ServerPersistence for DirPersistence {
+impl NodePersistence for DirPersistence {
     fn load_room_nodes(&self, room_id: &str) -> Vec<SyncNode> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
@@ -213,7 +405,9 @@ impl ServerPersistence for DirPersistence {
         metrics::histogram!("activesync_persistence_write_seconds", "kind" => "nodes_batch")
             .record(t0.elapsed().as_secs_f64());
     }
+}
 
+impl BlobPersistence for DirPersistence {
     fn load_room_blobs(&self, room_id: &str) -> Vec<(Hash, Vec<u8>)> {
         let dir = self.blobs_dir_for(room_id);
         let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new(); };
@@ -259,6 +453,77 @@ impl ServerPersistence for DirPersistence {
         }
         metrics::histogram!("activesync_persistence_write_seconds", "kind" => "blob")
             .record(t0.elapsed().as_secs_f64());
+    }
+
+    fn blob_gc_sweep(
+        &self,
+        room_id: &str,
+        live: &std::collections::HashSet<Hash>,
+        grace: Duration,
+    ) -> usize {
+        let blobs_dir = self.blobs_dir_for(room_id);
+        let tombs_dir = self.tombstones_dir_for(room_id);
+        let Ok(rd) = std::fs::read_dir(&blobs_dir) else { return 0; };
+
+        let now = SystemTime::now();
+        let mut deleted = 0usize;
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+            // Skip stray `.tmp` writes from a crashed persist_blob.
+            if name.ends_with(".tmp") { continue; }
+            let Some(hash) = hash_from_hex(name) else { continue };
+            let tomb_path = tombs_dir.join(name);
+
+            if live.contains(&hash) {
+                // Blob is referenced: clear any leftover tombstone so a brief
+                // unreference-then-rereference (e.g. a concurrent SetBlob
+                // arriving between sweeps) doesn't doom the blob next round.
+                if tomb_path.exists() {
+                    let _ = std::fs::remove_file(&tomb_path);
+                }
+                continue;
+            }
+
+            // Not live — consult tombstone.
+            match std::fs::metadata(&tomb_path) {
+                Ok(md) => {
+                    let aged = md.modified().ok()
+                        .and_then(|t| now.duration_since(t).ok())
+                        .map(|age| age >= grace)
+                        .unwrap_or(false);
+                    if aged {
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            tracing::warn!(?e, room = %room_id, blob = %name, "blob_gc_sweep: delete blob failed");
+                            continue;
+                        }
+                        let _ = std::fs::remove_file(&tomb_path);
+                        deleted += 1;
+                    }
+                }
+                Err(_) => {
+                    // No tombstone yet — create one. `grace == ZERO`
+                    // immediately re-checks and deletes in the same pass.
+                    if let Err(e) = std::fs::create_dir_all(&tombs_dir) {
+                        tracing::warn!(?e, "blob_gc_sweep: mkdir tombstones failed");
+                        continue;
+                    }
+                    if let Err(e) = std::fs::File::create(&tomb_path) {
+                        tracing::warn!(?e, "blob_gc_sweep: create tombstone failed");
+                        continue;
+                    }
+                    if grace.is_zero() {
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            tracing::warn!(?e, room = %room_id, blob = %name, "blob_gc_sweep: immediate delete failed");
+                            continue;
+                        }
+                        let _ = std::fs::remove_file(&tomb_path);
+                        deleted += 1;
+                    }
+                }
+            }
+        }
+        deleted
     }
 }
 

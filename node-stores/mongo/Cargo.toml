@@ -1,0 +1,24 @@
+[package]
+name = "activesync-mongo-store"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "MongoDB NodePersistence adapter for ActiveSync (F7)"
+
+[dependencies]
+activesync-core   = { path = "../../core" }
+activesync-server = { path = "../../server" }
+mongodb = { version = "3", default-features = false, features = ["rustls-tls", "bson-3", "compat-3-3-0"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+tracing = "0.1"
+metrics = "0.23"
+thiserror = { workspace = true }
+futures-util = "0.3"
+
+[dev-dependencies]
+tokio = { workspace = true }
+testcontainers = { version = "0.23", features = ["blocking"] }
+tracing-subscriber = "0.3"
+activesync-nodestore-conformance = { path = "../conformance" }
+activesync-core = { path = "../../core" }

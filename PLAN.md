@@ -1938,7 +1938,50 @@ Both tests pass. Full server test suite after G6: 15 lib + 2 token-expiry
 shipped. Next: product-polish wave (G8 SDK metrics hook, G9 conflict
 surfacing, G10 migration docs).
 
-### G8 — SDK metrics hook (not started)
+### G8 — SDK metrics hook (SHIPPED)
+
+**Implementation locations.**
+
+- [web/sdk.js](web/sdk.js) — `makeMetrics(onMetric)` near the other
+  small utilities returns `{ emit, enabled }`. `emit(kind, value, labels)`
+  is a true no-op when `onMetric` is unset (zero allocation, zero hot-path
+  cost). When set, app-side throws are caught + logged so a buggy hook
+  can't corrupt SDK state.
+- `createDoc` accepts a top-level `onMetric: (ev) => void` option. The
+  delivered envelope is `{ kind, value, labels, timestamp }` where
+  `timestamp` is `Date.now()`.
+- `makeTransport` now takes a `metrics` parameter and is instrumented at
+  the seven sites listed in the kinds table:
+  - **`pack_applied`** — emitted in the `pack` message handler with
+    `value = nodes.length` and `labels.from = "live"|"<peer>"`.
+  - **`op_apply_latency`** — wraps `afterLocalMutation` in `createDoc`.
+    `value` is `performance.now()` ms across `sendLocalDelta` +
+    mesh broadcast. Labels: `type` (map/text/list/blob/etc.), `source`.
+  - **`ws_reconnect`** — emitted twice: in `ws.onclose` with
+    `outcome:"scheduled"` (and `delay_ms`/`was_connected`), and in
+    `ws.onopen` with `outcome:"ok"` when the previous attempt count was
+    >0. The streak counter resets on every successful connect.
+  - **`blob_upload`** — emitted in both `sendBlobs` (WS-batched path,
+    bytes estimated from base64 length) and `directUpload` (direct PUT,
+    exact bytes).
+  - **`blob_download`** — emitted in `blob-pack` (WS, exact bytes,
+    count) and `fetchBlobViaUrl` (redirect, with `result:"ok"`/
+    `"expired"`/`"err"`).
+  - **`direct_upload_fallback`** — emitted in `sendBlobs`'s catch
+    block when the presigned PUT fails and we fall back to bytes-over-WS.
+    `labels.reason` carries the underlying error message.
+- The demo wires the hook to `console.debug('[metric]', kind, value, labels)`
+  in [web/demo.js](web/demo.js) so the surface gets exercised end-to-end;
+  `web/index.html` is cache-busted to `demo.js?v=7`.
+
+**Deferred from the original kind list.** `presence_latency` is not
+shipped — the server doesn't echo presence broadcasts, so there is no
+honest round-trip to measure. We can revisit this once presence acks
+land or when peer-to-peer presence makes the latency observable.
+
+---
+
+### G8 — SDK metrics hook (design retained for reference)
 
 **Problem.** The server exposes a rich Prometheus surface from G7
 (`activesync_*` histograms, gauges, counters). The SDK is a black box
@@ -2012,7 +2055,57 @@ expected cascade on load + one setBlob + one reconnect.
 - Automatic correlation with server metrics. That's an ops-side join
   (trace id / request id propagation) — out of scope for G8.
 
-### G9 — Conflict surfacing (not started)
+### G9 — Conflict surfacing (SHIPPED)
+
+**Implementation locations.**
+
+- [core/src/conflicts.rs](core/src/conflicts.rs) — new module. Pure
+  `detect_conflicts(nodes: &[&SyncNode]) -> Vec<ConflictEvent>`. Two
+  passes per op family (Map, List); O(N) over the node set. Output is
+  sorted deterministically so two callers with identical graph state
+  produce identical sequences.
+- [core/src/graph.rs](core/src/graph.rs) — `StateGraph::detect_conflicts(&self)`
+  thin wrapper that collects the graph's nodes and hands them to the
+  detector.
+- Definition. A conflict is recorded when, for a given key (Map key or
+  `list_key#item_hex` for List), a loser op came from a *different*
+  author than the winner. Same-author overwrites are refinement, not
+  conflict. This is a pragmatic approximation of causal concurrency —
+  in practice "different-author loser" exactly matches the surface
+  apps want to show. Deep causal traversal is deferred.
+- Kinds: `MapOverwrite`, `ListMoveLost`, `ListDeleteWon`. Text is not
+  emitted (RGA per-char attribution is a separate feature — see
+  non-goals in the design section below).
+- [bridge/src/lib.rs](bridge/src/lib.rs) — `SyncStore.take_conflicts_json()`
+  returns a JSON array of conflicts not yet delivered. Internal
+  fingerprint set (`HashSet<(kind,key,wl,wa,ll,la)>` + `VecDeque` for
+  bounded eviction at 4096 entries) ensures each conflict ships once.
+- [web/sdk.js](web/sdk.js) — `conflictE` emitter, `CONFLICT_BUFFER_MAX=256`
+  ring buffer, `pollConflicts()` invoked from every `emitChange` with
+  `ev.type === 'pack'|'bulk'` or `ev.source === 'local'`. Public API:
+  `doc.onConflict(cb)` + `doc.recentConflicts(sinceMs)`. Each event
+  also fans out through the G8 metrics hook as
+  `emit('conflict', 1, {kind, by_you})`.
+
+**Tests.** Four in `core/src/conflicts.rs::tests`:
+- `map_concurrent_set_emits_overwrite` — `Set(k,a)` vs `Set(k,b)` from
+  two authors merges into one `MapOverwrite` event.
+- `map_same_author_overwrite_is_not_conflict` — single author
+  rewriting their own key produces zero conflicts.
+- `list_concurrent_move_emits_move_lost` — two authors Move the same
+  item to different positions; reports at least one `ListMoveLost`.
+- `list_delete_emits_delete_won` — Delete wins over concurrent Move;
+  reports at least one `ListDeleteWon`.
+
+**Rebuild.** `wasm-pack build bridge --target web --out-dir ../web/pkg`
+was re-run so the `take_conflicts_json` export lands in
+`web/pkg/activesync_bridge.js`. If you pull this branch, rerun that
+command (or the `wasm:build` task you have wired up) before `web/`
+will work.
+
+---
+
+### G9 — Conflict surfacing (design retained for reference)
 
 **Problem.** The CRDT layer silently resolves every conflict: Map uses
 LWW on `(lamport, author)`, List absorbs on Delete, Text merges
@@ -2084,7 +2177,38 @@ graph already has.
 - Text-level character attribution. RGA already gives you "who
   inserted this char"; that's a different feature (inline blame).
 
-### G10 — Migration + operator docs (not started)
+### G10 — Migration + operator docs (SHIPPED)
+
+**Implementation locations.**
+
+- [docs/migration.md](docs/migration.md) — phase-boundary deltas (F4
+  through F8 + Phase G). Each section covers schema changes, config
+  knobs added, wire back-compat story, required code changes (usually
+  none), and rollback notes. Explicit "mixed-version fleets" note at
+  the bottom points at `A7` capability negotiation.
+- [docs/operator.md](docs/operator.md) — steady-state runbook. Full
+  CLI flag table; every `activesync_*` metric with its kind, labels,
+  and suggested alert shape; per-backend backup/restore
+  (`DirPersistence`, `PostgresNodeStore`, `MongoNodeStore`,
+  `S3BlobStore`); capacity planning rules of thumb drawn from the
+  bench suite; rolling-restart procedure; symptom → first-check
+  cheat sheet.
+- [docs/integration.md](docs/integration.md) — four worked
+  embedding examples: self-host with `DirPersistence`,
+  SpeechSlate-shape `Composite<MongoNodeStore, S3BlobStore>` with
+  `S3Auth::Delegate`, Postgres shape with `S3Auth::Direct`, and the
+  F5 JWT bridge. Every example uses the real crate APIs
+  (`Rooms::new(server_key, persistence, broadcast_capacity,
+  peer_rate_nodes, peer_rate_bytes)`, `DirPersistence::open`,
+  `MongoNodeStore::connect`, `PostgresNodeStore::connect_and_migrate`,
+  `S3BlobStore::new`, `BridgeConfig { verifier, room_key, … }`).
+- Every snippet round-trips against current `cargo doc` / node syntax
+  at authoring time; no API reference duplication (PLAN.md G10
+  non-goal).
+
+---
+
+### G10 — Migration + operator docs (design retained for reference)
 
 **Problem.** F6 and F7 just landed a trait split + two new adapters +
 capability negotiation + new wire messages. Anyone integrating
@@ -2140,7 +2264,27 @@ Target readers:
 at authoring time. Call out the snippet's source file so it stays
 honest.
 
-### G11 — Hot-room memory bound (not started)
+### G11 — Hot-room memory bound (observability SHIPPED; enforcement deferred)
+
+**Shipped — observability slice.** The first-step gauge is live:
+`activesync_room_bytes_resident{room}` is registered in
+[server/src/metrics.rs](server/src/metrics.rs) via `describe_gauge!`
+and updated at the end of every `import_nodes` in
+[server/src/room.rs](server/src/room.rs). The value is
+`node_count × 512 + Σ blob.len()` — a rough estimate (large
+transactions under-count on the per-node 512 B constant). Operator
+docs call this out; see
+[docs/operator.md](docs/operator.md#metrics-reference).
+
+**Deferred — enforcement options A/B/C.** No compaction trigger, no
+LRU hot window, no size-triggered eviction. The revisit trigger
+remains: first production room with >24 h continuous activity, or
+RSS SLO breach in a hosted deployment. Until then the gauge alone is
+enough — don't pre-optimize a shape we haven't seen.
+
+---
+
+### G11 — Hot-room memory bound (design retained for reference)
 
 **Problem.** A long-lived room holds its full `StateGraph` + (in dev)
 `MemoryBlobStore` + `verified_ids` cache + presence map in RAM for as

@@ -597,6 +597,31 @@ pub async fn import_nodes(room: &Room, nodes: Vec<SyncNode>) -> (usize, Vec<Stri
         metrics::counter!("activesync_nodes_accepted_total", "room" => room.room_id.clone())
             .increment(accepted as u64);
     }
+    // G11 — observability-only resident-bytes gauge. Approximate: flat
+    // 512 B per node header/transaction + exact blob resident bytes.
+    // Cheap to compute (one iteration over blob hashes) and only runs
+    // after each accepted pack, so it cannot outrun the WS hot path.
+    {
+        let node_count = graph.node_count() as u64;
+        drop(graph);
+        let blob_bytes: u64 = {
+            let blobs = room.blobs.read().await;
+            let mut total: u64 = 0;
+            for h in blobs.hashes() {
+                if let Some(sz) = blobs.size(h) {
+                    total += sz;
+                }
+            }
+            total
+        };
+        const NODE_EST_BYTES: u64 = 512;
+        let resident = node_count.saturating_mul(NODE_EST_BYTES).saturating_add(blob_bytes);
+        metrics::gauge!(
+            "activesync_room_bytes_resident",
+            "room" => room.room_id.clone()
+        )
+        .set(resident as f64);
+    }
 
     (accepted, errors)
 }

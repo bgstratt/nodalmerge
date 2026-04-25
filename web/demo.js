@@ -209,6 +209,12 @@ const doc = await createDoc({
   authorSeed,
   roomSeed,
   autoConnect: false,
+  // G8 — surface metric events on a debug channel so the demo exercises
+  // the hook end-to-end. Real apps would forward to OpenTelemetry / a
+  // counter/histogram backend instead of console.
+  onMetric: (ev) => {
+    console.debug('[metric]', ev.kind, ev.value, ev.labels);
+  },
 });
 const myPubkey = doc.pubkeyHex;
 

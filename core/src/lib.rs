@@ -1,6 +1,7 @@
 pub mod capabilities;
 pub mod cas;
 pub mod compaction;
+pub mod conflicts;
 pub mod crypto;
 pub mod frontier;
 pub mod graph;

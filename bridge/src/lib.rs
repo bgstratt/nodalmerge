@@ -7,7 +7,9 @@ use activesync_core::{
     replay, canonical_hash,
     compact, rebuild_from_snapshot, pack_snapshot_pack, unpack_snapshot_pack, verify_snapshot,
 };
+use activesync_core::conflicts::{ConflictEvent, ConflictFingerprint};
 use ed25519_dalek::SigningKey;
+use std::collections::{HashSet, VecDeque};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -32,7 +34,19 @@ pub struct SyncStore {
     tick_config: Option<TickConfig>,
     /// E3: Raw ops buffered during a tick window, flushed as one signed node.
     pending_tick_ops: Vec<Op>,
+    /// G9: conflicts already delivered to the SDK. Fingerprint set so
+    /// `take_conflicts_json` only yields new ones. Bounded by
+    /// [`CONFLICT_SEEN_MAX`] with LRU-style eviction so long-lived rooms
+    /// don't grow this set unboundedly.
+    conflicts_seen: HashSet<ConflictFingerprint>,
+    /// G9: FIFO of fingerprints in insertion order for bounded eviction.
+    conflicts_seen_order: VecDeque<ConflictFingerprint>,
 }
+
+/// G9 — maximum remembered conflict fingerprints. Anything beyond this
+/// may re-deliver (harmless — apps dedup on their side or show a
+/// duplicate toast). 4096 covers ~months of normal app use.
+const CONFLICT_SEEN_MAX: usize = 4096;
 
 #[wasm_bindgen]
 impl SyncStore {
@@ -47,7 +61,7 @@ impl SyncStore {
         let mut seed = [0u8; 32];
         seed.copy_from_slice(author_key);
         let signing_key = SigningKey::from_bytes(&seed);
-        Ok(SyncStore { graph: StateGraph::new(), signing_key, blobs: MemoryBlobStore::new(), room_key: None, tick_config: None, pending_tick_ops: Vec::new() })
+        Ok(SyncStore { graph: StateGraph::new(), signing_key, blobs: MemoryBlobStore::new(), room_key: None, tick_config: None, pending_tick_ops: Vec::new(), conflicts_seen: HashSet::new(), conflicts_seen_order: VecDeque::new() })
     }
 
     /// Hex-encoded Ed25519 public key — the peer's stable identity.
@@ -226,6 +240,59 @@ impl SyncStore {
             .map(|(k, v)| (k, base64_encode(&v)))
             .collect();
         serde_json::to_string(&b64).unwrap_or_else(|_| "{}".into())
+    }
+
+    // -------------------------------------------------------------------------
+    // G9: Conflict surfacing
+    // -------------------------------------------------------------------------
+
+    /// Return any conflicts that have arisen since the last call, as a
+    /// JSON array. Each entry:
+    /// `{ kind, key, winner_author, winner_lamport, winner_op, loser_author, loser_lamport, loser_op }`
+    ///
+    /// Authors are hex strings; ops are tagged objects matching
+    /// [`activesync_core::conflicts::ConflictOp`] (`{kind:"set",value:base64}`,
+    /// `{kind:"delete"}`, `{kind:"set_blob",blob_hash:"hex"}`, etc.).
+    ///
+    /// Idempotent: two back-to-back calls with no intervening graph
+    /// changes return `"[]"` on the second call. The in-process seen-set
+    /// is bounded ([`CONFLICT_SEEN_MAX`]), so extremely conflict-heavy
+    /// long-lived rooms may see older events re-surface; apps should
+    /// dedup on their side if they care.
+    pub fn take_conflicts_json(&mut self) -> String {
+        let conflicts = self.graph.detect_conflicts();
+        let mut fresh: Vec<&ConflictEvent> = Vec::new();
+        for c in &conflicts {
+            let fp = c.fingerprint();
+            if self.conflicts_seen.contains(&fp) {
+                continue;
+            }
+            self.conflicts_seen.insert(fp.clone());
+            self.conflicts_seen_order.push_back(fp);
+            while self.conflicts_seen_order.len() > CONFLICT_SEEN_MAX {
+                if let Some(old) = self.conflicts_seen_order.pop_front() {
+                    self.conflicts_seen.remove(&old);
+                }
+            }
+            fresh.push(c);
+        }
+
+        let arr: Vec<serde_json::Value> = fresh
+            .into_iter()
+            .map(|c| {
+                serde_json::json!({
+                    "kind":            serde_json::to_value(c.kind).unwrap_or(serde_json::Value::Null),
+                    "key":             c.key,
+                    "winner_author":   hex32(&c.winner_author),
+                    "winner_lamport":  c.winner_lamport,
+                    "winner_op":       serde_json::to_value(&c.winner_op).unwrap_or(serde_json::Value::Null),
+                    "loser_author":    hex32(&c.loser_author),
+                    "loser_lamport":   c.loser_lamport,
+                    "loser_op":        serde_json::to_value(&c.loser_op).unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect();
+        serde_json::to_string(&arr).unwrap_or_else(|_| "[]".into())
     }
 
     /// Read a single key from the **speculative** view (local + remote writes).
@@ -982,6 +1049,14 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, ()> {
         i += 4;
     }
     Ok(out)
+}
+
+fn hex32(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
 }
 
 fn base64_encode(data: &[u8]) -> String {

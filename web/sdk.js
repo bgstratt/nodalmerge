@@ -61,6 +61,31 @@ function makeEmitter() {
   };
 }
 
+// G8 — build a metrics dispatcher. Returns `{ emit }` where `emit` is a
+// no-op when no `onMetric` hook is configured (zero cost on the hot
+// path). When a hook is provided, wraps it so an app-side throw never
+// corrupts the SDK state. See docs/sdk.md for the event kind catalogue.
+function makeMetrics(onMetric) {
+  if (typeof onMetric !== 'function') {
+    return { emit() {}, enabled: false };
+  }
+  return {
+    emit(kind, value, labels) {
+      try {
+        onMetric({
+          kind,
+          value,
+          labels: labels || {},
+          timestamp: Date.now(),
+        });
+      } catch (e) {
+        console.error('[sdk] onMetric hook threw', e);
+      }
+    },
+    enabled: true,
+  };
+}
+
 function randomSeed32() {
   const s = new Uint8Array(32);
   (globalThis.crypto ?? crypto).getRandomValues(s);
@@ -71,13 +96,18 @@ function randomSeed32() {
 // Transport — WebSocket wrapper that speaks the ActiveSync wire protocol.
 // Reuses the protocol shipped in demo.js (hello/welcome/pack/request/mst/blob).
 // -----------------------------------------------------------------------------
-function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscription, onRemotePack, onConnect, onDisconnect, onError, onPresence, onPeerJoined, onPeerLeft, onWelcomePeers, onSignal, log }) {
+function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscription, onRemotePack, onConnect, onDisconnect, onError, onPresence, onPeerJoined, onPeerLeft, onWelcomePeers, onSignal, log, metrics }) {
+  metrics = metrics || { emit() {}, enabled: false };
   let ws = null;
   let reconnectTimer = null;
   let reconnectDelay = 1000;
   const maxReconnectDelay = 30_000;
   let closed = false;
   let connected = false;
+  // G8: counts every `openSocket()` call; resets to 0 on a successful
+  // onopen so `attempt` in `ws_reconnect` events reflects the current
+  // streak of failed attempts, not the lifetime total.
+  let reconnectAttempt = 0;
 
   // MST descent state.
   let mstDescentRoot = null;
@@ -150,15 +180,33 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
       }
       if (wsBytes.length > 0) {
         const blobs = JSON.parse(store.export_blobs_json(JSON.stringify(wsBytes)));
-        if (blobs.length > 0) send({ type: 'blob-upload', blobs });
+        if (blobs.length > 0) {
+          send({ type: 'blob-upload', blobs });
+          let total = 0;
+          for (const b of blobs) {
+            // b.data is base64; estimate bytes as 0.75 * len (upper bound).
+            total += Math.ceil((b?.data?.length ?? 0) * 0.75);
+          }
+          metrics.emit('blob_upload', total, {
+            transport: 'ws',
+            result: 'ok',
+            count: blobs.length,
+          });
+        }
       }
       for (const { hash, bytes } of direct) {
         directUpload(hash, bytes).catch(err => {
           log('warn', '[sdk] direct upload failed; falling back to ws', err);
+          metrics.emit('direct_upload_fallback', bytes.length, {
+            reason: err?.message ?? 'unknown',
+          });
           // Fallback: ship the bytes over WS.
           try {
             const blobs = JSON.parse(store.export_blobs_json(JSON.stringify([hash])));
-            if (blobs.length > 0) send({ type: 'blob-upload', blobs });
+            if (blobs.length > 0) {
+              send({ type: 'blob-upload', blobs });
+              metrics.emit('blob_upload', bytes.length, { transport: 'ws', result: 'ok' });
+            }
           } catch (_) {}
         });
       }
@@ -198,6 +246,7 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
     // Tell the server the object exists; server HEAD-verifies and
     // broadcasts blob-available so other peers can pull.
     send({ type: 'blob-uploaded', hash });
+    metrics.emit('blob_upload', bytes.length, { transport: 'direct', result: 'ok' });
   }
 
   // F6: download a blob via presigned URL and stash it in the store.
@@ -208,9 +257,11 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
     const resp = await fetch(url, { method: 'GET', cache: 'no-store' });
     if (resp.status === 403) {
       blobUrlCache.delete(hash);
+      metrics.emit('blob_download', 0, { transport: 'redirect', result: 'expired' });
       throw new Error('presigned URL rejected (403)');
     }
     if (!resp.ok) {
+      metrics.emit('blob_download', 0, { transport: 'redirect', result: 'err', status: resp.status });
       throw new Error('GET failed: ' + resp.status);
     }
     const bytes = new Uint8Array(await resp.arrayBuffer());
@@ -219,6 +270,7 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
     } finally {
       pendingBlobFetches.delete(hash);
     }
+    metrics.emit('blob_download', bytes.length, { transport: 'redirect', result: 'ok' });
     onRemotePack({ from: 'direct', kind: 'blobs' });
   }
 
@@ -305,9 +357,13 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
         break;
 
       case 'pack': {
+        const nodeCount = Array.isArray(msg.nodes) ? msg.nodes.length : 0;
         try { store.import_pack(msg.nodes); } catch (err) { onError(err); break; }
         refreshSentToServer();
         requestMissingBlobs();
+        metrics.emit('pack_applied', nodeCount, {
+          from: msg.from === undefined || msg.from === 'server' ? 'live' : String(msg.from),
+        });
         onRemotePack({ from: msg.from ?? 'server' });
         break;
       }
@@ -328,13 +384,25 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
       case 'blob-pack': {
         (msg.requested ?? []).forEach(h => pendingBlobFetches.delete(h));
         let touched = false;
+        let totalBytes = 0;
+        let count = 0;
         for (const { hash, data } of (msg.blobs ?? [])) {
           try {
-            store.store_blob_bytes(hash, b64decode(data));
+            const raw = b64decode(data);
+            store.store_blob_bytes(hash, raw);
+            totalBytes += raw.length;
+            count += 1;
             touched = true;
           } catch (_) {}
         }
-        if (touched) onRemotePack({ from: msg.from ?? 'server', kind: 'blobs' });
+        if (touched) {
+          metrics.emit('blob_download', totalBytes, {
+            transport: 'ws',
+            result: 'ok',
+            count,
+          });
+          onRemotePack({ from: msg.from ?? 'server', kind: 'blobs' });
+        }
         break;
       }
 
@@ -397,9 +465,14 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
     ws = new WebSocket(url);
 
     ws.onopen = () => {
+      const successfulAttempt = reconnectAttempt;
       reconnectDelay = 1000;
+      reconnectAttempt = 0;
       connected = true;
       pendingBlobFetches.clear();
+      if (successfulAttempt > 0) {
+        metrics.emit('ws_reconnect', successfulAttempt, { outcome: 'ok' });
+      }
       try {
         const hello = {
           type: 'hello',
@@ -443,6 +516,12 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
       ws = null;
       if (wasConnected) onDisconnect();
       if (!closed) {
+        reconnectAttempt += 1;
+        metrics.emit('ws_reconnect', reconnectAttempt, {
+          outcome: 'scheduled',
+          delay_ms: reconnectDelay,
+          was_connected: wasConnected,
+        });
         clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(openSocket, reconnectDelay);
         reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
@@ -863,6 +942,7 @@ function makePeerMesh({
  *   transport?: 'auto' | 'ws-only',    // default 'auto' (WS + WebRTC when available)
  *   iceServers?: RTCIceServer[],       // override STUN/TURN for WebRTC peers
  *   logger?: (level, ...args) => void, // default console
+ *   onMetric?: (ev) => void,           // G8: metric event hook. See docs/sdk.md.
  * }} opts
  */
 export async function createDoc(opts) {
@@ -882,10 +962,16 @@ export async function createDoc(opts) {
     presenceHeartbeatMs = 15_000,
     presenceStaleMs = 45_000,
     logger = (level, ...a) => console[level === 'warn' ? 'warn' : 'log']('[activesync]', ...a),
+    onMetric = null,
   } = opts;
 
   if (!serverUrl) throw new Error('createDoc: serverUrl is required');
   if (!room) throw new Error('createDoc: room is required');
+
+  // G8 — metrics dispatcher. `metrics.emit(kind, value, labels)` is a
+  // cheap no-op when `onMetric` is unset; otherwise it delivers a
+  // structured `{kind, value, labels, timestamp}` event.
+  const metrics = makeMetrics(onMetric);
 
   const store = new SyncStore(authorSeed);
   const pubkeyHex = store.pubkey_hex();
@@ -903,8 +989,62 @@ export async function createDoc(opts) {
   const connectE = makeEmitter();
   const disconnectE = makeEmitter();
   const errorE = makeEmitter();
+  // G9 — conflict surfacing. `conflictE` is the live fan-out; the SDK
+  // polls `store.take_conflicts_json()` after every pack-apply. A
+  // bounded ring buffer backs `doc.recentConflicts(sinceMs)` for apps
+  // that want a history panel instead of a live toast.
+  const conflictE = makeEmitter();
+  const CONFLICT_BUFFER_MAX = 256;
+  /** @type {{ at:number, kind:string, key:string, localOp:any, winningOp:any, byYou:boolean, raw:any }[]} */
+  const conflictBuffer = [];
 
-  function emitChange(ev) { anyChange.emit(ev); }
+  function decodeOpValue(op) {
+    if (!op || typeof op !== 'object') return op;
+    if (op.kind === 'set' && Array.isArray(op.value)) {
+      // serde serializes Vec<u8> as an array of numbers. Leave as array;
+      // apps know to decode JSON themselves if that's what they stored.
+      return op;
+    }
+    return op;
+  }
+
+  function recordConflict(raw) {
+    const byYou = raw.winner_author === pubkeyHex;
+    const ev = {
+      at:        Date.now(),
+      kind:      raw.kind,
+      key:       raw.key,
+      localOp:   decodeOpValue(raw.loser_op),
+      winningOp: {
+        ...decodeOpValue(raw.winner_op),
+        author:  raw.winner_author,
+        lamport: raw.winner_lamport,
+      },
+      byYou,
+      raw,
+    };
+    conflictBuffer.push(ev);
+    while (conflictBuffer.length > CONFLICT_BUFFER_MAX) conflictBuffer.shift();
+    try { conflictE.emit(ev); } catch (_) {}
+    metrics.emit('conflict', 1, { kind: raw.kind, by_you: byYou });
+  }
+
+  function pollConflicts() {
+    try {
+      const raw = JSON.parse(store.take_conflicts_json());
+      for (const r of raw) recordConflict(r);
+    } catch (e) {
+      // Older bridges without take_conflicts_json — silently skip.
+    }
+  }
+
+  function emitChange(ev) {
+    anyChange.emit(ev);
+    // Any pack/bulk/local apply may have surfaced new conflicts.
+    if (ev.type === 'pack' || ev.type === 'bulk' || ev.source === 'local') {
+      pollConflicts();
+    }
+  }
 
   // ---- token factory (C3) ----
   function getToken() {
@@ -1063,10 +1203,12 @@ export async function createDoc(opts) {
     onWelcomePeers: (peers) => mesh.onWelcomePeers(peers),
     onSignal: (msg) => mesh.onSignal(msg),
     log: logger,
+    metrics,
   });
 
   // After any local mutation, broadcast the delta + emit change.
   function afterLocalMutation(ev) {
+    const t0 = (globalThis.performance?.now?.() ?? Date.now());
     transport.sendLocalDelta();
     // Also push over any open data channels. Remote peers dedupe by node id.
     try {
@@ -1074,6 +1216,15 @@ export async function createDoc(opts) {
       mesh.broadcastPack(nodesB64);
     } catch (_) {}
     emitChange(ev);
+    // G8 — op_apply_latency is the local-apply -> local-broadcast round
+    // trip. Cheap (<1ms typically); useful for spotting regressions.
+    if (metrics.enabled) {
+      const t1 = (globalThis.performance?.now?.() ?? Date.now());
+      metrics.emit('op_apply_latency', t1 - t0, {
+        type: ev.type ?? 'unknown',
+        source: ev.source ?? 'local',
+      });
+    }
   }
 
   // ---- Map handle ----
@@ -1435,6 +1586,16 @@ export async function createDoc(opts) {
     onConnect(cb)    { return connectE.on(cb); },
     onDisconnect(cb) { return disconnectE.on(cb); },
     onError(cb)      { return errorE.on(cb); },
+    // G9 — conflict surfacing. `cb` is invoked with
+    // `{ at, kind, key, localOp, winningOp:{...,author,lamport}, byYou, raw }`.
+    // Fired once per conflict per SDK lifetime (the bridge dedups by
+    // fingerprint; the SDK buffer caps at 256 events).
+    onConflict(cb)   { return conflictE.on(cb); },
+    /** Return buffered conflict events no older than `sinceMs`. */
+    recentConflicts(sinceMs = 5 * 60 * 1000) {
+      const cutoff = Date.now() - sinceMs;
+      return conflictBuffer.filter(ev => ev.at >= cutoff).slice();
+    },
 
     connect()    { transport.connect(); },
     disconnect() { transport.disconnect(); },

@@ -130,6 +130,15 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
         "activesync_token_expired_disconnects_total",
         "Peers disconnected with WS close code 4002 after their capability token's `expiry` lapsed mid-session."
     );
+    // G11 — hot-room memory observability.
+    describe_gauge!(
+        "activesync_room_bytes_resident",
+        Unit::Bytes,
+        "Rough estimate of per-room resident memory: `node_count * NODE_EST_BYTES + sum(blob.len())`. \
+         Per-node estimate is a flat 512 bytes (header + small transaction); large transactions \
+         will under-count. This gauge is observability-only — the compaction/eviction policies \
+         driven by it are not yet shipped; until then use it for capacity planning and alerting."
+    );
     Ok(())
 }
 

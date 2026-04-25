@@ -733,6 +733,24 @@ impl<N: NodeStore> StateGraph<N> {
             .collect();
         crate::list::resolve_list_seq(&nodes, list_key)
     }
+
+    // -------------------------------------------------------------------------
+    // G9: conflict surfacing
+    // -------------------------------------------------------------------------
+
+    /// Re-derive the full set of LWW losers in the current graph state.
+    ///
+    /// Pure, deterministic, and idempotent — same node set produces the
+    /// same `Vec<ConflictEvent>` in the same order. The bridge layer
+    /// dedups across calls so a conflict is delivered to the SDK once.
+    pub fn detect_conflicts(&self) -> Vec<crate::conflicts::ConflictEvent> {
+        let node_ids = self.nodes.all_ids();
+        let nodes: Vec<&SyncNode> = node_ids
+            .iter()
+            .filter_map(|id| self.nodes.get(id))
+            .collect();
+        crate::conflicts::detect_conflicts(&nodes)
+    }
 }
 
 // =============================================================================

@@ -1,0 +1,37 @@
+# Build artifacts — by far the largest offenders.
+target/
+**/target/
+node-stores/*/target/
+
+# Git history / tooling.
+.git/
+.github/
+.vs/
+.vscode/
+.idea/
+
+# Web SDK build output (regenerated as needed; not used by the server image).
+web/pkg/
+web/node_modules/
+**/node_modules/
+
+# Local dev artifacts and data.
+demo-data/
+*.log
+flamegraph.svg
+*.svg
+server.key
+server.crt
+*.pem
+
+# Docs and large markdown — not needed in the image.
+docs/
+*.md
+
+# OS / editor noise.
+**/.DS_Store
+**/Thumbs.db
+
+# Don't re-include the Dockerfile/.dockerignore inside the image.
+.dockerignore
+Dockerfile

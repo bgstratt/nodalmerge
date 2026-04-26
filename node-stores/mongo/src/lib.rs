@@ -26,7 +26,9 @@ use activesync_server::store::NodePersistence;
 use mongodb::bson::{self, doc, Binary, DateTime as BsonDateTime, Document};
 use mongodb::options::{ClientOptions, FindOneAndUpdateOptions, FindOptions, IndexOptions, ReturnDocument};
 use mongodb::{Client, Collection, IndexModel};
-use tokio::runtime::Runtime;
+// Avoid creating a tokio runtime on the current thread; spawn short-lived
+// runtimes on dedicated threads when we need to bridge sync trait methods
+// to async Mongo operations.
 use futures_util::TryStreamExt;
 
 #[derive(Debug, thiserror::Error)]
@@ -61,7 +63,6 @@ impl MongoNodeStoreConfig {
 pub struct MongoNodeStore {
     nodes: Collection<Document>,
     seq: Collection<Document>,
-    rt: Arc<Runtime>,
 }
 
 impl std::fmt::Debug for MongoNodeStore {
@@ -79,32 +80,36 @@ impl MongoNodeStore {
         if cfg.database.is_empty() {
             return Err(MongoStoreError::Config("database must not be empty".into()));
         }
-        let rt = Arc::new(
-            Runtime::new()
-                .map_err(|e| MongoStoreError::Config(format!("tokio runtime: {e}")))?,
-        );
         let cfg2 = cfg.clone();
-        let (nodes, seq) = rt.block_on(async move {
-            let opts = ClientOptions::parse(&cfg2.connection_uri).await?;
-            let client = Client::with_options(opts)?;
-            let db = client.database(&cfg2.database);
-            let nodes: Collection<Document> = db.collection(&cfg2.collection);
-            let seq: Collection<Document> = db.collection(&cfg2.seq_collection);
+        // Run the async connect/ensure-index work on a fresh runtime in a
+        // spawned thread so we don't attempt to create a runtime on the
+        // current thread (which may already be running Tokio).
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move {
+                let opts = ClientOptions::parse(&cfg2.connection_uri).await?;
+                let client = Client::with_options(opts)?;
+                let db = client.database(&cfg2.database);
+                let nodes: Collection<Document> = db.collection(&cfg2.collection);
+                let seq: Collection<Document> = db.collection(&cfg2.seq_collection);
 
-            // Index: ordered hydration by (room_id, seq).
-            nodes
-                .create_index(
-                    IndexModel::builder()
-                        .keys(doc! { "room_id": 1i32, "seq": 1i32 })
-                        .options(IndexOptions::builder().name("room_seq".to_string()).build())
-                        .build(),
-                )
-                .await?;
+                // Index: ordered hydration by (room_id, seq).
+                nodes
+                    .create_index(
+                        IndexModel::builder()
+                            .keys(doc! { "room_id": 1i32, "seq": 1i32 })
+                            .options(IndexOptions::builder().name("room_seq".to_string()).build())
+                            .build(),
+                    )
+                    .await?;
 
-            Ok::<_, mongodb::error::Error>((nodes, seq))
-        })?;
-
-        Ok(Self { nodes, seq, rt })
+                Ok::<_, mongodb::error::Error>((nodes, seq))
+            });
+            let _ = tx.send(res);
+        });
+        let (nodes, seq) = rx.recv().map_err(|e| MongoStoreError::Config(format!("thread error: {e}")))??;
+        Ok(Self { nodes, seq })
     }
 
     /// Reserve `count` consecutive sequence numbers for `room_id`. Returns
@@ -158,20 +163,32 @@ impl NodePersistence for MongoNodeStore {
     fn load_room_nodes(&self, room_id: &str) -> Vec<SyncNode> {
         let nodes_coll = self.nodes.clone();
         let rid = room_id.to_string();
-        let res: Result<Vec<Vec<u8>>, mongodb::error::Error> = self.rt.block_on(async move {
-            let opts = FindOptions::builder().sort(doc! { "seq": 1i32 }).build();
-            let mut cursor = nodes_coll
-                .find(doc! { "room_id": &rid })
-                .with_options(opts)
-                .await?;
-            let mut out: Vec<Vec<u8>> = Vec::new();
-            while let Some(d) = cursor.try_next().await? {
-                if let Ok(b) = d.get_binary_generic("bytes") {
-                    out.push(b.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move {
+                let opts = FindOptions::builder().sort(doc! { "seq": 1i32 }).build();
+                let mut cursor = nodes_coll
+                    .find(doc! { "room_id": &rid })
+                    .with_options(opts)
+                    .await?;
+                let mut out: Vec<Vec<u8>> = Vec::new();
+                while let Some(d) = cursor.try_next().await? {
+                    if let Ok(b) = d.get_binary_generic("bytes") {
+                        out.push(b.clone());
+                    }
                 }
-            }
-            Ok(out)
+                Ok(out)
+            });
+            let _ = tx.send(res);
         });
+        let res: Result<Vec<Vec<u8>>, mongodb::error::Error> = match rx.recv() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(?e, "mongo thread recv failed");
+                return Vec::new();
+            }
+        };
         let raw = match res {
             Ok(r) => r,
             Err(e) => {
@@ -197,22 +214,34 @@ impl NodePersistence for MongoNodeStore {
         let rid = room_id.to_string();
         let bytes = pack_nodes(&[node]);
         let node_clone = node.clone();
-        let res: Result<(), mongodb::error::Error> = self.rt.block_on(async move {
-            let seq = Self::reserve_seq(&seq_coll, &rid, 1).await?;
-            let d = build_doc(&rid, &node_clone, seq, bytes);
-            match nodes_coll.insert_one(d).await {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    // Duplicate key (idempotent re-insert) is success.
-                    let s = e.to_string();
-                    if s.contains("E11000") || s.contains("duplicate key") {
-                        Ok(())
-                    } else {
-                        Err(e)
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move {
+                let seq = Self::reserve_seq(&seq_coll, &rid, 1).await?;
+                let d = build_doc(&rid, &node_clone, seq, bytes);
+                match nodes_coll.insert_one(d).await {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        // Duplicate key (idempotent re-insert) is success.
+                        let s = e.to_string();
+                        if s.contains("E11000") || s.contains("duplicate key") {
+                            Ok(())
+                        } else {
+                            Err(e)
+                        }
                     }
                 }
-            }
+            });
+            let _ = tx.send(res);
         });
+        let res: Result<(), mongodb::error::Error> = match rx.recv() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(?e, "mongo thread recv failed");
+                Err(mongodb::error::Error::from(std::io::Error::new(std::io::ErrorKind::Other, "thread recv failed")))
+            }
+        };
         if let Err(e) = res {
             tracing::warn!(?e, "mongo persist_node failed");
         }
@@ -240,32 +269,44 @@ impl NodePersistence for MongoNodeStore {
             .map(|n| ((*n).clone(), pack_nodes(&[*n])))
             .collect();
 
-        let res: Result<(), mongodb::error::Error> = self.rt.block_on(async move {
-            let first_seq = Self::reserve_seq(&seq_coll, &rid, n).await?;
-            let docs: Vec<Document> = owned
-                .into_iter()
-                .enumerate()
-                .map(|(i, (node, bytes))| build_doc(&rid, &node, first_seq + i as i64, bytes))
-                .collect();
-            // ordered=false so a duplicate key inside the batch doesn't
-            // poison the rest. The driver returns BulkWriteError; we treat
-            // duplicate-key entries as success.
-            match nodes_coll
-                .insert_many(docs)
-                .ordered(false)
-                .await
-            {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    let s = e.to_string();
-                    if s.contains("E11000") || s.contains("duplicate key") {
-                        Ok(())
-                    } else {
-                        Err(e)
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move {
+                let first_seq = Self::reserve_seq(&seq_coll, &rid, n).await?;
+                let docs: Vec<Document> = owned
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (node, bytes))| build_doc(&rid, &node, first_seq + i as i64, bytes))
+                    .collect();
+                // ordered=false so a duplicate key inside the batch doesn't
+                // poison the rest. The driver returns BulkWriteError; we treat
+                // duplicate-key entries as success.
+                match nodes_coll
+                    .insert_many(docs)
+                    .ordered(false)
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        let s = e.to_string();
+                        if s.contains("E11000") || s.contains("duplicate key") {
+                            Ok(())
+                        } else {
+                            Err(e)
+                        }
                     }
                 }
-            }
+            });
+            let _ = tx.send(res);
         });
+        let res: Result<(), mongodb::error::Error> = match rx.recv() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(?e, "mongo thread recv failed");
+                Err(mongodb::error::Error::from(std::io::Error::new(std::io::ErrorKind::Other, "thread recv failed")))
+            }
+        };
         if let Err(e) = res {
             tracing::warn!(?e, "mongo persist_nodes failed");
         }

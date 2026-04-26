@@ -14,27 +14,42 @@
 # Rust 1.85+ required: some transitive deps (e.g. `time-core`) have adopted
 # `edition = "2024"`, which was stabilized in 1.85. Pinning to a recent
 # stable keeps the build reproducible without chasing nightly.
-FROM rust:1.86-slim-bookworm AS builder
+FROM rust:1.90-slim-bookworm AS builder
 
 WORKDIR /src
 
 # Copy only manifests first for better layer caching. Any `path = "..."`
 # workspace member needs its Cargo.toml present for `cargo fetch` to resolve.
 COPY Cargo.toml Cargo.lock* ./
-COPY core/Cargo.toml         core/Cargo.toml
-COPY bridge/Cargo.toml       bridge/Cargo.toml
-COPY server/Cargo.toml       server/Cargo.toml
-COPY jwt-bridge/Cargo.toml   jwt-bridge/Cargo.toml
+COPY core/Cargo.toml                       core/Cargo.toml
+COPY bridge/Cargo.toml                     bridge/Cargo.toml
+COPY server/Cargo.toml                     server/Cargo.toml
+COPY jwt-bridge/Cargo.toml                 jwt-bridge/Cargo.toml
+COPY s3-blobs/Cargo.toml                   s3-blobs/Cargo.toml
+COPY node-stores/conformance/Cargo.toml    node-stores/conformance/Cargo.toml
+COPY node-stores/mongo/Cargo.toml          node-stores/mongo/Cargo.toml
+COPY node-stores/postgres/Cargo.toml       node-stores/postgres/Cargo.toml
 
 # Stub source trees so cargo can resolve + fetch without real code.
 # Core's Cargo.toml declares several `[[bench]]` targets; cargo validates
 # their files exist at manifest-parse time, so we stub them too. Same for
 # any integration-test targets we add later.
-RUN mkdir -p core/src core/benches bridge/src server/src server/tests jwt-bridge/src \
-    && echo 'fn main(){}'     > server/src/main.rs \
-    && echo ''                > core/src/lib.rs \
-    && echo ''                > bridge/src/lib.rs \
-    && echo ''                > jwt-bridge/src/lib.rs \
+RUN mkdir -p core/src core/benches \
+             bridge/src \
+             server/src server/tests \
+             jwt-bridge/src \
+             s3-blobs/src \
+             node-stores/conformance/src \
+             node-stores/mongo/src \
+             node-stores/postgres/src \
+    && echo 'fn main(){}' > server/src/main.rs \
+    && echo ''            > core/src/lib.rs \
+    && echo ''            > bridge/src/lib.rs \
+    && echo ''            > jwt-bridge/src/lib.rs \
+    && echo ''            > s3-blobs/src/lib.rs \
+    && echo ''            > node-stores/conformance/src/lib.rs \
+    && echo ''            > node-stores/mongo/src/lib.rs \
+    && echo ''            > node-stores/postgres/src/lib.rs \
     && for b in merge_10k sync_handshake resolve_1k blob_verify tx_hash; do \
            echo 'fn main(){}' > "core/benches/$b.rs"; \
        done \

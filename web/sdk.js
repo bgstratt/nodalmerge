@@ -96,7 +96,7 @@ function randomSeed32() {
 // Transport — WebSocket wrapper that speaks the ActiveSync wire protocol.
 // Reuses the protocol shipped in demo.js (hello/welcome/pack/request/mst/blob).
 // -----------------------------------------------------------------------------
-function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscription, onRemotePack, onConnect, onDisconnect, onError, onPresence, onPeerJoined, onPeerLeft, onWelcomePeers, onSignal, log, metrics }) {
+function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, getPubkey, getSubscription, onRemotePack, onConnect, onDisconnect, onError, onPresence, onPeerJoined, onPeerLeft, onWelcomePeers, onSignal, log, metrics }) {
   metrics = metrics || { emit() {}, enabled: false };
   let ws = null;
   let reconnectTimer = null;
@@ -459,7 +459,15 @@ function makeTransport({ serverUrl, room, store, getToken, getPubkey, getSubscri
     }
   }
 
-  function openSocket() {
+  async function openSocket() {
+    if (closed) return;
+    // Phase 5a (downstream): if a tokenProvider is configured, ensure we
+    // have a fresh token before opening the socket so the hello frame can
+    // carry it. Failures fall through to a tokenless hello — the server
+    // will close with 4002 and we'll retry on reconnect.
+    if (typeof ensureFreshToken === 'function') {
+      try { await ensureFreshToken(); } catch (_) {}
+    }
     if (closed) return;
     const url = `${serverUrl.replace(/\/$/, '')}/ws/${encodeURIComponent(room)}`;
     ws = new WebSocket(url);
@@ -937,6 +945,9 @@ function makePeerMesh({
  *   roomSeed?: Uint8Array,            // if set, sign a capability token on connect
  *   tokenCaps?: string[],              // e.g. ["write:world/**"]; empty = full
  *   tokenExpirySecs?: number,          // default 24h
+ *   tokenProvider?: (ctx) => Promise,  // server-mint hook; receives {room,pubkeyHex},
+ *                                      //   returns {peer_pubkey_hex,expiry_secs,capabilities,sig_hex}.
+ *                                      //   Takes precedence over roomSeed when set.
  *   autoConnect?: boolean,             // default true
  *   subscribe?: string[],              // F3a: glob patterns to materialize; default ["**"]
  *   transport?: 'auto' | 'ws-only',    // default 'auto' (WS + WebRTC when available)
@@ -955,6 +966,7 @@ export async function createDoc(opts) {
     roomSeed = null,
     tokenCaps = [],
     tokenExpirySecs = 60 * 60 * 24,
+    tokenProvider = null,
     autoConnect = true,
     subscribe: subscribePatterns = ['**'],
     transport: transportMode = 'auto',
@@ -1047,7 +1059,55 @@ export async function createDoc(opts) {
   }
 
   // ---- token factory (C3) ----
+  // Local-sign path (legacy, demo): roomSeed + tokenCaps → sign here.
+  // Server-mint path (Phase 5a downstream): tokenProvider returns a token
+  // already signed by a trusted bridge. We cache it and refresh ahead of
+  // expiry so reconnects don't have to wait on the network.
+  let cachedToken = null;
+  let tokenRefreshTimer = null;
+  let tokenRefreshInflight = null;
+
+  function tokenIsFresh(tok) {
+    if (!tok || typeof tok.expiry_secs !== 'number') return false;
+    // 5s slack so we don't hand the server a token that expires mid-handshake.
+    return tok.expiry_secs * 1000 > Date.now() + 5_000;
+  }
+
+  function scheduleTokenRefresh(tok) {
+    if (tokenRefreshTimer) { clearTimeout(tokenRefreshTimer); tokenRefreshTimer = null; }
+    if (!tok || typeof tok.expiry_secs !== 'number') return;
+    // Refresh 30s before expiry. Cap at INT32_MAX to keep setTimeout happy.
+    const ms = Math.min((tok.expiry_secs * 1000) - Date.now() - 30_000, 0x7FFFFFFF);
+    if (ms <= 0) return;
+    tokenRefreshTimer = setTimeout(() => {
+      ensureFreshToken({ force: true }).catch(e => logger('warn', '[sdk] token refresh failed', e));
+    }, ms);
+  }
+
+  async function ensureFreshToken(opts = {}) {
+    if (typeof tokenProvider !== 'function') return cachedToken;
+    if (!opts.force && tokenIsFresh(cachedToken)) return cachedToken;
+    if (tokenRefreshInflight) return tokenRefreshInflight;
+    tokenRefreshInflight = (async () => {
+      try {
+        const tok = await tokenProvider({ room, pubkeyHex });
+        if (tok && typeof tok.expiry_secs === 'number') {
+          cachedToken = tok;
+          scheduleTokenRefresh(tok);
+        }
+        return cachedToken;
+      } finally {
+        tokenRefreshInflight = null;
+      }
+    })();
+    return tokenRefreshInflight;
+  }
+
   function getToken() {
+    // Server-mint takes precedence when configured.
+    if (typeof tokenProvider === 'function') {
+      return tokenIsFresh(cachedToken) ? cachedToken : null;
+    }
     if (!roomSeed) return null;
     const expiry = Math.floor(Date.now() / 1000) + tokenExpirySecs;
     const caps = tokenCaps.length > 0 ? tokenCaps : null;
@@ -1191,6 +1251,7 @@ export async function createDoc(opts) {
     room,
     store,
     getToken,
+    ensureFreshToken,
     getPubkey: () => pubkeyHex,
     getSubscription: () => subscription.patterns.slice(),
     onRemotePack: () => emitChange({ source: 'remote', type: 'pack' }),
@@ -1610,6 +1671,7 @@ export async function createDoc(opts) {
       transport.disconnect();
       mesh.shutdown();
       presence._shutdown();
+      if (tokenRefreshTimer) { clearTimeout(tokenRefreshTimer); tokenRefreshTimer = null; }
       try { store.free(); } catch (_) {}
     },
   };

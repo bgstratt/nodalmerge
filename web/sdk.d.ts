@@ -191,6 +191,19 @@ export interface CreateDocOptions {
   roomSeed?: Uint8Array;
   tokenCaps?: string[];
   tokenExpirySecs?: number;
+  /**
+   * Server-mint hook (downstream Phase 5a). When provided, the SDK calls
+   * this on every (re)connect to obtain a RoomToken signed by a trusted
+   * bridge. Takes precedence over `roomSeed` / `tokenCaps`. The provider
+   * receives `{room, pubkeyHex}` and must return a token shaped like the
+   * upstream JWT-bridge `/mint` response.
+   */
+  tokenProvider?: (ctx: { room: string; pubkeyHex: string }) => Promise<{
+    peer_pubkey_hex: string;
+    expiry_secs: number;
+    capabilities: string[];
+    sig_hex: string;
+  }>;
   autoConnect?: boolean;
   /** F3a: glob patterns for client-side materialization. Default `["**"]`. */
   subscribe?: string[];

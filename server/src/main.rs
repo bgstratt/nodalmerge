@@ -129,9 +129,10 @@ async fn main() {
         .layer(cors)
         .with_state(rooms);
 
-    let addr = "127.0.0.1:7878";
+    let addr = std::env::var("AS_BIND_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:7878".to_string());
     tracing::info!(%addr, "ActiveSync server listening on ws://{addr}/ws/<room>");
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 

@@ -57,7 +57,9 @@ use object_store::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::runtime::Runtime;
+// Avoid creating a tokio runtime on the current thread (which may already
+// be driving one). Instead we spawn a short-lived thread and run a runtime
+// there for the few sync-to-async bridges below.
 use url::Url;
 
 // ─── Public types ───────────────────────────────────────────────────────────
@@ -196,10 +198,9 @@ pub struct S3BlobStore {
     s3: Option<Arc<AmazonS3>>,
     /// Delegate mode only — async HTTP client.
     http: reqwest::Client,
-    /// Owned single-thread runtime so sync trait methods can drive async
-    /// `object_store` / `reqwest` calls without panicking when called from
-    /// inside the server's main runtime.
-    rt: Arc<Runtime>,
+    // No persistent runtime here — we spawn a short-lived runtime in a
+    // dedicated thread for each sync-to-async bridge to avoid starting a
+    // runtime on a thread that may already be running one.
 }
 
 impl std::fmt::Debug for S3BlobStore {
@@ -261,15 +262,7 @@ impl S3BlobStore {
             S3Auth::Delegate { .. } => None,
         };
 
-        let rt = Runtime::new()
-            .map_err(|e| S3BlobError::Config(format!("tokio runtime: {e}")))?;
-
-        Ok(Self {
-            cfg,
-            s3,
-            http: reqwest::Client::new(),
-            rt: Arc::new(rt),
-        })
+        Ok(Self { cfg, s3, http: reqwest::Client::new() })
     }
 
     fn key_for(&self, room_id: &str, hash: &Hash) -> String {
@@ -298,9 +291,19 @@ impl S3BlobStore {
         let path = ObjectPath::from(self.key_for(room_id, hash));
         let ttl = self.cfg.presign_get_ttl;
         let s3 = s3.clone();
-        let url: Url = self.rt.block_on(async move {
-            s3.signed_url(reqwest::Method::GET, &path, ttl).await
-        })?;
+        // Run the async call on a fresh runtime inside a spawned thread so
+        // we don't attempt to create or block on a runtime on the current
+        // thread (which may already be running Tokio).
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move { s3.signed_url(reqwest::Method::GET, &path, ttl).await });
+            let _ = tx.send(res);
+        });
+        let url_res: Result<Url, object_store::Error> = rx
+            .recv()
+            .map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?;
+        let url = url_res.map_err(S3BlobError::ObjectStore)?;
         Ok(url.to_string())
     }
 
@@ -314,9 +317,16 @@ impl S3BlobStore {
         let path = ObjectPath::from(self.key_for(room_id, hash));
         let ttl = self.cfg.presign_put_ttl;
         let s3 = s3.clone();
-        let url: Url = self.rt.block_on(async move {
-            s3.signed_url(reqwest::Method::PUT, &path, ttl).await
-        })?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move { s3.signed_url(reqwest::Method::PUT, &path, ttl).await });
+            let _ = tx.send(res);
+        });
+        let url_res: Result<Url, object_store::Error> = rx
+            .recv()
+            .map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?;
+        let url = url_res.map_err(S3BlobError::ObjectStore)?;
         Ok(url.to_string())
     }
 
@@ -325,7 +335,16 @@ impl S3BlobStore {
         let s3 = self.s3.as_ref().expect("direct_head without s3 client");
         let path = ObjectPath::from(self.key_for(room_id, hash));
         let s3 = s3.clone();
-        let res = self.rt.block_on(async move { s3.head(&path).await });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move { s3.head(&path).await });
+            let _ = tx.send(res);
+        });
+        let res: Result<_, object_store::Error> = rx
+            .recv()
+            .map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?;
+        let res = res;
         match res {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
@@ -349,9 +368,9 @@ impl S3BlobStore {
             _ => return Ok(None),
         };
         #[derive(Serialize)]
-        struct Req<'a> {
-            op: &'a str,
-            room_id: &'a str,
+        struct Req {
+            op: &'static str,
+            room_id: String,
             hash: String,
             size: Option<u64>,
             ttl_seconds: u64,
@@ -362,25 +381,33 @@ impl S3BlobStore {
         }
         let body = Req {
             op,
-            room_id,
+            room_id: room_id.to_string(),
             hash: hash.to_hex(),
             size,
             ttl_seconds: ttl.as_secs(),
         };
+        tracing::debug!(%op, room = %room_id, hash = %hash.to_hex(), size = ?size, endpoint = %endpoint, "delegate_request: sending presign request to app");
         let http = self.http.clone();
-        self.rt.block_on(async move {
-            let mut req = http.post(&endpoint).json(&body);
-            if let Some(h) = auth_header {
-                req = req.header("Authorization", h);
-            }
-            let resp = req.send().await?;
-            if !resp.status().is_success() {
-                tracing::warn!(status = %resp.status(), %op, "delegate presign declined");
-                return Ok(None);
-            }
-            let parsed: Resp = resp.json().await?;
-            Ok::<Option<String>, S3BlobError>(Some(parsed.url))
-        })
+        // Run delegate HTTP request on a fresh runtime in a spawned thread.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move {
+                let mut req = http.post(&endpoint).json(&body);
+                if let Some(h) = auth_header {
+                    req = req.header("Authorization", h);
+                }
+                let resp: reqwest::Response = req.send().await?;
+                if !resp.status().is_success() {
+                    tracing::warn!(status = %resp.status(), %op, "delegate presign declined");
+                    return Ok(None);
+                }
+                let parsed: Resp = resp.json().await?;
+                Ok::<Option<String>, S3BlobError>(Some(parsed.url))
+            });
+            let _ = tx.send(res);
+        });
+        rx.recv().map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?
     }
 }
 
@@ -407,10 +434,13 @@ impl BlobPersistence for S3BlobStore {
         };
         let path = ObjectPath::from(self.key_for(room_id, hash));
         let payload = Bytes::copy_from_slice(bytes);
-        let res = self.rt.block_on(async move {
-            s3.put(&path, payload.into()).await
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move { s3.put(&path, payload.into()).await });
+            let _ = tx.send(res);
         });
-        if let Err(e) = res {
+        if let Err(e) = rx.recv().map_err(|e| S3BlobError::Config(format!("thread error: {e}"))).and_then(|r| r.map_err(S3BlobError::ObjectStore)) {
             tracing::warn!(?e, "S3 persist_blob failed");
         }
     }
@@ -433,24 +463,29 @@ impl BlobPersistence for S3BlobStore {
         ));
         let live_set: std::collections::HashSet<String> =
             live.iter().map(|h| h.to_hex()).collect();
-        let result = self.rt.block_on(async move {
-            let mut deleted = 0usize;
-            let mut stream = s3.list(Some(&prefix));
-            while let Some(meta) = stream.next().await {
-                let Ok(meta) = meta else { continue };
-                let key = meta.location.as_ref();
-                let Some(filename) = key.rsplit('/').next() else { continue };
-                if !live_set.contains(filename) {
-                    if let Err(e) = s3.delete(&meta.location).await {
-                        tracing::warn!(?e, key = %meta.location, "blob_gc_sweep: delete failed");
-                    } else {
-                        deleted += 1;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move {
+                let mut deleted = 0usize;
+                let mut stream = s3.list(Some(&prefix));
+                while let Some(meta) = stream.next().await {
+                    let Ok(meta) = meta else { continue };
+                    let key = meta.location.as_ref();
+                    let Some(filename) = key.rsplit('/').next() else { continue };
+                    if !live_set.contains(filename) {
+                        if let Err(e) = s3.delete(&meta.location).await {
+                            tracing::warn!(?e, key = %meta.location, "blob_gc_sweep: delete failed");
+                        } else {
+                            deleted += 1;
+                        }
                     }
                 }
-            }
-            deleted
+                deleted
+            });
+            let _ = tx.send(res);
         });
-        result
+        rx.recv().map_err(|_| 0).unwrap_or(0)
     }
 
     fn resolve_get_url(
@@ -493,6 +528,7 @@ impl BlobPersistence for S3BlobStore {
         size: u64,
     ) -> Option<PresignedUrl> {
         if size < self.cfg.direct_upload_threshold {
+            tracing::debug!(room = %room_id, hash = %hash.to_hex(), size = size, threshold = self.cfg.direct_upload_threshold, "resolve_put_url: size below threshold, skipping presign");
             return None;
         }
         let ttl = self.cfg.presign_put_ttl;

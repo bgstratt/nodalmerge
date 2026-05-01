@@ -432,6 +432,11 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
 
     // D2: register this peer and broadcast peer-joined to the room.
     room.register_peer(pubkey_hex.clone()).await;
+
+    // Small per-connection stabilization delay to avoid many peers
+    // immediately provoking DB selection storms on first Mongo call.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
     let _ = room.tx.send(serde_json::json!({
         "type":   "peer-joined",
         "from":   pubkey_hex,
@@ -828,11 +833,12 @@ async fn handle_client_message(
             }
             let hash_hex = msg["hash"].as_str().unwrap_or("");
             let size = msg["size"].as_u64().unwrap_or(0);
+            let content_type = msg["content_type"].as_str().map(|s| s.to_string());
             let Some(hash) = parse_hex_hash(hash_hex) else {
                 send_error(sink, "request-upload: bad hash").await;
                 return true;
             };
-            let reply = match room.persistence.resolve_put_url(&room.room_id, &hash, size) {
+            let reply = match room.persistence.resolve_put_url(&room.room_id, &hash, size, content_type.as_deref()) {
                 Some(p) => serde_json::json!({
                     "type": "upload-granted",
                     "hash": hash_hex,

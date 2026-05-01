@@ -113,7 +113,7 @@ fn s3_blob_round_trip_via_minio() {
 
     // 1. Mint presigned PUT and upload via plain HTTP.
     let put = store
-        .resolve_put_url(room_id, &hash, payload.len() as u64)
+        .resolve_put_url(room_id, &hash, payload.len() as u64, None)
         .expect("presign PUT");
     let put_status = rt.block_on(async {
         reqwest::Client::new()

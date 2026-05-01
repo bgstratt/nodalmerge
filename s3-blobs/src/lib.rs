@@ -360,6 +360,7 @@ impl S3BlobStore {
         hash: &Hash,
         size: Option<u64>,
         ttl: Duration,
+        content_type: Option<String>,
     ) -> Result<Option<String>, S3BlobError> {
         let (endpoint, auth_header) = match &self.cfg.auth {
             S3Auth::Delegate { presign_endpoint, auth_header } => {
@@ -374,6 +375,10 @@ impl S3BlobStore {
             hash: String,
             size: Option<u64>,
             ttl_seconds: u64,
+            // Algorithm helps the app choose canonical S3 key layout (e.g. "blake3").
+            algorithm: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            content_type: Option<String>,
         }
         #[derive(Deserialize)]
         struct Resp {
@@ -385,8 +390,10 @@ impl S3BlobStore {
             hash: hash.to_hex(),
             size,
             ttl_seconds: ttl.as_secs(),
+            algorithm: "blake3".to_string(),
+            content_type,
         };
-        tracing::debug!(%op, room = %room_id, hash = %hash.to_hex(), size = ?size, endpoint = %endpoint, "delegate_request: sending presign request to app");
+        tracing::debug!(%op, room = %room_id, hash = %hash.to_hex(), size = ?size, %body.algorithm, endpoint = %endpoint, "delegate_request: sending presign request to app");
         let http = self.http.clone();
         // Run delegate HTTP request on a fresh runtime in a spawned thread.
         let (tx, rx) = std::sync::mpsc::channel();
@@ -509,6 +516,7 @@ impl BlobPersistence for S3BlobStore {
                 hash,
                 None,
                 ttl,
+                None,
             ) {
                 Ok(Some(u)) => u,
                 Ok(None) => return None,
@@ -526,6 +534,7 @@ impl BlobPersistence for S3BlobStore {
         room_id: &str,
         hash: &Hash,
         size: u64,
+        content_type: Option<&str>,
     ) -> Option<PresignedUrl> {
         if size < self.cfg.direct_upload_threshold {
             tracing::debug!(room = %room_id, hash = %hash.to_hex(), size = size, threshold = self.cfg.direct_upload_threshold, "resolve_put_url: size below threshold, skipping presign");
@@ -546,6 +555,7 @@ impl BlobPersistence for S3BlobStore {
                 hash,
                 Some(size),
                 ttl,
+                content_type.map(|s| s.to_string()),
             ) {
                 Ok(Some(u)) => u,
                 Ok(None) => return None,

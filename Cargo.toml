@@ -6,6 +6,7 @@ members = [
     "jwt-bridge",
     "s3-blobs",
     "node-stores/mongo",
+    "dev-server",
     "node-stores/postgres",
     "node-stores/conformance",
 ]

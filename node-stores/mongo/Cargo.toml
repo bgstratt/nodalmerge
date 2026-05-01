@@ -8,14 +8,13 @@ description = "MongoDB NodePersistence adapter for ActiveSync (F7)"
 [dependencies]
 activesync-core   = { path = "../../core" }
 activesync-server = { path = "../../server" }
-mongodb = { version = "3", default-features = false, features = ["rustls-tls", "bson-3", "compat-3-3-0"] }
+mongodb = { version = "3.6.0", default-features = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 tracing = "0.1"
 metrics = "0.23"
 thiserror = { workspace = true }
 futures-util = "0.3"
-
 [dev-dependencies]
 tokio = { workspace = true }
 testcontainers = { version = "0.23", features = ["blocking"] }

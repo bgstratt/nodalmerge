@@ -129,6 +129,7 @@ pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
         _room_id: &str,
         _hash: &Hash,
         _size: u64,
+        _content_type: Option<&str>,
     ) -> Option<PresignedUrl> { None }
 
     /// F6 — verify a presigned upload completed. Called when the SDK
@@ -218,8 +219,8 @@ impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B>
     fn resolve_get_url(&self, room_id: &str, hash: &Hash, size_hint: Option<u64>) -> Option<PresignedUrl> {
         self.blobs.resolve_get_url(room_id, hash, size_hint)
     }
-    fn resolve_put_url(&self, room_id: &str, hash: &Hash, size: u64) -> Option<PresignedUrl> {
-        self.blobs.resolve_put_url(room_id, hash, size)
+    fn resolve_put_url(&self, room_id: &str, hash: &Hash, size: u64, content_type: Option<&str>) -> Option<PresignedUrl> {
+        self.blobs.resolve_put_url(room_id, hash, size, content_type)
     }
     fn verify_uploaded(&self, room_id: &str, hash: &Hash) -> Result<(), String> {
         self.blobs.verify_uploaded(room_id, hash)

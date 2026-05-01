@@ -37,12 +37,13 @@ doc.onChange(ev => {
 
 | Option           | Type         | Default        | Notes |
 |------------------|--------------|----------------|-------|
-| `serverUrl`      | `string`     | — (required)   | Without trailing `/ws/<room>` — the SDK appends it. |
+| `serverUrl`      | `string`     | — (optional)   | Without trailing `/ws/<room>` — the SDK appends it. Omit to run in local-only mode; call `doc.attachServer(...)` to attach later. |
 | `room`           | `string`     | — (required)   | Room id. Transport boundary; see PLAN.md decision log. |
 | `authorSeed`     | `Uint8Array` | random 32 B    | Persist this to keep identity across sessions. |
 | `roomSeed`       | `Uint8Array` | `null`         | Room private-key seed (C3). If set, a capability token is signed on every connect. |
 | `tokenCaps`      | `string[]`   | `[]`           | Path-scoped grants, e.g. `["write:intent/**"]`. Empty = full access. |
 | `tokenExpirySecs`| `number`     | `86400`        | Token TTL. |
+| `tokenProvider`  | `() => Promise<string>` | — | Optional async function to mint/refresh a JWT for server attach/connect. Used by `attachServer` to authenticate when moving from local-only to server-backed mode. |
 | `autoConnect`    | `boolean`    | `true`         | If false, call `doc.connect()` manually. |
 | `subscribe`      | `string[]`   | `["**"]`       | F3a: glob patterns for client-side materialization. See [Subscriptions](#subscriptions-f3a). |
 | `presenceHeartbeatMs` | `number` | `15000`        | Interval between presence re-broadcasts. `0` disables. |
@@ -58,11 +59,13 @@ doc.onChange(ev => {
 - `doc.connect()`, `doc.disconnect()`, `doc.close()`.
 - `doc.pubkeyHex`, `doc.authorSeed`, `doc.isConnected`.
 - `doc.store` — escape hatch to the raw `SyncStore` for advanced use (speculative reads, frontier inspection).
+ - `doc.computeBlake3(bytes)` → `Promise<string>` — helper to compute canonical Blake3 id for `bytes` (hex).
+ - `doc.attachServer(serverUrl, options?)` → `Promise<void>` — in-place transport swap and replay local state to a server. `options` may include `{ mode: 'immediate' | 'wait-for-welcome' | 'manual' | 'hybrid' }`.
 
 ### `MapHandle`
 
 - `set(key, value)` — `value` is any JSON-serializable value.
-- `setBlob(key, bytes)` — stores `bytes` in the CAS, sets the key to its blob hash. When the server advertises `supports_direct_blob_io` (F6) and `bytes.length >= 1 MiB`, the SDK requests a presigned S3 PUT URL and uploads directly to object storage; smaller blobs and pre-F6 servers fall back transparently to the WebSocket `blob-upload` path.
+ - `setBlob(key, bytes)` — stores `bytes` in the CAS and sets the key to the blob hash. The SDK computes a canonical Blake3 id for `bytes` (via `computeBlake3`) and calls the WASM `store.set_blob(...)`. If the WASM-derived id and the computed Blake3 disagree, the SDK prefers the computed Blake3 id and stores the bytes under the canonical `assets/blake3/<hex>` layout. When the server advertises `supports_direct_blob_io` (F6) and `bytes.length >= 1 MiB`, the SDK requests a presigned S3 PUT URL and uploads directly to object storage; smaller blobs and pre-F6 servers fall back transparently to the WebSocket `blob-upload` path. Blob bytes are persisted to the browser IndexedDB (`activesync-sdk` DB, `blobs` store) for offline-first use.
 - `get(key)` — returns the JSON value or `undefined`.
 - `getBlob(hashOrKey)` — returns the blob bytes, looking the key up if needed. Under F6, the server may respond to a `blob-request` with `blob-redirect` payloads carrying presigned GET URLs; the SDK fetches the URL, caches it for reuse, and falls back to WebSocket transport on `403`/expired or any network failure.
 - `delete(key)`.
@@ -75,68 +78,16 @@ doc.onChange(ev => {
 - `toString()`.
 - `onChange(cb)`.
 
-### `ListHandle<T>`
+### List status
 
-Ordered list with fractional-index CRDT. Ordering lives in `Op::List` for
-`key`; item content lives in the sidecar Map at `${key}/items/<itemId>` and
-is composed transparently. Each item has a stable 32-char hex id that
-survives moves and reorderings.
-
-- `length` — number of visible (non-tombstoned) items.
-- `ids()` — item ids in order (cheap; no content decode).
-- `get(id)` — decoded content for `id`, or `undefined`.
-- `toArray()` — `[{ id, content }, …]` in order.
-- `push(content)` / `insert(index, content)` — returns new item id.
-- `insertAfter(anchorId, content)` / `insertBefore(anchorId, content)` —
-  stale anchor falls back to append.
-- `move(id, index)` — destination index is interpreted with the moved
-  item removed, so `move(id, length-1)` always lands at the end.
-- `delete(id)` — idempotent tombstone.
-- `update(id, content)` — content-only edit; ordering unchanged. Concurrent
-  `update` and `move` on the same item both take effect.
-- `onChange(cb)` — any change (order or content).
-- `onReorder(cb)` — only when ordering changes.
-- `gestures` — composed drag-and-drop helpers, see below.
-
-#### `ListHandle.gestures`
-
-Drag-and-drop gestures decompose into multi-op sequences. Bare "last-writer-
-wins on replace-on-drop" is bad UX (the loser's item vanishes). These
-helpers emit op sequences designed so concurrent gestures converge to
-sensible outcomes:
-
-- `dropOnto(draggedId, targetId)` — tombstones target and moves dragged
-  into its slot. Concurrent `dropOnto` against the same target from two
-  peers preserves **both** dragged items (deletes are idempotent; the two
-  moves land at adjacent tied positions).
-- `dropBetween(draggedId, beforeId, afterId)` — drop into the gap between
-  two anchors. Either anchor may be `null` for list-start / list-end.
-  Stale anchors fall through gracefully.
-- `swap(aId, bId)` — exchange two items' positions. Concurrent swaps of
-  overlapping pairs resolve via LWW per moved item; no item is lost.
-- `dropBefore(draggedId, targetId)` / `dropAfter(draggedId, targetId)` —
-  land dragged immediately adjacent to target.
-
-Apps that prefer "replace wins, loser vanishes" semantics can skip these
-and call `delete` / `move` / `insert` directly.
-
-```js
-const list = doc.list('boards/main/buttons');
-
-const id = list.push({ label: 'Yes' });
-list.insertAfter(id, { label: 'No' });
-list.move(id, list.length - 1);
-list.update(id, { label: 'Yeah' });  // edit without reordering
-list.delete(id);
-
-// Drag-and-drop
-list.gestures.dropOnto(draggedId, targetId);
-list.gestures.dropBetween(draggedId, leftId, rightId);
-
-// Render
-for (const { id, content } of list.toArray()) draw(id, content);
-list.onReorder(() => rerender());
-```
+The fractional-index `List` API is not yet stabilized in this SDK release.
+While the engine contains list primitives, the high-level `ListHandle`
+surface (stable ordering, gestures, and production-ready helpers) is still
+experimental and may change. For production UIs (for example, a soundboard
+button layout) use a `Map` with an explicit ordering field (for example
+`map('buttons').set(id, { order: 'a0', ... })`) and implement fractional-index
+sorting on the client. We will document migration steps when `ListHandle` is
+stabilized.
 
 ### `doc.presence` (ephemeral awareness)
 Ephemeral side-channel for cursors, selections, typing indicators, viewport
@@ -226,14 +177,24 @@ events.
 ## What the SDK does not handle (yet)
 
 - **WebRTC P2P** — D2 is shipped in the bridge but not surfaced here yet. The
-  SDK uses WebSocket only; the demo app (`web/demo.js`) shows the WebRTC glue.
-- **Client-side subscription filters** — F3a. Today every peer replicates the
-  entire room.
-- **Speculative vs. canonical split** — E2 is in the bridge (`read_speculative`
-  / `read_canonical`); surface via `doc.store` if needed before it's exposed.
-- **Persistence** — browser-side IndexedDB adapter lives in the demo today.
-  The SDK itself is stateless; bring your own adapter or wait for the next SDK
-  cut.
+  SDK currently uses WebSocket only; the demo app (`web/demo.js`) contains
+  experimental WebRTC glue.
+- **Client-side subscription filters** — F3a. The server may filter relayed
+  packs per-peer, but client-side selective materialization is limited to the
+  subscription pattern set in `createDoc` and live updates; per-write filtering
+  is still policy's job.
+- **Full speculative/canonical surface** — The bridge exposes `read_speculative`
+  and `read_canonical`; the SDK currently exposes the raw `doc.store` escape
+  hatch for advanced consumers. A higher-level public API for speculative vs
+  canonical reads may be added later.
+
+Note on persistence: this SDK release includes a built-in IndexedDB persistence
+adapter used for Free/offline flows. The runtime persists node packs to
+`activesync-sdk` → `nodes` and stores raw blob bytes in `activesync-sdk` →
+`blobs`. `createDoc` will hydrate from IndexedDB when available; call
+`doc.close()` to clear any live persistence hooks. The persistence is opt-out
+— if you prefer a different storage layer, you can replace or disable it in
+your app.
 
 ## Compatibility
 
@@ -270,3 +231,99 @@ notes.onChange(() => {
 - [ARCHITECTURE.md](../ARCHITECTURE.md) — engine internals.
 - [`web/demo.js`](../web/demo.js) — full-fidelity demo using the low-level
   bridge directly; will be ported onto `createDoc` once the SDK proves out.
+
+## **Attach Server Modes**
+
+- **Immediate Replay (default):** attach swaps in a server transport, connects,
+  and immediately replays local nodes and then pushes blob bytes. Pros: fast
+  convergence and quick server backup of local edits. Cons: may attempt direct
+  blob uploads or registration before the server's capabilities or a fresh
+  token are observed, which can trigger fallbacks or extra retries.
+- **Wait-for-Welcome (recommended for strict handoff):** attach connects but
+  waits for the server "welcome" / capability negotiation (the handshake that
+  advertises `supports_direct_blob_io`, protocol version, etc.) before
+  replaying nodes or uploading blobs. Pros: avoids unnecessary presign attempts
+  and respects server capabilities and auth state. Cons: adds a small delay to
+  the replay path.
+- **Manual-Control Mode:** attach only establishes the transport and returns —
+  the app explicitly calls `store.export_nodes_missing_from(...)` and
+  `transport.sendBlobs(...)` when it decides to replay. Use this when the app
+  needs to show a UI confirmation, perform additional auth steps, or sequence
+  uploads to avoid bursts.
+- **Hybrid (capability-aware) Replay:** attach waits for welcome, replays the
+  node pack immediately, but defers large blob uploads until `supports_direct_blob_io`
+  is confirmed; otherwise it uses the websocket `blob-upload` fallback. This
+  minimizes wasted presign attempts while keeping node convergence fast.
+
+Token & auth notes:
+- `attachServer` uses the SDK's `tokenProvider` / `ensureFreshToken` hooks when
+  the transport needs a token for the handshake. For best results ensure the
+  user is logged in and a valid token can be minted before calling
+  `attachServer`. If your token minting is asynchronous or slow, prefer the
+  Wait-for-Welcome or Manual-Control modes so the app can surface progress to
+  the user while authentication completes.
+
+When to pick which mode:
+- Quick UX and optimistic uploads: Immediate Replay.
+- Strict server capability / auth correctness: Wait-for-Welcome.
+- App-driven sequencing or user confirmation: Manual-Control.
+
+## Room IDs and Free users
+
+Do not reuse user-provided human-readable room names as the canonical room ID
+for server-backed rooms. For Free/offline users the SDK should be initialized
+with a globally-unique identifier so that later attaching to the server does
+not accidentally merge two distinct users who chose the same human name.
+Recommendation: when creating local-only docs generate a UUID-based room id
+(`room: 'board-' + crypto.randomUUID()`), store a user-visible label separately
+(`map('meta').set('label', 'My Soundboard')`), and only use the stable UUID
+when calling `attachServer(...)`.
+
+## **Testing & Validation**
+
+- **Run services:** Start the API, ActiveSync bridge, and the frontend/dev server
+  before end-to-end tests. Example commands (adjust paths/ports as needed):
+
+```bash
+# API
+cd PWASoundboard.Api
+dotnet run --urls http://0.0.0.0:8080
+
+# ActiveSync bridge (repo root)
+cd activesync
+# depending on your dev workflow: cargo run or start the dev server that
+# hosts the bridge at the configured bridge URL
+cargo run
+
+# Frontend (web-react)
+cd web-react
+npm run dev
+```
+
+- **Offline hydration test:**
+  1. Open app and call `createDoc({ room, /* no serverUrl */ })`.
+  2. Call `map('assets').setBlob('fx/boom', bytes)` and `store` local state.
+  3. Close the page and reopen; confirm `tryHydratePersistence()` restores the
+     nodes pack and blob bytes (`map.get('fx/boom')` and `map.getBlob(...)`).
+
+- **AttachServer end-to-end test:**
+  1. Start a second client connected to the server (normal `createDoc({ serverUrl, room })`).
+  2. On the first (local-only) client, call `await doc.attachServer(serverUrl)`.
+  3. Verify server logs show the incoming pack and `/sync/assets/register` calls
+     for uploaded blobs. Confirm the second client receives nodes and can fetch/play
+     the uploaded blobs.
+
+- **Token delay simulation:**
+  - If your token provider can be slowed (e.g., return a Promise that resolves
+    after a delay), test `attachServer` in Immediate and Wait-for-Welcome modes
+    to ensure the UX and upload behavior are acceptable. Consider hardening
+    `attachServer` to `await ensureFreshToken()` before initiating the connect
+    attempt if your app requires it.
+
+- **Checks to verify:**
+  - Asset keys on the server follow `assets/{algorithm}/{hash}` (e.g.
+    `assets/blake3/<hex>`).
+  - The API received `POST /sync/assets/register` for each direct-uploaded blob.
+  - Other clients can successfully `getBlob(...)` and decode/play the audio.
+
+If you want, I can implement an optional `attachServer(..., { mode: 'wait-for-welcome'|'manual'|'immediate' })` overload and add a small demo harness that runs the three smoke tests automatically.

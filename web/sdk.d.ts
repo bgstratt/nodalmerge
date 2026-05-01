@@ -32,7 +32,7 @@ export type Unsubscribe = () => void;
 
 export interface MapHandle {
   set(key: string, value: JsonValue): void;
-  setBlob(key: string, bytes: Uint8Array): string;
+  setBlob(key: string, bytes: Uint8Array, options?: { contentType?: string }): string;
   get(key: string): JsonValue | undefined;
   getBlob(hashOrKey: string): Uint8Array | undefined;
   delete(key: string): void;
@@ -218,6 +218,8 @@ export interface CreateDocOptions {
   /** Time (ms) after which a silent peer is treated as gone. Default 45000. */
   presenceStaleMs?: number;
   logger?: (level: 'info' | 'warn' | 'error', ...args: unknown[]) => void;
+  /** F6: callback invoked after a direct presigned PUT upload completes successfully. */
+  onDirectUpload?: (args: { hash: string; length: number }) => void | Promise<void>;
 }
 
 export function createDoc(opts: CreateDocOptions): Promise<Doc>;

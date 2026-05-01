@@ -125,6 +125,8 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
   // hash hex; value is a resolver function `(reply) => void` that takes
   // either an `upload-granted` or `upload-denied` envelope.
   const pendingUploadGrants = new Map();
+  // Optional MIME type metadata for blobs uploaded via direct PUT.
+  const blobContentTypes = new Map();
   // GET URL cache: hash → { url, expiresAtMs }. Refreshed by
   // `blob-redirect` messages and by re-asking the server when expiry
   // approaches or a fetch returns 403.
@@ -132,7 +134,7 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
   // Threshold below which we don't even ask for a presigned PUT — the WS
   // round-trip is cheaper. Server may also enforce its own threshold;
   // this is just the client-side optimization.
-  const DIRECT_UPLOAD_THRESHOLD = 1 * 1024 * 1024;
+  const DIRECT_UPLOAD_THRESHOLD = 0; // always try presigned PUT in delegate mode
   // Refresh GET URLs this many ms before they expire so an in-flight
   // fetch doesn't 403.
   const URL_REFRESH_LEAD_MS = 60_000;
@@ -225,7 +227,10 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
         pendingUploadGrants.delete(hash);
         resolve(envelope);
       });
-      send({ type: 'request-upload', hash, size: bytes.length });
+      const req = { type: 'request-upload', hash, size: bytes.length };
+      const contentType = blobContentTypes.get(hash);
+      if (contentType) req.content_type = contentType;
+      send(req);
     });
     if (reply.type === 'upload-denied') {
       throw new Error('upload-denied: ' + (reply.reason ?? 'unknown'));
@@ -247,6 +252,13 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
     // broadcasts blob-available so other peers can pull.
     send({ type: 'blob-uploaded', hash });
     metrics.emit('blob_upload', bytes.length, { transport: 'direct', result: 'ok' });
+    if (typeof onDirectUpload === 'function') {
+      try {
+        await onDirectUpload({ hash, length: bytes.length });
+      } catch (e) {
+        log('warn', '[sdk] onDirectUpload failed', e);
+      }
+    }
   }
 
   // F6: download a blob via presigned URL and stash it in the store.
@@ -954,6 +966,7 @@ function makePeerMesh({
  *   iceServers?: RTCIceServer[],       // override STUN/TURN for WebRTC peers
  *   logger?: (level, ...args) => void, // default console
  *   onMetric?: (ev) => void,           // G8: metric event hook. See docs/sdk.md.
+ *   onDirectUpload?: (args: { hash: string; length: number }) => void | Promise<void>; // F6: callback after a direct presigned PUT completes
  * }} opts
  */
 export async function createDoc(opts) {
@@ -975,6 +988,7 @@ export async function createDoc(opts) {
     presenceStaleMs = 45_000,
     logger = (level, ...a) => console[level === 'warn' ? 'warn' : 'log']('[activesync]', ...a),
     onMetric = null,
+    onDirectUpload = null,
   } = opts;
 
   if (!serverUrl) throw new Error('createDoc: serverUrl is required');
@@ -1304,9 +1318,12 @@ export async function createDoc(opts) {
         store.set(fullKey, jsonToBytes(value));
         afterLocalMutation({ source: 'local', type: 'map', namespace, key, path: fullKey });
       },
-      setBlob(key, bytes) {
+      setBlob(key, bytes, options) {
         const fullKey = joinPath(namespace, key);
         const hash = store.set_blob(fullKey, bytes);
+        if (options?.contentType) {
+          blobContentTypes.set(hash, options.contentType);
+        }
         afterLocalMutation({ source: 'local', type: 'map', namespace, key, path: fullKey, blob: hash });
         // Push the blob bytes to the server so other peers can fetch them.
         // (The metadata node is propagated by sendLocalDelta; the raw bytes
@@ -1683,3 +1700,37 @@ export async function createDoc(opts) {
 
 // Re-export low-level primitives for apps that want to drop down.
 export { SyncStore, sign_room_token, room_pubkey_hex };
+
+// Lightweight attachServer helper for demo/harness usage.
+// Modes supported: 'immediate' | 'wait-for-welcome' | 'manual'
+export async function attachServer(doc, serverUrl, options = {}) {
+  const { mode = 'immediate', onProgress } = options || {};
+  if (!doc) throw new Error('attachServer: missing doc');
+  try {
+    onProgress?.('start', {});
+    if (!doc.isConnected) doc.connect();
+
+    if (mode === 'wait-for-welcome') {
+      await new Promise((resolve) => {
+        let resolved = false;
+        const un = doc.onConnect(() => { if (!resolved) { resolved = true; un(); resolve(); } });
+        if (doc.isConnected) { un(); resolve(); }
+        setTimeout(() => { if (!resolved) { resolved = true; try { un(); } catch(_) {} resolve(); } }, 10_000);
+      });
+    } else if (mode === 'immediate') {
+      if (!doc.isConnected) {
+        await new Promise((resolve) => {
+          const un = doc.onConnect(() => { un(); resolve(); });
+          setTimeout(() => { try { un(); } catch(_) {} resolve(); }, 10_000);
+        });
+      }
+    } else {
+      onProgress?.('manual', {});
+      return;
+    }
+    onProgress?.('done', {});
+  } catch (e) {
+    onProgress?.('error', { error: String(e) });
+    throw e;
+  }
+}

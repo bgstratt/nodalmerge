@@ -25,8 +25,8 @@ fn start_mongo() -> Option<testcontainers::Container<GenericImage>> {
     }
 }
 
-#[test]
-fn mongo_passes_full_conformance() {
+#[tokio::test]
+async fn mongo_passes_full_conformance() {
     let _ = tracing_subscriber::fmt::try_init();
     let Some(container) = start_mongo() else {
         eprintln!("skipping: Docker / Mongo container unavailable");
@@ -39,7 +39,7 @@ fn mongo_passes_full_conformance() {
 
     let mut store = None;
     for attempt in 0..10 {
-        match MongoNodeStore::connect(MongoNodeStoreConfig::new(&uri, DB_NAME)) {
+        match MongoNodeStore::connect(MongoNodeStoreConfig::new(&uri, DB_NAME)).await {
             Ok(s) => { store = Some(s); break; }
             Err(e) => {
                 eprintln!("connect attempt {attempt} failed: {e}");

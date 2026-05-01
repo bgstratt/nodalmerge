@@ -65,23 +65,11 @@ impl Room {
         // divergence detection on slow clients; larger = more slack for
         // brief stalls. Zero is rejected at arg-parse time.
         let (tx, _) = broadcast::channel(broadcast_capacity);
-        // F4: hydrate graph + blobs from disk before the room becomes visible.
-        let mut graph = StateGraph::new();
-        let persisted_nodes = persistence.load_room_nodes(&room_id);
-        if !persisted_nodes.is_empty() {
-            let res = graph.apply_remote_batch(persisted_nodes);
-            if !res.rejected.is_empty() {
-                tracing::warn!(
-                    room = %room_id,
-                    rejected = res.rejected.len(),
-                    "rejected nodes during hydrate (corrupt/tampered persisted row)"
-                );
-            }
-        }
-        let mut blobs = MemoryBlobStore::new();
-        for (_h, bytes) in persistence.load_room_blobs(&room_id) {
-            blobs.put(bytes);
-        }
+        // F4: start with an empty in-memory graph and blob store. Persistence
+        // hydration is performed asynchronously by the caller so we don't
+        // perform blocking I/O during the WebSocket handshake.
+        let graph = StateGraph::new();
+        let blobs = MemoryBlobStore::new();
         Arc::new(Room {
             graph:           RwLock::new(graph),
             blobs:           RwLock::new(blobs),
@@ -270,6 +258,31 @@ impl Rooms {
             .clone();
         if created {
             metrics::gauge!("activesync_rooms_total").increment(1.0);
+            // Spawn background hydration so the WebSocket handshake doesn't
+            // block on potentially slow persistence I/O (e.g. Mongo).
+            let room_clone = Arc::clone(&room);
+            let persistence = Arc::clone(&self.persistence);
+            tokio::spawn(async move {
+                if persistence.is_durable() {
+                    // Load nodes and apply to the in-memory graph.
+                    let nodes = persistence.load_room_nodes(&room_clone.room_id);
+                    if !nodes.is_empty() {
+                        let res = room_clone.graph.write().await.apply_remote_batch(nodes);
+                        if !res.rejected.is_empty() {
+                            tracing::warn!(room = %room_clone.room_id, rejected = res.rejected.len(), "rejected nodes during async hydrate");
+                        }
+                    }
+                    // Load blobs and insert into memory blob store.
+                    let blobs = persistence.load_room_blobs(&room_clone.room_id);
+                    if !blobs.is_empty() {
+                        let mut store = room_clone.blobs.write().await;
+                        for (_h, bytes) in blobs {
+                            store.put(bytes);
+                        }
+                    }
+                    tracing::info!(room = %room_clone.room_id, "async persistence hydrate completed");
+                }
+            });
         }
         room
     }

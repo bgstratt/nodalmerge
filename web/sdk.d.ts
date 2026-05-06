@@ -13,7 +13,7 @@ export type ChangeSource = 'local' | 'remote';
 export interface ChangeEvent {
   source: ChangeSource;
   /** 'map' | 'text' for fine-grained local events; 'pack' for bulk remote merges. */
-  type: 'map' | 'text' | 'pack' | 'bulk' | 'blob';
+  type: 'map' | 'text' | 'list' | 'pack' | 'bulk' | 'blob' | 'undo' | 'redo';
   /** 'webrtc' when the event arrived via a peer data channel, 'ws' (or undefined) via the server. */
   transport?: 'ws' | 'webrtc';
   from?: string;
@@ -26,6 +26,17 @@ export interface ChangeEvent {
   len?: number;
   blob?: string;
   deleted?: boolean;
+  id?: string;
+  index?: number;
+  reason?: string;
+  origin?: string;
+  dragged?: string;
+  target?: string;
+  before?: string | null;
+  after?: string | null;
+  a?: string;
+  b?: string;
+  fallback?: string;
 }
 
 export type Unsubscribe = () => void;
@@ -144,6 +155,26 @@ export interface MeshPeer {
   connectionState: RTCPeerConnectionState | 'unknown';
 }
 
+export interface ConflictEvent {
+  at: number;
+  kind: string;
+  key: string;
+  localOp: unknown;
+  winningOp: unknown;
+  byYou: boolean;
+  raw: unknown;
+}
+
+export interface UndoManager {
+  undo(): boolean;
+  redo(): boolean;
+  clear(): void;
+  commit(): void;
+  readonly undoDepth: number;
+  readonly redoDepth: number;
+  destroy(): void;
+}
+
 export interface Doc {
   readonly pubkeyHex: string;
   readonly authorSeed: Uint8Array;
@@ -173,6 +204,17 @@ export interface Doc {
   onConnect(cb: () => void): Unsubscribe;
   onDisconnect(cb: () => void): Unsubscribe;
   onError(cb: (err: Error) => void): Unsubscribe;
+  /** G9 conflict surfacing hook. */
+  onConflict(cb: (ev: ConflictEvent) => void): Unsubscribe;
+  /** Return buffered conflicts newer than `sinceMs` (default 5 minutes). */
+  recentConflicts(sinceMs?: number): ConflictEvent[];
+
+  /** E3 app-layer undo/redo manager using compensating ops. */
+  undoManager(opts?: {
+    scope?: string[];
+    captureTimeout?: number;
+    maxItems?: number;
+  }): UndoManager;
 
   connect(): void;
   disconnect(): void;
@@ -217,13 +259,35 @@ export interface CreateDocOptions {
   presenceHeartbeatMs?: number;
   /** Time (ms) after which a silent peer is treated as gone. Default 45000. */
   presenceStaleMs?: number;
-  logger?: (level: 'info' | 'warn' | 'error', ...args: unknown[]) => void;
+  logger?: (level: 'log' | 'info' | 'warn' | 'error', ...args: unknown[]) => void;
+  /** G8 metric hook. No-op overhead when unset. */
+  onMetric?: (ev: {
+    kind: string;
+    value: number;
+    labels: Record<string, unknown>;
+    timestamp: number;
+  }) => void;
   /** F6: callback invoked after a direct presigned PUT upload completes successfully. */
   onDirectUpload?: (args: { hash: string; length: number }) => void | Promise<void>;
 }
 
 export function createDoc(opts: CreateDocOptions): Promise<Doc>;
 export function ready(): Promise<unknown>;
+
+export interface AttachServerOptions {
+  mode?: 'immediate' | 'wait-for-welcome' | 'manual';
+  onProgress?: (
+    stage: 'start' | 'manual' | 'done' | 'error',
+    payload: Record<string, unknown>,
+  ) => void;
+}
+
+/** Lightweight transport-attach helper used by demo/harness flows. */
+export function attachServer(
+  doc: Doc,
+  serverUrl: string,
+  options?: AttachServerOptions,
+): Promise<void>;
 
 // Low-level re-exports.
 export { SyncStore, sign_room_token, room_pubkey_hex } from './pkg/activesync_bridge.js';

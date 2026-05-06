@@ -550,7 +550,7 @@ Asserts the client receives a `Close { code: 4001 }` frame within 5s and
 that `room.connected_peers` empties within 2s of the close. Deterministic
 because `broadcast::Sender::send` is non-yielding.
 
-### G2 — WebRTC mesh cap
+### G2 — WebRTC mesh cap *(DEFERRED)*
 
 **Where it lives today.** `makePeerMesh` in `web/sdk.js` opens two
 `RTCDataChannel`s per remote peer, unconditionally. A 50-peer room =
@@ -561,6 +561,11 @@ O(N²) ≈ 2 450 channels per peer.
 - Mesh selection: sort peers by pubkey, keep the closest-hash K; everyone else rides WS. Deterministic and symmetric (both sides pick the same K).
 - `doc.peers()` already surfaces `transport`; surface the reason (`'mesh-cap'` vs `'ws-only'` vs `'negotiating'`) too.
 - Zero server change. Falls out of existing D2 fallback path.
+
+**Current decision.** Deferred for now. Current deployments are expected to have
+very low concurrent peer counts (typically <= 5, often fewer active at once),
+so the O(N^2) mesh path is not currently a bottleneck. Revisit if classroom-style
+usage becomes a real requirement.
 
 ### G3 — Rate limiting per peer *(SHIPPED)*
 
@@ -725,7 +730,7 @@ scrape endpoint.
 
 Integration test: `server/tests/metrics_endpoint.rs` installs the recorder on a loopback port, exercises room + peer + import paths, and scrapes `/metrics` via a raw HTTP/1.1 GET to assert the baseline series are present.
 
-### G8 — Metrics surface in the SDK (thin, BYO backend)
+### G8 — Metrics surface in the SDK (thin, BYO backend) *(SHIPPED)*
 
 **Rationale.** Adding a metrics exporter inside the WASM bridge pays a
 bundle-size tax in every browser session and forces a backend choice the
@@ -733,34 +738,36 @@ engine has no business making. Host apps already ship analytics (Sentry,
 Datadog RUM, PostHog, plain `performance.mark`); double-instrumenting is
 waste.
 
-**Plan.**
-- `createDoc({ onMetric: (m) => … })` — pure JS callback, synchronous,
-  zero deps.
-- Emitted events (object shape stable, name string enumerated):
-  - `{ name: 'merge_ms', value, room, peer, nodes }`
-  - `{ name: 'lagged_broadcast', count, room }`
-  - `{ name: 'rtc_channel_open' | 'rtc_channel_close', peer, channel }`
-  - `{ name: 'blob_fetch_ms', value, hash, via: 'ws' | 'webrtc' }`
-  - `{ name: 'reconnect', attempt, backoff_ms }`
-- Tree-shaker drops the whole path when `onMetric` is absent.
-- Mirrors server counter names where the concept overlaps (`lagged_broadcast` ↔ `activesync_broadcast_lagged_total`) so end-to-end dashboards are trivial.
+**Shipped.**
+- `createDoc({ onMetric })` is available in `web/sdk.js` and emits app-owned
+  metric events with the stable envelope `{ kind, value, labels, timestamp }`.
+- Emission is zero-cost when `onMetric` is unset (no hot-path allocations).
+- Current emitted kinds include: `pack_applied`, `op_apply_latency`,
+  `ws_reconnect`, `blob_upload`, `blob_download`, and
+  `direct_upload_fallback`.
+- `presence_latency` was intentionally deferred because there is no reliable
+  round-trip acknowledgment surface yet.
 
-### G9 — Conflict visibility (SDK)
+### G9 — Conflict visibility (SDK) *(SHIPPED)*
 
 **Where it lives today.** LWW is silent: caregiver A overwrites caregiver B
 with no user-facing signal.
 
-**Plan.**
-- Extend `doc.onChange(ev)` with `ev.overwrote: Map<key, { prevAuthor, prevLamport, prevValue }>` — populated only when an accepted op displaced a non-tombstoned value written by a different author within the last `conflictWindowMs` (default 30 s).
-- Pure SDK-side; reads `read_canonical(key)` before merge to capture the displaced value. No wire change.
-- Opt-in via `createDoc({ conflictReporting: true })` to avoid the extra resolve cost for apps that don't need it.
+**Shipped.**
+- Conflict detection landed in core and is surfaced through the bridge via
+  `take_conflicts_json`.
+- SDK surface is `doc.onConflict(cb)` plus `doc.recentConflicts(sinceMs)`.
+- Events are emitted for practical conflict kinds (`MapOverwrite`,
+  `ListMoveLost`, `ListDeleteWon`) and are also mirrored through the G8 metric
+  hook as conflict events.
+- No wire/protocol changes were required.
 
-### G10 — Schema migration guidance (docs-only)
+### G10 — Schema migration guidance (docs-only) *(SHIPPED)*
 
 **Where it lives today.** The engine is schema-free (`Op::Map` values are
-opaque `Vec<u8>`). App authors have no written rules of the road.
+opaque `Vec<u8>`). Guidance is documentation-only and app-layer by design.
 
-**Plan.** One-page `docs/schema-migrations.md`:
+**Shipped.** `docs/schema-migrations.md` now captures the migration rules:
 - **Ops are forever.** Old nodes survive compaction only as state, not as replayable ops; old op *shapes* survive forever in pre-compaction history.
 - **Additive changes only.** New optional fields in value JSON. Renames = `Set(new_key, value)` + `Set(old_key, tombstone)`.
 - **Versioning escape hatch.** App-layer `version` field inside the value bytes. SDK does not interpret; app chooses forward/backward compat.
@@ -790,6 +797,6 @@ both behind the existing glob layer:
 |---|---|---|
 | **Operational safety** | G1, G7, G3, G4, G5, G6 | Backpressure + metrics + rate limiting + blob GC + Lamport ceiling + token-expiry enforcement. All shipped — the full load-bearing operational floor. |
 | **Before real users** | — | Subsumed into the Operational-safety wave. |
-| **Product polish** | G8, G9, G10 | SDK metrics hook, conflict surfacing, migration docs. All small, all app-adjacent. |
+| **Product polish** | G8, G9, G10 | SDK metrics hook, conflict surfacing, migration docs. Shipped. |
 | **Never unless asked** | G2 (cap only), G11 | G2 is trivial if mesh scale ever bites; G11 is expensive and speculative. |
 

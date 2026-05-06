@@ -13,10 +13,11 @@
 //   notes.insert(0, 'Hello');
 //
 // Status:
-//   v0 — LWW Map + RGA Text + IBF/MST handshake + blob sync.
-//   Deferred: WebRTC P2P (D2), presence (F2), client-side subscribe (F3a),
-//             speculative/canonical split (E2 is in the bridge but not yet
-//             surfaced here — apps wanting it can drop to `doc.store`).
+//   v1 — LWW Map + RGA Text + ListHandle (F8) + IBF/MST handshake + blob sync.
+//   Shipped: WebRTC mesh (D2/F1b), presence (F2), subscriptions (F3a/F3b),
+//            metrics hook (G8), conflict surfacing (G9), undo manager (E3).
+//   Still low-level escape hatch: speculative/canonical reads remain on
+//   `doc.store` (bridge-level APIs).
 
 import init, {
   SyncStore,

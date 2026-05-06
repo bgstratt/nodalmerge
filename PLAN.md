@@ -715,8 +715,7 @@ Internally this is a thin JS wrapper around today's `SyncStore`. No core changes
 reconnect) + WebRTC peer mesh (F1b, see below). `web/sdk.d.ts` ships
 TypeScript types including `MeshPeer` + `transport: 'ws' | 'webrtc'` on change
 events. `docs/sdk.md` covers quickstart + API + known limitations. Token
-signing (C3) is wired through `roomSeed` + `tokenCaps`. `doc.list()`
-deliberately throws — List CRDT is tracked post-F. `doc.store` is the escape
+signing (C3) is wired through `roomSeed` + `tokenCaps`. `doc.store` is the escape
 hatch for anything the SDK doesn't surface yet (speculative reads, raw wire).
 `web/demo.js` has been ported onto `createDoc` and is now the reference
 consumer of the SDK rather than a parallel impl.
@@ -1358,7 +1357,7 @@ under the `NodePersistence` trait (see F6).
 
 ### Problem
 
-Today `doc.list()` throws. Apps model ordered collections as:
+When this work was proposed, `doc.list()` threw. Apps modeled ordered collections as:
 1. Map with an app-level `sortKey` field — works under single-editor, silently
    corrupts under concurrent reorder (two clients computing the same
    "between A and B" key collide).

@@ -96,7 +96,7 @@ function randomSeed32() {
 // Transport — WebSocket wrapper that speaks the ActiveSync wire protocol.
 // Reuses the protocol shipped in demo.js (hello/welcome/pack/request/mst/blob).
 // -----------------------------------------------------------------------------
-function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, getPubkey, getSubscription, onRemotePack, onConnect, onDisconnect, onError, onPresence, onPeerJoined, onPeerLeft, onWelcomePeers, onSignal, log, metrics }) {
+function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, getPubkey, getSubscription, onRemotePack, onConnect, onDisconnect, onError, onPresence, onPeerJoined, onPeerLeft, onWelcomePeers, onSignal, log, metrics, blobContentTypes }) {
   metrics = metrics || { emit() {}, enabled: false };
   let ws = null;
   let reconnectTimer = null;
@@ -125,8 +125,7 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
   // hash hex; value is a resolver function `(reply) => void` that takes
   // either an `upload-granted` or `upload-denied` envelope.
   const pendingUploadGrants = new Map();
-  // Optional MIME type metadata for blobs uploaded via direct PUT.
-  const blobContentTypes = new Map();
+  // blobContentTypes is passed in from createDoc scope so setBlob (in makeMap) can write to it.
   // GET URL cache: hash → { url, expiresAtMs }. Refreshed by
   // `blob-redirect` messages and by re-asking the server when expiry
   // approaches or a fetch returns 403.
@@ -241,9 +240,10 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
     const resp = await fetch(reply.url, {
       method: 'PUT',
       body: bytes,
-      // Avoid the browser appending `Content-Type: text/plain;...` which
-      // would mismatch the presign signature on some providers.
-      headers: { 'Content-Type': 'application/octet-stream' },
+      // Use the same Content-Type that was sent in request-upload so the
+      // presigned URL signature (which locks in the content-type) is not
+      // violated. Mismatching causes S3 to return 403.
+      headers: { 'Content-Type': blobContentTypes.get(hash) ?? 'application/octet-stream' },
     });
     if (!resp.ok) {
       throw new Error('PUT failed: ' + resp.status);
@@ -1015,6 +1015,10 @@ export async function createDoc(opts) {
   const connectE = makeEmitter();
   const disconnectE = makeEmitter();
   const errorE = makeEmitter();
+  // E3 — undo manager hook. Fires *before* each local mutation with
+  // enough state to build a compensating op. makeUndoManager() subscribes
+  // here; all other code should call afterLocalMutation() as before.
+  const preMutationE = makeEmitter();
   // G9 — conflict surfacing. `conflictE` is the live fan-out; the SDK
   // polls `store.take_conflicts_json()` after every pack-apply. A
   // bounded ring buffer backs `doc.recentConflicts(sinceMs)` for apps
@@ -1235,6 +1239,11 @@ export async function createDoc(opts) {
     };
   })();
 
+  // ---- blob content-type registry ----
+  // Declared here (createDoc scope) so both makeMap.setBlob and makeTransport.directUpload
+  // can access the same Map via closure / parameter.
+  const blobContentTypes = new Map();
+
   // ---- transport ----
   // Forward declaration so the mesh can call transport.send for signaling.
   let transport;
@@ -1279,6 +1288,7 @@ export async function createDoc(opts) {
     onSignal: (msg) => mesh.onSignal(msg),
     log: logger,
     metrics,
+    blobContentTypes,
   });
 
   // After any local mutation, broadcast the delta + emit change.
@@ -1302,6 +1312,178 @@ export async function createDoc(opts) {
     }
   }
 
+  // ---- Undo Manager (E3) ----
+  //
+  // Tracks *local* mutations for the current author and provides undo/redo.
+  // Uses preMutationE to capture before-state, and anyChange to batch ops
+  // within `captureTimeout` ms into a single undo item.
+  //
+  // Limitations:
+  //  - `list.delete` and `text.delete` are not reversible in a CRDT; they are
+  //    silently excluded from the undo stack.
+  //  - Text undo is positional (best-effort under concurrent remote ops).
+  //  - Origin tagging prevents undo-of-undo loops: compensating writes are not
+  //    tracked by the undo manager that issued them.
+  //
+  function makeUndoManager({ scope = ['**'], captureTimeout = 500, maxItems = 100 } = {}) {
+    // Scope filter — glob patterns using the same matcher as subscriptions.
+    const scopeSub = compileSubscription(scope);
+
+    // Undo stack — each entry is an array of compensating op descriptors.
+    // Grows from the tail; undo pops the tail.
+    const undoStack = [];
+    // Redo stack — re-populated when undo is invoked, cleared on new mutations.
+    const redoStack = [];
+
+    // Capture window: ops within `captureTimeout` ms are merged into one item.
+    let pendingItem = null;   // { compensations: [...], timer: id }
+    let _inCompensation = false; // re-entrancy guard
+
+    function flushPending() {
+      if (!pendingItem) return;
+      clearTimeout(pendingItem.timer);
+      if (pendingItem.compensations.length > 0) {
+        undoStack.push(pendingItem.compensations);
+        while (undoStack.length > maxItems) undoStack.shift();
+        redoStack.length = 0; // any new mutation clears redo history
+      }
+      pendingItem = null;
+    }
+
+    // Pre-mutation handler: called BEFORE the store write.
+    const unsubPre = preMutationE.on(ev => {
+      if (_inCompensation) return; // don't track our own compensating writes
+      if (!scopeSub.matches(ev.path)) return;
+
+      let compensation = null;
+
+      if (ev.type === 'map-set') {
+        // Undo: re-set to old value, or delete the key if it was absent.
+        if (ev.oldValue !== null) {
+          compensation = { op: 'map-set', path: ev.path, value: ev.oldValue };
+        } else {
+          compensation = { op: 'map-delete', path: ev.path };
+        }
+      } else if (ev.type === 'map-delete') {
+        // Undo: re-set to the old value if it existed.
+        if (ev.oldValue !== null) {
+          compensation = { op: 'map-set', path: ev.path, value: ev.oldValue };
+        }
+        // If oldValue was null (key already absent), nothing to undo.
+      } else if (ev.type === 'list-insert') {
+        // Undo: delete the newly inserted item.
+        compensation = { op: 'list-delete', listKey: ev.path, id: ev.id };
+      } else if (ev.type === 'list-move') {
+        // Undo: move back to old index.
+        compensation = { op: 'list-move', listKey: ev.path, id: ev.id, index: ev.oldIndex };
+      } else if (ev.type === 'text-insert') {
+        // Undo: delete the inserted characters at the same position.
+        compensation = { op: 'text-delete', textKey: ev.path, pos: ev.pos, len: ev.len };
+      }
+      // text-delete and list-delete (undoable=false) are intentionally skipped.
+
+      if (!compensation) return;
+
+      if (!pendingItem) {
+        const timer = setTimeout(flushPending, captureTimeout);
+        pendingItem = { compensations: [], timer };
+      }
+      // Prepend so that applying compensations in order reverses the ops correctly.
+      pendingItem.compensations.unshift(compensation);
+    });
+
+    function applyCompensations(comps, store) {
+      _inCompensation = true;
+      try {
+        for (const c of comps) {
+          if (c.op === 'map-set') {
+            store.set(c.path, jsonToBytes(c.value));
+          } else if (c.op === 'map-delete') {
+            store.delete(c.path);
+          } else if (c.op === 'list-delete') {
+            try { store.list_delete(c.listKey, c.id); } catch (_) {}
+          } else if (c.op === 'list-move') {
+            try { store.list_move_to(c.listKey, c.id, c.index); } catch (_) {}
+          } else if (c.op === 'text-delete') {
+            try {
+              for (let i = 0; i < c.len; i++) store.delete_text(c.textKey, c.pos);
+            } catch (_) {}
+          }
+        }
+      } finally {
+        _inCompensation = false;
+      }
+    }
+
+    return {
+      /**
+       * Undo the most recent captured mutation group.
+       * Returns `true` if there was something to undo, `false` otherwise.
+       */
+      undo() {
+        flushPending(); // commit any in-window ops first
+        const comps = undoStack.pop();
+        if (!comps) return false;
+        // Build forward (redo) snapshot BEFORE applying compensations.
+        const forwardComps = [];
+        for (const c of [...comps].reverse()) {
+          if (c.op === 'map-set' || c.op === 'map-delete') {
+            const all = JSON.parse(store.resolve_json());
+            const cur = all[c.path] ?? null;
+            if (cur !== null) forwardComps.push({ op: 'map-set', path: c.path, value: cur });
+            else forwardComps.push({ op: 'map-delete', path: c.path });
+          } else if (c.op === 'list-move') {
+            // Snapshot current index for redo.
+            try {
+              const ids = JSON.parse(store.list_ids_json(c.listKey));
+              const cur = ids.indexOf(c.id);
+              forwardComps.push({ op: 'list-move', listKey: c.listKey, id: c.id, index: cur < 0 ? c.index : cur });
+            } catch (_) {}
+          }
+          // list-delete redo and text-delete redo are not captured (same CRDT limitations).
+        }
+        applyCompensations(comps, store);
+        afterLocalMutation({ source: 'local', type: 'undo', origin: 'undo-manager' });
+        if (forwardComps.length > 0) redoStack.push(forwardComps);
+        return true;
+      },
+
+      /**
+       * Re-apply the most recently undone mutation group.
+       * Returns `true` if there was something to redo, `false` otherwise.
+       */
+      redo() {
+        flushPending();
+        const comps = redoStack.pop();
+        if (!comps) return false;
+        applyCompensations(comps, store);
+        afterLocalMutation({ source: 'local', type: 'redo', origin: 'undo-manager' });
+        return true;
+      },
+
+      /** Discard all undo/redo history. */
+      clear() {
+        flushPending();
+        undoStack.length = 0;
+        redoStack.length = 0;
+      },
+
+      /** Flush the current capture window and commit it as a discrete undo item. */
+      commit() { flushPending(); },
+
+      /** Number of available undo steps. */
+      get undoDepth() { return undoStack.length; },
+      /** Number of available redo steps. */
+      get redoDepth() { return redoStack.length; },
+
+      /** Unsubscribe and release all hooks. */
+      destroy() {
+        flushPending();
+        unsubPre();
+      },
+    };
+  }
+
   // ---- Map handle ----
   function makeMap(namespace) {
     const changeE = makeEmitter();
@@ -1315,6 +1497,9 @@ export async function createDoc(opts) {
     return {
       set(key, value) {
         const fullKey = joinPath(namespace, key);
+        // E3: snapshot old value before write for undo compensation.
+        preMutationE.emit({ type: 'map-set', path: fullKey, namespace,
+          oldValue: (JSON.parse(store.resolve_json())[fullKey] ?? null) });
         store.set(fullKey, jsonToBytes(value));
         afterLocalMutation({ source: 'local', type: 'map', namespace, key, path: fullKey });
       },
@@ -1347,6 +1532,9 @@ export async function createDoc(opts) {
       },
       delete(key) {
         const fullKey = joinPath(namespace, key);
+        // E3: snapshot old value before delete for undo compensation.
+        preMutationE.emit({ type: 'map-delete', path: fullKey, namespace,
+          oldValue: (JSON.parse(store.resolve_json())[fullKey] ?? null) });
         store.delete(fullKey);
         afterLocalMutation({ source: 'local', type: 'map', namespace, key, path: fullKey, deleted: true });
       },
@@ -1378,10 +1566,15 @@ export async function createDoc(opts) {
     return {
       insert(pos, str) {
         if (typeof str !== 'string') throw new TypeError('text.insert: str must be a string');
+        // E3: snapshot insertion site for undo (positional undo; breaks under concurrency).
+        preMutationE.emit({ type: 'text-insert', path: key, pos, len: str.length });
         for (let i = 0; i < str.length; i++) store.insert_text(key, pos + i, str[i]);
         afterLocalMutation({ source: 'local', type: 'text', path: key, op: 'insert', pos, len: str.length });
       },
       delete(pos, len = 1) {
+        // E3: snapshot deleted text for undo (content-preserving re-insert is not supported
+        // in RGA; undo of text delete is intentionally skipped by the undo manager).
+        preMutationE.emit({ type: 'text-delete', path: key, pos, len });
         for (let i = 0; i < len; i++) store.delete_text(key, pos);
         afterLocalMutation({ source: 'local', type: 'text', path: key, op: 'delete', pos, len });
       },
@@ -1473,6 +1666,8 @@ export async function createDoc(opts) {
       push(content) {
         const id = newItemId();
         writeContent(id, content);
+        // E3: record new item id so undo can delete it.
+        preMutationE.emit({ type: 'list-insert', path: key, id, index: this.length });
         store.list_insert_at(key, this.length, id);
         afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'insert', id, index: this.length - 1 });
         return id;
@@ -1482,6 +1677,8 @@ export async function createDoc(opts) {
         const id = newItemId();
         writeContent(id, content);
         const i = Math.max(0, Math.min(index | 0, this.length));
+        // E3: record new item id so undo can delete it.
+        preMutationE.emit({ type: 'list-insert', path: key, id, index: i });
         store.list_insert_at(key, i, id);
         afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'insert', id, index: i });
         return id;
@@ -1507,11 +1704,18 @@ export async function createDoc(opts) {
         const len = this.length;
         if (len === 0) return; // nothing to move
         const i = Math.max(0, Math.min(index | 0, len - 1));
+        // E3: snapshot old index so undo can move back.
+        const oldIndex = JSON.parse(store.list_ids_json(key)).indexOf(idHex);
+        preMutationE.emit({ type: 'list-move', path: key, id: idHex, oldIndex: oldIndex < 0 ? i : oldIndex, newIndex: i });
         store.list_move_to(key, idHex, i);
         afterLocalMutation({ source: 'local', type: 'list', path: key, op: 'move', id: idHex, index: i });
       },
 
       delete(idHex) {
+        // E3: list deletes (tombstones) cannot be truly undone in a fractional-index
+        // CRDT (tombstoned items cannot be re-inserted under the same id). The undo
+        // manager skips list-delete by design; document this for callers.
+        preMutationE.emit({ type: 'list-delete', path: key, id: idHex, undoable: false });
         store.list_delete(key, idHex);
         // Tombstone the sidecar too — keeps resolve_json() free of orphan
         // content bytes for items no peer can ever reference again.
@@ -1646,6 +1850,18 @@ export async function createDoc(opts) {
     text: makeText,
     list: makeList,
     presence,
+
+    /**
+     * E3 — Undo manager factory. Returns an object with `.undo()`, `.redo()`,
+     * `.commit()`, `.clear()`, and `.destroy()`. Multiple independent managers
+     * can coexist (e.g. one per collaborative region).
+     *
+     * @param {{ scope?: string[], captureTimeout?: number, maxItems?: number }} opts
+     *   scope         — glob patterns for keys to track (default ["**"] = all).
+     *   captureTimeout — ms window within which ops merge into one undo step (default 500).
+     *   maxItems      — ring-buffer cap for undo history (default 100).
+     */
+    undoManager(opts) { return makeUndoManager(opts); },
 
     // F3a subscription API -------------------------------------------------
     get subscription() { return subscription.patterns.slice(); },

@@ -54,6 +54,10 @@ pub const SNAP_HASH_KEY: &str = "\x00snap:hash";
 /// Op key that carries the postcard-encoded frontier in a snapshot node.
 pub const SNAP_FRONT_KEY: &str = "\x00snap:front";
 
+/// Op key that carries the optional base-snapshot `NodeId` ([u8;32]) for
+/// incremental (chained) snapshots (E4).  Absent in full snapshots.
+pub const SNAP_BASE_KEY: &str = "\x00snap:base";
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -70,6 +74,9 @@ pub struct SnapshotMeta {
     pub frontier: Vec<NodeId>,
     /// The Ed25519 public key of the peer that produced this snapshot.
     pub author: [u8; 32],
+    /// E4: For incremental snapshots, the NodeId of the previous snapshot this
+    /// one chains from.  `None` for full (standalone) snapshots.
+    pub base_id: Option<NodeId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +154,78 @@ pub fn compact(
 }
 
 // ---------------------------------------------------------------------------
+// compact_incremental()
+// ---------------------------------------------------------------------------
+
+/// Create an *incremental* snapshot that chains from a previous snapshot.
+///
+/// An incremental snapshot is identical to a full snapshot (see [`compact`])
+/// except it also carries `\x00snap:base` = `base_snapshot_id.0` (32 raw
+/// bytes).  Receivers that already hold the base snapshot can prune only the
+/// nodes between the base frontier and the new frontier, keeping their chain
+/// intact rather than discarding their entire history.
+///
+/// # Chain consolidation
+///
+/// Once the chain reaches `max_chain_depth` incremental snapshots, callers
+/// should switch back to a full [`compact`] call to reset the depth counter
+/// and prevent unbounded chain growth.  The server's snapshot sweeper
+/// (`--snapshot-interval` / `--snapshot-max-chain`) handles this automatically.
+///
+/// # Errors
+/// Same as [`compact`]: returns `SyncError::HashMismatch` if the graph is empty.
+pub fn compact_incremental(
+    graph: &StateGraph,
+    signing_key: &ed25519_dalek::SigningKey,
+    base_snapshot_id: NodeId,
+) -> Result<SyncNode, SyncError> {
+    let resolved: BTreeMap<String, Vec<u8>> = graph
+        .resolve()
+        .into_iter()
+        .filter(|(k, _)| !k.starts_with('\x00'))
+        .collect();
+
+    let snap_hash = canonical_hash(&resolved);
+
+    let frontier_ids: Vec<[u8; 32]> = {
+        let mut ids: Vec<[u8; 32]> = graph
+            .frontier()
+            .heads
+            .iter()
+            .map(|h| h.0)
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+
+    let frontier_bytes = postcard::to_allocvec(&frontier_ids)
+        .map_err(|_e| SyncError::HashMismatch {
+            expected: Hash([0u8; 32]),
+            actual:   Hash([0u8; 32]),
+        })?;
+
+    let ops = vec![
+        Op::Map(MapOp::Set { key: SNAP_HASH_KEY.to_string(),  value: snap_hash.0.to_vec() }),
+        Op::Map(MapOp::Set { key: SNAP_FRONT_KEY.to_string(), value: frontier_bytes }),
+        // E4: chain pointer to the previous snapshot.
+        Op::Map(MapOp::Set { key: SNAP_BASE_KEY.to_string(),  value: base_snapshot_id.0.to_vec() }),
+    ];
+
+    let author: [u8; 32] = signing_key.verifying_key().to_bytes();
+    let lamport = graph.lamport() + 1;
+    let tx = Transaction {
+        author,
+        lamport,
+        wall_ms: 0,
+        ops,
+        parents: vec![],
+    };
+
+    let node = SyncNode::new_signed(tx, signing_key);
+    Ok(node)
+}
+
+// ---------------------------------------------------------------------------
 // verify_snapshot()
 // ---------------------------------------------------------------------------
 
@@ -166,6 +245,7 @@ pub fn verify_snapshot(node: &SyncNode) -> Result<SnapshotMeta, SyncError> {
 
     let mut snap_hash_bytes: Option<[u8; 32]> = None;
     let mut frontier: Option<Vec<NodeId>> = None;
+    let mut base_id: Option<NodeId> = None;
 
     for op in &node.transaction.ops {
         if let Op::Map(MapOp::Set { key, value }) = op {
@@ -185,6 +265,11 @@ pub fn verify_snapshot(node: &SyncNode) -> Result<SnapshotMeta, SyncError> {
                         actual:   Hash([0u8; 32]),
                     })?;
                 frontier = Some(ids.into_iter().map(Hash).collect());
+            } else if key == SNAP_BASE_KEY {
+                // E4: optional chain pointer. 32 raw bytes = NodeId.
+                if let Ok(arr) = <[u8; 32]>::try_from(value.as_slice()) {
+                    base_id = Some(Hash(arr));
+                }
             }
         }
     }
@@ -199,7 +284,7 @@ pub fn verify_snapshot(node: &SyncNode) -> Result<SnapshotMeta, SyncError> {
         actual:   Hash([0u8; 32]),
     })?;
 
-    Ok(SnapshotMeta { snapshot_hash, frontier, author: node.transaction.author })
+    Ok(SnapshotMeta { snapshot_hash, frontier, author: node.transaction.author, base_id })
 }
 
 // ---------------------------------------------------------------------------

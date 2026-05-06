@@ -379,7 +379,8 @@ Test suite: **117 / 117** passing in `activesync-core` (`cargo test -p activesyn
 | E | E1 Super-Peer, E2 Speculative/canonical views, E3 Tick batching | ✅ |
 | F | F0 WS token enforcement, F1a SDK `createDoc`, F1b WebRTC peer mesh in SDK, F2 Presence API, F3a client-side subscriptions, F3b server-side subscription filter, F4 `DirPersistence` (SQLite + file blobs), F4-follow-up idle-room eviction, F5 JWT bridge + Docker self-host | ✅ |
 | Ops | tracing + RUST_LOG, batch verify (`verify_batch`, chunk=256) | ✅ |
-| Future | CDN-backed `BlobStore::resolve_url` adapter; List CRDT (fractional index); RGA run compression; Peritext rich-text | open |
+| F8 | Fractional-index List CRDT (`Op::List`, `ListHandle`, `doc.list()`) | ✅ |
+| Future | CDN-backed `BlobStore::resolve_url` adapter; S3 NodePersistence (op-log replication); Incremental snapshots; Undo manager (compensating ops); RGA run compression; Peritext rich-text | open |
 
 Everything described in the protocol stack is on disk and exercised by tests
 and the live demo. Remaining open items are product-specific CRDT extensions
@@ -439,8 +440,10 @@ Behaviors worth flagging:
 * **Presence.** Side-channel, not in the DAG. Heartbeats every 15 s; peers
   swept after 45 s silence; leave events fire on `peer-left`, `clear()`, or
   staleness.
-* **`doc.list()` deliberately throws.** List CRDT (fractional index) is
-  scheduled post-F.
+* **`doc.list(key)`** returns a `ListHandle` (F8, shipped). `.insert(index, id, content)`,
+  `.move(id, index)`, `.delete(id)`, `.items()`, `.length`, `.onChange(cb)`. Item order
+  is fractional-index (base-62 `FracIdx`); concurrent moves are LWW — not delete+insert —
+  so sidecar Map edits compose cleanly with position changes.
 
 `activesync-jwt-bridge` (Rust) is the companion piece for hosted
 deployments: your auth server mints a JWT with

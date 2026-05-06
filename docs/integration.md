@@ -7,7 +7,8 @@ crates.
 > For upgrade paths from older versions see
 > [migration.md](./migration.md). For day-2 operations see
 > [operator.md](./operator.md). For the frontend API see
-> [sdk.md](./sdk.md).
+> [sdk.md](./sdk.md). For delegated-storage asset lifecycle cleanup,
+> see [delegated-storage-gc.md](./delegated-storage-gc.md).
 
 ---
 

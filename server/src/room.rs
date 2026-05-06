@@ -657,3 +657,137 @@ pub fn base64_encode(data: &[u8]) -> String {
     }
     out
 }
+
+// ---------------------------------------------------------------------------
+// E4: Snapshot sweeper
+// ---------------------------------------------------------------------------
+
+/// E4 — Spawn the background snapshot sweeper.
+///
+/// Wakes every `check_interval` and checks each live room.  Once a room
+/// accumulates `node_interval` or more new nodes since the last snapshot, the
+/// server compacts the room's graph and broadcasts the resulting snapshot node
+/// to all connected peers.
+///
+/// Incremental vs. full snapshots:
+/// - The first snapshot is always a *full* snapshot (no chain pointer).
+/// - Each subsequent snapshot within a chain is *incremental* (carries
+///   `\x00snap:base` pointing to the previous snapshot's node ID).
+/// - Once the chain reaches `max_chain_depth`, the sweeper resets to a full
+///   snapshot to prevent unbounded chain growth.
+///
+/// `node_interval == 0` disables snapshotting (returns `None`).
+/// Callers may drop the returned `JoinHandle` — the runtime drops the task.
+pub fn spawn_snapshot_sweeper(
+    rooms: Rooms,
+    server_key: std::sync::Arc<ed25519_dalek::SigningKey>,
+    node_interval: usize,
+    max_chain_depth: usize,
+    check_interval: Duration,
+) -> Option<tokio::task::JoinHandle<()>> {
+    use activesync_core::compaction::{compact, compact_incremental, pack_snapshot_pack};
+
+    if node_interval == 0 {
+        return None;
+    }
+
+    Some(tokio::spawn(async move {
+        // Per-room snapshot state: (last_node_count, chain_depth, last_snapshot_id).
+        let mut room_state: HashMap<String, (usize, usize, Option<activesync_core::NodeId>)> = HashMap::new();
+
+        let mut ticker = tokio::time::interval(check_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await; // skip t=0
+
+        loop {
+            ticker.tick().await;
+
+            // Snapshot the room list so we don't hold the outer lock during compaction.
+            let room_list: Vec<(String, Arc<Room>)> = {
+                let map = rooms.rooms.read().await;
+                map.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect()
+            };
+
+            for (room_id, room) in room_list {
+                let graph = room.graph.read().await;
+                let current_count = graph.node_count();
+                drop(graph);
+
+                let (last_count, chain_depth, last_snap_id) = room_state
+                    .entry(room_id.clone())
+                    .or_insert((current_count, 0, None));
+
+                let delta = current_count.saturating_sub(*last_count);
+                if delta < node_interval {
+                    continue; // not enough new nodes yet
+                }
+
+                // Time to snapshot. Choose full vs. incremental.
+                let graph = room.graph.read().await;
+                let snap_result = if *chain_depth >= max_chain_depth || last_snap_id.is_none() {
+                    // Full snapshot: resets the chain.
+                    compact(&graph, &server_key)
+                } else {
+                    // Incremental snapshot: chains from previous.
+                    compact_incremental(&graph, &server_key, last_snap_id.unwrap())
+                };
+                drop(graph);
+
+                let snap_node = match snap_result {
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!(room = %room_id, ?e, "snapshot sweeper: compact failed");
+                        continue;
+                    }
+                };
+
+                let snap_id = snap_node.id;
+                let is_full = last_snap_id.is_none() || *chain_depth >= max_chain_depth;
+                let kind = if is_full { "full" } else { "incremental" };
+
+                // Insert the snapshot node into the room's graph.
+                {
+                    let mut graph = room.graph.write().await;
+                    if let Err(e) = graph.apply_remote(snap_node.clone()) {
+                        tracing::warn!(room = %room_id, ?e, "snapshot sweeper: apply_remote failed");
+                        continue;
+                    }
+                }
+
+                // Persist the snapshot node if durable.
+                room.persistence.persist_node(&room_id, &snap_node);
+
+                // Broadcast the snapshot pack to all connected peers.
+                let pack_bytes = pack_snapshot_pack(&snap_node, &[]);
+                let pack_b64 = base64_encode(&pack_bytes);
+                let msg = serde_json::json!({
+                    "type":  "pack",
+                    "from":  "server-snapshot",
+                    "nodes": pack_b64,
+                })
+                .to_string();
+                let _ = room.tx.send(msg);
+
+                metrics::counter!("activesync_snapshot_total", "kind" => kind, "room" => room_id.clone())
+                    .increment(1);
+                tracing::info!(
+                    room = %room_id,
+                    kind,
+                    snap = %snap_id.to_hex(),
+                    delta,
+                    chain_depth = if is_full { 0 } else { *chain_depth + 1 },
+                    "snapshot emitted"
+                );
+
+                // Update per-room state.
+                *last_count = current_count;
+                if is_full {
+                    *chain_depth = 0;
+                } else {
+                    *chain_depth += 1;
+                }
+                *last_snap_id = Some(snap_id);
+            }
+        }
+    }))
+}

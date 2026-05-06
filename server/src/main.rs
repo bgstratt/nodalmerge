@@ -1,5 +1,6 @@
 use activesync_server::{keypair, metrics, room, store, ws_handler};
 
+use std::sync::Arc;
 use axum::{Router, routing::get};
 use tower_http::cors::{CorsLayer, Any};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -117,6 +118,27 @@ async fn main() {
                  (no on-disk blobs to collect). Pass --store <path> to enable."
             );
         }
+    }
+
+    // E4: optional snapshot sweeper. `--snapshot-interval <N>` (default 0 =
+    // disabled) triggers a compaction snapshot every N new nodes per room.
+    // `--snapshot-max-chain <K>` (default 10) limits incremental chain depth
+    // before the sweeper falls back to a full snapshot.
+    let snapshot_interval = parse_usize_flag(&args, "--snapshot-interval", 0).unwrap_or(0);
+    if snapshot_interval > 0 {
+        let max_chain = parse_usize_flag(&args, "--snapshot-max-chain", 10).unwrap_or(10);
+        tracing::info!(
+            interval_nodes = snapshot_interval,
+            max_chain_depth = max_chain,
+            "snapshot sweeper enabled"
+        );
+        let _handle = room::spawn_snapshot_sweeper(
+            rooms.clone(),
+            Arc::clone(&rooms.server_key),
+            snapshot_interval,
+            max_chain,
+            std::time::Duration::from_secs(30), // check every 30 s
+        );
     }
 
     let cors = CorsLayer::new()
@@ -284,6 +306,33 @@ fn parse_u64_flag(args: &[String], flag: &str, default_for_msg: u64) -> Option<u
         };
         if let Some(s) = raw {
             return match s.parse::<u64>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!("warning: {flag} expects a non-negative integer; got {s:?}, using default {default_for_msg}");
+                    None
+                }
+            };
+        }
+        i += 1;
+    }
+    None
+}
+
+/// E4: Parse a `usize` CLI flag (e.g. `--snapshot-interval 100`).
+fn parse_usize_flag(args: &[String], flag: &str, default_for_msg: usize) -> Option<usize> {
+    let eq_prefix = format!("{flag}=");
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == flag {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match s.parse::<usize>() {
                 Ok(n) => Some(n),
                 Err(_) => {
                     eprintln!("warning: {flag} expects a non-negative integer; got {s:?}, using default {default_for_msg}");

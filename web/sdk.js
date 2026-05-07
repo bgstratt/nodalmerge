@@ -53,6 +53,20 @@ function b64decode(s) {
   return out;
 }
 
+function decodeResolvedValue(raw) {
+  // Newer bridge shape: values in resolve_json() are base64 strings.
+  if (typeof raw === 'string') {
+    try {
+      const decoded = bytesToJson(b64decode(raw));
+      if (decoded !== undefined) return decoded;
+    } catch (_) {}
+    // Back-compat: tolerate legacy plain JSON-string payloads.
+    try { return JSON.parse(raw); } catch (_) {}
+  }
+  // Older bridge shape or already-decoded values.
+  return raw;
+}
+
 function makeEmitter() {
   const listeners = new Set();
   return {
@@ -1499,8 +1513,9 @@ export async function createDoc(opts) {
       set(key, value) {
         const fullKey = joinPath(namespace, key);
         // E3: snapshot old value before write for undo compensation.
+        const oldRaw = JSON.parse(store.resolve_json())[fullKey];
         preMutationE.emit({ type: 'map-set', path: fullKey, namespace,
-          oldValue: (JSON.parse(store.resolve_json())[fullKey] ?? null) });
+          oldValue: (decodeResolvedValue(oldRaw) ?? null) });
         store.set(fullKey, jsonToBytes(value));
         afterLocalMutation({ source: 'local', type: 'map', namespace, key, path: fullKey });
       },
@@ -1522,7 +1537,7 @@ export async function createDoc(opts) {
         const fullKey = joinPath(namespace, key);
         if (!subscription.matches(fullKey)) return undefined;
         const all = JSON.parse(store.resolve_json());
-        return all[fullKey];
+        return decodeResolvedValue(all[fullKey]);
       },
       getBlob(hashOrKey) {
         // Accepts either a blob hash hex string or a map key; prefers hash.
@@ -1534,8 +1549,9 @@ export async function createDoc(opts) {
       delete(key) {
         const fullKey = joinPath(namespace, key);
         // E3: snapshot old value before delete for undo compensation.
+        const oldRaw = JSON.parse(store.resolve_json())[fullKey];
         preMutationE.emit({ type: 'map-delete', path: fullKey, namespace,
-          oldValue: (JSON.parse(store.resolve_json())[fullKey] ?? null) });
+          oldValue: (decodeResolvedValue(oldRaw) ?? null) });
         store.delete(fullKey);
         afterLocalMutation({ source: 'local', type: 'map', namespace, key, path: fullKey, deleted: true });
       },
@@ -1546,7 +1562,7 @@ export async function createDoc(opts) {
         for (const [k, v] of Object.entries(flat)) {
           if (prefix && !k.startsWith(prefix)) continue;
           if (!subscription.matches(k)) continue;
-          out[prefix ? k.slice(prefix.length) : k] = v;
+          out[prefix ? k.slice(prefix.length) : k] = decodeResolvedValue(v);
         }
         return out;
       },

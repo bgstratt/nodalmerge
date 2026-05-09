@@ -674,7 +674,7 @@ mod tests {
         let store = S3BlobStore::new(cfg).unwrap();
         // 100 bytes < 1 KiB threshold → resolve_put_url returns None
         // without ever hitting the (mock) endpoint.
-        let url = store.resolve_put_url("room", &Hash::of(b"x"), 100);
+        let url = store.resolve_put_url("room", &Hash::of(b"x"), 100, None);
         assert!(url.is_none(), "small uploads must fall through to WS");
     }
 }

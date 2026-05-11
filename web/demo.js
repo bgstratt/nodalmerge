@@ -34,12 +34,36 @@ window.addEventListener('unhandledrejection', ev => {
 // Config
 // ---------------------------------------------------------------------------
 const ROOM_ID    = 'default';
-const SERVER_URL = 'ws://127.0.0.1:7878';
+const DEFAULT_SERVER_URL = 'ws://127.0.0.1:7878';
 const COLORS     = ['#60a5fa','#4ade80','#f472b6','#fb923c','#a78bfa','#34d399','#fbbf24','#f87171'];
 const IDB_NAME    = 'activesync-v6';
 const IDB_VERSION = 1;
 const COLLAB_KEY  = 'collab/doc';
 const LIST_KEY    = 'demo/list';
+
+function resolveServerUrl() {
+  const storageKey = 'activesync-server-url';
+  const params = new URLSearchParams(window.location.search);
+  const fromQuery = params.get('server') || params.get('serverUrl') || params.get('ws');
+  const fromSession = sessionStorage.getItem(storageKey);
+  const candidate = (fromQuery || fromSession || DEFAULT_SERVER_URL).trim();
+
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') {
+      throw new Error(`unsupported protocol: ${parsed.protocol}`);
+    }
+    const normalized = parsed.toString().replace(/\/$/, '');
+    sessionStorage.setItem(storageKey, normalized);
+    return normalized;
+  } catch (e) {
+    console.warn('[boot] invalid server url override, falling back to default:', candidate, e);
+    sessionStorage.setItem(storageKey, DEFAULT_SERVER_URL);
+    return DEFAULT_SERVER_URL;
+  }
+}
+
+const SERVER_URL = resolveServerUrl();
 
 // ---------------------------------------------------------------------------
 // Identity — Ed25519 seed in sessionStorage (survives refresh, not close)

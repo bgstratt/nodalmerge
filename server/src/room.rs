@@ -6,6 +6,11 @@ use std::{
     time::{Duration, Instant},
 };
 use activesync_core::{MemoryBlobStore, BlobStore, Op, MapOp, Policy, StateGraph, SyncNode, pack_nodes};
+use activesync_host_core::engine::{
+    PeerCountGaugeUpdate,
+    plan_deregister_peer_membership,
+    plan_register_peer_membership,
+};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use tokio::sync::{broadcast, RwLock};
 
@@ -88,8 +93,11 @@ impl Room {
     /// Register a newly-connected peer. Clears the idle-eviction clock.
     pub async fn register_peer(&self, pubkey_hex: String) {
         let inserted = self.connected_peers.write().await.insert(pubkey_hex);
-        *self.idle_since.lock().expect("idle_since poisoned") = None;
-        if inserted {
+        let plan = plan_register_peer_membership(inserted);
+        if plan.clear_idle_since {
+            *self.idle_since.lock().expect("idle_since poisoned") = None;
+        }
+        if plan.gauge_update == PeerCountGaugeUpdate::Increment {
             metrics::gauge!("activesync_peers_total", "room" => self.room_id.clone()).increment(1.0);
         }
     }
@@ -99,10 +107,11 @@ impl Room {
     pub async fn deregister_peer(&self, pubkey_hex: &str) {
         let mut peers = self.connected_peers.write().await;
         let removed = peers.remove(pubkey_hex);
-        if peers.is_empty() {
+        let plan = plan_deregister_peer_membership(removed, peers.is_empty());
+        if plan.set_idle_since_now {
             *self.idle_since.lock().expect("idle_since poisoned") = Some(Instant::now());
         }
-        if removed {
+        if plan.gauge_update == PeerCountGaugeUpdate::Decrement {
             metrics::gauge!("activesync_peers_total", "room" => self.room_id.clone()).decrement(1.0);
         }
     }
@@ -369,6 +378,27 @@ impl Rooms {
         let mut total = 0;
         for (id, room) in rooms {
             let live = collect_live_blob_hashes(&room).await;
+
+            // PR-05 compatibility bridge: run shared GC coordinator in
+            // MarkOnly mode to exercise host-neutral contracts without
+            // changing deletion behavior. Legacy blob_gc_sweep remains the
+            // source of physical delete behavior for now.
+            match crate::gc_adapter::run_mark_only_preflight(&id, &live) {
+                Ok(delta) => {
+                    metrics::counter!("activesync_gc_runs_total", "mode" => "mark-only", "status" => "ok")
+                        .increment(1);
+                    metrics::counter!("activesync_gc_marked_total", "room" => id.clone())
+                        .increment(delta.marked_count);
+                }
+                Err(e) => {
+                    metrics::counter!("activesync_gc_runs_total", "mode" => "mark-only", "status" => "error")
+                        .increment(1);
+                    metrics::counter!("activesync_gc_error_total", "room" => id.clone())
+                        .increment(1);
+                    tracing::warn!(room = %id, ?e, "GC mark-only preflight failed; continuing with legacy sweep");
+                }
+            }
+
             let deleted = self.persistence.blob_gc_sweep(&id, &live, grace);
             if deleted > 0 {
                 metrics::counter!("activesync_blob_gc_deleted_total", "room" => id.clone())

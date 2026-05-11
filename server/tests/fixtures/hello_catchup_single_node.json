@@ -1,0 +1,7 @@
+{
+  "name": "hello_catchup_single_node",
+  "room_id": "parity-room",
+  "expected_sequence": ["welcome", "pack"],
+  "expected_pack_count": 1,
+  "notes": "Golden baseline for Workstream A extraction: empty-client frontier should receive welcome then one catchup pack when room has exactly one server node."
+}

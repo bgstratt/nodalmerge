@@ -198,6 +198,36 @@ adapter used for Free/offline flows. The runtime persists node packs to
 — if you prefer a different storage layer, you can replace or disable it in
 your app.
 
+Offline persistence ownership contract:
+
+- Browser/offline hydrate-save flows (IndexedDB node/blob caches) are SDK-owned.
+- Host adapters (including .NET runtime host and host-ffi) do not implement or
+  mirror browser IndexedDB persistence semantics.
+- Host adapters only expose deterministic sync command/event primitives; SDK
+  layers choose when and how to persist local graph/blob state for offline UX.
+
+Undo/transport ownership contract:
+
+- `doc.undoManager(...)` is SDK/app-layer behavior (compensating operations and
+  capture-window policy), intentionally not a host-core adapter state machine.
+- Host adapters expose deterministic map/text/list/blob command/event
+  primitives that the SDK undo manager composes; adapters do not own undo UX
+  policy, history grouping, or capture semantics.
+- Reconnect/backoff policy and `transport: 'auto' | 'ws-only'` selection are
+  SDK transport responsibilities.
+- Host adapters remain WS-first authoritative sync bridges and may expose
+  optional WebRTC signaling relay primitives used by SDK mesh logic.
+
+Metrics ownership contract:
+
+- `onMetric` emission is SDK-owned and app-facing; events are emitted as point
+  telemetry envelopes (`{ kind, value, labels, timestamp }`) when configured.
+- Host adapters and server processes own operational telemetry sinks/exporters
+  (for example Prometheus endpoint wiring and runtime logging/tracing).
+- Host-core/host-ffi/.NET runtime host do not expose a duplicate generic
+  metrics wire command/event stream; SDK metrics are derived from runtime
+  behavior and host instrumentation is emitted by the adapter process.
+
 ## Compatibility
 
 - Wire format is backwards-compatible with any server running the same wire

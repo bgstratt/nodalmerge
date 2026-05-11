@@ -5,6 +5,8 @@
 
 pub mod keypair;
 pub mod metrics;
+pub mod gc_adapter;
+pub mod adapter_context;
 pub mod room;
 pub mod store;
 pub mod ws_handler;

@@ -1,0 +1,10 @@
+{
+  "name": "token_expiry_close_4002",
+  "scenario": "token_expiry",
+  "room_id": "parity-locked-room",
+  "token_ttl_secs": 2,
+  "expected_sequence": ["welcome", "close"],
+  "expected_pack_count": 0,
+  "expected_close_code": 4002,
+  "notes": "Golden auth-negative parity scenario: locked room accepts token at hello, then closes session with 4002 when token expires."
+}

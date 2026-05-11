@@ -30,13 +30,146 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde_json::Value;
-use activesync_core::{BlobStore, Ibf, MerkleSearchTree, Policy, PolicyDefault, PolicyRule,
+use activesync_core::{BlobStore, MerkleSearchTree, Policy, PolicyDefault, PolicyRule,
                       RoomToken, SyncCapabilities, SyncNode, pack_nodes, unpack_nodes,
                       compact, rebuild_from_snapshot, pack_snapshot_pack, verify_snapshot};
+use activesync_host_core::protocol::{
+    BlobPackEntry,
+    BlobRedirectEntry,
+    assemble_blob_available_envelope,
+    assemble_blob_pack_envelope,
+    assemble_error_envelope,
+    assemble_mst_response_envelope,
+    assemble_blob_redirect_envelope,
+    assemble_normalized_peer_stamped_relay_envelope,
+    assemble_presence_envelope,
+    assemble_peer_pack_relay_envelope,
+    assemble_peer_joined_envelope,
+    assemble_peer_left_envelope,
+    assemble_rate_limit_exceeded_close_frame,
+    assemble_resync_required_close_frame,
+    assemble_room_locked_envelope,
+    assemble_server_overload_close_frame,
+    assemble_server_pack_reply_envelope,
+    assemble_server_info_envelope,
+    assemble_set_room_key_rejected_envelope,
+    assemble_token_expired_close_frame,
+    assemble_tick_start_envelope,
+    assemble_tick_stopped_envelope,
+    assemble_snapshot_pack_envelope,
+    assemble_compact_ack_envelope,
+    assemble_policy_set_envelope,
+    assemble_subscribe_ack_envelope,
+    assemble_upload_denied_envelope,
+    assemble_upload_granted_envelope,
+    assemble_upload_rejected_envelope,
+    negotiate_capabilities,
+    welcome_mst_root_hex,
+    decide_sync_diff,
+    ClientIbfInput,
+    CloseFrameSpec,
+    SyncDiffInput,
+};
+use activesync_host_core::engine::{
+    assemble_welcome_catchup_package,
+    classify_hello_payload,
+    parse_client_capabilities,
+    parse_client_frontier_node_ids,
+    parse_client_ibf_input,
+    classify_request_upload_resolve_put_url_outcome,
+    plan_direct_blob_io_bad_hash_gate,
+    plan_direct_blob_io_negotiation_gate,
+    classify_direct_blob_io_verify_outcome,
+    DirectBlobIoVerifyOutcome,
+    RequestUploadResolvePutUrlOutcome,
+    PackImportMutationAction,
+    BlobStoreMutationAction,
+    plan_has_catchup,
+    plan_pack_import_mutation,
+    plan_blob_store_mutation,
+    plan_peer_rate_limiters,
+    plan_token_deadline_remaining_secs,
+    plan_filtered_catchup_send_payload,
+    serialize_catchup_pack_envelope_json,
+    should_break_main_loop_after_push_send,
+    should_terminate_after_blob_upload_verify_failure_reply_send,
+    should_terminate_after_compact_room_ack_send,
+    should_terminate_after_filtered_catchup_send,
+    should_ignore_unknown_client_message_type,
+    should_terminate_after_server_info_reply_send,
+    should_terminate_after_set_policy_reply_send,
+    should_terminate_after_set_room_key_locked_ack_send,
+    should_terminate_after_start_tick_reply_send,
+    should_terminate_after_stop_tick_reply_send,
+    should_terminate_after_subscribe_ack_send,
+    should_terminate_after_mst_request_reply_send,
+    should_terminate_after_mst_done_server_pack_send,
+    should_terminate_after_request_server_pack_send,
+    should_terminate_after_blob_request_redirect_reply_send,
+    should_terminate_after_blob_request_blob_pack_reply_send,
+    should_terminate_after_request_upload_reply_send,
+    should_terminate_after_welcome_send,
+    classify_set_room_key_lock_state,
+    classify_set_room_key_parse_result,
+    extract_blob_upload_entry_data_b64,
+    extract_blob_upload_entry_hash_text,
+    extract_blob_uploaded_hash_text,
+    extract_blob_request_hashes,
+    extract_hello_pubkey_text,
+    extract_pack_nodes_payload_b64,
+    extract_mst_done_ids,
+    extract_mst_request_paths,
+    extract_request_upload_content_type,
+    extract_request_upload_hash_text,
+    extract_request_upload_size,
+    extract_presence_data_payload,
+    extract_set_room_key_pubkey_text,
+    extract_set_policy_can_write_hex_text,
+    extract_set_policy_can_write_values,
+    extract_set_policy_default_text,
+    extract_set_policy_rule_values,
+    extract_start_tick_interval_ms,
+    extract_start_tick_intent_prefix,
+    extract_webrtc_relay_fields,
+    SetRoomKeyLockStateResult,
+    SetRoomKeyParseResult,
+    shape_set_room_key_already_locked_rejection_reason,
+    shape_set_room_key_invalid_pubkey_rejection_reason,
+    classify_set_policy_default,
+    classify_set_policy_parse_result,
+    shape_set_policy_unknown_default_error,
+    SetPolicyDefaultParseResult,
+    SetPolicyParseResult,
+    classify_compact_room_compaction_result,
+    classify_compact_room_verify_result,
+    classify_compact_room_rebuild_result,
+    shape_compact_room_compaction_failed_error,
+    shape_compact_room_verify_failed_error,
+    shape_compact_room_rebuild_failed_error,
+    CompactRoomCompactionResult,
+    CompactRoomVerifyResult,
+    CompactRoomRebuildResult,
+    shape_blob_uploaded_verify_failure_rejection_payload,
+    shape_client_known_id_set,
+    shape_request_known_id_set,
+    shape_blob_uploaded_available_hashes,
+    shape_catchup_pack_payload_b64,
+    shape_welcome_missing_hex,
+    shape_welcome_peer_list,
+    shape_welcome_root_hex,
+    shape_welcome_server_frontier_hex,
+    should_skip_self_echo_broadcast_envelope,
+    HelloPayloadClassification,
+};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use governor::{Quota, RateLimiter, clock::DefaultClock, state::{InMemoryState, NotKeyed}};
 use std::num::NonZeroU32;
 
+use crate::adapter_context::{
+    ClientDispatchBuild,
+    ClientDispatchCommand,
+    build_client_dispatch_context,
+};
 use crate::room::{Rooms, Room, import_nodes};
 
 /// G3: per-peer direct rate limiter. `None` = limit disabled for this
@@ -252,15 +385,10 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
             return;
         }
         Ok(Some(Ok(Message::Text(t)))) => {
-            match serde_json::from_str::<Value>(&t) {
-                Ok(v) if v["type"] == "hello" => v,
-                Ok(v) => {
-                    tracing::warn!(ty = ?v["type"], "expected hello, got other type — closing");
-                    send_error(&mut sink, "expected hello").await;
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "hello parse error — closing");
+            match classify_hello_payload(&t) {
+                HelloPayloadClassification::ValidHello(v) => v,
+                HelloPayloadClassification::ProtocolErrorExpectedHello => {
+                    tracing::warn!("invalid/non-hello handshake payload — closing");
                     send_error(&mut sink, "expected hello").await;
                     return;
                 }
@@ -281,7 +409,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
         }
     };
 
-    let pubkey_hex = hello["pubkey"].as_str().unwrap_or("").to_string();
+    let pubkey_hex = extract_hello_pubkey_text(&hello);
     let short = &pubkey_hex[..8.min(pubkey_hex.len())];
     tracing::info!(room = %room_id, peer = %short, "peer connected");
 
@@ -289,13 +417,20 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     // authoritative tick writes are never throttled. Zero disables the
     // corresponding limiter outright.
     let is_server_peer = pubkey_hex == server_pubkey_hex;
-    let node_limiter: Option<PeerLimiter> = match (is_server_peer, NonZeroU32::new(rooms.peer_rate_nodes)) {
-        (false, Some(nz)) => Some(RateLimiter::direct(Quota::per_second(nz))),
-        _ => None,
+    let limiter_plan = plan_peer_rate_limiters(
+        is_server_peer,
+        rooms.peer_rate_nodes,
+        rooms.peer_rate_bytes,
+    );
+    let node_limiter: Option<PeerLimiter> = if limiter_plan.enable_node_limiter {
+        NonZeroU32::new(rooms.peer_rate_nodes).map(|nz| RateLimiter::direct(Quota::per_second(nz)))
+    } else {
+        None
     };
-    let byte_limiter: Option<PeerLimiter> = match (is_server_peer, NonZeroU32::new(rooms.peer_rate_bytes)) {
-        (false, Some(nz)) => Some(RateLimiter::direct(Quota::per_second(nz))),
-        _ => None,
+    let byte_limiter: Option<PeerLimiter> = if limiter_plan.enable_byte_limiter {
+        NonZeroU32::new(rooms.peer_rate_bytes).map(|nz| RateLimiter::direct(Quota::per_second(nz)))
+    } else {
+        None
     };
 
     // F3b: parse this peer's subscription from hello. Defaults to everything.
@@ -309,18 +444,9 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     // session the instant it lapses (short-lived tokens + SDK refresh hook).
     let token_deadline: Option<tokio::time::Instant> = {
         let auth_key = room.auth_key.read().await;
-        if let Some(ref room_vk) = *auth_key {
+        let verified_expiry_secs = if let Some(ref room_vk) = *auth_key {
             match verify_hello_token(&hello, room_vk, &pubkey_hex, &room_id) {
-                Ok(expiry_secs) => {
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    // `verify` already rejected `now >= expiry`, so this
-                    // subtraction is safe; guard anyway for belt-and-braces.
-                    let remaining = expiry_secs.saturating_sub(now_secs);
-                    Some(tokio::time::Instant::now() + std::time::Duration::from_secs(remaining))
-                }
+                Ok(expiry_secs) => Some(expiry_secs),
                 Err(e) => {
                     send_error(&mut sink, &format!("auth: {e}")).await;
                     return;
@@ -328,107 +454,85 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
             }
         } else {
             None
-        }
+        };
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        plan_token_deadline_remaining_secs(verified_expiry_secs, now_secs)
+            .map(|remaining| tokio::time::Instant::now() + std::time::Duration::from_secs(remaining))
     };
 
-    let client_known: Vec<activesync_core::NodeId> = hello["frontier"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|v| parse_hex_hash(v.as_str()?)).collect())
-        .unwrap_or_default();
+    let client_known = parse_client_frontier_node_ids(&hello);
 
     // Capability negotiation (A7): parse client caps (missing field → defaults).
-    let client_caps: SyncCapabilities = hello.get("caps")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let server_caps = SyncCapabilities::default();
-    let negotiated_caps = server_caps.intersect(&client_caps);
+    let client_caps: SyncCapabilities = parse_client_capabilities(&hello);
+    let negotiated_caps = negotiate_capabilities(&client_caps);
+
+    let client_ibf: ClientIbfInput = parse_client_ibf_input(&hello);
+
+    // Precompute graph inputs used by diff decision helper.
+    let (server_ids, missing_from_us) = {
+        let graph = room.graph.read().await;
+        let client_known_set = shape_client_known_id_set(&client_known);
+        (graph.all_node_ids(), graph.missing_hashes(&client_known_set))
+    };
 
     // IBF set-reconciliation (B1): when both peers support IBF and the client
     // included an `ibf` field, decode the symmetric diff directly. Otherwise
     // fall back to the frontier-based over-send approach.
-    let (only_in_client, only_in_server): (Vec<_>, Vec<_>) = if negotiated_caps.supports_ibf {
-        if let Some(ibf_b64) = hello["ibf"].as_str() {
-            match base64_decode(ibf_b64).ok().and_then(|b| Ibf::decode_bytes(&b).ok()) {
-                Some(client_ibf) => {
-                    let graph = room.graph.read().await;
-                    let server_ids = graph.all_node_ids();
-                    let mut diff = Ibf::from_ids(&server_ids);
-                    diff.subtract(&client_ibf);
-                    match diff.decode() {
-                        Some((in_server, in_client)) => (in_client, in_server),
-                        None => {
-                            // IBF too small to decode — fall back gracefully.
-                            let all: std::collections::HashSet<_> = server_ids.into_iter().collect();
-                            (vec![], all.into_iter().collect())
-                        }
-                    }
-                }
-                None => {
-                    let graph = room.graph.read().await;
-                    (vec![], graph.all_node_ids())
-                }
-            }
-        } else {
-            // Client claims IBF support but didn't send one — fall back.
-            let graph = room.graph.read().await;
-            let client_known_set: std::collections::HashSet<_> = client_known.iter().copied().collect();
-            let all: std::collections::HashSet<_> = graph.all_node_ids().into_iter().collect();
-            let only_in_server: Vec<_> = all.difference(&client_known_set).copied().collect();
-            (vec![], only_in_server)
-        }
-    } else {
-        // Legacy frontier-based diff.
-        let graph = room.graph.read().await;
-        let client_known_set: std::collections::HashSet<_> = client_known.iter().copied().collect();
-        let missing_from_us = graph.missing_hashes(&client_known_set);
-        let all: std::collections::HashSet<_> = graph.all_node_ids().into_iter().collect();
-        let only_in_server: Vec<_> = all.difference(&client_known_set).copied().collect();
-        (missing_from_us, only_in_server)
-    };
+    let (only_in_client, only_in_server): (Vec<_>, Vec<_>) = decide_sync_diff(SyncDiffInput {
+        negotiated_supports_ibf: negotiated_caps.supports_ibf,
+        client_known,
+        client_ibf,
+        server_ids,
+        legacy_missing_from_us: missing_from_us,
+    });
     tracing::debug!(peer = %short, only_in_client = only_in_client.len(), only_in_server = only_in_server.len(), "diff computed");
 
     // Send welcome: tell client which of ITS nodes WE are missing, and give it
     // any nodes it is missing.  In MST mode we include the server's MST root
     // so the client can drive iterative descent; we still push a catch-up pack
     // for the nodes we know the client is missing via IBF.
-    let (welcome_json, catchup_b64, has_catchup) = {
+    let welcome_and_catchup = {
         let graph = room.graph.read().await;
         let nodes = graph.get_nodes(&only_in_server);
-        let pack_b64 = base64_encode(&pack_nodes(&nodes));
-        let has_catchup = !nodes.is_empty();
+        let pack_b64 = shape_catchup_pack_payload_b64(&nodes);
+        let has_catchup = plan_has_catchup(nodes.len());
         let server_frontier = graph.frontier();
-        let missing_hex: Vec<String> = only_in_client.iter().map(|h| h.to_hex()).collect();
+        let missing_hex = shape_welcome_missing_hex(&only_in_client);
 
         // Build MST root when MST is negotiated (B2).
-        let mst_root_hex = if negotiated_caps.supports_mst {
-            let all_ids = graph.all_node_ids();
-            MerkleSearchTree::from_ids(&all_ids).root_hash_hex()
-        } else {
-            String::new()
-        };
+        let all_ids = graph.all_node_ids();
+        let mst_root_hex = welcome_mst_root_hex(&negotiated_caps, &all_ids);
 
         // D2: collect currently-connected peers for the welcome message so the
         // new peer knows who to initiate WebRTC connections with immediately.
-        let current_peers: Vec<String> = room.connected_peers.read().await
+        let connected_peers: Vec<String> = room
+            .connected_peers
+            .read()
+            .await
             .iter()
-            .filter(|p| p.as_str() != pubkey_hex)
             .cloned()
             .collect();
+        let current_peers: Vec<String> = shape_welcome_peer_list(&connected_peers, &pubkey_hex);
 
-        let mut w = serde_json::json!({
-            "type":        "welcome",
-            "root":        graph.merkle_root().to_hex(),
-            "frontier":    server_frontier.to_hex_vec(),
-            "missing":     missing_hex,
-            "caps":        negotiated_caps,
-            "server_pubkey": server_pubkey_hex,
-            "peers":       current_peers,
-        });
-        if !mst_root_hex.is_empty() {
-            w["mst_root"] = serde_json::json!(mst_root_hex);
-        }
-        (w.to_string(), pack_b64, has_catchup)
+        assemble_welcome_catchup_package(
+            shape_welcome_root_hex(&graph.merkle_root()),
+            shape_welcome_server_frontier_hex(&server_frontier),
+            missing_hex,
+            negotiated_caps.clone(),
+            server_pubkey_hex.clone(),
+            current_peers,
+            mst_root_hex,
+            pack_b64,
+            has_catchup,
+        )
     };
+    let welcome_json = welcome_and_catchup.welcome_json;
+    let catchup_b64 = welcome_and_catchup.catchup_b64;
+    let has_catchup = welcome_and_catchup.has_catchup;
 
     // D2: register this peer and broadcast peer-joined to the room.
     room.register_peer(pubkey_hex.clone()).await;
@@ -437,13 +541,13 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     // immediately provoking DB selection storms on first Mongo call.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let _ = room.tx.send(serde_json::json!({
-        "type":   "peer-joined",
-        "from":   pubkey_hex,
-        "pubkey": pubkey_hex,
-    }).to_string());
+    let peer_joined = assemble_peer_joined_envelope(pubkey_hex.clone());
+    let peer_joined_json = serde_json::to_string(&peer_joined)
+        .expect("peer-joined envelope should always serialize");
+    emit_room_broadcast(&room, peer_joined_json);
 
-    if !ws_send(&mut sink, &room_id, welcome_json).await {
+    let welcome_send_ok = emit_single_send(&mut sink, &room_id, welcome_json).await;
+    if should_terminate_after_welcome_send(welcome_send_ok) {
         tracing::warn!(peer = %short, "welcome send failed");
         room.deregister_peer(&pubkey_hex).await;
         return;
@@ -453,10 +557,12 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     // Send catch-up pack if non-empty. F3b: filter through the peer's
     // subscription before sending.
     if has_catchup {
-        let env = serde_json::json!({"type":"pack","from":"server","nodes":catchup_b64}).to_string();
+        let env = serialize_catchup_pack_envelope_json(catchup_b64);
         let sub = subscription.read().unwrap().clone();
-        if let Some(filtered) = filter_pack_for_subscriber(&env, &sub) {
-            if !ws_send(&mut sink, &room_id, filtered).await {
+        let planned = plan_filtered_catchup_send_payload(filter_pack_for_subscriber(&env, &sub));
+        if let Some(filtered) = planned {
+            let send_ok = emit_single_send(&mut sink, &room_id, filtered).await;
+            if should_terminate_after_filtered_catchup_send(send_ok) {
                 room.deregister_peer(&pubkey_hex).await;
                 return;
             }
@@ -488,13 +594,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
                     "room" => room_id.clone(),
                 ).increment(1);
                 tracing::info!(peer = %short, room = %room_id, "token expired — closing with 4002");
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(1),
-                    sink.send(Message::Close(Some(CloseFrame {
-                        code: 4002,
-                        reason: std::borrow::Cow::Borrowed("token expired"),
-                    }))),
-                ).await;
+                emit_close_frame(&mut sink, assemble_token_expired_close_frame()).await;
                 break;
             }
             // --- inbound from this client ---
@@ -529,10 +629,8 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
                 match push {
                     Ok(env) => {
                         // Skip messages we sent ourselves (self-echo suppression)
-                        if let Ok(v) = serde_json::from_str::<Value>(&env) {
-                            if v["from"].as_str() == Some(pubkey_hex.as_str()) {
-                                continue;
-                            }
+                        if should_skip_self_echo_broadcast_envelope(&env, &pubkey_hex) {
+                            continue;
                         }
                         // F3b: subscription filter. Pack envelopes may be rewritten
                         // to drop nodes outside this peer's subscription, or
@@ -543,7 +641,8 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
                             Some(s) => s,
                             None => continue,
                         };
-                        if !ws_send(&mut sink, &room_id, out).await { break; }
+                        let send_ok = emit_single_send(&mut sink, &room_id, out).await;
+                        if should_break_main_loop_after_push_send(send_ok) { break; }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         // G1: slow consumer fell behind the ring buffer.
@@ -562,13 +661,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
                             lagged = n,
                             "broadcast lagged — closing with 4001 resync required"
                         );
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(1),
-                            sink.send(Message::Close(Some(CloseFrame {
-                                code: 4001,
-                                reason: std::borrow::Cow::Borrowed("resync required"),
-                            }))),
-                        ).await;
+                        emit_close_frame(&mut sink, assemble_resync_required_close_frame()).await;
                         break;
                     }
                     Err(_) => break,
@@ -581,10 +674,10 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     // D2: deregister peer and notify remaining peers so they can close their
     // WebRTC connections.
     room.deregister_peer(&pubkey_hex).await;
-    let _ = room.tx.send(serde_json::json!({
-        "type": "peer-left",
-        "from": pubkey_hex,
-    }).to_string());
+    let peer_left = assemble_peer_left_envelope(pubkey_hex.clone());
+    let peer_left_json = serde_json::to_string(&peer_left)
+        .expect("peer-left envelope should always serialize");
+    emit_room_broadcast(&room, peer_left_json);
     tracing::debug!(peer = %short, "handler fully exited");
 }
 
@@ -601,25 +694,32 @@ async fn handle_client_message(
     byte_limiter: Option<&PeerLimiter>,
     negotiated_caps: &SyncCapabilities,
 ) -> bool {
-    let msg: Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(_) => { send_error(sink, "invalid JSON").await; return true; }
+    let dispatch_ctx = match build_client_dispatch_context(text) {
+        ClientDispatchBuild::Ready(ctx) => ctx,
+        ClientDispatchBuild::Malformed(plan) => {
+            send_error(sink, plan.error_message).await;
+            return plan.keep_connection_open;
+        }
     };
+    let msg = &dispatch_ctx.message;
+    let message_type = dispatch_ctx.message_type;
 
-    match msg["type"].as_str().unwrap_or("") {
+    match &dispatch_ctx.command {
 
         // F3b: update this peer's subscription at runtime -------------------
-        "subscribe" => {
+        ClientDispatchCommand::Subscribe => {
             let sub = Subscription::from_hello_value(&msg["patterns"]);
             *subscription.write().unwrap() = sub;
-            let reply = serde_json::json!({"type":"subscribe-ack"}).to_string();
-            if !ws_send(sink, room_id, reply).await { return false; }
+            let reply_env = assemble_subscribe_ack_envelope();
+            let reply = serde_json::to_string(&reply_env)
+                .expect("subscribe-ack envelope should always serialize");
+            if should_terminate_after_subscribe_ack_send(emit_single_send(sink, room_id, reply).await) { return false; }
         }
 
         // Client pushes a pack of new nodes --------------------------------
-        "pack" => {
-            let nodes_b64 = msg["nodes"].as_str().unwrap_or("");
-            let decoded = match base64_decode(nodes_b64) {
+        ClientDispatchCommand::Pack => {
+            let nodes_b64 = extract_pack_nodes_payload_b64(&msg);
+            let decoded = match base64_decode(&nodes_b64) {
                 Ok(b) => b,
                 Err(_) => { send_error(sink, "invalid pack: bad base64").await; return true; }
             };
@@ -653,34 +753,31 @@ async fn handle_client_message(
             tracing::info!(peer = %&pubkey_hex[..8.min(pubkey_hex.len())], incoming, accepted, errs = errs.len(), "pack received");
             if !errs.is_empty() {
                 tracing::warn!(errors = %errs.join("; "), "pack errors");
-                let err = serde_json::json!({"type":"error","msg":errs.join("; ")}).to_string();
+                let err = serde_json::to_string(&assemble_error_envelope(errs.join("; ")))
+                    .expect("error envelope should always serialize");
                 let _ = sink.send(Message::Text(err.into())).await;
             }
-            if accepted > 0 {
+            if plan_pack_import_mutation(accepted)
+                == PackImportMutationAction::BroadcastAcceptedLeafPack {
                 // Build merged pack of new leaf nodes and broadcast to room
                 let bcast = {
                     let graph = room.graph.read().await;
                     let leaf_ids: Vec<_> = graph.leaf_ids().iter().copied().collect();
                     let nodes = graph.get_nodes(&leaf_ids);
                     let nodes_b64 = base64_encode(&pack_nodes(&nodes));
-                    serde_json::json!({
-                        "type":  "pack",
-                        "from":  pubkey_hex,
-                        "nodes": nodes_b64,
-                        "root":  graph.merkle_root().to_hex(),
-                    }).to_string()
+                    serde_json::to_string(&assemble_peer_pack_relay_envelope(
+                        pubkey_hex.to_string(),
+                        nodes_b64,
+                        graph.merkle_root().to_hex(),
+                    )).expect("peer pack relay envelope should always serialize")
                 };
-                let _ = room.tx.send(bcast);
+                emit_room_broadcast(room, bcast);
             }
         }
 
         // Client requests MST nodes at specific paths (B2) -------------------
-        "mst-request" => {
-            let paths: Vec<String> = msg["paths"]
-                .as_array().unwrap_or(&vec![])
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect();
+        ClientDispatchCommand::MstRequest => {
+            let paths = extract_mst_request_paths(&msg);
             let graph = room.graph.read().await;
             let all_ids = graph.all_node_ids();
             let mst = MerkleSearchTree::from_ids(&all_ids);
@@ -688,54 +785,47 @@ async fn handle_client_message(
             let nodes: Vec<_> = paths.iter()
                 .filter_map(|p| mst.get_node_wire(p))
                 .collect();
-            let reply = serde_json::json!({
-                "type":  "mst-response",
-                "nodes": nodes,
-            }).to_string();
-            if !ws_send(sink, room_id, reply).await { return false; }
+            let reply = serde_json::to_string(&assemble_mst_response_envelope(nodes))
+                .expect("mst-response envelope should always serialize");
+            if should_terminate_after_mst_request_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
         }
 
         // Client completed MST descent, requests specific missing nodes -------
-        "mst-done" => {
-            let ids: Vec<activesync_core::NodeId> = msg["ids"]
-                .as_array().unwrap_or(&vec![])
-                .iter()
-                .filter_map(|v| parse_hex_hash(v.as_str()?))
-                .collect();
+        ClientDispatchCommand::MstDone => {
+            let ids = extract_mst_done_ids(&msg);
             if !ids.is_empty() {
                 let graph = room.graph.read().await;
                 let nodes = graph.get_nodes(&ids);
                 let nodes_b64 = base64_encode(&pack_nodes(&nodes));
-                let reply = serde_json::json!({
-                    "type":  "pack",
-                    "from":  "server",
-                    "nodes": nodes_b64,
-                    "root":  graph.merkle_root().to_hex(),
-                }).to_string();
+                let reply_env = assemble_server_pack_reply_envelope(
+                    nodes_b64,
+                    graph.merkle_root().to_hex(),
+                );
+                let reply = serde_json::to_string(&reply_env)
+                    .expect("server pack reply envelope should always serialize");
                 drop(graph);
-                if !ws_send(sink, room_id, reply).await { return false; }
+                if should_terminate_after_mst_done_server_pack_send(emit_single_send(sink, room_id, reply).await) { return false; }
             }
         }
 
         // Client requests nodes it doesn't have ----------------------------
-        "request" => {
-            let known_set: std::collections::HashSet<_> =
-                parse_hex_list(&msg["known"]).into_iter().collect();
+        ClientDispatchCommand::Request => {
+            let known_set = shape_request_known_id_set(&msg);
             let graph = room.graph.read().await;
             let missing = graph.missing_hashes(&known_set);
             let nodes = graph.get_nodes(&missing);
             let nodes_b64 = base64_encode(&pack_nodes(&nodes));
-            let reply = serde_json::json!({
-                "type":  "pack",
-                "from":  "server",
-                "nodes": nodes_b64,
-                "root":  graph.merkle_root().to_hex(),
-            }).to_string();
-            if !ws_send(sink, room_id, reply).await { return false; }
+            let reply_env = assemble_server_pack_reply_envelope(
+                nodes_b64,
+                graph.merkle_root().to_hex(),
+            );
+            let reply = serde_json::to_string(&reply_env)
+                .expect("server pack reply envelope should always serialize");
+            if should_terminate_after_request_server_pack_send(emit_single_send(sink, room_id, reply).await) { return false; }
         }
 
         // Client uploads blobs ---------------------------------------------
-        "blob-upload" => {
+        ClientDispatchCommand::BlobUpload => {
             let blobs = match msg["blobs"].as_array() {
                 Some(a) => a.clone(),
                 None => return true,
@@ -743,10 +833,10 @@ async fn handle_client_message(
             let mut stored = 0usize;
             let mut blob_store = room.blobs.write().await;
             for entry in &blobs {
-                let hash_hex = entry["hash"].as_str().unwrap_or("");
-                let data_b64 = entry["data"].as_str().unwrap_or("");
+                let hash_hex = extract_blob_upload_entry_hash_text(entry);
+                let data_b64 = extract_blob_upload_entry_data_b64(entry);
                 if let (Some(expected), Ok(bytes)) =
-                    (parse_hex_hash(hash_hex), base64_decode(data_b64))
+                    (parse_hex_hash(&hash_hex), base64_decode(&data_b64))
                 {
                     let actual = activesync_core::Hash::of(&bytes);
                     if actual == expected {
@@ -760,37 +850,35 @@ async fn handle_client_message(
             // Blobs are served on-demand via blob-request.
             // Broadcast a lightweight notification so peers know new blobs are
             // available and can request them without waiting for the next delta.
-            if stored > 0 {
-                let available: Vec<_> = blobs.iter()
+            if plan_blob_store_mutation(stored)
+                == BlobStoreMutationAction::BroadcastBlobAvailable {
+                let available: Vec<String> = blobs.iter()
                     .filter_map(|e| e["hash"].as_str())
+                    .map(str::to_string)
                     .collect();
-                let bcast = serde_json::json!({
-                    "type":  "blob-available",
-                    "hashes": available,
-                }).to_string();
-                let _ = room.tx.send(bcast);
+                let bcast = serde_json::to_string(&assemble_blob_available_envelope(available))
+                    .expect("blob-available envelope should always serialize");
+                emit_room_broadcast(room, bcast);
             }
         }
 
         // Client requests specific blobs -----------------------------------
-        "blob-request" => {
-            let hashes: Vec<String> = msg["hashes"]
-                .as_array().unwrap_or(&vec![])
-                .iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        ClientDispatchCommand::BlobRequest => {
+            let hashes = extract_blob_request_hashes(&msg);
 
             // F6: split into "redirect" and "fall-through" buckets. Only
             // peers that negotiated `supports_direct_blob_io` get redirects.
-            let mut redirects: Vec<serde_json::Value> = Vec::new();
+            let mut redirects: Vec<BlobRedirectEntry> = Vec::new();
             let mut fallthrough: Vec<String> = Vec::new();
             if negotiated_caps.supports_direct_blob_io {
                 for h in &hashes {
                     let Some(hash) = parse_hex_hash(h) else { fallthrough.push(h.clone()); continue };
                     match room.persistence.resolve_get_url(&room.room_id, &hash, None) {
-                        Some(p) => redirects.push(serde_json::json!({
-                            "hash": h,
-                            "url": p.url,
-                            "expires_at_unix": p.expires_at_unix,
-                        })),
+                        Some(p) => redirects.push(BlobRedirectEntry {
+                            hash: h.clone(),
+                            url: p.url,
+                            expires_at_unix: p.expires_at_unix,
+                        }),
                         None => fallthrough.push(h.clone()),
                     }
                 }
@@ -798,126 +886,166 @@ async fn handle_client_message(
                 fallthrough = hashes.clone();
             }
             if !redirects.is_empty() {
-                let reply = serde_json::json!({
-                    "type": "blob-redirect",
-                    "redirects": redirects,
-                }).to_string();
-                if !ws_send(sink, room_id, reply).await { return false; }
+                let reply_env = assemble_blob_redirect_envelope(redirects);
+                let reply = serde_json::to_string(&reply_env)
+                    .expect("blob-redirect envelope should always serialize");
+                if should_terminate_after_blob_request_redirect_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
             }
 
             // For everything not redirected, fall through to bytes-over-WS.
             let blob_store = room.blobs.read().await;
-            let entries: Vec<_> = fallthrough.iter().filter_map(|h| {
+            let entries: Vec<BlobPackEntry> = fallthrough.iter().filter_map(|h| {
                 let hash = parse_hex_hash(h)?;
                 let data = blob_store.get(&hash)?;
-                Some(serde_json::json!({"hash": h, "data": base64_encode(&data)}))
+                Some(BlobPackEntry {
+                    hash: h.clone(),
+                    data: base64_encode(&data),
+                })
             }).collect();
             // Always reply including the originally requested hashes so the
             // client can clear its pending set even for unavailable blobs.
-            let reply = serde_json::json!({
-                "type":      "blob-pack",
-                "blobs":     entries,
-                "requested": fallthrough,
-            }).to_string();
-            if !ws_send(sink, room_id, reply).await { return false; }
+            let reply_env = assemble_blob_pack_envelope(entries, fallthrough);
+            let reply = serde_json::to_string(&reply_env)
+                .expect("blob-pack envelope should always serialize");
+            if should_terminate_after_blob_request_blob_pack_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
         }
 
         // F6: client wants a presigned PUT URL ----------------------------
         // C→S: { type:"request-upload", hash, size }
         // S→C: { type:"upload-granted", hash, url, expires_at_unix }
         //   or { type:"upload-denied",  hash, reason }
-        "request-upload" => {
-            if !negotiated_caps.supports_direct_blob_io {
-                send_error(sink, "request-upload not negotiated").await;
-                return true;
+        ClientDispatchCommand::RequestUpload => {
+            if let Some(plan) = plan_direct_blob_io_negotiation_gate(
+                negotiated_caps.supports_direct_blob_io,
+                "request-upload",
+            ) {
+                send_error(sink, plan.error_message).await;
+                return plan.keep_connection_open;
             }
-            let hash_hex = msg["hash"].as_str().unwrap_or("");
-            let size = msg["size"].as_u64().unwrap_or(0);
-            let content_type = msg["content_type"].as_str().map(|s| s.to_string());
-            let Some(hash) = parse_hex_hash(hash_hex) else {
-                send_error(sink, "request-upload: bad hash").await;
-                return true;
+            let hash_hex = extract_request_upload_hash_text(&msg);
+            let size = extract_request_upload_size(&msg);
+            let content_type = extract_request_upload_content_type(&msg);
+            let hash_opt = parse_hex_hash(&hash_hex);
+            if let Some(plan) = plan_direct_blob_io_bad_hash_gate(
+                hash_opt.is_some(),
+                "request-upload",
+            ) {
+                send_error(sink, plan.error_message).await;
+                return plan.keep_connection_open;
             };
-            let reply = match room.persistence.resolve_put_url(&room.room_id, &hash, size, content_type.as_deref()) {
-                Some(p) => serde_json::json!({
-                    "type": "upload-granted",
-                    "hash": hash_hex,
-                    "url":  p.url,
-                    "expires_at_unix": p.expires_at_unix,
-                }),
-                None => serde_json::json!({
-                    "type":   "upload-denied",
-                    "hash":   hash_hex,
-                    "reason": "use-ws",
-                }),
+            let hash = hash_opt.expect("hash should be valid after bad-hash gate");
+            let put_url = room
+                .persistence
+                .resolve_put_url(&room.room_id, &hash, size, content_type.as_deref());
+            let reply = match classify_request_upload_resolve_put_url_outcome(put_url.is_some()) {
+                RequestUploadResolvePutUrlOutcome::GrantUpload => {
+                    let p = put_url.expect("put-url should be present when outcome grants upload");
+                    serde_json::to_string(&assemble_upload_granted_envelope(
+                    hash_hex.to_string(),
+                    p.url,
+                    p.expires_at_unix,
+                )).expect("upload-granted envelope should always serialize")
+                }
+                RequestUploadResolvePutUrlOutcome::DenyUseWs => serde_json::to_string(&assemble_upload_denied_envelope(
+                    hash_hex.to_string(),
+                    "use-ws".to_string(),
+                )).expect("upload-denied envelope should always serialize"),
             };
-            if !ws_send(sink, room_id, reply.to_string()).await { return false; }
+            if should_terminate_after_request_upload_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
         }
 
         // F6: client claims a presigned PUT completed --------------------
         // C→S: { type:"blob-uploaded", hash }
         // Server verifies via BlobPersistence::verify_uploaded (HEAD on S3)
         // and broadcasts blob-available so other peers can fetch it.
-        "blob-uploaded" => {
-            if !negotiated_caps.supports_direct_blob_io {
-                send_error(sink, "blob-uploaded not negotiated").await;
-                return true;
+        ClientDispatchCommand::BlobUploaded => {
+            if let Some(plan) = plan_direct_blob_io_negotiation_gate(
+                negotiated_caps.supports_direct_blob_io,
+                "blob-uploaded",
+            ) {
+                send_error(sink, plan.error_message).await;
+                return plan.keep_connection_open;
             }
-            let hash_hex = msg["hash"].as_str().unwrap_or("");
-            let Some(hash) = parse_hex_hash(hash_hex) else {
-                send_error(sink, "blob-uploaded: bad hash").await;
-                return true;
+            let hash_hex = extract_blob_uploaded_hash_text(&msg);
+            let hash_opt = parse_hex_hash(&hash_hex);
+            if let Some(plan) = plan_direct_blob_io_bad_hash_gate(
+                hash_opt.is_some(),
+                "blob-uploaded",
+            ) {
+                send_error(sink, plan.error_message).await;
+                return plan.keep_connection_open;
             };
+            let hash = hash_opt.expect("hash should be valid after bad-hash gate");
             match room.persistence.verify_uploaded(&room.room_id, &hash) {
-                Ok(()) => {
-                    let bcast = serde_json::json!({
-                        "type":   "blob-available",
-                        "hashes": [hash_hex],
-                    }).to_string();
-                    let _ = room.tx.send(bcast);
-                }
-                Err(e) => {
+                Ok(()) => match classify_direct_blob_io_verify_outcome(true) {
+                    DirectBlobIoVerifyOutcome::BroadcastAvailable => {
+                    let available_hashes = shape_blob_uploaded_available_hashes(&hash_hex);
+                    let bcast = serde_json::to_string(&assemble_blob_available_envelope(
+                        available_hashes,
+                    )).expect("blob-available envelope should always serialize");
+                    emit_room_broadcast(room, bcast);
+                    }
+                    DirectBlobIoVerifyOutcome::SendUploadRejected => {}
+                },
+                Err(e) => match classify_direct_blob_io_verify_outcome(false) {
+                    DirectBlobIoVerifyOutcome::BroadcastAvailable => {}
+                    DirectBlobIoVerifyOutcome::SendUploadRejected => {
                     tracing::warn!(?e, hash = %hash_hex, "blob-uploaded verify failed");
-                    let reply = serde_json::json!({
-                        "type":   "upload-rejected",
-                        "hash":   hash_hex,
-                        "reason": e,
-                    }).to_string();
-                    if !ws_send(sink, room_id, reply).await { return false; }
-                }
+                    let rejection_payload =
+                        shape_blob_uploaded_verify_failure_rejection_payload(&hash_hex, &e.to_string());
+                    let reply = serde_json::to_string(&assemble_upload_rejected_envelope(
+                        rejection_payload.hash,
+                        rejection_payload.reason,
+                    )).expect("upload-rejected envelope should always serialize");
+                    if should_terminate_after_blob_upload_verify_failure_reply_send(
+                        emit_single_send(sink, room_id, reply).await,
+                    ) { return false; }
+                    }
+                },
             }
         }
 
         // Ephemeral presence — forward, do not store -----------------------
-        "presence" => {
-            let bcast = serde_json::json!({
-                "type": "presence",
-                "from": pubkey_hex,
-                "data": msg["data"],
-            }).to_string();
-            let _ = room.tx.send(bcast);
+        ClientDispatchCommand::Presence => {
+            let bcast = serde_json::to_string(&assemble_presence_envelope(
+                pubkey_hex.to_string(),
+                extract_presence_data_payload(&msg),
+            )).expect("presence envelope should always serialize");
+            emit_room_broadcast(room, bcast);
         }
 
         // C3: lock the room with an Ed25519 verifying key -------------------
         // Only accepted if the room is currently open (auth_key is None).
         // Once set, the key cannot be changed without restarting the server.
-        "set-room-key" => {
-            let vk_hex = msg["pubkey"].as_str().unwrap_or("");
-            match parse_verifying_key(vk_hex) {
-                Some(vk) => {
+        ClientDispatchCommand::SetRoomKey => {
+            let vk_hex = extract_set_room_key_pubkey_text(&msg);
+            let parsed_vk = parse_verifying_key(&vk_hex);
+            match classify_set_room_key_parse_result(parsed_vk.is_some()) {
+                SetRoomKeyParseResult::Parsed => {
+                    let vk = parsed_vk.expect("verifying key should be present when parse succeeds");
                     let mut auth_key = room.auth_key.write().await;
-                    if auth_key.is_none() {
-                        *auth_key = Some(vk);
-                        let reply = serde_json::json!({
-                            "type":   "room-locked",
-                            "pubkey": vk_hex,
-                        }).to_string();
-                        if !ws_send(sink, room_id, reply).await { return false; }
-                    } else {
-                        send_error(sink, "room already locked").await;
+                    match classify_set_room_key_lock_state(auth_key.is_none()) {
+                        SetRoomKeyLockStateResult::LockRoom => {
+                            *auth_key = Some(vk);
+                            let reply = serde_json::to_string(&assemble_room_locked_envelope(
+                                vk_hex.to_string(),
+                            )).expect("room-locked envelope should always serialize");
+                            if should_terminate_after_set_room_key_locked_ack_send(emit_single_send(sink, room_id, reply).await) { return false; }
+                        }
+                        SetRoomKeyLockStateResult::RejectAlreadyLocked => {
+                            let reply = serde_json::to_string(&assemble_set_room_key_rejected_envelope(
+                                shape_set_room_key_already_locked_rejection_reason().to_string(),
+                            )).expect("set-room-key rejected envelope should always serialize");
+                            let _ = sink.send(Message::Text(reply.into())).await;
+                        }
                     }
                 }
-                None => { send_error(sink, "set-room-key: invalid pubkey hex").await; }
+                SetRoomKeyParseResult::InvalidPubkeyHex => {
+                    let reply = serde_json::to_string(&assemble_set_room_key_rejected_envelope(
+                        shape_set_room_key_invalid_pubkey_rejection_reason().to_string(),
+                    )).expect("set-room-key rejected envelope should always serialize");
+                    let _ = sink.send(Message::Text(reply.into())).await;
+                }
             }
         }
 
@@ -930,27 +1058,27 @@ async fn handle_client_message(
         // `can_write` entries are 64-char hex Ed25519 verifying keys.
         // The server's own pubkey may be listed to designate it as the sole
         // authority for a protected path (Authoritative mode).
-        "set-policy" => {
+        ClientDispatchCommand::SetPolicy => {
             let policy = parse_policy(&msg, sink).await;
-            match policy {
-                Some(p) => {
+            match classify_set_policy_parse_result(policy.is_some()) {
+                SetPolicyParseResult::ApplyPolicy => {
+                    let p = policy.expect("policy should be present when parse succeeds");
                     room.set_policy(p).await;
-                    let reply = serde_json::json!({"type":"policy-set"}).to_string();
-                    if !ws_send(sink, room_id, reply).await { return false; }
+                    let reply = serde_json::to_string(&assemble_policy_set_envelope())
+                        .expect("policy-set envelope should always serialize");
+                    if should_terminate_after_set_policy_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
                 }
-                None => {} // parse_policy already sent the error
+                SetPolicyParseResult::ParseFailed => {} // parse_policy already sent the error
             }
         }
 
         // E1: client requests the server's public key -------------------------
         // Useful for building policies that reference the server as authority.
-        "server-info" => {
+        ClientDispatchCommand::ServerInfo => {
             let vk_hex = hex_from_bytes(&server_key.verifying_key().to_bytes());
-            let reply = serde_json::json!({
-                "type":   "server-info",
-                "pubkey": vk_hex,
-            }).to_string();
-            if !ws_send(sink, room_id, reply).await { return false; }
+            let reply = serde_json::to_string(&assemble_server_info_envelope(vk_hex))
+                .expect("server-info envelope should always serialize");
+            if should_terminate_after_server_info_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
         }
 
         // E1: start the Authoritative tick loop for this room -----------------
@@ -965,25 +1093,21 @@ async fn handle_client_message(
         //
         // Respond with "tick-started" (first call) or "tick-already-running"
         // (idempotent: a loop is already active for this room).
-        "start-tick" => {
-            let interval_ms = msg["interval_ms"].as_u64().unwrap_or(16).max(1);
-            let intent_prefix = msg["intent_prefix"]
-                .as_str()
-                .unwrap_or("intent/")
-                .to_string();
+        ClientDispatchCommand::StartTick => {
+            let interval_ms = extract_start_tick_interval_ms(&msg);
+            let intent_prefix = extract_start_tick_intent_prefix(&msg);
             let started = room.start_tick(Arc::clone(server_key), interval_ms, intent_prefix);
-            let reply = serde_json::json!({
-                "type": if started { "tick-started" } else { "tick-already-running" },
-                "interval_ms": interval_ms,
-            }).to_string();
-            if !ws_send(sink, room_id, reply).await { return false; }
+            let reply = serde_json::to_string(&assemble_tick_start_envelope(started, interval_ms))
+                .expect("tick start envelope should always serialize");
+            if should_terminate_after_start_tick_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
         }
 
         // E1: stop the tick loop for this room --------------------------------
-        "stop-tick" => {
+        ClientDispatchCommand::StopTick => {
             room.stop_tick();
-            let reply = serde_json::json!({"type":"tick-stopped"}).to_string();
-            if !ws_send(sink, room_id, reply).await { return false; }
+            let reply = serde_json::to_string(&assemble_tick_stopped_envelope())
+                .expect("tick-stopped envelope should always serialize");
+            if should_terminate_after_stop_tick_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
         }
 
         // D3: Compact the room graph into a snapshot --------------------------
@@ -998,46 +1122,70 @@ async fn handle_client_message(
         //
         // Server → Client broadcast:
         //   { type: "snapshot-pack", pack_b64: "<base64>", snapshot_hash: "<hex64>" }
-        "compact-room" => {
+        ClientDispatchCommand::CompactRoom => {
             // 1. Compact current graph into a snapshot node.
             let snap = {
                 let graph = room.graph.read().await;
-                match compact(&*graph, server_key) {
-                    Ok(s) => s,
-                    Err(e) => { send_error(sink, &format!("compact failed: {e}")).await; return true; }
+                let compact_result = compact(&*graph, server_key);
+                match classify_compact_room_compaction_result(compact_result.is_ok()) {
+                    CompactRoomCompactionResult::UseSnapshot => {
+                        compact_result.expect("snapshot should be present when compaction succeeds")
+                    }
+                    CompactRoomCompactionResult::SendCompactFailed => {
+                        let err = compact_result
+                            .err()
+                            .expect("compaction error should be present when compaction fails");
+                        send_error(sink, &shape_compact_room_compaction_failed_error(&err.to_string())).await;
+                        return true;
+                    }
                 }
             };
 
             // 2. Verify and extract metadata.
-            let meta = match verify_snapshot(&snap) {
-                Ok(m) => m,
-                Err(e) => { send_error(sink, &format!("snapshot verify failed: {e}")).await; return true; }
+            let verify_result = verify_snapshot(&snap);
+            let meta = match classify_compact_room_verify_result(verify_result.is_ok()) {
+                CompactRoomVerifyResult::UseVerifiedSnapshot => {
+                    verify_result.expect("verified snapshot metadata should be present when verify succeeds")
+                }
+                CompactRoomVerifyResult::SendVerifyFailed => {
+                    let err = verify_result
+                        .err()
+                        .expect("verify error should be present when verify fails");
+                    send_error(sink, &shape_compact_room_verify_failed_error(&err.to_string())).await;
+                    return true;
+                }
             };
             let hash_hex = meta.snapshot_hash.to_hex();
 
             // 3. Rebuild the room graph from the snapshot (prunes old nodes).
-            let rebuilt = match rebuild_from_snapshot(snap.clone(), &[]) {
-                Ok(g) => g,
-                Err(e) => { send_error(sink, &format!("rebuild failed: {e}")).await; return true; }
+            let rebuild_result = rebuild_from_snapshot(snap.clone(), &[]);
+            let rebuilt = match classify_compact_room_rebuild_result(rebuild_result.is_ok()) {
+                CompactRoomRebuildResult::InstallRebuiltGraph => {
+                    rebuild_result.expect("rebuilt graph should be present when rebuild succeeds")
+                }
+                CompactRoomRebuildResult::SendRebuildFailed => {
+                    let err = rebuild_result
+                        .err()
+                        .expect("rebuild error should be present when rebuild fails");
+                    send_error(sink, &shape_compact_room_rebuild_failed_error(&err.to_string())).await;
+                    return true;
+                }
             };
             *room.graph.write().await = rebuilt;
 
             // 4. Pack the snapshot node and broadcast to all peers.
             let pack_bytes = pack_snapshot_pack(&snap, &[]);
             let pack_b64 = base64_encode(&pack_bytes);
-            let bcast = serde_json::json!({
-                "type":          "snapshot-pack",
-                "pack_b64":      pack_b64,
-                "snapshot_hash": hash_hex,
-            }).to_string();
-            let _ = room.tx.send(bcast);
+            let bcast = serde_json::to_string(&assemble_snapshot_pack_envelope(
+                pack_b64,
+                hash_hex.clone(),
+            )).expect("snapshot-pack envelope should always serialize");
+            emit_room_broadcast(room, bcast);
 
             // Confirm to the requesting client.
-            let reply = serde_json::json!({
-                "type":          "compact-ack",
-                "snapshot_hash": hash_hex,
-            }).to_string();
-            if !ws_send(sink, room_id, reply).await { return false; }
+            let reply = serde_json::to_string(&assemble_compact_ack_envelope(hash_hex))
+                .expect("compact-ack envelope should always serialize");
+            if should_terminate_after_compact_room_ack_send(emit_single_send(sink, room_id, reply).await) { return false; }
         }
 
         // D2: WebRTC signaling relay ----------------------------------------
@@ -1054,13 +1202,20 @@ async fn handle_client_message(
         // Server → room broadcast (adds `from` field):
         //   { type: "webrtc-offer"|"webrtc-answer"|"webrtc-ice",
         //     from: "<our_pubkey_hex>", to: "...", ... }
-        "webrtc-offer" | "webrtc-answer" | "webrtc-ice" => {
-            let mut relay = msg.clone();
-            relay["from"] = serde_json::json!(pubkey_hex);
-            let _ = room.tx.send(relay.to_string());
+        ClientDispatchCommand::Relay => {
+            let relay_fields = extract_webrtc_relay_fields(&msg);
+            let relay = serde_json::to_string(&assemble_normalized_peer_stamped_relay_envelope(
+                pubkey_hex.to_string(),
+                relay_fields,
+            )).expect("webrtc relay envelope should always serialize");
+            emit_room_broadcast(room, relay);
         }
 
-        _ => {}
+        ClientDispatchCommand::Unknown => {
+            if !should_ignore_unknown_client_message_type(&message_type) {
+                return false;
+            }
+        }
     }
 
     true
@@ -1071,8 +1226,31 @@ async fn handle_client_message(
 // ---------------------------------------------------------------------------
 
 async fn send_error(sink: &mut SplitSink<WebSocket, Message>, msg: &str) {
-    let j = serde_json::json!({"type":"error","msg":msg}).to_string();
+    let j = serde_json::to_string(&assemble_error_envelope(msg.to_string()))
+        .expect("error envelope should always serialize");
     let _ = sink.send(Message::Text(j.into())).await;
+}
+
+/// Shared adapter emitter for single session-targeted text envelopes.
+async fn emit_single_send(
+    sink: &mut SplitSink<WebSocket, Message>,
+    room_id: &str,
+    text: String,
+) -> bool {
+    ws_send(sink, room_id, text).await
+}
+
+/// Shared adapter emitter for room fan-out envelopes.
+fn emit_room_broadcast(room: &Arc<Room>, envelope: String) {
+    let _ = room.tx.send(envelope);
+}
+
+/// Shared adapter emitter for session close frames.
+async fn emit_close_frame(
+    sink: &mut SplitSink<WebSocket, Message>,
+    spec: CloseFrameSpec,
+) {
+    send_close_with_timeout(sink, spec).await;
 }
 
 // G1 — backpressure & slow-client policy.
@@ -1108,16 +1286,27 @@ async fn ws_send(
                 "room" => room_id.to_string(),
             ).increment(1);
             tracing::warn!(room = %room_id, "ws send timed out — closing with 1011 server overload");
-            let _ = tokio::time::timeout(
-                WS_CLOSE_FRAME_TIMEOUT,
-                sink.send(Message::Close(Some(CloseFrame {
-                    code: 1011,
-                    reason: std::borrow::Cow::Borrowed("server overload"),
-                }))),
-            ).await;
+            emit_close_frame(sink, assemble_server_overload_close_frame()).await;
             false
         }
     }
+}
+
+fn close_message_from_spec(spec: CloseFrameSpec) -> Message {
+    Message::Close(Some(CloseFrame {
+        code: spec.code,
+        reason: std::borrow::Cow::Owned(spec.reason),
+    }))
+}
+
+async fn send_close_with_timeout(
+    sink: &mut SplitSink<WebSocket, Message>,
+    spec: CloseFrameSpec,
+) {
+    let _ = tokio::time::timeout(
+        WS_CLOSE_FRAME_TIMEOUT,
+        sink.send(close_message_from_spec(spec)),
+    ).await;
 }
 
 // G3 — per-peer rate limiting.
@@ -1177,13 +1366,7 @@ async fn deny_peer_rate(
         kind,
         "peer rate limit tripped — closing with 4008"
     );
-    let _ = tokio::time::timeout(
-        WS_CLOSE_FRAME_TIMEOUT,
-        sink.send(Message::Close(Some(CloseFrame {
-            code: 4008,
-            reason: std::borrow::Cow::Borrowed("rate limit exceeded"),
-        }))),
-    ).await;
+    emit_close_frame(sink, assemble_rate_limit_exceeded_close_frame()).await;
 }
 
 /// Parse a `set-policy` JSON message into a `Policy`.
@@ -1192,17 +1375,18 @@ async fn parse_policy(
     msg: &Value,
     sink: &mut SplitSink<WebSocket, Message>,
 ) -> Option<Policy> {
-    let default = match msg["default"].as_str().unwrap_or("allow") {
-        "deny"  => PolicyDefault::DenyAll,
-        "allow" => PolicyDefault::AllowAll,
-        other   => {
-            send_error(sink, &format!("set-policy: unknown default '{other}', use 'allow' or 'deny'")).await;
+    let default_raw = extract_set_policy_default_text(msg);
+    let default = match classify_set_policy_default(&default_raw) {
+        SetPolicyDefaultParseResult::DenyAll => PolicyDefault::DenyAll,
+        SetPolicyDefaultParseResult::AllowAll => PolicyDefault::AllowAll,
+        SetPolicyDefaultParseResult::Unknown => {
+            send_error(sink, &shape_set_policy_unknown_default_error(&default_raw)).await;
             return None;
         }
     };
 
     let mut rules = Vec::new();
-    let rule_arr = msg["rules"].as_array().cloned().unwrap_or_default();
+    let rule_arr = extract_set_policy_rule_values(msg);
     for rule_val in &rule_arr {
         let path_glob = match rule_val["path_glob"].as_str() {
             Some(s) => s.to_string(),
@@ -1211,23 +1395,18 @@ async fn parse_policy(
                 return None;
             }
         };
-        let can_write: Vec<[u8; 32]> = match rule_val["can_write"].as_array() {
-            Some(arr) => {
-                let mut keys = Vec::new();
-                for v in arr {
-                    let hex = v.as_str().unwrap_or("");
-                    match parse_hex_32(hex) {
-                        Some(b) => keys.push(b),
-                        None => {
-                            send_error(sink, &format!("set-policy: invalid pubkey hex '{hex}'")).await;
-                            return None;
-                        }
-                    }
+        let mut keys = Vec::new();
+        for v in &extract_set_policy_can_write_values(rule_val) {
+            let hex = extract_set_policy_can_write_hex_text(v);
+            match parse_hex_32(&hex) {
+                Some(b) => keys.push(b),
+                None => {
+                    send_error(sink, &format!("set-policy: invalid pubkey hex '{hex}'")).await;
+                    return None;
                 }
-                keys
             }
-            None => vec![],
-        };
+        }
+        let can_write = keys;
         rules.push(PolicyRule { path_glob, can_write, can_read: vec![], can_derive: vec![] });
     }
 
@@ -1293,13 +1472,6 @@ fn parse_hex_32(hex: &str) -> Option<[u8; 32]> {
         bytes[i] = (hi << 4) | lo;
     }
     Some(bytes)
-}
-
-fn parse_hex_list(val: &Value) -> Vec<activesync_core::NodeId> {
-    val.as_array().unwrap_or(&vec![])
-        .iter()
-        .filter_map(|v| parse_hex_hash(v.as_str()?))
-        .collect()
 }
 
 fn parse_hex_hash(hex: &str) -> Option<activesync_core::Hash> {

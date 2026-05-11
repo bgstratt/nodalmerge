@@ -1,0 +1,13 @@
+{
+  "name": "ibf_mst_negotiation_single_node",
+  "scenario": "hello_catchup",
+  "room_id": "parity-room-mst",
+  "client_supports_ibf": true,
+  "client_supports_mst": true,
+  "include_client_ibf_empty": true,
+  "expected_sequence": ["welcome", "pack"],
+  "expected_pack_count": 1,
+  "expected_close_code": null,
+  "expected_welcome_has_mst_root": true,
+  "notes": "Golden negotiation parity scenario: client offers IBF+MST and includes a valid empty IBF payload; server welcome must include mst_root and still provide catchup pack."
+}

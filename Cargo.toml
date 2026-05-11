@@ -1,6 +1,9 @@
 [workspace]
 members = [
     "core",
+    "gc",
+    "host-core",
+    "host-ffi",
     "server",
     "bridge",
     "jwt-bridge",

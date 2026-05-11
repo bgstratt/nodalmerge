@@ -1,0 +1,11 @@
+{
+  "name": "tick_compaction_start_stop_snapshot",
+  "scenario": "tick_compaction",
+  "room_id": "parity-tick-room",
+  "expected_sequence": ["welcome", "tick-started", "tick-stopped"],
+  "expected_pack_count": 0,
+  "expected_close_code": null,
+  "expected_has_snapshot_pack": true,
+  "expected_has_compact_ack": true,
+  "notes": "Golden tick/compaction parity scenario: start+stop tick control then compact-room emits both snapshot-pack broadcast and compact-ack reply."
+}

@@ -232,6 +232,7 @@ Expired tokens disconnect the client with close code `4002`; the SDK's
 - **[sdk.md](sdk.md)** — complete API reference, all options, edge cases.
 - **[deployment.md](deployment.md)** — ops guide: backups, tuning, metrics.
 - **[self-host.md](self-host.md)** — 5-minute Docker + JWT bridge walkthrough.
+- **[operations-inventory.md](operations-inventory.md)** — cross-surface operation index (SDK, wire, server, core, auth, GC) with gap-analysis matrix.
 - **[../PLAN.md](../PLAN.md)** — engineering plan + decision log (why things
   are the way they are).
 - **[../web/demo.js](../web/demo.js)** — full reference client: IndexedDB,

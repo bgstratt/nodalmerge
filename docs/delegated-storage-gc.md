@@ -13,6 +13,40 @@ and need deterministic reclaim of unreferenced blob objects.
 2. Make reachability authoritative from ActiveSync room state.
 3. Avoid daily dependence on ListBucket.
 4. Keep app/product field naming out of shared GC core.
+5. Keep GC transport-agnostic so WebSocket/WebRTC/HTTP streaming/in-process hosts share identical lifecycle semantics.
+
+## Core ownership principles
+
+1. CRDT core defines what logically exists (reachable hashes).
+2. Storage/host layer defines physical retention windows and delete policy.
+3. GC enforces storage lifecycle using contracts; it is not CRDT merge logic.
+4. Transport is only a delivery pipe and must not affect GC correctness.
+
+## Normative semantics (A1 freeze)
+
+The rules in this section are normative for pre-host-extraction work.
+
+1. Liveness definition:
+    - A blob hash is live when it is reachable from authoritative state in its GC domain.
+    - Reachability includes current state references, system/admin pins, and active upload leases.
+    - Reachability is not defined by websocket/session presence.
+
+2. Source of truth:
+    - Mark pass via `LiveHashSource` (or HTTP fallback) is authoritative truth.
+    - Incremental deltas (`ReferenceDeltaSink`) are optimization only and must reconcile to mark.
+
+3. Domain model:
+    - Deletion eligibility is domain-scoped, not room-scoped.
+    - Domain is defined by host config (typically tenant + bucket + prefix).
+    - Any live reference in a domain protects the hash in that domain.
+
+4. Safety precedence:
+    - Pin/lease protections override deletion eligibility.
+    - Grace window is mandatory before hard delete unless explicitly configured otherwise for test/dev.
+
+5. Backward compatibility:
+    - Existing room-scoped sweep APIs may remain as runtime shims during migration.
+    - Shims must not redefine normative semantics above.
 
 ## Architecture
 
@@ -22,6 +56,12 @@ and need deterministic reclaim of unreferenced blob objects.
 4. `BlobObjectStore`: object HEAD/DELETE (LIST optional, low-frequency drift job only).
 5. `GcCoordinator`: orchestrates mark -> soft sweep -> hard sweep.
 
+Boundary rule:
+
+1. `GcCoordinator` consumes state/liveness contracts only.
+2. No dependency on websocket session state, peer presence, or runtime-specific task model.
+3. Same coordinator behavior must hold when hosted by Rust server runtime, .NET host runtime, or in-process scheduler.
+
 ## Rust trait contracts
 
 ```rust
@@ -30,7 +70,11 @@ use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetState {
+    Uploading,
     Active,
+    Grace,
+    SweepCandidate,
+    Pinned,
     PendingDelete,
     Deleted,
     Quarantined,
@@ -145,6 +189,21 @@ pub trait BlobObjectStore: Send + Sync {
     fn head(&self, bucket: &str, key: &str) -> anyhow::Result<bool>;
     fn delete(&self, bucket: &str, key: &str) -> anyhow::Result<()>;
 }
+
+/// Optional fast-path for incremental reference updates emitted by hosts
+/// that already observe old/new hash sets on state changes.
+///
+/// GC correctness must never depend solely on this signal; mark/sweep remains
+/// the authoritative repair path.
+pub trait ReferenceDeltaSink: Send + Sync {
+    fn apply_delta(
+        &self,
+        scope: &str,
+        added_hashes: &[String],
+        removed_hashes: &[String],
+        observed_at: SystemTime,
+    ) -> anyhow::Result<()>;
+}
 ```
 
 Notes:
@@ -152,6 +211,7 @@ Notes:
 1. Adapters may be implemented with SQL, document, KV, or embedded stores.
 2. `LiveHashSource` must be product-configurable; shared GC code must not hard-code product field names.
 3. `BlobObjectStore` intentionally excludes `list` for daily GC safety.
+4. `ReferenceDeltaSink` is optional optimization for low-latency queueing; it does not replace mark pass.
 
 ## HTTP fallback contract
 
@@ -213,6 +273,20 @@ Rules:
 2. Collect live hashes from `LiveHashSource` or HTTP fallback.
 3. For each hash: upsert inventory as `Active`, set `last_marked_run_id = run_id`, clear pending delete.
 
+Mark authority rule:
+
+1. Mark is authoritative truth for liveness.
+2. Incremental deltas may accelerate queue updates but must reconcile to mark results.
+
+Lifecycle transition guidance:
+
+1. Uploading -> Active after integrity/ownership verification.
+2. Active -> Grace on dereference.
+3. Grace -> SweepCandidate when grace deadline is exceeded and no protection applies.
+4. SweepCandidate -> Deleted only after hard-delete safety checks pass.
+5. Any state -> Pinned when policy/admin pin applies.
+6. Grace/SweepCandidate/PendingDelete -> Active on re-reference.
+
 ### Soft sweep
 
 1. Query inventory where not marked in current run and not pinned.
@@ -224,6 +298,13 @@ Rules:
 1. Query `PendingDelete` older than grace window and not pinned.
 2. Optional `HEAD` safety check.
 3. `DELETE` object and transition inventory row to `Deleted`.
+
+Delete safety rule:
+
+1. Deletion is valid only within the configured GC domain (`tenant/bucket/prefix` semantics).
+2. Any live reference within the domain protects the hash from deletion.
+3. Hosts with multi-tenant routing must map domain boundaries explicitly in config/adapters.
+4. Room-local scans must never delete hashes still live elsewhere in the same domain.
 
 ## Safety defaults
 
@@ -238,3 +319,16 @@ Rules:
 2. No SpeechSlate-specific field names in shared crates.
 3. Do not require object listing permission for nightly GC.
 4. Keep policy hooks (admin pinning, room scope) injectable per product.
+
+## Sequencing guidance for host extraction
+
+Before host extraction/integration begins, freeze:
+
+1. Liveness model (authoritative mark source and delete domain semantics).
+2. GC contract surfaces (traits and run modes).
+3. Safety defaults and rollout gates.
+
+Rationale:
+
+1. Host extraction should implement one GC lifecycle contract across all hosts.
+2. Defining this late risks runtime-coupled behavior and divergent retention semantics.

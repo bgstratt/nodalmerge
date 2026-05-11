@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj" />
+  </Folder>
+</Solution>

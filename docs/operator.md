@@ -7,7 +7,8 @@ backend, and the rolling-restart procedure.
 > First-time readers: see [quickstart.md](./quickstart.md) and
 > [self-host.md](./self-host.md). For integration shapes, see
 > [integration.md](./integration.md). For version upgrades, see
-> [migration.md](./migration.md).
+> [migration.md](./migration.md). For cross-surface operation inventory and
+> gap analysis, see [operations-inventory.md](./operations-inventory.md).
 
 ---
 
@@ -198,3 +199,170 @@ replica-set / logical-replication / cross-region-replication.
 | `activesync_merge_batch_seconds` p99 rising | CPU saturation; scale horizontally (shard by room) or verify ed25519 simd backend is active. |
 | `activesync_persistence_write_seconds{kind="blob"}` p99 rising | Disk I/O or S3 latency; check the blob backend. |
 | Disk fills | `activesync_blob_gc_deleted_total` not ticking; verify `--blob-gc-interval` is set. |
+
+---
+
+## Admin operation reference
+
+This section summarizes room/admin protocol operations used in production
+operations and debugging workflows.
+
+### `server-info`
+
+Purpose:
+
+1. Confirm server capabilities/version shape during incident triage.
+
+Request:
+
+```json
+{ "type": "server-info" }
+```
+
+Expected response:
+
+```json
+{
+  "type": "server-info",
+  "version": "<build>",
+  "caps": { "supports_ibf": true }
+}
+```
+
+### `set-room-key`
+
+Purpose:
+
+1. Enable room token enforcement by setting room verification key.
+
+Request:
+
+```json
+{ "type": "set-room-key", "pubkey": "<ed25519_hex>" }
+```
+
+Expected response:
+
+```json
+{ "type": "room-locked" }
+```
+
+Operational notes:
+
+1. Invalid key encoding returns `error`.
+2. After lock, peers without valid room tokens are rejected.
+
+### `set-policy`
+
+Purpose:
+
+1. Update room policy defaults and path rules.
+
+Request:
+
+```json
+{
+  "type": "set-policy",
+  "default": "deny",
+  "rules": [
+    { "path_glob": "world/**", "allow": ["<peer_pubkey_hex>"] }
+  ]
+}
+```
+
+Expected response:
+
+```json
+{ "type": "policy-set" }
+```
+
+Operational notes:
+
+1. Unknown defaults or malformed rules return `error`.
+2. Treat policy updates as configuration events; log request/response with operator identity.
+
+### `start-tick` and `stop-tick`
+
+Purpose:
+
+1. Control authoritative server-side tick loop for intent-to-world materialization.
+
+Start request:
+
+```json
+{ "type": "start-tick", "interval_ms": 100, "intent_prefix": "intent/" }
+```
+
+Start response:
+
+```json
+{ "type": "tick-started", "interval_ms": 100, "intent_prefix": "intent/" }
+```
+
+If already running:
+
+```json
+{ "type": "tick-already-running", "interval_ms": 100, "intent_prefix": "intent/" }
+```
+
+Stop request/response:
+
+```json
+{ "type": "stop-tick" }
+```
+
+```json
+{ "type": "tick-stopped" }
+```
+
+Operational notes:
+
+1. Keep interval conservative in multi-tenant deployments to avoid bursty write amplification.
+2. Prefer explicit change control for interval/prefix changes.
+
+### `compact-room`
+
+Purpose:
+
+1. Trigger room compaction and snapshot pack emission.
+
+Request:
+
+```json
+{ "type": "compact-room" }
+```
+
+Expected responses:
+
+```json
+{
+  "type": "snapshot-pack",
+  "snapshot": "<base64_snapshot>",
+  "frontier": ["<node_id_hex>"]
+}
+```
+
+then
+
+```json
+{ "type": "compact-ack" }
+```
+
+Operational notes:
+
+1. Run during lower write pressure windows for large rooms.
+2. Capture snapshot metadata in incident logs if compaction fails downstream.
+
+### `error` handling guidance
+
+Server error envelope:
+
+```json
+{ "type": "error", "msg": "reason" }
+```
+
+Operational handling:
+
+1. Auth/policy format failures: fix request and retry.
+2. Transient storage/runtime failures: retry with backoff and monitor error counters.
+3. Repeated protocol errors from one peer: isolate client and inspect wire payloads.

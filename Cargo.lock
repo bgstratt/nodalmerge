@@ -49,6 +49,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "activesync-gc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "activesync-host-core"
+version = "0.1.0"
+dependencies = [
+ "activesync-core",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "activesync-host-ffi"
+version = "0.1.0"
+dependencies = [
+ "activesync-core",
+ "activesync-host-core",
+ "ed25519-dalek",
+ "postcard",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "activesync-jwt-bridge"
 version = "0.1.0"
 dependencies = [
@@ -136,7 +167,10 @@ name = "activesync-server"
 version = "0.1.0"
 dependencies = [
  "activesync-core",
+ "activesync-gc",
+ "activesync-host-core",
  "axum",
+ "base64 0.22.1",
  "ed25519-dalek",
  "futures-util",
  "governor",

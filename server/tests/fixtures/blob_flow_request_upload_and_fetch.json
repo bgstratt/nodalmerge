@@ -1,0 +1,11 @@
+{
+  "name": "blob_flow_request_upload_and_fetch",
+  "scenario": "blob_flow",
+  "room_id": "parity-blob-room",
+  "expected_sequence": ["welcome", "upload-denied", "blob-pack"],
+  "expected_pack_count": 0,
+  "expected_close_code": null,
+  "expected_blob_pack_count": 1,
+  "expected_upload_denied_reason": "use-ws",
+  "notes": "Golden blob flow parity scenario: request-upload denied on NoPersistence and blob-request returns blob-pack with seeded blob."
+}

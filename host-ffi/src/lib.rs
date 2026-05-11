@@ -1,0 +1,231 @@
+use std::ffi::c_void;
+
+use activesync_host_core::api::HostCommand;
+use activesync_host_core::engine::HostEngine;
+use activesync_host_core::errors::HostCoreError;
+use serde::{Deserialize, Serialize};
+
+const ABI_VERSION: u32 = 1;
+
+#[repr(C)]
+pub struct as_host_engine {
+    inner: HostEngine,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct as_bytes_view {
+    pub ptr: *const u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct as_bytes_owned {
+    pub ptr: *mut u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(non_camel_case_types)]
+pub enum as_status {
+    AS_OK = 0,
+    AS_ERR_INVALID_ARG = 1,
+    AS_ERR_NOT_FOUND = 2,
+    AS_ERR_AUTH = 3,
+    AS_ERR_POLICY = 4,
+    AS_ERR_PROTOCOL = 5,
+    AS_ERR_INTERNAL = 255,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct FfiCommandEnvelope {
+    room_id: String,
+    command: HostCommand,
+}
+
+fn make_owned_bytes(bytes: Vec<u8>) -> as_bytes_owned {
+    if bytes.is_empty() {
+        return as_bytes_owned {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        };
+    }
+
+    let boxed = bytes.into_boxed_slice();
+    let len = boxed.len();
+    let ptr = Box::into_raw(boxed) as *mut u8;
+    as_bytes_owned { ptr, len }
+}
+
+fn map_host_core_error(err: HostCoreError) -> as_status {
+    match err {
+        HostCoreError::InvalidCommand => as_status::AS_ERR_INVALID_ARG,
+        HostCoreError::RoomNotFound | HostCoreError::SessionNotFound => as_status::AS_ERR_NOT_FOUND,
+        HostCoreError::ProtocolViolation | HostCoreError::SessionAlreadyOpen => {
+            as_status::AS_ERR_PROTOCOL
+        }
+        HostCoreError::InternalInvariant => as_status::AS_ERR_INTERNAL,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn as_host_abi_version() -> u32 {
+    ABI_VERSION
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn as_host_engine_new(out_engine: *mut *mut as_host_engine) -> as_status {
+    if out_engine.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+
+    let boxed = Box::new(as_host_engine {
+        inner: HostEngine::new(),
+    });
+
+    // SAFETY: out_engine was validated as non-null above and points to caller-owned storage.
+    unsafe {
+        *out_engine = Box::into_raw(boxed);
+    }
+
+    as_status::AS_OK
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn as_host_engine_free(engine: *mut as_host_engine) -> as_status {
+    if engine.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+
+    // SAFETY: pointer was returned from Box::into_raw in as_host_engine_new.
+    unsafe {
+        drop(Box::from_raw(engine));
+    }
+
+    as_status::AS_OK
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn as_host_submit_command(
+    engine: *mut as_host_engine,
+    command_bin: as_bytes_view,
+    out_events_bin: *mut as_bytes_owned,
+) -> as_status {
+    if engine.is_null() || out_events_bin.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+
+    if command_bin.len > 0 && command_bin.ptr.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+
+    let command_bytes = if command_bin.len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: validated non-null pointer with caller-provided byte length.
+        unsafe { std::slice::from_raw_parts(command_bin.ptr, command_bin.len) }
+    };
+
+    let envelope: FfiCommandEnvelope = match postcard::from_bytes(command_bytes) {
+        Ok(envelope) => envelope,
+        Err(_) => return as_status::AS_ERR_INVALID_ARG,
+    };
+
+    let engine_ref = {
+        // SAFETY: engine pointer validated as non-null above and is valid for this call.
+        unsafe { &mut (*engine).inner }
+    };
+
+    let result = match engine_ref.apply(activesync_host_core::api::CommandEnvelope::new(
+        envelope.room_id,
+        envelope.command,
+    )) {
+        Ok(result) => result,
+        Err(err) => return map_host_core_error(err),
+    };
+
+    let event_bytes = match postcard::to_allocvec(&result.events) {
+        Ok(bytes) => bytes,
+        Err(_) => return as_status::AS_ERR_INTERNAL,
+    };
+
+    let owned = make_owned_bytes(event_bytes);
+    // SAFETY: out_events_bin was validated as non-null above and points to caller-owned storage.
+    unsafe {
+        *out_events_bin = owned;
+    }
+
+    as_status::AS_OK
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn as_host_submit_command_json(
+    engine: *mut as_host_engine,
+    command_json: as_bytes_view,
+    out_events_json: *mut as_bytes_owned,
+) -> as_status {
+    if engine.is_null() || out_events_json.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+
+    if command_json.len > 0 && command_json.ptr.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+
+    let command_bytes = if command_json.len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: validated non-null pointer with caller-provided byte length.
+        unsafe { std::slice::from_raw_parts(command_json.ptr, command_json.len) }
+    };
+
+    let envelope: FfiCommandEnvelope = match serde_json::from_slice(command_bytes) {
+        Ok(envelope) => envelope,
+        Err(_) => return as_status::AS_ERR_INVALID_ARG,
+    };
+
+    let engine_ref = {
+        // SAFETY: engine pointer validated as non-null above and is valid for this call.
+        unsafe { &mut (*engine).inner }
+    };
+
+    let result = match engine_ref.apply(activesync_host_core::api::CommandEnvelope::new(
+        envelope.room_id,
+        envelope.command,
+    )) {
+        Ok(result) => result,
+        Err(err) => return map_host_core_error(err),
+    };
+
+    let events_json = match serde_json::to_vec(&result.events) {
+        Ok(bytes) => bytes,
+        Err(_) => return as_status::AS_ERR_INTERNAL,
+    };
+
+    let owned = make_owned_bytes(events_json);
+    // SAFETY: out_events_json was validated as non-null above and points to caller-owned storage.
+    unsafe {
+        *out_events_json = owned;
+    }
+
+    as_status::AS_OK
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn as_bytes_owned_free(bytes: as_bytes_owned) {
+    if bytes.ptr.is_null() || bytes.len == 0 {
+        return;
+    }
+
+    // SAFETY: bytes were allocated via Box<[u8]> in make_owned_bytes.
+    unsafe {
+        let raw_slice = std::ptr::slice_from_raw_parts_mut(bytes.ptr, bytes.len);
+        drop(Box::from_raw(raw_slice));
+    }
+}
+
+#[allow(dead_code)]
+fn _assert_ffi_safe_sizes(_: *mut c_void) {
+}

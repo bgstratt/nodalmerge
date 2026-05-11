@@ -8,6 +8,10 @@ It complements `docs/delegated-storage-gc.md`:
 1. `delegated-storage-gc.md` defines contracts/interfaces.
 2. This document defines execution order, rollout, validation, and guardrails.
 
+It is also a prerequisite input to `hostedMigrationPlan.md`:
+
+1. Host extraction starts only after the pre-host-extraction gate (Section 11A) is complete.
+
 ## 0. Scope and non-goals
 
 Scope:
@@ -15,17 +19,26 @@ Scope:
 1. Reclaim externally stored CAS blobs (S3/R2/MinIO/filesystem blob stores) when no longer live.
 2. Keep ActiveSync core product-agnostic and backend-agnostic.
 3. Support optional datastore adapters via separate modules/crates.
+4. Define GC contracts before host-runtime extraction so embedding hosts (.NET/server/WASM) share one lifecycle model.
 
 Non-goals:
 
 1. Do not delete immutable DAG history/nodes.
 2. Do not hard-code product selectors, room naming, tenancy semantics, or admin policy in core.
 3. Do not require `ListBucket` for daily safe GC.
+4. Do not couple GC semantics to WebSocket/WebRTC or any specific transport/runtime.
 
 Important model:
 
 1. Logical removal happens by new DAG operations that remove/replace blob references.
 2. Physical blob deletion happens later via GC after liveness and safety checks.
+
+Architecture positioning model:
+
+1. CRDT core defines what logically exists (reachability truth).
+2. Storage layer defines physical retention semantics.
+3. GC enforces retention semantics using storage/liveness contracts.
+4. Transport only moves sync messages and must not alter GC correctness.
 
 ## 1. Architecture and ownership model
 
@@ -44,6 +57,12 @@ Portability rules:
 2. Adapters own backend specifics (Mongo/Postgres/MySQL/MSSQL/Oracle/KV).
 3. Policy hooks remain injectable per product.
 
+Runtime/transport neutrality requirement:
+
+1. GC coordinator behavior must be identical regardless of host runtime (tokio/.NET/in-process scheduler).
+2. GC inputs are state/liveness contracts, never socket/session implementation details.
+3. Future transports (HTTP streaming, WebTransport, UDS, in-process channels, brokered adapters) must not require GC model changes.
+
 ## 2. Data model (logical contracts)
 
 Logical records used by GC (storage-neutral):
@@ -59,6 +78,14 @@ Reference: concrete trait and type contracts are specified in
 
 ## 3. Liveness and deletion semantics
 
+### A1 frozen decisions (normative)
+
+1. Authoritative liveness = reachable from authoritative state within GC domain.
+2. Mark pass is source of truth; incremental deltas are acceleration path only.
+3. GC eligibility is domain-scoped (tenant/bucket/prefix), not intrinsically room-scoped.
+4. Pin and lease protections override delete eligibility.
+5. Room-scoped runtime sweep APIs are compatibility shims during migration and must not redefine semantics.
+
 Primary liveness model:
 
 1. Incremental reference deltas are primary signal (`oldHashes` vs `newHashes`).
@@ -69,6 +96,12 @@ Deletion domain rule:
 
 1. One GC domain per `(tenantId, bucket, keyPrefix)` where applicable.
 2. Any live reference in the domain keeps hash live.
+
+Reference ownership rule:
+
+1. Liveness is derived from authoritative state reachability, not transport observations.
+2. Hosts may provide incremental reference deltas (`oldHashes/newHashes`) but mark pass remains authoritative repair path.
+3. GC must behave safely under retry/replay and eventually consistent adapters.
 
 Hard-delete preconditions:
 
@@ -122,7 +155,7 @@ Rollout phases:
 
 Execution order:
 
-1. B0 - Contract freeze and package boundaries.
+1. B0 - Contract freeze and package boundaries (required gate before host extraction/integration).
 2. B1 - Coordinator skeleton (no deletes).
 3. B2 - Delta engine and queue semantics with idempotency.
 4. B3 - Adapter implementation (Mongo first, contract-neutral shape).
@@ -136,6 +169,8 @@ B0 deliverables:
 2. Package map documented:
    1. core contracts/coordinator package,
    2. optional adapter packages.
+3. Ownership semantics frozen: "core defines truth, storage defines retention, GC enforces retention".
+4. Pre-host extraction checklist signed off (see Section 11A).
 
 B3 deliverables:
 
@@ -218,3 +253,28 @@ No-go:
 3. Implement idempotent delta hook before any hard-delete enablement.
 4. Enable queue consumer in observe-only mode first.
 5. Complete coupling review before merging core changes.
+
+## 11A. Pre-Host-Extraction Gate (Required)
+
+These items must be complete before starting host extraction/integration work:
+
+1. [x] GC liveness/deletion domain semantics approved.
+2. [x] Contract surface approved for `LiveHashSource`, inventory, run ledger, and object-store operations.
+3. [x] Incremental delta semantics approved (`oldHashes/newHashes`, idempotency, retry behavior).
+4. [x] Safety defaults approved (`graceWindow`, delete caps, HEAD gate, run modes).
+5. [x] Conformance tests defined for false-delete prevention and live-again cancellation.
+6. [x] Adapter boundary review completed (no transport/runtime assumptions in GC contracts).
+
+11A status:
+
+1. Semantics and contract freeze complete in docs.
+2. Executable conformance and fault tests implemented in `gc/tests/`.
+3. Compatibility adapter integration path implemented in `server` (mark-only coordinator preflight + legacy sweep fallback).
+4. Adapter boundary review sign-off complete.
+
+11A adapter boundary review notes:
+
+1. `activesync-gc` contracts use trait interfaces and `std` types only (`SystemTime`, iterators, strings, hashes-as-values), with no Tokio/Axum/WebSocket imports.
+2. Coordinator orchestration is runtime-neutral (`run_once`) and does not own sockets, tasks, or transport lifecycles.
+3. Server integration is via a compatibility adapter (`server/src/gc_adapter.rs`) that translates server room state into contract calls and preserves legacy delete execution in `blob_gc_sweep`.
+4. Result: contract package is host-embeddable and transport-agnostic; runtime ownership can move to host without contract breakage.

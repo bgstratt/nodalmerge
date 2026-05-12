@@ -29,3 +29,11 @@ target
 *.dmp
 *.coverage
 *.trx
+
+# Local IDE metadata
+.vs/
+
+# Local runtime persistence artifacts
+data/*.db
+data/*.db-shm
+data/*.db-wal

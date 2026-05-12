@@ -32,10 +32,10 @@ Task 2 (surface mapping): complete (each row mapped to direct/proxy surface).
 | R19-LD-008 | 12 | Sync/catchup import/request/mst | legacy-demo-direct | One tab starts with lagging local state | Catchup converges without manual replay; no protocol dead-end | Pending | Pending | Required for row 19 end-to-end confidence |
 | R19-LD-009 | 15 | Conflict surfacing hooks | legacy-demo-direct | Generate conflicting writes | Conflict event visible through SDK conflict surface and does not stall convergence | Pending | Pending | Covered row non-regression |
 | R19-LD-010 | 18 | onMetric hook telemetry | legacy-demo-direct | Metrics hook enabled in demo | Deterministic metric envelopes emitted for transport/apply/conflict events | Pending | Pending | Covered row non-regression |
-| R19-SS-001 | 3,4,5,6 | SpeechSlate-shape core data flows | speechslate-direct OR speechslate-proxy | Mongo + S3/delegated shape configured per docs/integration.md | Map/text/list/blob flows function against host-owned backend with same convergence semantics | Pending | Pending | Primary row 19 SpeechSlate-shape proof |
-| R19-SS-002 | 6,7 | SpeechSlate-shape blob path | speechslate-direct OR speechslate-proxy | Presign/delegate path configured or fallback explicitly active | Direct path works when configured; fallback path deterministic when unavailable | Pending | Pending | Must capture chosen mode in evidence |
-| R19-SS-003 | 10,11 | Policy/auth semantics in SpeechSlate-shape | speechslate-direct OR speechslate-proxy | Locked room/token + policy setup | Authorized writes succeed; invalid token/policy violations reject predictably | Pending | Pending | Confirms enterprise path behavior |
-| R19-SS-004 | 17 | Transport policy (ws-only/auto) | speechslate-direct OR speechslate-proxy | Toggle transport options in SDK init | WS-first behavior remains stable; optional mesh does not break parity | Pending | Pending | Boundary regression check |
+| R19-SS-001 | 3,4,5,6 | SpeechSlate-shape core data flows | speechslate-direct OR speechslate-proxy | Mongo + S3/delegated shape configured per docs/integration.md | Map/text/list/blob flows function against host-owned backend with same convergence semantics | Pass (speechslate-proxy) | `SpeechSlateProxyAcceptanceTests.R19_SS_001_proxy_runtime_connect_and_dispatch_noop_with_mongo_s3delegated_profile` | Proxy harness pass; `speechslate-direct` remains Blocked-External until full SpeechSlate runtime is available |
+| R19-SS-002 | 6,7 | SpeechSlate-shape blob path | speechslate-direct OR speechslate-proxy | Presign/delegate path configured or fallback explicitly active | Direct path works when configured; fallback path deterministic when unavailable | Pass (speechslate-proxy) | `SpeechSlateProxyAcceptanceTests.R19_SS_002_proxy_blob_delegated_direct_path_returns_presigned_url`; `SpeechSlateProxyAcceptanceTests.R19_SS_002_proxy_blob_delegated_failure_falls_back_to_ws_path_contract_404` | Proxy harness pass for delegated direct+fallback; `speechslate-direct` remains Blocked-External |
+| R19-SS-003 | 10,11 | Policy/auth semantics in SpeechSlate-shape | speechslate-direct OR speechslate-proxy | Locked room/token + policy setup | Authorized writes succeed; invalid token/policy violations reject predictably | Pass (speechslate-proxy) | `SpeechSlateProxyAcceptanceTests.R19_SS_003_proxy_auth_valid_embedded_token_allows_runtime_dispatch`; `SpeechSlateProxyAcceptanceTests.R19_SS_003_proxy_auth_policy_capability_mismatch_rejects_predictably` | Proxy harness pass for embedded auth semantics; `speechslate-direct` remains Blocked-External |
+| R19-SS-004 | 17 | Transport policy (ws-only/auto) | speechslate-direct OR speechslate-proxy | Toggle transport options in SDK init | WS-first behavior remains stable; optional mesh does not break parity | Pass (speechslate-proxy) | `SpeechSlateProxyAcceptanceTests.R19_SS_004_proxy_transport_ws_first_remains_stable_with_optional_signaling_relay` | Proxy boundary pass for WS-first + optional signaling relay; `speechslate-direct` remains Blocked-External |
 
 ## Coverage mapping for partial rows 3-6 (closure target)
 
@@ -65,6 +65,13 @@ These results advance row 19 readiness but do not by themselves close scenario r
 3. .NET runtime + FFI slices:
    - `dotnet test ... --filter "FullyQualifiedName~FfiBindingTests"` passed (5 tests).
    - `dotnet test ... --filter "FullyQualifiedName~RuntimeWebSocketEndpointTests|FullyQualifiedName~RuntimeWebSocketLoopRunnerTests"` passed (61 tests).
+   - Provider migration P2 slices:
+     - `dotnet test ... --filter "FullyQualifiedName~ProviderHostRestartDurabilityIntegrationTests|FullyQualifiedName~ProviderDurabilityTests|FullyQualifiedName~ProviderCompositionTests"` passed (7 tests).
+     - `dotnet test ... --filter "FullyQualifiedName~ProviderProfileTokenEndpointIntegrationTests|FullyQualifiedName~ProviderProfileRuntimeIntegrationTests|FullyQualifiedName~ProviderCompositionTests"` passed (13 tests).
+     - `dotnet test ... --filter "FullyQualifiedName!~FfiBindingTests"` passed (225 tests).
+    - Provider migration P3 delegated resilience slices:
+       - `dotnet test ... --filter "FullyQualifiedName~ProviderS3DelegatedBlobResolverIntegrationTests|FullyQualifiedName~ProviderCompositionTests"` passed (11 tests).
+       - `dotnet test ... --filter "FullyQualifiedName!~FfiBindingTests"` passed (231 tests) after delegated retry + circuit-breaker additions.
 4. Hosted service health:
    - `GET http://127.0.0.1:7878/ffi/abi-version` -> `{"abiVersion":1}`.
    - `GET http://127.0.0.1:8080/index.html` -> `200`.
@@ -72,12 +79,68 @@ These results advance row 19 readiness but do not by themselves close scenario r
    - Same-room pack relay test.
    - Same-room peer-left test.
    - Cross-room relay isolation test.
+6. SpeechSlate proxy auth/policy slice:
+   - `dotnet test ... --filter "FullyQualifiedName~SpeechSlateProxyAcceptanceTests"` passed (5 tests).
+   - `dotnet test ... --filter "FullyQualifiedName!~FfiBindingTests"` passed (236 tests).
+7. SpeechSlate proxy transport boundary slice:
+   - `dotnet test ... --filter "FullyQualifiedName~SpeechSlateProxyAcceptanceTests"` passed (6 tests).
+   - `dotnet test ... --filter "FullyQualifiedName!~FfiBindingTests"` passed (237 tests).
+8. Config-first live verifier slice (`dotnet-host/verify.ps1`):
+   - Runtime startup + websocket `hello`/`noop-ack` passed under explicit delegated profile args.
+   - Delegated `/sync/blob-url` get probe returned delegated presigned URL (200) and delegated stub observed room-scoped request payload.
+   - Precondition: `ACTIVESYNC_HOST_FFI_DLL` must resolve to a built host-ffi DLL (or local host-ffi artifact must exist for verifier auto-resolution).
 
 Evidence pointers (code/tests):
 
 1. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/RuntimeWebSocketEndpointTests.cs` (relay and peer lifecycle coverage).
 2. `dotnet-host/src/ActiveSync.DotNetHost/Runtime/RuntimeRoomBroker.cs` (room membership + broadcast broker).
 3. `dotnet-host/src/ActiveSync.DotNetHost/Runtime/RuntimeWebSocketLoopRunner.cs` (room-aware registration/relay logic).
+4. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderHostRestartDurabilityIntegrationTests.cs` (host restart preserves `Sqlite` nodes + `File` blobs).
+5. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderDurabilityTests.cs` (provider-level durability across DI container restarts).
+6. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderCompositionTests.cs` (profile selection and validation for `Sqlite` + `File`).
+7. `dotnet-host/src/ActiveSync.Host.Composition/SqliteNodeStoreProvider.cs` (durable node persistence provider).
+8. `dotnet-host/src/ActiveSync.Host.Composition/FileBlobStoreProvider.cs` (durable local blob provider).
+9. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderS3DelegatedBlobResolverIntegrationTests.cs` (delegated success path, timeout retry fallback, 5xx circuit-open fallback).
+10. `dotnet-host/src/ActiveSync.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs` (retry + circuit-breaker fallback policy implementation).
+11. `dotnet-host/src/ActiveSync.Host.Composition/S3DelegatedBlobOptions.cs` (resilience policy knobs and validation).
+12. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/SpeechSlateProxyAcceptanceTests.cs` (automated `speechslate-proxy` acceptance scenarios for delegated mode).
+
+## Provider migration evidence mapping (P2)
+
+The following provider-specific acceptance additions from `docs/DOTNET_HOST_PROVIDER_MIGRATION_PLAN.md` now have evidence in this stream:
+
+1. Node durability across restart in selected node provider:
+- Covered by `ProviderHostRestartDurabilityIntegrationTests.Host_restart_preserves_nodes_and_blobs_in_sqlite_file_profile`.
+2. Blob upload/download in selected blob provider mode:
+- Covered by provider durability tests and host-restart test using `File` blob provider read/write path.
+
+Status: evidence captured for P2 `Sqlite` + `File` profile; row-19 UX scenario rows remain governed by their existing `Pending`/execution workflow.
+
+## Provider migration evidence mapping (P3 delegated fallback)
+
+The delegated provider failure-mode fallback requirement from `docs/DOTNET_HOST_PROVIDER_MIGRATION_PLAN.md` now has deterministic evidence in this stream:
+
+1. Delegated timeout fallback:
+- Covered by `ProviderS3DelegatedBlobResolverIntegrationTests.Sync_blob_url_retries_on_timeout_then_falls_back_to_404`.
+- Verifies retry count (`MaxRetries + 1` attempts) and deterministic fallback to non-presigned path (`404` from `/sync/blob-url` mapping).
+2. Delegated 5xx fallback with circuit-breaker:
+- Covered by `ProviderS3DelegatedBlobResolverIntegrationTests.Sync_blob_url_opens_circuit_after_5xx_threshold_and_short_circuits_follow_up_request`.
+- Verifies breaker opens at threshold and subsequent request is short-circuited without another delegate HTTP call.
+
+Status: delegated failure-mode fallback evidence captured under provider-mode execution; full row-19 UX scenarios remain tracked separately in the scenario table.
+
+## SpeechSlate-shape proxy execution note (automated-only)
+
+Automated proxy scenario execution now covers:
+
+1. `R19-SS-001` via runtime connect + command dispatch under `Mongo` + `S3Delegated` profile wiring.
+2. `R19-SS-002` via delegated direct presign success and delegated failure fallback contract behavior.
+3. `R19-SS-003` via embedded token accept + capability mismatch rejection behavior.
+4. `R19-SS-004` via WS-first stability under optional signaling relay (`webrtc-offer`) in proxy harness.
+
+Boundary note:
+
+1. `speechslate-direct` remains `Blocked-External` in this workspace until full SpeechSlate runtime harness is available.
 
 ## Execution note
 

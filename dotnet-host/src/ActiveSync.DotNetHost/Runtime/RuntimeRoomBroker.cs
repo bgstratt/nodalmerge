@@ -1,11 +1,19 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
+using Microsoft.Extensions.Logging;
 
 namespace ActiveSync.DotNetHost.Runtime;
 
 public sealed class RuntimeRoomBroker
 {
+    private readonly ILogger<RuntimeRoomBroker> _logger;
+
+    public RuntimeRoomBroker(ILogger<RuntimeRoomBroker> logger)
+    {
+        _logger = logger;
+    }
+
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<ulong, RuntimeRoomConnection>> _rooms =
         new(StringComparer.Ordinal);
 
@@ -30,6 +38,14 @@ public sealed class RuntimeRoomBroker
             .Distinct(StringComparer.Ordinal)
             .ToArray();
 
+        _logger.LogInformation(
+            "runtime room register room={Room} session={Session} peer={Peer} roomPeers={PeerCount}",
+            roomId,
+            state.SessionId,
+            state.PeerPubkeyHex,
+            room.Count
+        );
+
         return RuntimeRoomRegistrationResult.Registered(peers);
     }
 
@@ -48,6 +64,14 @@ public sealed class RuntimeRoomBroker
 
         room.TryRemove(state.SessionId, out _);
 
+        _logger.LogInformation(
+            "runtime room unregister room={Room} session={Session} peer={Peer} roomPeers={PeerCount}",
+            roomId,
+            state.SessionId,
+            state.PeerPubkeyHex,
+            room.Count
+        );
+
         if (room.IsEmpty)
         {
             _rooms.TryRemove(roomId, out _);
@@ -64,10 +88,13 @@ public sealed class RuntimeRoomBroker
     {
         if (!_rooms.TryGetValue(roomId, out var room))
         {
+            _logger.LogInformation("runtime room broadcast skip room={Room} reason=no-room", roomId);
             return;
         }
 
         var snapshot = room.Values.ToArray();
+        var attempted = 0;
+        var delivered = 0;
         foreach (var connection in snapshot)
         {
             if (excludeSessionId.HasValue && connection.SessionId == excludeSessionId.Value)
@@ -81,12 +108,27 @@ public sealed class RuntimeRoomBroker
                 continue;
             }
 
+            attempted += 1;
+
             var sent = await connection.TrySendTextAsync(outboundMessage, cancellationToken);
             if (!sent)
             {
                 room.TryRemove(connection.SessionId, out _);
             }
+            else
+            {
+                delivered += 1;
+            }
         }
+
+        _logger.LogInformation(
+            "runtime room broadcast room={Room} attempted={Attempted} delivered={Delivered} excludeSession={ExcludeSession} targetPeer={TargetPeer}",
+            roomId,
+            attempted,
+            delivered,
+            excludeSessionId,
+            targetPeerPubkey ?? "*"
+        );
 
         if (room.IsEmpty)
         {

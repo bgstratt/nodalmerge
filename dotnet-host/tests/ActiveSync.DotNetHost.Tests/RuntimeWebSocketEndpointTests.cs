@@ -1,6 +1,7 @@
 using ActiveSync.DotNetHost;
 using ActiveSync.DotNetHost.Ffi;
 using ActiveSync.DotNetHost.Runtime;
+using ActiveSync.Host.Abstractions.Providers;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
@@ -1090,6 +1091,57 @@ public class RuntimeWebSocketEndpointTests
         Assert.Null(maybeFrame);
     }
 
+    [Fact]
+    public async Task Runtime_endpoint_hello_with_invalid_token_returns_error_and_does_not_initialize()
+    {
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IRuntimeCommandBridge>(new NoopAckRuntimeCommandBridge());
+            services.AddSingleton<IRoomTokenAuthProvider>(
+                new RuntimeTokenAuthProviderStub(RoomTokenValidationResult.Invalid("expired"))
+            );
+        });
+        await app.StartAsync();
+
+        using var ws = await ConnectRuntimeWebSocketAsync(app);
+
+        await SendTextAsync(
+            ws,
+            "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"frontier\":[],\"token\":{\"peer_pubkey\":\"peer-a\",\"expiry\":1700000000,\"caps\":[\"read:**\"],\"sig\":\"beef\"}}"
+        );
+
+        var tokenError = await ReceiveTextAsync(ws);
+        Assert.Contains("token rejected: expired", tokenError, StringComparison.Ordinal);
+
+        await SendTextAsync(ws, "{\"type\":\"noop\"}");
+        var noopError = await ReceiveTextAsync(ws);
+        Assert.Contains("hello must be sent first", noopError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Runtime_endpoint_hello_with_valid_token_still_dispatches_noop()
+    {
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IRuntimeCommandBridge>(new NoopAckRuntimeCommandBridge());
+            services.AddSingleton<IRoomTokenAuthProvider>(
+                new RuntimeTokenAuthProviderStub(RoomTokenValidationResult.Valid)
+            );
+        });
+        await app.StartAsync();
+
+        using var ws = await ConnectRuntimeWebSocketAsync(app);
+
+        await SendTextAsync(
+            ws,
+            "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"frontier\":[],\"token\":{\"peer_pubkey\":\"peer-a\",\"expiry\":1700000000,\"caps\":[\"read:**\"],\"sig\":\"beef\"}}"
+        );
+
+        await SendTextAsync(ws, "{\"type\":\"noop\"}");
+        var outbound = await ReceiveTextAsync(ws);
+        Assert.Contains("\"type\":\"noop-ack\"", outbound, StringComparison.Ordinal);
+    }
+
     private static WebApplication BuildTestApp(Action<IServiceCollection>? configureServices = null)
     {
         return HostApplication.Build(
@@ -1309,5 +1361,31 @@ internal sealed class AlternatingRuntimeCommandBridge : IRuntimeCommandBridge
         }
 
         return FfiJsonBridgeResult.Success("[]");
+    }
+}
+
+internal sealed class RuntimeTokenAuthProviderStub : IRoomTokenAuthProvider
+{
+    private readonly RoomTokenValidationResult _validationResult;
+
+    public RuntimeTokenAuthProviderStub(RoomTokenValidationResult validationResult)
+    {
+        _validationResult = validationResult;
+    }
+
+    public ValueTask<RoomTokenValidationResult> ValidateAsync(
+        RoomTokenValidationRequest request,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return ValueTask.FromResult(_validationResult);
+    }
+
+    public ValueTask<RoomTokenMintResult> MintAsync(
+        RoomTokenMintRequest request,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return ValueTask.FromResult(RoomTokenMintResult.NotSupported);
     }
 }

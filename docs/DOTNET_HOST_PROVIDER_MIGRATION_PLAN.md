@@ -4,6 +4,51 @@ Status: Draft for implementation planning
 Owner: Hosted runtime stream
 Date: 2026-05-11
 
+## Implementation Status Snapshot (2026-05-11)
+
+Current phase: P2 (in progress)
+
+Completed so far:
+
+1. P0 complete:
+- `ActiveSync.Host.Abstractions` and `ActiveSync.Host.Composition` scaffolded and wired.
+- Provider contracts and base options/validation in place.
+2. P1 complete:
+- Runtime host composed through provider abstractions.
+- Default + embedded JWT auth profiles implemented and validated.
+- Optional sidecar JWT mode implemented and integration tested (including 502/504/501 mappings).
+3. P2 partial complete:
+- `Sqlite` node provider implemented.
+- `File` blob provider implemented.
+- Composition profile selection for `Sqlite` + `File` implemented.
+- Provider durability tests added and passing.
+- Host restart durability integration test added and passing.
+- Provider evidence captured in row-19 acceptance evidence stream.
+4. P3 kickoff complete:
+- `Mongo` node provider implemented and selectable via composition.
+- `S3Delegated` blob resolver provider implemented and selectable via composition.
+- Delegated `/sync/blob-url` integration tests added and passing.
+- Delegated resolver retry + circuit-breaker policy implemented with deterministic timeout/5xx tests.
+
+Latest validation evidence:
+
+1. Focused provider suites green.
+2. Non-FFI regression suite green.
+3. Full FFI-enabled suite green when `ACTIVESYNC_HOST_FFI_DLL` is set.
+4. Live host run/connect verifier (`dotnet-host/verify.ps1`) confirms runtime startup, delegated `/sync/blob-url` presign resolution, and websocket `hello`/`noop-ack` flow under explicit SpeechSlate-shape blob profile args when `ACTIVESYNC_HOST_FFI_DLL` points to a built host-ffi DLL.
+
+Remaining P2 checklist items:
+
+1. Execute/record full legacy row-19 UX acceptance matrix scenarios after provider mode switch (`Sqlite` + `File`) for final parity sign-off.
+
+Next P3 checklist items:
+
+1. Capture delegated failure-mode fallback evidence in row-19 stream under provider-mode execution. (completed)
+2. Execute SpeechSlate-shape delegated mode acceptance scenarios (`R19-SS-001`, `R19-SS-002`) and record direct vs proxy boundary notes. (completed via automated `speechslate-proxy`; `speechslate-direct` remains Blocked-External)
+3. Execute SpeechSlate-shape auth/policy acceptance scenario (`R19-SS-003`) and record proxy evidence. (completed via automated `speechslate-proxy`; `speechslate-direct` remains Blocked-External)
+4. Execute SpeechSlate-shape transport policy scenario (`R19-SS-004`) or capture deterministic proxy equivalent boundary evidence. (completed via automated `speechslate-proxy` WS-first + optional signaling relay; `speechslate-direct` remains Blocked-External)
+5. Keep direct-run verifier precondition explicit in runbooks (`ACTIVESYNC_HOST_FFI_DLL` set or local host-ffi build present) and continue capturing live delegated evidence on each provider/profile update.
+
 ## 1. Goals
 
 1. Keep the hosted runtime as the transport/runtime owner.
@@ -56,7 +101,8 @@ Implication: your intuition is correct. We should add provider projects around s
 - S3 delegated presign service
 3. Auth/token providers:
 - pass-through (current behavior)
-- JWT-bridge integration client
+- JWT-bridge embedded (in-host)
+- JWT-bridge integration client (optional sidecar)
 - custom enterprise auth adapter
 
 ## 4. Recommended Solution/Package Layout
@@ -255,7 +301,7 @@ Recommended model:
 1. Support both topologies behind one auth provider contract:
 - Embedded mode: JWT verification and RoomToken minting run in-process in ActiveSync.DotNetHost.
 - Sidecar mode: ActiveSync.DotNetHost calls external JWT bridge HTTP service.
-2. Keep sidecar optional, not mandatory.
+2. Keep sidecar optional, not mandatory; embedded mode is the default standalone deployment path.
 3. Use the same provider interface and config shape for both to avoid app/runtime drift.
 
 Trade-offs:

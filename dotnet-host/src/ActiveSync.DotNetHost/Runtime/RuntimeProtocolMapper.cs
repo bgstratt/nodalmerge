@@ -1779,17 +1779,17 @@ public sealed class RuntimeProtocolMapper
 
     private static string? ValidateToken(RuntimeInboundToken token)
     {
-        if (string.IsNullOrWhiteSpace(token.PeerPubkey))
+        if (string.IsNullOrWhiteSpace(token.GetPeerPubkey()))
         {
             return "hello.token.peer_pubkey is required";
         }
 
-        if (token.Expiry is null)
+        if (token.GetExpiry() is null)
         {
             return "hello.token.expiry is required";
         }
 
-        if (string.IsNullOrWhiteSpace(token.Sig))
+        if (string.IsNullOrWhiteSpace(token.GetSignature()))
         {
             return "hello.token.sig is required";
         }
@@ -1801,10 +1801,10 @@ public sealed class RuntimeProtocolMapper
     {
         return new JsonObject
         {
-            ["peer_pubkey"] = token.PeerPubkey,
-            ["expiry"] = token.Expiry,
-            ["caps"] = new JsonArray((token.Caps ?? []).Select(x => (JsonNode?)x).ToArray()),
-            ["sig"] = token.Sig
+            ["peer_pubkey"] = token.GetPeerPubkey(),
+            ["expiry"] = token.GetExpiry(),
+            ["caps"] = new JsonArray((token.GetCapabilities() ?? []).Select(x => (JsonNode?)x).ToArray()),
+            ["sig"] = token.GetSignature()
         };
     }
 }
@@ -1926,12 +1926,31 @@ public sealed class RuntimeInboundToken
 {
     [JsonPropertyName("peer_pubkey")]
     public string? PeerPubkey { get; set; }
+    [JsonPropertyName("peer_pubkey_hex")]
+    public string? PeerPubkeyHex { get; set; }
     [JsonPropertyName("expiry")]
     public ulong? Expiry { get; set; }
+    [JsonPropertyName("expiry_secs")]
+    public ulong? ExpirySecs { get; set; }
     [JsonPropertyName("caps")]
     public string[]? Caps { get; set; }
+    [JsonPropertyName("capabilities")]
+    public string[]? Capabilities { get; set; }
     [JsonPropertyName("sig")]
     public string? Sig { get; set; }
+    [JsonPropertyName("sig_hex")]
+    public string? SigHex { get; set; }
+
+    public string? GetPeerPubkey() =>
+        !string.IsNullOrWhiteSpace(PeerPubkey) ? PeerPubkey : PeerPubkeyHex;
+
+    public ulong? GetExpiry() => Expiry ?? ExpirySecs;
+
+    public string[]? GetCapabilities() =>
+        Caps is { Length: > 0 } ? Caps : Capabilities;
+
+    public string? GetSignature() =>
+        !string.IsNullOrWhiteSpace(Sig) ? Sig : SigHex;
 }
 
 public sealed class RuntimeInboundPolicyRule

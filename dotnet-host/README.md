@@ -148,6 +148,43 @@ Examples:
 - dotnet test dotnet-host/ActiveSync.DotNetHost.slnx
 - dotnet test dotnet-host/ActiveSync.DotNetHost.slnx --filter "FullyQualifiedName~DemoReadinessSmokeTests"
 
+## SpeechSlate-Shape Local Smoke
+
+Use this to validate hosted AS service readiness before wiring full SpeechSlate web-react + API runs.
+
+1. From repo root, build host FFI:
+- `cargo build -p activesync-host-ffi`
+2. Run verifier from `dotnet-host` folder:
+- `cd dotnet-host`
+- `pwsh -File .\verify.ps1`
+
+Expected success markers in output:
+
+- `Server ready. Verifying delegated blob-url route...`
+- `Delegated blob-url check passed:`
+- `Received: {"type":"noop-ack"}`
+- `Verification SUCCESS (delegated blob-url + runtime websocket).`
+
+If `verify.ps1` is run outside `dotnet-host`, use:
+
+- `Set-Location <repo>\dotnet-host; .\verify.ps1`
+
+## Auth Profile Mode
+
+The host auth provider is selected through `ActiveSync:Providers:Auth`:
+
+- `Default`: pass-through validation semantics, `/sync/token` returns `501` (no mint support).
+- `JwtBridgeEmbedded`: in-host JWT mint + validate (no extra process required).
+- `JwtBridgeSidecar`: optional external auth bridge mode (opt-in only).
+
+Embedded mode options:
+
+- `ActiveSync:Auth:JwtBridgeEmbedded:Issuer`
+- `ActiveSync:Auth:JwtBridgeEmbedded:Audience`
+- `ActiveSync:Auth:JwtBridgeEmbedded:SigningKey` (minimum 32 chars for HS256)
+
+Development defaults in `appsettings.Development.json` are configured for `JwtBridgeEmbedded` so the host can run standalone without requiring a sidecar.
+
 ## Notes
 
 This slice focuses on host runtime ownership and P/Invoke lifecycle wiring.

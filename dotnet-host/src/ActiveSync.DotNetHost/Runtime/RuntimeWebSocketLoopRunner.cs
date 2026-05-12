@@ -1,11 +1,25 @@
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ActiveSync.DotNetHost.Runtime;
 
 public sealed class RuntimeWebSocketLoopRunner
 {
+    private readonly ILogger<RuntimeWebSocketLoopRunner> _logger;
+
+    public RuntimeWebSocketLoopRunner()
+        : this(NullLogger<RuntimeWebSocketLoopRunner>.Instance)
+    {
+    }
+
+    public RuntimeWebSocketLoopRunner(ILogger<RuntimeWebSocketLoopRunner> logger)
+    {
+        _logger = logger;
+    }
+
     public const int MaxInboundMessageBytes = 64 * 1024;
 
     public Task RunAsync(
@@ -15,7 +29,15 @@ public sealed class RuntimeWebSocketLoopRunner
         CancellationToken cancellationToken
     )
     {
-        return RunAsync(socket, frameProcessor, state, roomBroker: null, cancellationToken);
+        return RunAsync(
+            socket,
+            frameProcessor,
+            state,
+            roomBroker: null,
+            tokenValidationService: null,
+            dagPersistenceService: null,
+            cancellationToken
+        );
     }
 
     public async Task RunAsync(
@@ -23,10 +45,13 @@ public sealed class RuntimeWebSocketLoopRunner
         RuntimeFrameProcessor frameProcessor,
         RuntimeConnectionState state,
         RuntimeRoomBroker? roomBroker = null,
+        RuntimeTokenValidationService? tokenValidationService = null,
+        RuntimeDagPersistenceService? dagPersistenceService = null,
         CancellationToken cancellationToken = default
     )
     {
-        roomBroker ??= new RuntimeRoomBroker();
+        roomBroker ??= new RuntimeRoomBroker(NullLogger<RuntimeRoomBroker>.Instance);
+        dagPersistenceService ??= null;
         var registeredInRoom = false;
         try
         {
@@ -80,11 +105,84 @@ public sealed class RuntimeWebSocketLoopRunner
                     continue;
                 }
 
+                if (result.MessageType == WebSocketMessageType.Text && tokenValidationService is not null)
+                {
+                    var tokenValidation = await tokenValidationService.ValidateInboundAsync(
+                        messageBuffer.ToArray(),
+                        state,
+                        cancellationToken
+                    );
+                    if (!tokenValidation.Allowed)
+                    {
+                        var validationError = RuntimeFrameProcessResult.FromOutboundMessages(
+                            dispatchSucceeded: false,
+                            [RuntimeErrorEnvelopeBuilder.BuildMessageError(tokenValidation.ErrorMessage ?? "invalid token")],
+                            shouldCloseConnection: false
+                        );
+
+                        foreach (var outbound in validationError.OutboundMessages)
+                        {
+                            var sent = await TrySendTextAsync(socket, outbound, cancellationToken);
+                            if (!sent)
+                            {
+                                return;
+                            }
+                        }
+
+                        continue;
+                    }
+                }
+
+                var inboundJson = result.MessageType == WebSocketMessageType.Text
+                    ? ParseJsonObject(messageBuffer.ToArray())
+                    : null;
+                var inboundType = inboundJson is not null
+                    ? ReadString(inboundJson["type"])
+                    : null;
+                var inboundRoom = inboundJson is not null
+                    ? ReadString(inboundJson["room"])
+                    : null;
+
+                if (!state.IsInitialized
+                    && dagPersistenceService is not null
+                    && !string.IsNullOrWhiteSpace(inboundType)
+                    && (string.Equals(inboundType, "hello", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(inboundType, "client-hello", StringComparison.OrdinalIgnoreCase))
+                    && !string.IsNullOrWhiteSpace(inboundRoom))
+                {
+                    await dagPersistenceService.HydrateRoomIfNeededAsync(inboundRoom, cancellationToken);
+                }
+
                 var processResult = frameProcessor.ProcessFrame(
                     result.MessageType,
                     messageBuffer.ToArray(),
                     state
                 );
+
+                if (result.MessageType == WebSocketMessageType.Text)
+                {
+                    _logger.LogInformation(
+                        "runtime inbound room={Room} session={Session} peer={Peer} type={Type} dispatch={Dispatch}",
+                        state.RoomId ?? "<uninitialized>",
+                        state.SessionId,
+                        state.PeerPubkeyHex ?? "<unknown>",
+                        inboundType ?? "<parse-error>",
+                        processResult.DispatchSucceeded
+                    );
+
+                    if (processResult.DispatchSucceeded
+                        && dagPersistenceService is not null
+                        && string.Equals(inboundType, "pack", StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrWhiteSpace(state.RoomId)
+                        && inboundJson is not null)
+                    {
+                        var nodesB64 = ReadString(inboundJson["nodes"]);
+                        if (!string.IsNullOrWhiteSpace(nodesB64))
+                        {
+                            await dagPersistenceService.PersistInboundPackAsync(state.RoomId!, nodesB64, cancellationToken);
+                        }
+                    }
+                }
 
                 if (!registeredInRoom && state.IsInitialized)
                 {
@@ -151,6 +249,13 @@ public sealed class RuntimeWebSocketLoopRunner
                     && !string.IsNullOrWhiteSpace(state.PeerPubkeyHex)
                     && TryBuildPackRelay(messageBuffer.ToArray(), state, out var packRelayJson))
                 {
+                    _logger.LogInformation(
+                        "runtime pack relay room={Room} from={Peer} session={Session}",
+                        state.RoomId,
+                        state.PeerPubkeyHex,
+                        state.SessionId
+                    );
+
                     await roomBroker.BroadcastAsync(
                         state.RoomId!,
                         packRelayJson,
@@ -344,6 +449,28 @@ public sealed class RuntimeWebSocketLoopRunner
         }.ToJsonString();
 
         return true;
+    }
+
+    private static JsonObject? ParseJsonObject(byte[] payload)
+    {
+        try
+        {
+            return JsonNode.Parse(payload) as JsonObject;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? ReadString(JsonNode? node)
+    {
+        if (node is JsonValue value && value.TryGetValue<string>(out var s))
+        {
+            return s;
+        }
+
+        return null;
     }
 
     private static Task SendTextAsync(WebSocket socket, string text, CancellationToken cancellationToken)

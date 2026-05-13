@@ -1,5 +1,7 @@
 using ActiveSync.DotNetHost.Ffi;
 using ActiveSync.DotNetHost.Runtime;
+using Microsoft.Extensions.Logging.Abstractions;
+using System.Diagnostics.Metrics;
 using System.Net.WebSockets;
 using System.Text;
 
@@ -394,6 +396,111 @@ public class RuntimeWebSocketLoopRunnerTests
         Assert.Null(socket.CloseDescription);
     }
 
+    [Fact]
+    public async Task Runtime_ws_metrics_emit_connection_and_inbound_counts()
+    {
+        using var metrics = new WsMeterCapture("ActiveSync.DotNetHost.RuntimeWs");
+
+        var runner = new RuntimeWebSocketLoopRunner();
+        var frameProcessor = CreateFrameProcessor(
+            FfiJsonBridgeResult.Success("[]"),
+            FfiJsonBridgeResult.Success("[\"NoopAck\"]")
+        );
+        var state = InitializedState();
+        var socket = new FakeWebSocket([
+            FakeReceiveFrame.Text("{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"frontier\":[]}"),
+            FakeReceiveFrame.Text("{\"type\":\"noop\"}"),
+            FakeReceiveFrame.Close()
+        ]);
+
+        var beforeOpened = metrics.GetTotal("runtime_ws_connections_opened_total");
+        var beforeClosed = metrics.GetTotal("runtime_ws_connections_closed_total");
+        var beforeInbound = metrics.GetTotal("runtime_ws_inbound_messages_total");
+
+        await runner.RunAsync(socket, frameProcessor, state);
+
+        Assert.True(metrics.GetTotal("runtime_ws_connections_opened_total") >= beforeOpened + 1);
+        Assert.True(metrics.GetTotal("runtime_ws_connections_closed_total") >= beforeClosed + 1);
+        Assert.True(metrics.GetTotal("runtime_ws_inbound_messages_total") >= beforeInbound + 2);
+    }
+
+    [Fact]
+    public async Task Runtime_ws_metrics_emit_trace_and_pack_relay_correlation_counts()
+    {
+        using var metrics = new WsMeterCapture("ActiveSync.DotNetHost.RuntimeWs");
+
+        var roomBroker = new RuntimeRoomBroker(NullLogger<RuntimeRoomBroker>.Instance);
+        var senderRunner = new RuntimeWebSocketLoopRunner();
+        var senderState = new RuntimeConnectionState(3)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+        var senderSocket = new FakeWebSocket([
+            FakeReceiveFrame.Text("{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"trace_id\":\"trace-abc\",\"frontier\":[]}"),
+            FakeReceiveFrame.Text("{\"type\":\"pack\",\"nodes\":\"bm9kZXM=\",\"trace_id\":\"trace-abc\"}"),
+            FakeReceiveFrame.Close()
+        ]);
+
+        var beforePackRelay = metrics.GetTotal("runtime_ws_pack_relay_total");
+        var beforeInboundTrace = metrics.GetTotalByTrace("runtime_ws_inbound_messages_total", "trace-abc");
+
+        await senderRunner.RunAsync(
+            senderSocket,
+            CreateFrameProcessor(
+                FfiJsonBridgeResult.Success("[]"),
+                FfiJsonBridgeResult.Success("[]")
+            ),
+            senderState,
+            roomBroker,
+            tokenValidationService: null,
+            dagPersistenceService: null,
+            CancellationToken.None
+        );
+
+        Assert.True(metrics.GetTotal("runtime_ws_pack_relay_total") >= beforePackRelay + 1);
+        Assert.True(metrics.GetTotalByTrace("runtime_ws_inbound_messages_total", "trace-abc") >= beforeInboundTrace + 2);
+    }
+
+    [Fact]
+    public async Task Simulated_reconnect_storm_emits_actionable_room_metrics()
+    {
+        using var metrics = new WsMeterCapture("ActiveSync.DotNetHost.RuntimeWs");
+
+        const string room = "room-storm";
+        const int sessionCount = 12;
+
+        var beforeClosedByRoom = metrics.GetTotalByTag("runtime_ws_connections_closed_total", "room", room);
+        var beforeInboundByRoom = metrics.GetTotalByTag("runtime_ws_inbound_messages_total", "room", room);
+
+        for (var i = 0; i < sessionCount; i++)
+        {
+            var runner = new RuntimeWebSocketLoopRunner();
+            var state = new RuntimeConnectionState((ulong)(1000 + i))
+            {
+                IsInitialized = true,
+                RoomId = room,
+                PeerPubkeyHex = $"peer-{i}"
+            };
+
+            var socket = new FakeWebSocket([
+                FakeReceiveFrame.Text($"{{\"type\":\"hello\",\"room\":\"{room}\",\"pubkey\":\"peer-{i}\",\"trace_id\":\"storm-{i}\",\"frontier\":[]}}"),
+                FakeReceiveFrame.Close()
+            ]);
+
+            await runner.RunAsync(
+                socket,
+                CreateFrameProcessor(FfiJsonBridgeResult.Success("[]")),
+                state,
+                cancellationToken: CancellationToken.None
+            );
+        }
+
+        Assert.True(metrics.GetTotalByTag("runtime_ws_connections_closed_total", "room", room) >= beforeClosedByRoom + sessionCount);
+        Assert.True(metrics.GetTotalByTag("runtime_ws_inbound_messages_total", "room", room) >= beforeInboundByRoom + sessionCount);
+    }
+
     private static RuntimeFrameProcessor CreateFrameProcessor(params FfiJsonBridgeResult[] bridgeResults)
     {
         var bridge = new FakeRuntimeCommandBridge(bridgeResults);
@@ -572,4 +679,111 @@ internal enum ReceiveFailureMode
     None,
     WebSocketException,
     ObjectDisposedException
+}
+
+internal sealed class WsMeterCapture : IDisposable
+{
+    private readonly MeterListener _listener;
+    private readonly Dictionary<string, long> _totals = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _totalsByInstrumentAndTrace = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _totalsByInstrumentAndTag = new(StringComparer.Ordinal);
+
+    public WsMeterCapture(string meterName)
+    {
+        _listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, listener) =>
+            {
+                if (string.Equals(instrument.Meter.Name, meterName, StringComparison.Ordinal))
+                {
+                    listener.EnableMeasurementEvents(instrument);
+                }
+            }
+        };
+
+        _listener.SetMeasurementEventCallback<long>((instrument, measurement, tags, _) =>
+        {
+            if (_totals.TryGetValue(instrument.Name, out var current))
+            {
+                _totals[instrument.Name] = current + measurement;
+            }
+            else
+            {
+                _totals[instrument.Name] = measurement;
+            }
+
+            string? trace = null;
+            foreach (var tag in tags)
+            {
+                if (string.Equals(tag.Key, "trace", StringComparison.Ordinal)
+                    && tag.Value is string traceValue
+                    && !string.IsNullOrWhiteSpace(traceValue))
+                {
+                    trace = traceValue;
+                    break;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(trace))
+            {
+                var key = $"{instrument.Name}|{trace}";
+                if (_totalsByInstrumentAndTrace.TryGetValue(key, out var byTraceCurrent))
+                {
+                    _totalsByInstrumentAndTrace[key] = byTraceCurrent + measurement;
+                }
+                else
+                {
+                    _totalsByInstrumentAndTrace[key] = measurement;
+                }
+            }
+
+            foreach (var tag in tags)
+            {
+                if (string.IsNullOrWhiteSpace(tag.Key))
+                {
+                    continue;
+                }
+
+                var value = tag.Value?.ToString();
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    continue;
+                }
+
+                var tagKey = $"{instrument.Name}|{tag.Key}|{value}";
+                if (_totalsByInstrumentAndTag.TryGetValue(tagKey, out var byTagCurrent))
+                {
+                    _totalsByInstrumentAndTag[tagKey] = byTagCurrent + measurement;
+                }
+                else
+                {
+                    _totalsByInstrumentAndTag[tagKey] = measurement;
+                }
+            }
+        });
+
+        _listener.Start();
+    }
+
+    public long GetTotal(string name)
+    {
+        return _totals.TryGetValue(name, out var total) ? total : 0;
+    }
+
+    public long GetTotalByTrace(string instrumentName, string trace)
+    {
+        var key = $"{instrumentName}|{trace}";
+        return _totalsByInstrumentAndTrace.TryGetValue(key, out var total) ? total : 0;
+    }
+
+    public long GetTotalByTag(string instrumentName, string tagKey, string tagValue)
+    {
+        var key = $"{instrumentName}|{tagKey}|{tagValue}";
+        return _totalsByInstrumentAndTag.TryGetValue(key, out var total) ? total : 0;
+    }
+
+    public void Dispose()
+    {
+        _listener.Dispose();
+    }
 }

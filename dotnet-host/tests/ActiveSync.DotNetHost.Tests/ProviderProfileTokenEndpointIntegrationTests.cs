@@ -114,6 +114,184 @@ public sealed class ProviderProfileTokenEndpointIntegrationTests
     }
 
     [Fact]
+    public async Task Sync_token_validate_rejects_embedded_token_when_issuer_mismatches()
+    {
+        await using var issuerAApp = BuildTestApp(config =>
+        {
+            config.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["ActiveSync:Providers:Auth"] = "JwtBridgeEmbedded",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Issuer"] = "issuer-a",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Audience"] = "test-audience",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:SigningKey"] = "test-signing-key-1234567890-abcdef"
+                }
+            );
+        });
+        await issuerAApp.StartAsync();
+
+        var minted = await MintTokenAsync(issuerAApp.GetTestClient(), "room-a", "peer-a", 120, ["read:**"]);
+
+        await using var issuerBApp = BuildTestApp(config =>
+        {
+            config.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["ActiveSync:Providers:Auth"] = "JwtBridgeEmbedded",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Issuer"] = "issuer-b",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Audience"] = "test-audience",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:SigningKey"] = "test-signing-key-1234567890-abcdef"
+                }
+            );
+        });
+        await issuerBApp.StartAsync();
+
+        var validate = await ValidateTokenAsync(
+            issuerBApp.GetTestClient(),
+            "room-a",
+            minted.PeerPubkeyHex,
+            minted.ExpiryUnixSeconds,
+            minted.Capabilities,
+            minted.SignatureHex
+        );
+
+        Assert.False(validate.Valid);
+        Assert.Equal("invalid embedded token", validate.Reason);
+    }
+
+    [Fact]
+    public async Task Sync_token_validate_allows_previous_key_during_embedded_rotation_overlap()
+    {
+        const string oldKey = "old-signing-key-1234567890-abcdef1234";
+        const string newKey = "new-signing-key-1234567890-abcdef1234";
+
+        await using var oldKeyApp = BuildTestApp(config =>
+        {
+            config.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["ActiveSync:Providers:Auth"] = "JwtBridgeEmbedded",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Issuer"] = "test-issuer",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Audience"] = "test-audience",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:SigningKey"] = oldKey
+                }
+            );
+        });
+        await oldKeyApp.StartAsync();
+
+        var minted = await MintTokenAsync(oldKeyApp.GetTestClient(), "room-a", "peer-a", 120, ["read:**"]);
+
+        await using var overlapApp = BuildTestApp(config =>
+        {
+            config.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["ActiveSync:Providers:Auth"] = "JwtBridgeEmbedded",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Issuer"] = "test-issuer",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Audience"] = "test-audience",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:SigningKey"] = newKey,
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:PreviousSigningKeys:0"] = oldKey,
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:ClockSkewSeconds"] = "0"
+                }
+            );
+        });
+        await overlapApp.StartAsync();
+
+        var validate = await ValidateTokenAsync(
+            overlapApp.GetTestClient(),
+            "room-a",
+            minted.PeerPubkeyHex,
+            minted.ExpiryUnixSeconds,
+            minted.Capabilities,
+            minted.SignatureHex
+        );
+
+        Assert.True(validate.Valid);
+        Assert.Null(validate.Reason);
+    }
+
+    [Fact]
+    public async Task Sync_token_validate_rejects_previous_key_when_overlap_not_configured()
+    {
+        const string oldKey = "old-signing-key-1234567890-abcdef1234";
+        const string newKey = "new-signing-key-1234567890-abcdef1234";
+
+        await using var oldKeyApp = BuildTestApp(config =>
+        {
+            config.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["ActiveSync:Providers:Auth"] = "JwtBridgeEmbedded",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Issuer"] = "test-issuer",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Audience"] = "test-audience",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:SigningKey"] = oldKey
+                }
+            );
+        });
+        await oldKeyApp.StartAsync();
+
+        var minted = await MintTokenAsync(oldKeyApp.GetTestClient(), "room-a", "peer-a", 120, ["read:**"]);
+
+        await using var rotatedNoOverlapApp = BuildTestApp(config =>
+        {
+            config.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["ActiveSync:Providers:Auth"] = "JwtBridgeEmbedded",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Issuer"] = "test-issuer",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Audience"] = "test-audience",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:SigningKey"] = newKey,
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:ClockSkewSeconds"] = "0"
+                }
+            );
+        });
+        await rotatedNoOverlapApp.StartAsync();
+
+        var validate = await ValidateTokenAsync(
+            rotatedNoOverlapApp.GetTestClient(),
+            "room-a",
+            minted.PeerPubkeyHex,
+            minted.ExpiryUnixSeconds,
+            minted.Capabilities,
+            minted.SignatureHex
+        );
+
+        Assert.False(validate.Valid);
+        Assert.Equal("invalid embedded token", validate.Reason);
+    }
+
+    [Fact]
+    public async Task Sync_token_validate_rejects_when_embedded_token_capability_set_differs()
+    {
+        await using var app = BuildTestApp(config =>
+        {
+            config.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["ActiveSync:Providers:Auth"] = "JwtBridgeEmbedded",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Issuer"] = "test-issuer",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Audience"] = "test-audience",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:SigningKey"] = "test-signing-key-1234567890-abcdef"
+                }
+            );
+        });
+        await app.StartAsync();
+
+        var minted = await MintTokenAsync(app.GetTestClient(), "room-a", "peer-a", 120, ["read:**", "write:world/**"]);
+        var validate = await ValidateTokenAsync(
+            app.GetTestClient(),
+            "room-a",
+            minted.PeerPubkeyHex,
+            minted.ExpiryUnixSeconds,
+            ["read:**"],
+            minted.SignatureHex
+        );
+
+        Assert.False(validate.Valid);
+        Assert.Equal("capability mismatch", validate.Reason);
+    }
+
+    [Fact]
     public async Task Sync_token_mints_and_validates_in_jwt_bridge_sidecar_profile()
     {
         await using var app = BuildTestApp(config =>
@@ -368,6 +546,75 @@ public sealed class ProviderProfileTokenEndpointIntegrationTests
             configureServices: configureServices,
             configureWebHost: webHost => webHost.UseTestServer(),
             configureConfiguration: cfg => configureConfiguration?.Invoke(cfg)
+        );
+    }
+
+    private static async Task<(string PeerPubkeyHex, long ExpiryUnixSeconds, string SignatureHex, string[] Capabilities)> MintTokenAsync(
+        HttpClient client,
+        string room,
+        string peer,
+        int lifetimeSeconds,
+        string[] capabilities)
+    {
+        var mintResponse = await client.PostAsJsonAsync(
+            "/sync/token",
+            new
+            {
+                room,
+                peerPubkeyHex = peer,
+                lifetimeSeconds,
+                capabilities
+            }
+        );
+        Assert.Equal(HttpStatusCode.OK, mintResponse.StatusCode);
+
+        using var mintStream = await mintResponse.Content.ReadAsStreamAsync();
+        using var mintDoc = await JsonDocument.ParseAsync(mintStream);
+
+        var mintedCaps = mintDoc.RootElement.GetProperty("capabilities")
+            .EnumerateArray()
+            .Select(x => x.GetString())
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Cast<string>()
+            .ToArray();
+
+        return (
+            mintDoc.RootElement.GetProperty("peer_pubkey_hex").GetString()!,
+            mintDoc.RootElement.GetProperty("expiry_secs").GetInt64(),
+            mintDoc.RootElement.GetProperty("sig_hex").GetString()!,
+            mintedCaps
+        );
+    }
+
+    private static async Task<(bool Valid, string? Reason)> ValidateTokenAsync(
+        HttpClient client,
+        string room,
+        string peer,
+        long expiry,
+        string[] capabilities,
+        string signature)
+    {
+        var validateResponse = await client.PostAsJsonAsync(
+            "/sync/token/validate",
+            new
+            {
+                room,
+                peer_pubkey_hex = peer,
+                expiry_secs = expiry,
+                capabilities,
+                sig_hex = signature
+            }
+        );
+
+        Assert.Equal(HttpStatusCode.OK, validateResponse.StatusCode);
+        using var validateStream = await validateResponse.Content.ReadAsStreamAsync();
+        using var validateDoc = await JsonDocument.ParseAsync(validateStream);
+
+        return (
+            validateDoc.RootElement.GetProperty("valid").GetBoolean(),
+            validateDoc.RootElement.TryGetProperty("reason", out var reason) && reason.ValueKind != JsonValueKind.Null
+                ? reason.GetString()
+                : null
         );
     }
 }

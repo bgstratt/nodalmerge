@@ -74,6 +74,48 @@ public sealed class ProviderCompositionTests
     }
 
     [Fact]
+    public void AddActiveSyncHostProviders_ThrowsForInvalidJwtEmbeddedClockSkew()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["ActiveSync:Providers:Auth"] = "JwtBridgeEmbedded",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Issuer"] = "test-issuer",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Audience"] = "test-audience",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:SigningKey"] = "test-signing-key-1234567890-abcdef",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:ClockSkewSeconds"] = "999"
+                }
+            )
+            .Build();
+
+        var services = new ServiceCollection();
+        var ex = Assert.Throws<InvalidOperationException>(() => services.AddActiveSyncHostProviders(config));
+        Assert.Contains("ClockSkewSeconds", ex.Message);
+    }
+
+    [Fact]
+    public void AddActiveSyncHostProviders_ThrowsForInvalidJwtEmbeddedPreviousSigningKey()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["ActiveSync:Providers:Auth"] = "JwtBridgeEmbedded",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Issuer"] = "test-issuer",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:Audience"] = "test-audience",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:SigningKey"] = "test-signing-key-1234567890-abcdef",
+                    ["ActiveSync:Auth:JwtBridgeEmbedded:PreviousSigningKeys:0"] = "too-short"
+                }
+            )
+            .Build();
+
+        var services = new ServiceCollection();
+        var ex = Assert.Throws<InvalidOperationException>(() => services.AddActiveSyncHostProviders(config));
+        Assert.Contains("PreviousSigningKeys", ex.Message);
+    }
+
+    [Fact]
     public void AddActiveSyncHostProviders_SelectsSqliteAndFileProviders_WhenConfigured()
     {
         var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-provider-composition", Guid.NewGuid().ToString("N"));

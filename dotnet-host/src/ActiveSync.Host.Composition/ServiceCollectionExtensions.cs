@@ -209,9 +209,25 @@ internal sealed class InMemoryNodeStoreProvider : INodeStoreProvider
         return ValueTask.FromResult<NodeSnapshot?>(null);
     }
 
+    public ValueTask<CompactionSnapshot?> LoadCompactionSnapshotAsync(
+        string roomId,
+        CancellationToken cancellationToken = default)
+    {
+        return ValueTask.FromResult<CompactionSnapshot?>(null);
+    }
+
     public ValueTask PersistAcceptedNodesAsync(
         string roomId,
         IReadOnlyList<AcceptedNodeRecord> nodes,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask DeleteAcceptedNodesAsync(
+        string roomId,
+        IReadOnlyList<string> nodeIdHexes,
         CancellationToken cancellationToken = default
     )
     {
@@ -300,6 +316,14 @@ internal sealed class JwtBridgeEmbeddedRoomTokenAuthProvider : IRoomTokenAuthPro
     {
         _options = options;
         _signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.SigningKey));
+        var previousSigningKeys = _options.PreviousSigningKeys
+            .Select(previous => new SymmetricSecurityKey(Encoding.UTF8.GetBytes(previous)))
+            .ToArray();
+
+        var allSigningKeys = new SecurityKey[] { _signingKey }
+            .Concat(previousSigningKeys)
+            .ToArray();
+
         _validationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -307,9 +331,10 @@ internal sealed class JwtBridgeEmbeddedRoomTokenAuthProvider : IRoomTokenAuthPro
             ValidateAudience = true,
             ValidAudience = _options.Audience,
             ValidateIssuerSigningKey = true,
-            IssuerSigningKey = _signingKey,
+            IssuerSigningKeys = allSigningKeys,
+            ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 },
             ValidateLifetime = true,
-            ClockSkew = TimeSpan.FromSeconds(5)
+            ClockSkew = TimeSpan.FromSeconds(_options.ClockSkewSeconds)
         };
     }
 
@@ -356,12 +381,10 @@ internal sealed class JwtBridgeEmbeddedRoomTokenAuthProvider : IRoomTokenAuthPro
         }
 
         var tokenCaps = principal.FindAll("cap").Select(x => x.Value).ToHashSet(StringComparer.Ordinal);
-        foreach (var cap in request.Capabilities)
+        var requestedCaps = request.Capabilities.ToHashSet(StringComparer.Ordinal);
+        if (!tokenCaps.SetEquals(requestedCaps))
         {
-            if (!tokenCaps.Contains(cap))
-            {
-                return ValueTask.FromResult(RoomTokenValidationResult.Invalid("capability mismatch"));
-            }
+            return ValueTask.FromResult(RoomTokenValidationResult.Invalid("capability mismatch"));
         }
 
         return ValueTask.FromResult(RoomTokenValidationResult.Valid);

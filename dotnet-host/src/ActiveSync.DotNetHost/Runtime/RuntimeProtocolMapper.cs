@@ -1814,12 +1814,14 @@ public sealed class RuntimeConnectionState
     public RuntimeConnectionState(ulong sessionId)
     {
         SessionId = sessionId;
+        TraceId = $"sess-{sessionId}-{Guid.NewGuid():N}";
     }
 
     public ulong SessionId { get; set; }
     public bool IsInitialized { get; set; }
     public string? RoomId { get; set; }
     public string? PeerPubkeyHex { get; set; }
+    public string? TraceId { get; set; }
 }
 
 public sealed record RuntimeMapResult(
@@ -1853,6 +1855,8 @@ public sealed class RuntimeInboundMessage
     public string? Type { get; set; }
     public string? Room { get; set; }
     public string? Pubkey { get; set; }
+    [JsonPropertyName("trace_id")]
+    public string? TraceId { get; set; }
     public string? Namespace { get; set; }
     public string? Key { get; set; }
     public JsonNode? Value { get; set; }

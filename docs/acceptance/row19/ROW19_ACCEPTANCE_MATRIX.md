@@ -89,6 +89,17 @@ These results advance row 19 readiness but do not by themselves close scenario r
    - Runtime startup + websocket `hello`/`noop-ack` passed under explicit delegated profile args.
    - Delegated `/sync/blob-url` get probe returned delegated presigned URL (200) and delegated stub observed room-scoped request payload.
    - Precondition: `ACTIVESYNC_HOST_FFI_DLL` must resolve to a built host-ffi DLL (or local host-ffi artifact must exist for verifier auto-resolution).
+9. 9.7 operational parity artifacts (baseline):
+   - Dashboard/alert pack: `docs/acceptance/row19/ROW19_9_7_OBSERVABILITY_DASHBOARDS_AND_ALERTS.md`.
+   - Incident runbook + tabletop rehearsal notes: `docs/acceptance/row19/ROW19_9_7_RUNBOOK_REHEARSAL.md`.
+   - Simulated drill evidence includes reconnect-storm room metrics and auth-spike denied-reason breakdown assertions.
+   - Runtime observability slice validation totals updated to 31/31 targeted and 48/48 broader parity filter.
+10. 9.8 automated parity harness kickoff:
+   - Contract + scenario inventory: `docs/acceptance/row19/ROW19_9_8_AUTOMATED_SCENARIO_CONTRACT.md`.
+   - Harness implementation: `dotnet-host/tests/ActiveSync.DotNetHost.Tests/Row19AutomatedScenarioHarnessTests.cs`.
+   - Implemented scenarios now cover multi-device save/delete/restart, offline edit/reconnect, fixed+flexible layout integrity, asset propagation/retrieval, and duplicate replay churn guard.
+   - Implemented churn soak extension covers 10k duplicate replay budget guard.
+   - Validation totals in this stream: 6/6 scenario-harness tests; 54/54 broader parity filter tests.
 
 Evidence pointers (code/tests):
 

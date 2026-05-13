@@ -211,7 +211,7 @@ public static class HostApplication
         configureConfiguration?.Invoke(builder.Configuration);
 
         builder.Services.AddActiveSyncHostProviders(builder.Configuration);
-        builder.Services.AddActiveSyncRuntimeCore();
+        builder.Services.AddActiveSyncRuntimeCore(builder.Configuration);
 
         configureServices?.Invoke(builder.Services);
 
@@ -229,6 +229,7 @@ public static class HostApplication
         startupLogger.LogWarning(
             "Runtime websocket path remains relay-first; experimental DAG pack persistence/hydration via configured node store is enabled"
         );
+        EmitAuthReadinessChecks(app.Services, providerOptions, startupLogger);
 
         app.MapGet("/", () => Results.Ok(new
         {
@@ -533,6 +534,53 @@ public static class HostApplication
         app.Map("/ws/{roomId}", HandleRuntimeWebSocketAsync);
 
         return app;
+    }
+
+    private static void EmitAuthReadinessChecks(
+        IServiceProvider services,
+        ActiveSyncHostProviderOptions providerOptions,
+        ILogger startupLogger)
+    {
+        if (string.Equals(providerOptions.AuthProvider, "JwtBridgeEmbedded", StringComparison.Ordinal))
+        {
+            var options = services.GetRequiredService<JwtBridgeEmbeddedAuthOptions>();
+            startupLogger.LogInformation(
+                "Auth readiness provider=JwtBridgeEmbedded issuer={Issuer} audience={Audience} clock_skew_seconds={ClockSkewSeconds} previous_keys={PreviousKeyCount}",
+                options.Issuer,
+                options.Audience,
+                options.ClockSkewSeconds,
+                options.PreviousSigningKeys.Count
+            );
+
+            if (options.ClockSkewSeconds > 60)
+            {
+                startupLogger.LogWarning(
+                    "Auth readiness provider=JwtBridgeEmbedded policy warning: ClockSkewSeconds={ClockSkewSeconds} exceeds recommended max=60",
+                    options.ClockSkewSeconds
+                );
+            }
+
+            return;
+        }
+
+        if (string.Equals(providerOptions.AuthProvider, "JwtBridgeSidecar", StringComparison.Ordinal))
+        {
+            var options = services.GetRequiredService<JwtBridgeSidecarAuthOptions>();
+            startupLogger.LogInformation(
+                "Auth readiness provider=JwtBridgeSidecar base_url={BaseUrl} timeout_seconds={TimeoutSeconds} api_key_configured={ApiKeyConfigured}",
+                options.BaseUrl,
+                options.TimeoutSeconds,
+                !string.IsNullOrWhiteSpace(options.ApiKey)
+            );
+
+            if (options.TimeoutSeconds > 30)
+            {
+                startupLogger.LogWarning(
+                    "Auth readiness provider=JwtBridgeSidecar policy warning: TimeoutSeconds={TimeoutSeconds} exceeds recommended max=30",
+                    options.TimeoutSeconds
+                );
+            }
+        }
     }
 
     private sealed class BlobUrlQuery

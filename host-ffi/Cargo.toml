@@ -15,4 +15,11 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 activesync-core = { path = "../core" }
+activesync-host-core = { path = "../host-core" }
+base64 = "0.22"
+criterion = { workspace = true }
 ed25519-dalek = { workspace = true }
+
+[[bench]]
+name = "host_runtime_vs_ffi"
+harness = false

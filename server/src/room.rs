@@ -550,7 +550,10 @@ pub fn spawn_tick_loop(
 /// retried in the next pass (their parent may arrive later in the same batch
 /// or in a follow-up pack); other rejections are recorded as errors and
 /// surfaced to the caller.
-pub async fn import_nodes(room: &Room, nodes: Vec<SyncNode>) -> (usize, Vec<String>) {
+pub async fn import_nodes(
+    room: &Room,
+    nodes: Vec<SyncNode>,
+) -> (usize, Vec<activesync_core::NodeId>, Vec<String>) {
     let t0 = Instant::now();
     let mut pending = nodes;
     let mut accepted = 0usize;
@@ -666,7 +669,7 @@ pub async fn import_nodes(room: &Room, nodes: Vec<SyncNode>) -> (usize, Vec<Stri
         .set(resident as f64);
     }
 
-    (accepted, errors)
+    (accepted, accepted_ids, errors)
 }
 
 // ---------------------------------------------------------------------------

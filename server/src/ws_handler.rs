@@ -749,7 +749,7 @@ async fn handle_client_message(
                 }
             }
 
-            let (accepted, errs) = import_nodes(room, nodes).await;
+            let (accepted, accepted_ids, errs) = import_nodes(room, nodes).await;
             tracing::info!(peer = %&pubkey_hex[..8.min(pubkey_hex.len())], incoming, accepted, errs = errs.len(), "pack received");
             if !errs.is_empty() {
                 tracing::warn!(errors = %errs.join("; "), "pack errors");
@@ -759,11 +759,12 @@ async fn handle_client_message(
             }
             if plan_pack_import_mutation(accepted)
                 == PackImportMutationAction::BroadcastAcceptedLeafPack {
-                // Build merged pack of new leaf nodes and broadcast to room
+                // Broadcast exactly the accepted nodes from this import pass.
+                // Using current leafs can drop required parent ops (e.g. map
+                // sidecar before list insert), which breaks downstream convergence.
                 let bcast = {
                     let graph = room.graph.read().await;
-                    let leaf_ids: Vec<_> = graph.leaf_ids().iter().copied().collect();
-                    let nodes = graph.get_nodes(&leaf_ids);
+                    let nodes = graph.get_nodes(&accepted_ids);
                     let nodes_b64 = base64_encode(&pack_nodes(&nodes));
                     serde_json::to_string(&assemble_peer_pack_relay_envelope(
                         pubkey_hex.to_string(),

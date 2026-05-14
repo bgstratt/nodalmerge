@@ -946,6 +946,72 @@ public sealed class RuntimeProtocolMapper
             ]);
         }
 
+        if (string.Equals(type, "blob-upload", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
+            {
+                return RuntimeMapResult.Failure("hello must be sent first");
+            }
+
+            if (message.Blobs is null || message.Blobs.Length == 0)
+            {
+                return RuntimeMapResult.Failure("blob-upload.blobs is required");
+            }
+
+            var namespaceValue = ResolveNamespace(message);
+            var commands = new List<string>(message.Blobs.Length);
+            foreach (var blob in message.Blobs)
+            {
+                if (blob is null || string.IsNullOrWhiteSpace(blob.Hash))
+                {
+                    return RuntimeMapResult.Failure("blob-upload.blobs[].hash is required");
+                }
+
+                var dataB64 = blob.DataB64;
+                if (string.IsNullOrWhiteSpace(dataB64))
+                {
+                    dataB64 = blob.Data;
+                }
+
+                if (string.IsNullOrWhiteSpace(dataB64))
+                {
+                    return RuntimeMapResult.Failure("blob-upload.blobs[].data is required");
+                }
+
+                commands.Add(
+                    SerializeEnvelope(
+                        state.RoomId,
+                        new JsonObject
+                        {
+                            ["BlobSet"] = new JsonObject
+                            {
+                                ["namespace"] = namespaceValue,
+                                ["hash"] = blob.Hash,
+                                ["data_b64"] = dataB64
+                            }
+                        }
+                    )
+                );
+            }
+
+            return RuntimeMapResult.Success(commands);
+        }
+
+        if (string.Equals(type, "blob-uploaded", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
+            {
+                return RuntimeMapResult.Failure("hello must be sent first");
+            }
+
+            if (string.IsNullOrWhiteSpace(message.Hash))
+            {
+                return RuntimeMapResult.Failure("blob-uploaded.hash is required");
+            }
+
+            return RuntimeMapResult.Success([]);
+        }
+
         if (string.Equals(type, "blob-get", StringComparison.OrdinalIgnoreCase))
         {
             if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
@@ -1662,12 +1728,37 @@ public sealed class RuntimeProtocolMapper
 
             if (obj.TryGetPropertyValue("BlobPackPrepared", out var blobPackNode) && blobPackNode is JsonObject blobPack)
             {
+                var blobs = new JsonArray();
+                if (blobPack["blobs"] is JsonArray sourceBlobs)
+                {
+                    foreach (var entryNode in sourceBlobs)
+                    {
+                        if (entryNode is not JsonObject entry)
+                        {
+                            continue;
+                        }
+
+                        var hash = entry["hash"]?.GetValue<string>();
+                        var data = entry["data"]?.GetValue<string>() ?? entry["data_b64"]?.GetValue<string>();
+                        if (string.IsNullOrWhiteSpace(hash) || string.IsNullOrWhiteSpace(data))
+                        {
+                            continue;
+                        }
+
+                        blobs.Add(new JsonObject
+                        {
+                            ["hash"] = hash,
+                            ["data"] = data
+                        });
+                    }
+                }
+
                 outbound.Add(new JsonObject
                 {
                     ["type"] = "blob-pack",
                     ["room"] = blobPack["room_id"]?.GetValue<string>(),
                     ["namespace"] = blobPack["namespace"]?.GetValue<string>(),
-                    ["blobs"] = blobPack["blobs"]?.DeepClone() ?? new JsonArray(),
+                    ["blobs"] = blobs,
                     ["requested"] = blobPack["requested"]?.DeepClone() ?? new JsonArray()
                 }.ToJsonString());
                 continue;
@@ -1915,6 +2006,20 @@ public sealed class RuntimeInboundMessage
     public RuntimeInboundPolicyRule[]? PolicyRules { get; set; }
     [JsonPropertyName("since_unix_ms")]
     public ulong? SinceUnixMs { get; set; }
+    [JsonPropertyName("blobs")]
+    public RuntimeInboundBlob[]? Blobs { get; set; }
+}
+
+public sealed class RuntimeInboundBlob
+{
+    [JsonPropertyName("hash")]
+    public string? Hash { get; set; }
+
+    [JsonPropertyName("data")]
+    public string? Data { get; set; }
+
+    [JsonPropertyName("data_b64")]
+    public string? DataB64 { get; set; }
 }
 
 public sealed class RuntimeInboundCaps

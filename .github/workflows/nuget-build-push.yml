@@ -1,0 +1,187 @@
+name: nuget-build-push
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'dotnet-host/src/**'
+      - 'dotnet-host/ActiveSync.DotNetHost.slnx'
+      - 'host-ffi/**'
+      - '.github/workflows/nuget-build-push.yml'
+  workflow_dispatch:
+    inputs:
+      packageVersion:
+        description: Optional package version override
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: 10.0.x
+  NUGET_OUTPUT_DIR: ${{ github.workspace }}/artifacts/nuget
+
+jobs:
+  pack-managed:
+    name: pack managed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Resolve package version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.packageVersion }}" ]; then
+            echo "value=${{ github.event.inputs.packageVersion }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=0.1.0-preview.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore solution
+        run: dotnet restore dotnet-host/ActiveSync.DotNetHost.slnx
+
+      - name: Pack ActiveSync.Host.Abstractions
+        run: dotnet pack dotnet-host/src/ActiveSync.Host.Abstractions/ActiveSync.Host.Abstractions.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
+
+      - name: Pack ActiveSync.Host.Composition
+        run: dotnet pack dotnet-host/src/ActiveSync.Host.Composition/ActiveSync.Host.Composition.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
+
+      - name: Upload managed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-managed
+          path: ${{ env.NUGET_OUTPUT_DIR }}/*.nupkg
+          if-no-files-found: error
+
+  pack-native-linux:
+    name: pack native linux-x64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve package version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.packageVersion }}" ]; then
+            echo "value=${{ github.event.inputs.packageVersion }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=0.1.0-preview.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build host ffi release library
+        run: cargo build -p activesync-host-ffi --release
+
+      - name: Pack ActiveSync.DotNetHost.Native.linux-x64
+        run: dotnet pack dotnet-host/src/ActiveSync.DotNetHost.Native.linux-x64/ActiveSync.DotNetHost.Native.linux-x64.csproj -c Release -o "$NUGET_OUTPUT_DIR" /p:Version=${{ steps.version.outputs.value }}
+
+      - name: Upload linux native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-native-linux-x64
+          path: ${{ env.NUGET_OUTPUT_DIR }}/*.nupkg
+          if-no-files-found: error
+
+  pack-native-win:
+    name: pack native win-x64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve package version
+        id: version
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace('${{ github.event.inputs.packageVersion }}')) {
+            "value=${{ github.event.inputs.packageVersion }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+          else {
+            "value=0.1.0-preview.${{ github.run_number }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
+      - name: Build host ffi release library
+        run: cargo build -p activesync-host-ffi --release
+
+      - name: Pack ActiveSync.DotNetHost.Native.win-x64
+        run: dotnet pack dotnet-host/src/ActiveSync.DotNetHost.Native.win-x64/ActiveSync.DotNetHost.Native.win-x64.csproj -c Release -o "$env:NUGET_OUTPUT_DIR" /p:Version=${{ steps.version.outputs.value }}
+
+      - name: Upload windows native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-native-win-x64
+          path: ${{ env.NUGET_OUTPUT_DIR }}/*.nupkg
+          if-no-files-found: error
+
+  publish:
+    name: publish github packages
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    needs:
+      - pack-managed
+      - pack-native-linux
+      - pack-native-win
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Download managed packages
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-managed
+          path: ${{ env.NUGET_OUTPUT_DIR }}
+
+      - name: Download linux native packages
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-native-linux-x64
+          path: ${{ env.NUGET_OUTPUT_DIR }}
+
+      - name: Download windows native packages
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-native-win-x64
+          path: ${{ env.NUGET_OUTPUT_DIR }}
+
+      - name: Add GitHub Packages source
+        shell: pwsh
+        run: |
+          dotnet nuget add source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" --name github --username "${{ github.actor }}" --password "${{ secrets.GITHUB_TOKEN }}" --store-password-in-clear-text
+
+      - name: Push packages
+        shell: pwsh
+        run: |
+          $packages = Get-ChildItem -Path "$env:NUGET_OUTPUT_DIR" -Filter *.nupkg -Recurse | Where-Object { $_.Name -notlike '*.snupkg' }
+          foreach ($package in $packages) {
+            dotnet nuget push $package.FullName --source github --api-key "${{ secrets.GITHUB_TOKEN }}" --skip-duplicate
+          }

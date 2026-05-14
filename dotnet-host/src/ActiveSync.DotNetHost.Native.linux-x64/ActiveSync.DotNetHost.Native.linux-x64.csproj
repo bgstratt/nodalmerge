@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <PackageId>ActiveSync.DotNetHost.Native.linux-x64</PackageId>
+    <Description>Native host FFI runtime for ActiveSync .NET host on linux-x64.</Description>
+    <PackageTags>activesync;sync;crdt;native;ffi;linux</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\..\target\release\libactivesync_host_ffi.so"
+          Pack="true"
+          PackagePath="runtimes/linux-x64/native/"
+          Visible="false" />
+  </ItemGroup>
+
+</Project>

@@ -3,6 +3,8 @@
     <Project Path="src/ActiveSync.Host.Abstractions/ActiveSync.Host.Abstractions.csproj" />
     <Project Path="src/ActiveSync.Host.Composition/ActiveSync.Host.Composition.csproj" />
     <Project Path="src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj" />
+    <Project Path="src/ActiveSync.DotNetHost.Native.linux-x64/ActiveSync.DotNetHost.Native.linux-x64.csproj" />
+    <Project Path="src/ActiveSync.DotNetHost.Native.win-x64/ActiveSync.DotNetHost.Native.win-x64.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj" />

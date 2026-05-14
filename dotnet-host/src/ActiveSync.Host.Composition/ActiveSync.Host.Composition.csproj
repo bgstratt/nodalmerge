@@ -4,6 +4,10 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <PackageId>ActiveSync.Host.Composition</PackageId>
+    <Description>Dependency injection composition and provider wiring for ActiveSync host integrations.</Description>
+    <PackageTags>activesync;sync;crdt;host;composition</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>

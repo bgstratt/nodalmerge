@@ -514,6 +514,19 @@ public static class HostApplication
             var tokenValidationService = context.RequestServices.GetRequiredService<RuntimeTokenValidationService>();
             var state = new RuntimeConnectionState(sessionIds.Next());
 
+            // Compatibility path `/ws/{roomId}` can carry the room only in the URL.
+            // Seed state.RoomId early so hydration can run before hello processing.
+            if (context.Request.RouteValues.TryGetValue("roomId", out var roomRouteValue)
+                && roomRouteValue is not null)
+            {
+                var routeRoom = roomRouteValue.ToString();
+                if (!string.IsNullOrWhiteSpace(routeRoom)
+                    && !string.Equals(routeRoom, "runtime", StringComparison.OrdinalIgnoreCase))
+                {
+                    state.RoomId = Uri.UnescapeDataString(routeRoom);
+                }
+            }
+
             using var socket = await context.WebSockets.AcceptWebSocketAsync();
             try
             {

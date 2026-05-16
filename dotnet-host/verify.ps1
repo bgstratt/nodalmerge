@@ -4,8 +4,8 @@ param(
     [string]$DelegateBaseUrl = "http://127.0.0.1:8788",
     [int]$StartupTimeoutSeconds = 45,
     [switch]$UseMongo,
-    [string]$MongoConnectionString = "mongodb://localhost:27017",
-    [string]$MongoDatabaseName = "activesync-verify"
+    [string]$MongoConnectionString = "",
+    [string]$MongoDatabaseName = ""
 )
 
 Set-StrictMode -Version Latest
@@ -162,8 +162,12 @@ try {
 
     if ($UseMongo.IsPresent) {
         $hostArgs += "--ActiveSync:Providers:NodeStorage=Mongo"
-        $hostArgs += "--ActiveSync:Storage:Mongo:ConnectionString=$MongoConnectionString"
-        $hostArgs += "--ActiveSync:Storage:Mongo:DatabaseName=$MongoDatabaseName"
+        if (-not [string]::IsNullOrWhiteSpace($MongoConnectionString)) {
+            $hostArgs += "--ActiveSync:Storage:Mongo:ConnectionString=$MongoConnectionString"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($MongoDatabaseName)) {
+            $hostArgs += "--ActiveSync:Storage:Mongo:DatabaseName=$MongoDatabaseName"
+        }
     }
     else {
         $hostArgs += "--ActiveSync:Providers:NodeStorage=InMemory"

@@ -444,6 +444,45 @@ public class RuntimeDagPersistenceServiceTests
         Assert.Equal(1, metrics.GetTotal("room_duplicate_pack_replay_suppressed_total"));
     }
 
+    [Fact]
+    public async Task PersistRoomSnapshotAsync_PersistsServerPackPayload()
+    {
+        var roomId = "room-snapshot";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            ServerPackPayload = new byte[] { 101, 102, 103, 104 }
+        };
+        var service = new RuntimeDagPersistenceService(store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance);
+
+        await service.PersistRoomSnapshotAsync(roomId, CancellationToken.None);
+
+        Assert.Equal(1, store.PersistAcceptedCalls);
+        var snapshot = await store.LoadRoomSnapshotAsync(roomId, CancellationToken.None);
+        Assert.NotNull(snapshot);
+        Assert.Single(snapshot!.Nodes);
+    }
+
+    [Fact]
+    public async Task PersistRoomSnapshotAsync_SkipsDuplicateServerPackPayload()
+    {
+        var roomId = "room-snapshot-replay";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            ServerPackPayload = new byte[] { 121, 122, 123, 124 }
+        };
+        var service = new RuntimeDagPersistenceService(store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance);
+
+        using var metrics = new RuntimeDagMeterCapture();
+
+        await service.PersistRoomSnapshotAsync(roomId, CancellationToken.None);
+        await service.PersistRoomSnapshotAsync(roomId, CancellationToken.None);
+
+        Assert.Equal(1, store.PersistAcceptedCalls);
+        Assert.Equal(1, metrics.GetTotal("room_duplicate_pack_replay_suppressed_total"));
+    }
+
     private sealed class TestNodeStoreProvider : INodeStoreProvider
     {
         private readonly List<AcceptedNodeRecord> _nodes = new();

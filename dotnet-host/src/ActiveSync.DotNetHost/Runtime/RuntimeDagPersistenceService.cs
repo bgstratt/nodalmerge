@@ -79,6 +79,16 @@ public sealed class RuntimeDagPersistenceService
         return task;
     }
 
+    public void InvalidateHydration(string roomId)
+    {
+        if (string.IsNullOrWhiteSpace(roomId))
+        {
+            return;
+        }
+
+        _hydrateByRoom.TryRemove(roomId, out _);
+    }
+
     public async ValueTask PersistInboundPackAsync(
         string roomId,
         string nodesB64,
@@ -97,45 +107,7 @@ public sealed class RuntimeDagPersistenceService
             {
                 return;
             }
-
-            var hashHex = Convert.ToHexStringLower(SHA256.HashData(payload));
-            var acceptedAtUtc = DateTimeOffset.UtcNow;
-            var retentionWindow = _compactionOptions.RetentionWindow ?? DefaultCompactionRetentionWindow;
-            var record = new AcceptedNodeRecord(
-                NodeIdHex: $"pack:{hashHex}",
-                Payload: payload,
-                PayloadKind: AcceptedNodeKinds.Pack,
-                CausalParentNodeIds: null,
-                FrontierHashHex: null,
-                Applied: false,
-                IsTombstone: false,
-                AcceptedAtUtc: acceptedAtUtc,
-                EligibleForCompactionAtUtc: acceptedAtUtc.Add(retentionWindow)
-            );
-
-            if (await IsKnownPackReplayAsync(roomId, record.NodeIdHex, cancellationToken))
-            {
-                DuplicatePackReplaySuppressedCounter.Add(
-                    1,
-                    KeyValuePair.Create<string, object?>("room", roomId)
-                );
-                _logger.LogInformation(
-                    "runtime dag persist skipped room={Room} reason=duplicate-pack-replay key={Key}",
-                    roomId,
-                    record.NodeIdHex
-                );
-                return;
-            }
-
-            await _nodeStore.PersistAcceptedNodesAsync(roomId, [record], cancellationToken);
-            _logger.LogInformation(
-                "runtime dag persisted room={Room} bytes={Bytes} key={Key}",
-                roomId,
-                payload.Length,
-                record.NodeIdHex
-            );
-
-            await TryRunCompactionAsync(roomId, cancellationToken);
+            await PersistPackPayloadAsync(roomId, payload, "inbound-pack", cancellationToken);
         }
         catch (FormatException)
         {
@@ -145,6 +117,85 @@ public sealed class RuntimeDagPersistenceService
         {
             _logger.LogWarning(ex, "runtime dag persist failed room={Room}", roomId);
         }
+    }
+
+    public async ValueTask PersistRoomSnapshotAsync(
+        string roomId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (string.IsNullOrWhiteSpace(roomId))
+        {
+            return;
+        }
+
+        try
+        {
+            var snapshot = await TryGetServerPackSnapshotAsync(roomId, cancellationToken);
+            if (snapshot is null || snapshot.Payload.Length == 0)
+            {
+                _logger.LogInformation(
+                    "runtime dag persist skipped room={Room} reason=empty-server-pack",
+                    roomId
+                );
+                return;
+            }
+
+            await PersistPackPayloadAsync(roomId, snapshot.Payload, "snapshot-on-mutation", cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "runtime dag persist snapshot failed room={Room}", roomId);
+        }
+    }
+
+    private async ValueTask PersistPackPayloadAsync(
+        string roomId,
+        byte[] payload,
+        string source,
+        CancellationToken cancellationToken
+    )
+    {
+        var hashHex = Convert.ToHexStringLower(SHA256.HashData(payload));
+        var acceptedAtUtc = DateTimeOffset.UtcNow;
+        var retentionWindow = _compactionOptions.RetentionWindow ?? DefaultCompactionRetentionWindow;
+        var record = new AcceptedNodeRecord(
+            NodeIdHex: $"pack:{hashHex}",
+            Payload: payload,
+            PayloadKind: AcceptedNodeKinds.Pack,
+            CausalParentNodeIds: null,
+            FrontierHashHex: null,
+            Applied: false,
+            IsTombstone: false,
+            AcceptedAtUtc: acceptedAtUtc,
+            EligibleForCompactionAtUtc: acceptedAtUtc.Add(retentionWindow)
+        );
+
+        if (await IsKnownPackReplayAsync(roomId, record.NodeIdHex, cancellationToken))
+        {
+            DuplicatePackReplaySuppressedCounter.Add(
+                1,
+                KeyValuePair.Create<string, object?>("room", roomId)
+            );
+            _logger.LogInformation(
+                "runtime dag persist skipped room={Room} reason=duplicate-pack-replay key={Key} source={Source}",
+                roomId,
+                record.NodeIdHex,
+                source
+            );
+            return;
+        }
+
+        await _nodeStore.PersistAcceptedNodesAsync(roomId, [record], cancellationToken);
+        _logger.LogInformation(
+            "runtime dag persisted room={Room} bytes={Bytes} key={Key} source={Source}",
+            roomId,
+            payload.Length,
+            record.NodeIdHex,
+            source
+        );
+
+        await TryRunCompactionAsync(roomId, cancellationToken);
     }
 
     private async Task HydrateRoomCoreAsync(string roomId, CancellationToken cancellationToken)

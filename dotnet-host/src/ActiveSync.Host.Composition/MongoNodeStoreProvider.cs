@@ -37,25 +37,37 @@ internal sealed class MongoNodeStoreProvider : INodeStoreProvider
             return null;
         }
 
-        var nodes = docs.Select(doc =>
+        var nodes = new List<AcceptedNodeRecord>(docs.Count);
+        foreach (var doc in docs)
         {
+            // Be permissive when reading older/malformed records: skip invalid entries instead of crashing room hydration.
+            var nodeIdHex = GetStringOrNull(doc, "node_id_hex");
+            var payload = GetByteArrayOrNull(doc, "payload");
+            if (string.IsNullOrWhiteSpace(nodeIdHex) || payload is null)
+            {
+                continue;
+            }
+
             var acceptedAt = GetDateTimeOffsetOrNull(doc, "accepted_at_utc");
-            return new AcceptedNodeRecord(
-                doc["node_id_hex"].AsString,
-                doc["payload"].AsByteArray,
-                doc.TryGetValue("payload_kind", out var payloadKind) ? payloadKind.AsString : AcceptedNodeKinds.Pack,
-                doc.TryGetValue("causal_parent_node_ids", out var causalParents)
-                    ? causalParents.AsBsonArray.Select(x => x.AsString).ToArray()
-                    : null,
-                doc.TryGetValue("frontier_hash_hex", out var frontierHash) ? frontierHash.AsString : null,
+            nodes.Add(new AcceptedNodeRecord(
+                nodeIdHex,
+                payload,
+                GetStringOrNull(doc, "payload_kind") ?? AcceptedNodeKinds.Pack,
+                GetStringArrayOrNull(doc, "causal_parent_node_ids"),
+                GetStringOrNull(doc, "frontier_hash_hex"),
                 doc.TryGetValue("applied", out var applied) && applied.ToBoolean(),
                 doc.TryGetValue("is_tombstone", out var isTombstone) && isTombstone.ToBoolean(),
                 acceptedAt,
                 GetDateTimeOffsetOrNull(doc, "eligible_for_compaction_at_utc")
-            );
-        }).ToArray();
+            ));
+        }
 
-        return new NodeSnapshot(roomId, nodes);
+        if (nodes.Count == 0)
+        {
+            return null;
+        }
+
+        return new NodeSnapshot(roomId, nodes.ToArray());
     }
 
     public async ValueTask<CompactionSnapshot?> LoadCompactionSnapshotAsync(
@@ -213,5 +225,54 @@ internal sealed class MongoNodeStoreProvider : INodeStoreProvider
         }
 
         return null;
+    }
+
+    private static string? GetStringOrNull(BsonDocument doc, string fieldName)
+    {
+        if (!doc.TryGetValue(fieldName, out var value) || value.IsBsonNull)
+        {
+            return null;
+        }
+
+        return value.BsonType == BsonType.String
+            ? value.AsString
+            : value.ToString();
+    }
+
+    private static byte[]? GetByteArrayOrNull(BsonDocument doc, string fieldName)
+    {
+        if (!doc.TryGetValue(fieldName, out var value) || value.IsBsonNull)
+        {
+            return null;
+        }
+
+        if (value.BsonType == BsonType.Binary)
+        {
+            return value.AsByteArray;
+        }
+
+        return null;
+    }
+
+    private static string[]? GetStringArrayOrNull(BsonDocument doc, string fieldName)
+    {
+        if (!doc.TryGetValue(fieldName, out var value) || value.IsBsonNull)
+        {
+            return null;
+        }
+
+        if (value is not BsonArray arr)
+        {
+            return null;
+        }
+
+        var values = arr
+            .Where(x => !x.IsBsonNull)
+            .Select(x => x.BsonType == BsonType.String ? x.AsString : x.ToString())
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x!)
+            .ToArray();
+
+        return values.Length == 0 ? null : values;
     }
 }

@@ -106,6 +106,16 @@ public sealed class RuntimeProtocolMapper
                             ["hello"] = clientHelloPayload
                         }
                     }
+                ),
+                SerializeEnvelope(
+                    state.RoomId!,
+                    new JsonObject
+                    {
+                        ["RequestServerPack"] = new JsonObject
+                        {
+                            ["known_ids"] = new JsonArray()
+                        }
+                    }
                 )
             };
 
@@ -263,6 +273,16 @@ public sealed class RuntimeProtocolMapper
                         {
                             ["session_id"] = sessionId,
                             ["hello"] = clientHelloPayload
+                        }
+                    }
+                ),
+                SerializeEnvelope(
+                    roomId,
+                    new JsonObject
+                    {
+                        ["RequestServerPack"] = new JsonObject
+                        {
+                            ["known_ids"] = new JsonArray()
                         }
                     }
                 )

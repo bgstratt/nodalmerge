@@ -179,9 +179,15 @@ public sealed class RuntimeWebSocketLoopRunner
                     && !string.IsNullOrWhiteSpace(inboundType)
                     && (string.Equals(inboundType, "hello", StringComparison.OrdinalIgnoreCase)
                         || string.Equals(inboundType, "client-hello", StringComparison.OrdinalIgnoreCase))
-                    && !string.IsNullOrWhiteSpace(inboundRoom))
+                    )
                 {
-                    await dagPersistenceService.HydrateRoomIfNeededAsync(inboundRoom, cancellationToken);
+                    var hydrateRoomId = !string.IsNullOrWhiteSpace(inboundRoom)
+                        ? inboundRoom
+                        : state.RoomId;
+                    if (!string.IsNullOrWhiteSpace(hydrateRoomId))
+                    {
+                        await dagPersistenceService.HydrateRoomIfNeededAsync(hydrateRoomId, cancellationToken);
+                    }
                 }
 
                 var processResult = frameProcessor.ProcessFrame(
@@ -218,7 +224,21 @@ public sealed class RuntimeWebSocketLoopRunner
                         if (!string.IsNullOrWhiteSpace(nodesB64))
                         {
                             await dagPersistenceService.PersistInboundPackAsync(state.RoomId!, nodesB64, cancellationToken);
+                            // Also persist the room's current server-pack snapshot.
+                            // In practice most client writes arrive as `pack` messages,
+                            // so relying only on non-pack mutation hooks can leave
+                            // persistence with delta-only history that doesn't always
+                            // hydrate deterministically on fresh reconnects.
+                            await dagPersistenceService.PersistRoomSnapshotAsync(state.RoomId!, cancellationToken);
                         }
+                    }
+
+                    if (processResult.DispatchSucceeded
+                        && dagPersistenceService is not null
+                        && !string.IsNullOrWhiteSpace(state.RoomId)
+                        && ShouldPersistSnapshotForMutation(inboundType))
+                    {
+                        await dagPersistenceService.PersistRoomSnapshotAsync(state.RoomId!, cancellationToken);
                     }
                 }
 
@@ -342,7 +362,12 @@ public sealed class RuntimeWebSocketLoopRunner
 
             if (registeredInRoom)
             {
-                roomBroker.Unregister(state);
+                var roomBecameEmpty = roomBroker.Unregister(state);
+
+                if (roomBecameEmpty && dagPersistenceService is not null && !string.IsNullOrWhiteSpace(state.RoomId))
+                {
+                    dagPersistenceService.InvalidateHydration(state.RoomId);
+                }
 
                 if (!string.IsNullOrWhiteSpace(state.RoomId) && !string.IsNullOrWhiteSpace(state.PeerPubkeyHex))
                 {
@@ -523,6 +548,31 @@ public sealed class RuntimeWebSocketLoopRunner
         }
 
         return null;
+    }
+
+    private static bool ShouldPersistSnapshotForMutation(string? inboundType)
+    {
+        if (string.IsNullOrWhiteSpace(inboundType))
+        {
+            return false;
+        }
+
+        return inboundType.Equals("map-set", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("map-delete", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("list-push", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("list-insert", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("list-delete", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("list-move", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("list-update", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("text-insert", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("text-delete", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("text-insert-at", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("text-delete-at", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("blob-set", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("set-policy", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("set-room-key", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("presence", StringComparison.OrdinalIgnoreCase)
+            || inboundType.Equals("presence-set", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string GetOrCreateTraceId(RuntimeConnectionState state)

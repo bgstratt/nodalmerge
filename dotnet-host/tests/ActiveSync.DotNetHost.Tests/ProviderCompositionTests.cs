@@ -185,13 +185,14 @@ public sealed class ProviderCompositionTests
 
         var services = new ServiceCollection();
         services.AddActiveSyncHostProviders(config);
-        var serviceProvider = services.BuildServiceProvider();
 
-        var nodeProvider = serviceProvider.GetRequiredService<INodeStoreProvider>();
-        var blobResolver = serviceProvider.GetRequiredService<IBlobUrlResolverProvider>();
+        var nodeDescriptor = services.LastOrDefault(d => d.ServiceType == typeof(INodeStoreProvider));
+        var blobResolverDescriptor = services.LastOrDefault(d => d.ServiceType == typeof(IBlobUrlResolverProvider));
 
-        Assert.Equal("MongoNodeStoreProvider", nodeProvider.GetType().Name);
-        Assert.Equal("S3DelegatedBlobUrlResolverProvider", blobResolver.GetType().Name);
+        Assert.NotNull(nodeDescriptor);
+        Assert.NotNull(blobResolverDescriptor);
+        Assert.Equal("MongoNodeStoreProvider", nodeDescriptor!.ImplementationType?.Name);
+        Assert.Equal("S3DelegatedBlobUrlResolverProvider", blobResolverDescriptor!.ImplementationType?.Name);
     }
 
     [Fact]

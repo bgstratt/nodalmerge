@@ -49,17 +49,17 @@ public sealed class RuntimeRoomBroker
         return RuntimeRoomRegistrationResult.Registered(peers);
     }
 
-    public void Unregister(RuntimeConnectionState state)
+    public bool Unregister(RuntimeConnectionState state)
     {
         if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
         {
-            return;
+            return false;
         }
 
         var roomId = state.RoomId;
         if (!_rooms.TryGetValue(roomId, out var room))
         {
-            return;
+            return false;
         }
 
         room.TryRemove(state.SessionId, out _);
@@ -75,7 +75,10 @@ public sealed class RuntimeRoomBroker
         if (room.IsEmpty)
         {
             _rooms.TryRemove(roomId, out _);
+            return true;
         }
+
+        return false;
     }
 
     public async Task BroadcastAsync(

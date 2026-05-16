@@ -1,8 +1,8 @@
 # SpeechSlate Host Operational Parity Matrix
 
-Status: Draft baseline
+Status: Sidecar checkpoint recorded; Embedded execution pending
 Owner: Host runtime stream
-Last Updated: 2026-05-13
+Last Updated: 2026-05-14
 
 ## 1. Usage
 
@@ -36,12 +36,12 @@ Last Updated: 2026-05-13
 | SH-007 | Data-plane | list push/insert/update/delete/get parity | Pending | Pending |  |  |
 | SH-008 | Data-plane | pack/request/mst request/done parity | Pending | Pending |  |  |
 | SH-009 | Data-plane | recent-conflicts parity | Pending | Pending |  |  |
-| SH-010 | Signaling | webrtc-offer relay via runtime WS | Pending | Pending |  |  |
-| SH-011 | Signaling | webrtc-answer relay via runtime WS | Pending | Pending |  |  |
-| SH-012 | Signaling | webrtc-ice relay via runtime WS | Pending | Pending |  |  |
+| SH-010 | Signaling | webrtc-offer relay via runtime WS | Pass | Pending | Sidecar runtime logs 2026-05-14 | Relay observed during dual-browser mirroring session |
+| SH-011 | Signaling | webrtc-answer relay via runtime WS | Pass | Pending | Sidecar runtime logs 2026-05-14 | Relay observed during dual-browser mirroring session |
+| SH-012 | Signaling | webrtc-ice relay via runtime WS | Pass | Pending | Sidecar runtime logs 2026-05-14 | Relay observed during dual-browser mirroring session |
 | SH-013 | Presence | presence set/get/sweep parity | Pending | Pending |  |  |
 | SH-014 | Subscription | subscribe ack + filtered delivery parity | Pending | Pending |  |  |
-| SH-015 | Auth | token mint/validate parity | Pending | Pending |  |  |
+| SH-015 | Auth | token mint/validate parity | Pass | Pending | SpeechSlate API logs 2026-05-14 | Repeated /sync/token -> sidecar 200 responses |
 | SH-016 | Blob | blob-set/get/get-many parity | Pending | Pending |  |  |
 | SH-017 | Blob | request-upload grant/deny parity | Pending | Pending |  |  |
 | SH-018 | Blob | blob-request redirect/pack parity | Pending | Pending |  |  |
@@ -49,9 +49,9 @@ Last Updated: 2026-05-13
 | SH-020 | Resilience | invalid frame type recovery | Pending | Pending |  |  |
 | SH-021 | Resilience | oversized message handling | Pending | Pending |  |  |
 | SH-022 | Resilience | parallel connection isolation | Pending | Pending |  |  |
-| SH-023 | Ops | startup readiness checks parity | Pending | Pending |  |  |
+| SH-023 | Ops | startup readiness checks parity | Pass | Pending | Sidecar/API startup logs 2026-05-14 | Services listening and accepting traffic |
 | SH-024 | Ops | restart durability expectations | Pending | Pending |  |  |
-| SH-025 | Ops | observability (logs/metrics/trace id) parity | Pending | Pending |  |  |
+| SH-025 | Ops | observability (logs/metrics/trace id) parity | Pass | Pending | Sidecar runtime logs 2026-05-14 | Session/trace-rich logs present during live flow |
 | SH-026 | Security | approved public endpoint surface only | Pending | Pending |  |  |
 | SH-027 | Security | raw ffi/debug/demo endpoints internal-only | Pending | Pending |  |  |
 | SH-028 | Security | token/blob ownership remains API boundary | Pending | Pending |  |  |
@@ -71,3 +71,6 @@ Release recommendation conditions:
 |---|---|---|---|---|
 | 2026-05-13 | Sidecar | Matrix initialized | Pending | Plan bootstrap |
 | 2026-05-13 | Embedded | Matrix initialized | Pending | Plan bootstrap |
+| 2026-05-14 | Sidecar | S2 integration checklist + sidecar config profile added | In Progress | docs/acceptance/speechslate-host/S2_SIDECAR_IMPLEMENTATION_CHECKLIST.md |
+| 2026-05-14 | Sidecar | Dual-browser soak (Chrome + Edge), mirroring and persistence log validation | Checkpoint Pass | Sidecar/API runtime log capture during S2 closeout |
+| 2026-05-14 | Embedded | S4 checklist created and execution kickoff | In Progress | docs/acceptance/speechslate-host/S4_EMBEDDED_IMPLEMENTATION_CHECKLIST.md |

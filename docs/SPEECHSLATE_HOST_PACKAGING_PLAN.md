@@ -1,6 +1,6 @@
 # SpeechSlate Host Packaging and Operational Parity Plan
 
-Status: Draft for execution
+Status: Execution in progress (Sidecar complete, Embedded started)
 Owner: Host runtime stream
 Date: 2026-05-13
 
@@ -312,12 +312,17 @@ Execution status key:
 Slice status board:
 1. S0 Plan and Baseline Freeze: `Complete`
 2. S1 Managed + Native Packaging: `In Progress`
-3. S2 Sidecar Integration: `Not Started`
-4. S3 Sidecar Operational Parity Gate: `Not Started`
-5. S4 Embedded Package/Surface: `Not Started`
+3. S2 Sidecar Integration: `Complete`
+4. S3 Sidecar Operational Parity Gate: `In Progress` (checkpoint pass; remaining rows can continue in parallel)
+5. S4 Embedded Package/Surface: `In Progress`
 6. S5 Control-Plane In-Process Migration: `Not Started`
 7. S6 Embedded Operational Parity Gate: `Not Started`
 8. S7 Production Cutover and Runbooks: `Not Started`
+
+S2 implementation artifacts:
+1. Sidecar sample runtime profile: `dotnet-host/src/ActiveSync.DotNetHost/appsettings.SpeechSlate.Sidecar.sample.json`
+2. Sidecar execution checklist: `docs/acceptance/speechslate-host/S2_SIDECAR_IMPLEMENTATION_CHECKLIST.md`
+3. Parity tracking matrix: `docs/acceptance/speechslate-host/OPERATIONAL_PARITY_MATRIX.md`
 
 ## 12. Definition of Done
 

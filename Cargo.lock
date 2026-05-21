@@ -57,6 +57,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "activesync-host-axum"
+version = "0.1.0"
+dependencies = [
+ "activesync-server",
+ "axum",
+ "ed25519-dalek",
+ "tower-http 0.5.2",
+]
+
+[[package]]
 name = "activesync-host-core"
 version = "0.1.0"
 dependencies = [

@@ -3,12 +3,15 @@ name = "activesync-bridge"
 version = "0.1.0"
 edition = "2021"
 description = "WASM bridge: exposes activesync-core to JavaScript"
+readme = "README.md"
+keywords = ["crdt", "sync", "wasm", "javascript"]
+categories = ["wasm", "api-bindings"]
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-activesync-core = { path = "../core" }
+activesync-core = { version = "0.1.0", path = "../core" }
 ed25519-dalek = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

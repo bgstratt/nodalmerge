@@ -1,0 +1,23 @@
+{
+  "name": "activesync-sdk-js",
+  "version": "0.1.0",
+  "description": "High-level JavaScript SDK wrapper for ActiveSync room/sync/replay/offline/CAS/topology flows",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "keywords": [
+    "activesync",
+    "crdt",
+    "sync",
+    "offline",
+    "replay"
+  ],
+  "dependencies": {
+    "activesync-bridge": "^0.1.0"
+  }
+}

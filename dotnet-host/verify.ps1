@@ -5,7 +5,9 @@ param(
     [int]$StartupTimeoutSeconds = 45,
     [switch]$UseMongo,
     [string]$MongoConnectionString = "",
-    [string]$MongoDatabaseName = ""
+    [string]$MongoDatabaseName = "",
+    [switch]$UseNuGetPackages,
+    [string]$ActiveSyncPackageVersion = "0.1.0-local"
 )
 
 Set-StrictMode -Version Latest
@@ -129,7 +131,10 @@ try {
         ASPNETCORE_URLS = $BaseUrl
     }
 
-    if ([string]::IsNullOrWhiteSpace($env:ACTIVESYNC_HOST_FFI_DLL)) {
+    if ($UseNuGetPackages.IsPresent) {
+        Write-Host "Using package mode; native runtime should resolve from NuGet runtime assets."
+    }
+    elseif ([string]::IsNullOrWhiteSpace($env:ACTIVESYNC_HOST_FFI_DLL)) {
         $resolvedFfiDll = Resolve-FfiDllPath
         if ($resolvedFfiDll) {
             $hostEnv["ACTIVESYNC_HOST_FFI_DLL"] = $resolvedFfiDll
@@ -145,11 +150,23 @@ try {
         Write-Host "Using ACTIVESYNC_HOST_FFI_DLL from current environment"
     }
 
-    $hostArgs = @(
-        "run",
-        "--project", "src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj",
-        "--no-launch-profile",
-        "--",
+    if ($UseNuGetPackages.IsPresent) {
+        $restoreArgs = @(
+            "restore",
+            "./ActiveSync.DotNetHost.slnx",
+            "--configfile", "./NuGet.Local.config",
+            "-p:ActiveSyncUseNuGetPackages=true",
+            "-p:ActiveSyncPackageVersion=$ActiveSyncPackageVersion"
+        )
+
+        Write-Host "Restoring in package mode with NuGet.Local.config ..."
+        & dotnet @restoreArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "dotnet restore failed in package mode"
+        }
+    }
+
+    $runtimeArgs = @(
         "--ActiveSync:Providers:BlobStorage=S3Delegated",
         "--ActiveSync:Storage:S3Delegated:BaseUrl=$DelegateBaseUrl",
         "--ActiveSync:Storage:S3Delegated:PutPath=/v1/blobs/presign-put",
@@ -161,17 +178,33 @@ try {
     )
 
     if ($UseMongo.IsPresent) {
-        $hostArgs += "--ActiveSync:Providers:NodeStorage=Mongo"
+        $runtimeArgs += "--ActiveSync:Providers:NodeStorage=Mongo"
         if (-not [string]::IsNullOrWhiteSpace($MongoConnectionString)) {
-            $hostArgs += "--ActiveSync:Storage:Mongo:ConnectionString=$MongoConnectionString"
+            $runtimeArgs += "--ActiveSync:Storage:Mongo:ConnectionString=$MongoConnectionString"
         }
         if (-not [string]::IsNullOrWhiteSpace($MongoDatabaseName)) {
-            $hostArgs += "--ActiveSync:Storage:Mongo:DatabaseName=$MongoDatabaseName"
+            $runtimeArgs += "--ActiveSync:Storage:Mongo:DatabaseName=$MongoDatabaseName"
         }
     }
     else {
-        $hostArgs += "--ActiveSync:Providers:NodeStorage=InMemory"
+        $runtimeArgs += "--ActiveSync:Providers:NodeStorage=InMemory"
     }
+
+    $hostArgs = @(
+        "run",
+        "--project", "src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj",
+        "--no-launch-profile"
+    )
+
+    if ($UseNuGetPackages.IsPresent) {
+        $hostArgs += @(
+            "-p:ActiveSyncUseNuGetPackages=true",
+            "-p:ActiveSyncPackageVersion=$ActiveSyncPackageVersion"
+        )
+    }
+
+    $hostArgs += "--"
+    $hostArgs += $runtimeArgs
 
     Write-Host "Starting Host with delegated blob profile..."
     $process = Start-Process dotnet -ArgumentList $hostArgs -NoNewWindow -PassThru -Env $hostEnv

@@ -3,9 +3,12 @@ name = "activesync-host-core"
 version = "0.1.0"
 edition = "2021"
 description = "Host-neutral orchestration surface for ActiveSync"
+readme = "README.md"
+keywords = ["crdt", "sync", "host", "orchestration"]
+categories = ["network-programming", "api-bindings"]
 
 [dependencies]
-activesync-core = { path = "../core" }
+activesync-core = { version = "0.1.0", path = "../core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

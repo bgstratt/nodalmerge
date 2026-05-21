@@ -8,6 +8,11 @@
     <PackageId>ActiveSync.Host.Abstractions</PackageId>
     <Description>Provider contracts and abstractions for ActiveSync host integrations.</Description>
     <PackageTags>activesync;sync;crdt;host</PackageTags>
+    <PackageReadmeFile>NUGET_README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\NUGET_README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
 
 </Project>

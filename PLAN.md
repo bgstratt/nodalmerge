@@ -4,6 +4,20 @@
 > Beat Firebase, Yjs, Automerge, Replicache, ElectricSQL by being a low-level,
 > extensible, E2EE-ready CRDT engine — not a black box.
 
+## Open-Core Packaging Track
+
+This plan now runs with an explicit product split:
+
+- Open source: runtime core, transports, local persistence adapters, replay, and baseline diagnostics.
+- Paid/hosted: orchestration, enterprise topology management, scaling layer, managed relay/auth, advanced observability/merge tooling, and analytics.
+
+Sequencing:
+
+- Phase 1: package-first adoption (`npm`, NuGet, crates) with a minimal API profile: room, sync, replay, offline, CAS, topology.
+- Phase 2: hosted relay/sync service monetization with operational guarantees and enterprise controls.
+
+Reference: `docs/OPEN_CORE_PACKAGING_STRATEGY.md`.
+
 ---
 
 ## Current State (Baseline)

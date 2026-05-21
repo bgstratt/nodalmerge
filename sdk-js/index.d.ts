@@ -1,0 +1,139 @@
+export interface ActiveSyncSdkOptions {
+  wsUrl: string;
+  roomId: string;
+  authorKey?: Uint8Array;
+  wasmModule?: RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+  token?: unknown;
+  tickIntervalMs?: number;
+  maxOpsPerTick?: number;
+  reconnect?: {
+    enabled?: boolean;
+    initialDelayMs?: number;
+    maxDelayMs?: number;
+    factor?: number;
+    maxAttempts?: number;
+  };
+  offline?: {
+    persistenceKey?: string;
+  };
+  transport?: {
+    mode?: "ws-only" | "auto";
+  };
+}
+
+export interface TopologySnapshot {
+  connected: boolean;
+  outboxDepth: number;
+  nodeCount: number;
+  frontier: string[];
+  pubkey: string;
+  transportPolicy: "ws-only" | "auto";
+  activeTransport: "ws-only" | "ws+webrtc";
+}
+
+export type ActiveSyncRuntimeMessageType =
+  | "welcome"
+  | "pack"
+  | "blob-pack"
+  | "blob-redirect"
+  | "presence"
+  | "presence-snapshot"
+  | "presence-leave"
+  | "peer-joined"
+  | "peer-left"
+  | "peer-signal"
+  | "webrtc-offer"
+  | "webrtc-answer"
+  | "webrtc-ice"
+  | "error"
+  | "noop-ack"
+  | "session-opened"
+  | "session-closed";
+
+export interface ActiveSyncRuntimeMessage {
+  type: ActiveSyncRuntimeMessageType;
+  [key: string]: unknown;
+}
+
+export type ActiveSyncSdkEvent =
+  | "message"
+  | "error"
+  | "state"
+  | "connected"
+  | "disconnected"
+  | "reconnect"
+  | "presence"
+  | "signal"
+  | "runtime-message"
+  | "transport";
+
+export declare class ActiveSyncSdk {
+  constructor(options: ActiveSyncSdkOptions);
+  initialize(): Promise<void>;
+
+  compat: ReturnType<typeof createSdkMigrationShim>;
+
+  room: {
+    connect: () => Promise<void>;
+    disconnect: () => void;
+  };
+
+  sync: {
+    set: (key: string, value: string) => void;
+    get: (key: string) => string | null;
+    del: (key: string) => void;
+    push: () => void;
+    pull: () => void;
+  };
+
+  replay: {
+    state: () => Record<string, string>;
+    canonicalHash: () => string;
+    replayPack: (packB64: string) => unknown;
+  };
+
+  offline: {
+    outboxDepth: () => number;
+    flush: () => void;
+    clearPersisted: () => void;
+  };
+
+  presence: {
+    set: (data: unknown, options?: { sessionId?: string; ttlMs?: number; nowUnixMs?: number }) => void;
+    getAll: () => void;
+    sweep: (nowUnixMs: number) => void;
+  };
+
+  signaling: {
+    relay: (type: string, to: string, payload?: Record<string, unknown>) => void;
+    offer: (to: string, sdp: string) => void;
+    answer: (to: string, sdp: string) => void;
+    ice: (to: string, candidate: string, sdpMid?: string, sdpMLineIndex?: number) => void;
+  };
+
+  cas: {
+    setBlob: (key: string, bytes: Uint8Array) => string;
+    getBlob: (hashHex: string) => Uint8Array;
+    requestMissingBlobs: () => void;
+  };
+
+  topology: {
+    snapshot: () => TopologySnapshot;
+  };
+
+  on(event: ActiveSyncSdkEvent, handler: (payload: unknown) => void): () => void;
+}
+
+export declare function parseRuntimeMessage(data: string): ActiveSyncRuntimeMessage | null;
+
+export declare function createSdkMigrationShim(sdk: ActiveSyncSdk): {
+  sendPack: () => void;
+  requestServerPack: () => void;
+  setPresence: (data: unknown, options?: { sessionId?: string; ttlMs?: number; nowUnixMs?: number }) => void;
+  sendWebRtcOffer: (to: string, sdp: string) => void;
+  sendWebRtcAnswer: (to: string, sdp: string) => void;
+  sendWebRtcIce: (to: string, candidate: string, sdpMid?: string, sdpMLineIndex?: number) => void;
+  onRuntimeEvent: (type: ActiveSyncRuntimeMessageType, handler: (message: ActiveSyncRuntimeMessage) => void) => () => void;
+};
+
+export declare function createActiveSyncSdk(options: ActiveSyncSdkOptions): Promise<ActiveSyncSdk>;

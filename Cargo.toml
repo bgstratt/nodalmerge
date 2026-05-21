@@ -3,6 +3,7 @@ members = [
     "core",
     "gc",
     "host-core",
+    "host-axum",
     "host-ffi",
     "server",
     "bridge",

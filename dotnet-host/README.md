@@ -132,6 +132,34 @@ Runtime resolution order:
 
 If loading still fails, set `ACTIVESYNC_HOST_FFI_DLL` explicitly to remove path ambiguity.
 
+## Local NuGet Packaging (Pre-Publish)
+
+Use this flow to validate managed/native packaging locally before publishing.
+
+1. Build and pack local packages:
+- `cd dotnet-host`
+- `pwsh -File .\pack-local-nuget.ps1 -Version 0.1.0-local`
+
+This writes packages to `artifacts/nuget-local`.
+
+2. Restore host in package-consumer mode:
+- `dotnet restore .\ActiveSync.DotNetHost.slnx --configfile .\NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
+
+3. Run host against local packages:
+- `dotnet run --project .\src\ActiveSync.DotNetHost\ActiveSync.DotNetHost.csproj --no-launch-profile -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
+
+Notes:
+- Default build uses project references; package mode is opt-in via `ActiveSyncUseNuGetPackages=true`.
+- Package mode includes native runtime package references (`win-x64`, `linux-x64`) so runtime assets resolve via NuGet instead of local cargo outputs.
+
+Dead-simple surface reference:
+
+- `DEAD_SIMPLE_API.md`
+
+NuGet package readme source used in package metadata:
+
+- `NUGET_README.md`
+
 Optional override:
 
 - Set ACTIVESYNC_HOST_FFI_DLL to an absolute path for the native library file.
@@ -168,6 +196,10 @@ Expected success markers in output:
 If `verify.ps1` is run outside `dotnet-host`, use:
 
 - `Set-Location <repo>\dotnet-host; .\verify.ps1`
+
+Package-mode smoke (local NuGet feed):
+
+- `Set-Location <repo>\dotnet-host; .\verify.ps1 -UseNuGetPackages -ActiveSyncPackageVersion 0.1.0-local`
 
 ## Auth Profile Mode
 

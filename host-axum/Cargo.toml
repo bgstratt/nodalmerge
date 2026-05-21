@@ -1,0 +1,14 @@
+[package]
+name = "activesync-host-axum"
+version = "0.1.0"
+edition = "2021"
+description = "Paper-thin Axum adapter for embedding ActiveSync host runtime"
+readme = "README.md"
+keywords = ["crdt", "sync", "axum", "host"]
+categories = ["network-programming", "web-programming::http-server"]
+
+[dependencies]
+activesync-server = { version = "0.1.0", path = "../server" }
+axum = { version = "0.7", features = ["ws"] }
+ed25519-dalek = { workspace = true }
+tower-http = { version = "0.5", features = ["cors"] }

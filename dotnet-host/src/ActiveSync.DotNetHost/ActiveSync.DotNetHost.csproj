@@ -5,11 +5,20 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>7575e404-45c6-42e8-9cba-3a37140683ce</UserSecretsId>
+    <ActiveSyncUseNuGetPackages Condition="'$(ActiveSyncUseNuGetPackages)' == ''">false</ActiveSyncUseNuGetPackages>
+    <ActiveSyncPackageVersion Condition="'$(ActiveSyncPackageVersion)' == ''">0.1.0-local</ActiveSyncPackageVersion>
   </PropertyGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="'$(ActiveSyncUseNuGetPackages)' != 'true'">
     <ProjectReference Include="..\ActiveSync.Host.Abstractions\ActiveSync.Host.Abstractions.csproj" />
     <ProjectReference Include="..\ActiveSync.Host.Composition\ActiveSync.Host.Composition.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(ActiveSyncUseNuGetPackages)' == 'true'">
+    <PackageReference Include="ActiveSync.Host.Abstractions" Version="$(ActiveSyncPackageVersion)" />
+    <PackageReference Include="ActiveSync.Host.Composition" Version="$(ActiveSyncPackageVersion)" />
+    <PackageReference Include="ActiveSync.DotNetHost.Native.win-x64" Version="$(ActiveSyncPackageVersion)" />
+    <PackageReference Include="ActiveSync.DotNetHost.Native.linux-x64" Version="$(ActiveSyncPackageVersion)" />
   </ItemGroup>
 
   <ItemGroup>

@@ -20,6 +20,18 @@ The target architecture is **host-owned runtime** as the primary end state:
 
 Standalone `activesync-server` remains a first-party host adapter, not deprecated.
 
+Open-core alignment:
+
+- Keep deterministic runtime semantics and protocol primitives open and packageable.
+- Monetize hosted operational capability (managed orchestration, topology operations, observability, scale, relay/auth/security, analytics) rather than withholding core sync semantics.
+
+Adoption-to-monetization sequence:
+
+1. Package the runtime surfaces first (`npm`, NuGet, crates) with a dead-simple room/sync/replay/offline/CAS/topology API.
+2. Use that package surface as the client/host entry point for managed hosted offerings.
+
+Reference strategy document: `docs/OPEN_CORE_PACKAGING_STRATEGY.md`.
+
 GC alignment note:
 
 1. Host extraction depends on GC contract freeze and lifecycle ownership decisions defined in `docs/GC_IMPLEMENTATION_PLAN.md` and `docs/delegated-storage-gc.md`.

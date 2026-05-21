@@ -8,7 +8,12 @@
     <PackageId>ActiveSync.Host.Composition</PackageId>
     <Description>Dependency injection composition and provider wiring for ActiveSync host integrations.</Description>
     <PackageTags>activesync;sync;crdt;host;composition</PackageTags>
+    <PackageReadmeFile>NUGET_README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\NUGET_README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.0" />

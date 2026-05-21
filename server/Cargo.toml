@@ -9,9 +9,9 @@ name = "activesync-server"
 path = "src/main.rs"
 
 [dependencies]
-activesync-core = { path = "../core" }
-activesync-gc = { path = "../gc" }
-activesync-host-core = { path = "../host-core" }
+activesync-core = { version = "0.1.0", path = "../core" }
+activesync-gc = { version = "0.1.0", path = "../gc" }
+activesync-host-core = { version = "0.1.0", path = "../host-core" }
 ed25519-dalek = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { workspace = true }

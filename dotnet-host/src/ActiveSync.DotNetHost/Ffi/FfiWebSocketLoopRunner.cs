@@ -1,4 +1,5 @@
 using ActiveSync.DotNetHost.Runtime;
+using System.Diagnostics.Metrics;
 using System.Net.WebSockets;
 using System.Text;
 
@@ -6,6 +7,11 @@ namespace ActiveSync.DotNetHost.Ffi;
 
 public sealed class FfiWebSocketLoopRunner
 {
+    private static readonly Meter RuntimeControlPlaneMeter = new("ActiveSync.DotNetHost.RuntimeControlPlane", "1.0.0");
+    private static readonly Counter<long> RuntimeControlPlaneDeniedCounter = RuntimeControlPlaneMeter.CreateCounter<long>(
+        "runtime_control_plane_denied_total"
+    );
+
     public const int MaxInboundMessageBytes = 64 * 1024;
 
     public async Task RunAsync(
@@ -102,6 +108,7 @@ public sealed class FfiWebSocketLoopRunner
                     continue;
                 }
 
+                RecordControlPlaneDenyMetricIfApplicable(bridgeResult);
                 var errorText = RuntimeErrorEnvelopeBuilder.BuildStatusError(bridgeResult.Status.ToString());
                 var errorBytes = Encoding.UTF8.GetBytes(errorText);
                 var sentStatusError = await TrySendAsync(
@@ -128,6 +135,32 @@ public sealed class FfiWebSocketLoopRunner
         {
             // Socket was disposed during shutdown/disconnect race.
         }
+    }
+
+    private static void RecordControlPlaneDenyMetricIfApplicable(FfiBridgeResult bridgeResult)
+    {
+        if (bridgeResult.Status != AsStatus.Policy)
+        {
+            return;
+        }
+
+        var command = string.IsNullOrWhiteSpace(bridgeResult.DenyMetadata?.Command)
+            ? "ffi"
+            : bridgeResult.DenyMetadata!.Command;
+        var requiredCapability = string.IsNullOrWhiteSpace(bridgeResult.DenyMetadata?.RequiredCapability)
+            ? "unknown"
+            : bridgeResult.DenyMetadata!.RequiredCapability;
+        var reasonClass = string.IsNullOrWhiteSpace(bridgeResult.DenyMetadata?.ReasonClass)
+            ? "reject.control_plane_forbidden"
+            : bridgeResult.DenyMetadata!.ReasonClass;
+
+        RuntimeControlPlaneDeniedCounter.Add(
+            1,
+            KeyValuePair.Create<string, object?>("host", "dotnet-host"),
+            KeyValuePair.Create<string, object?>("command", command),
+            KeyValuePair.Create<string, object?>("required_capability", requiredCapability),
+            KeyValuePair.Create<string, object?>("reason_class", reasonClass)
+        );
     }
 
     private static async Task<bool> TrySendAsync(

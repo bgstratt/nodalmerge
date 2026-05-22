@@ -18,6 +18,7 @@ public sealed record RoomTokenValidationRequest(
     string PeerPubkeyHex,
     long ExpiryUnixSeconds,
     IReadOnlyList<string> Capabilities,
+    string? CapabilityProfileVersion,
     string SignatureHex
 );
 
@@ -32,7 +33,8 @@ public sealed record RoomTokenMintRequest(
     string RoomId,
     string PeerPubkeyHex,
     int? LifetimeSeconds,
-    IReadOnlyList<string>? RequestedCapabilities
+    IReadOnlyList<string>? RequestedCapabilities,
+    string? CapabilityProfileVersion
 );
 
 public sealed record RoomTokenMintResult(

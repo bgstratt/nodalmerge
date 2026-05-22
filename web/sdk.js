@@ -463,7 +463,11 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
       }
 
       case 'error':
-        onError(new Error('server: ' + msg.msg));
+        {
+          const err = new Error('server: ' + msg.msg);
+          err.serverEnvelope = msg;
+          onError(err);
+        }
         break;
 
       // Presence, WebRTC signaling, room-lock acks: mostly SDK-handled (F2/D2).
@@ -592,6 +596,127 @@ function matchesPrefix(path, ns) {
   if (!ns) return true;
   const p = ns.endsWith('/') ? ns : ns + '/';
   return path === ns || path.startsWith(p);
+}
+
+// -----------------------------------------------------------------------------
+// Capability helpers (P3) — namespace protection ergonomics
+// -----------------------------------------------------------------------------
+
+function normalizeCapabilityScope(scope) {
+  const s = String(scope || '').trim().toLowerCase();
+  if (s !== 'read' && s !== 'write' && s !== 'derive') {
+    throw new Error(`invalid capability scope: ${scope}`);
+  }
+  return s;
+}
+
+function normalizeNamespacePattern(pattern) {
+  const p = String(pattern || '').trim().replace(/^\/+/, '');
+  if (!p || p === '**') return '**';
+  if (p.includes('*')) return p;
+  if (p.endsWith('/')) return p + '**';
+  return p + '/**';
+}
+
+/**
+ * Build a capability string from a scope + path pattern.
+ *
+ * Examples:
+ * - capability('read', 'world/**') -> "read:world/**"
+ * - capability('write', 'intent/*') -> "write:intent/*"
+ */
+export function capability(scope, pathPattern) {
+  const s = normalizeCapabilityScope(scope);
+  const p = String(pathPattern || '').trim().replace(/^\/+/, '') || '**';
+  return `${s}:${p}`;
+}
+
+/**
+ * Build namespace-scoped capability strings.
+ *
+ * Input values are treated as namespace roots by default:
+ * - "world"      -> "read:world/**"
+ * - "intent/"    -> "write:intent/**"
+ * - "world/**"   -> kept as-is
+ */
+export function namespaceCapabilities(spec = {}) {
+  const out = [];
+  for (const scope of ['read', 'write', 'derive']) {
+    const roots = Array.isArray(spec[scope]) ? spec[scope] : [];
+    for (const root of roots) {
+      out.push(capability(scope, normalizeNamespacePattern(root)));
+    }
+  }
+  return [...new Set(out)].sort();
+}
+
+function normalizeTokenCapsOption(tokenCaps) {
+  if (tokenCaps == null) return [];
+  if (Array.isArray(tokenCaps)) {
+    return [...new Set(tokenCaps.map(c => String(c).trim()).filter(Boolean))].sort();
+  }
+  if (typeof tokenCaps === 'object') {
+    return namespaceCapabilities(tokenCaps);
+  }
+  throw new Error('createDoc: tokenCaps must be a string[] or namespace capability spec object');
+}
+
+function parseRejectPrefix(message) {
+  const text = String(message ?? '').trim();
+  const head = /^reject\.([a-z0-9_\-.]+)(?::\s*(.*))?$/i.exec(text);
+  if (!head) return null;
+
+  const rest = head[2] || '';
+  // Prefer canonical key-value form when present.
+  let cmd = /(?:^|\s)command=([^\s]+)/i.exec(rest)?.[1] ?? null;
+  let required = /(?:^|\s)requires=([^\s]+)/i.exec(rest)?.[1] ?? null;
+
+  // Back-compat parsing for older freeform shape:
+  // "set-policy requires policy.admin"
+  if (!cmd || !required) {
+    const legacy = /^([^\s]+)\s+requires\s+([^\s]+)$/i.exec(rest.trim());
+    if (legacy) {
+      cmd = cmd ?? legacy[1];
+      required = required ?? legacy[2];
+    }
+  }
+
+  if (cmd) cmd = cmd.replace(/[;,]$/, '');
+  if (required) required = required.replace(/[;,]$/, '');
+
+  return {
+    reasonClass: `reject.${head[1]}`,
+    command: cmd,
+    requiredCapability: required,
+  };
+}
+
+function parseRejectionEnvelope(err) {
+  if (!err || typeof err !== 'object') return null;
+
+  const env = err.serverEnvelope;
+  const msg = env?.msg ?? err.message ?? '';
+  const fromPrefix = parseRejectPrefix(msg);
+  let reasonClass = env?.reason_class ?? fromPrefix?.reasonClass ?? null;
+  const command = env?.command ?? fromPrefix?.command ?? null;
+  const requiredCapability = env?.required_capability ?? fromPrefix?.requiredCapability ?? null;
+
+  if (reasonClass && !String(reasonClass).startsWith('reject.')) {
+    reasonClass = `reject.${String(reasonClass).replace(/^reject\./, '')}`;
+  }
+
+  if (!reasonClass && !command && !requiredCapability) return null;
+
+  return {
+    at: Date.now(),
+    source: 'server',
+    reasonClass,
+    command,
+    requiredCapability,
+    message: msg,
+    status: env?.status ?? null,
+    raw: env ?? null,
+  };
 }
 
 // Glob compile: `/**` trailing = optional subtree, `**` = any chars incl. `/`,
@@ -970,11 +1095,14 @@ function makePeerMesh({
  *   room: string,
  *   authorSeed?: Uint8Array,
  *   roomSeed?: Uint8Array,            // if set, sign a capability token on connect
- *   tokenCaps?: string[],              // e.g. ["write:world/**"]; empty = full
+ *   tokenCaps?: string[] | { read?: string[], write?: string[], derive?: string[] },
+ *                                      // string[]: ["write:world/**"]
+ *                                      // object:   { read:["world"], write:["intent"] }
  *   tokenExpirySecs?: number,          // default 24h
  *   tokenProvider?: (ctx) => Promise,  // server-mint hook; receives {room,pubkeyHex},
  *                                      //   returns {peer_pubkey_hex,expiry_secs,capabilities,sig_hex}.
  *                                      //   Takes precedence over roomSeed when set.
+ *   onRejection?: (ev) => void,         // typed server rejection events
  *   autoConnect?: boolean,             // default true
  *   subscribe?: string[],              // F3a: glob patterns to materialize; default ["**"]
  *   transport?: 'auto' | 'ws-only',    // default 'auto' (WS + WebRTC when available)
@@ -995,6 +1123,7 @@ export async function createDoc(opts) {
     tokenCaps = [],
     tokenExpirySecs = 60 * 60 * 24,
     tokenProvider = null,
+    onRejection = null,
     autoConnect = true,
     subscribe: subscribePatterns = ['**'],
     transport: transportMode = 'auto',
@@ -1030,6 +1159,7 @@ export async function createDoc(opts) {
   const connectE = makeEmitter();
   const disconnectE = makeEmitter();
   const errorE = makeEmitter();
+  const rejectionE = makeEmitter();
   // E3 — undo manager hook. Fires *before* each local mutation with
   // enough state to build a compensating op. makeUndoManager() subscribes
   // here; all other code should call afterLocalMutation() as before.
@@ -1042,6 +1172,31 @@ export async function createDoc(opts) {
   const CONFLICT_BUFFER_MAX = 256;
   /** @type {{ at:number, kind:string, key:string, localOp:any, winningOp:any, byYou:boolean, raw:any }[]} */
   const conflictBuffer = [];
+  const REJECTION_BUFFER_MAX = 128;
+  /** @type {{ at:number, source:'server', reasonClass:string|null, command:string|null, requiredCapability:string|null, message:string, status:number|null, raw:any }[]} */
+  const rejectionBuffer = [];
+
+  function recordRejection(ev) {
+    rejectionBuffer.push(ev);
+    while (rejectionBuffer.length > REJECTION_BUFFER_MAX) rejectionBuffer.shift();
+    try { rejectionE.emit(ev); } catch (_) {}
+    try { onRejection?.(ev); } catch (_) {}
+    metrics.emit('rejection', 1, {
+      source: ev.source,
+      reason_class: ev.reasonClass ?? 'unknown',
+      command: ev.command ?? 'unknown',
+      required_capability: ev.requiredCapability ?? 'unknown',
+    });
+  }
+
+  function handleSdkError(err) {
+    const rejection = parseRejectionEnvelope(err);
+    if (rejection) {
+      recordRejection(rejection);
+      try { err.rejection = rejection; } catch (_) {}
+    }
+    errorE.emit(err);
+  }
 
   function decodeOpValue(op) {
     if (!op || typeof op !== 'object') return op;
@@ -1143,7 +1298,8 @@ export async function createDoc(opts) {
     }
     if (!roomSeed) return null;
     const expiry = Math.floor(Date.now() / 1000) + tokenExpirySecs;
-    const caps = tokenCaps.length > 0 ? tokenCaps : null;
+    const normalizedCaps = normalizeTokenCapsOption(tokenCaps);
+    const caps = normalizedCaps.length > 0 ? normalizedCaps : null;
     return JSON.parse(sign_room_token(room, pubkeyHex, BigInt(expiry), roomSeed, caps));
   }
 
@@ -1295,7 +1451,7 @@ export async function createDoc(opts) {
     onRemotePack: () => emitChange({ source: 'remote', type: 'pack' }),
     onConnect: () => { connectE.emit(); presence._onConnect(); },
     onDisconnect: () => { disconnectE.emit(); presence._onDisconnect(); },
-    onError: (err) => errorE.emit(err),
+    onError: (err) => handleSdkError(err),
     onPresence: (msg) => presence._onMessage(msg),
     onPeerJoined: (msg) => { mesh.onPeerJoined(msg.pubkey || msg.from); presence._onPeerJoined(msg); },
     onPeerLeft: (msg) => { mesh.onPeerLeft(msg.from); presence._onPeerLeft(msg); },
@@ -1897,6 +2053,11 @@ export async function createDoc(opts) {
     onConnect(cb)    { return connectE.on(cb); },
     onDisconnect(cb) { return disconnectE.on(cb); },
     onError(cb)      { return errorE.on(cb); },
+    onRejection(cb)  { return rejectionE.on(cb); },
+    recentRejections(sinceMs = 5 * 60 * 1000) {
+      const cutoff = Date.now() - sinceMs;
+      return rejectionBuffer.filter(ev => ev.at >= cutoff).slice();
+    },
     // G9 — conflict surfacing. `cb` is invoked with
     // `{ at, kind, key, localOp, winningOp:{...,author,lamport}, byYou, raw }`.
     // Fired once per conflict per SDK lifetime (the bridge dedups by

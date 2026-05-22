@@ -57,7 +57,7 @@ async fn import_nodes_rejects_lamport_ceiling_and_wall_skew() {
     let bad_lamport = node_at(&sk, LAMPORT_SLACK + 10, now_ms, "b");
     let bad_wall = node_at(&sk, 2, now_ms + WALL_SKEW_MAX_MS + 3_600_000, "c");
 
-    let (accepted, errors) = import_nodes(&room, vec![
+    let (accepted, _, errors) = import_nodes(&room, vec![
         good,
         bad_lamport,
         bad_wall,
@@ -99,7 +99,8 @@ async fn import_nodes_accepts_nodes_within_both_bounds() {
     let at_lamport_edge = node_at(&sk, LAMPORT_SLACK, now_ms, "e1");
     let at_wall_edge = node_at(&sk, 1, now_ms + 60_000, "e2");
 
-    let (accepted, errors) = import_nodes(&room, vec![at_lamport_edge, at_wall_edge]).await;
+    let (accepted, _, errors) = import_nodes(&room, vec![at_lamport_edge, at_wall_edge]).await;
     assert_eq!(accepted, 2, "boundary nodes must be accepted; errors={errors:?}");
     assert!(errors.is_empty(), "unexpected errors: {errors:?}");
 }
+

@@ -39,7 +39,7 @@ async fn room_survives_restart_with_nodes_and_blobs() {
         let n1 = make_node(&sk, "hello", b"world");
         let n2 = make_node(&sk, "answer", b"42");
         let n3 = make_node(&sk, "rust", b"ferris");
-        let (accepted, errs) = import_nodes(&room, vec![n1.clone(), n2.clone(), n3.clone()]).await;
+        let (accepted, _, errs) = import_nodes(&room, vec![n1.clone(), n2.clone(), n3.clone()]).await;
         assert_eq!(accepted, 3);
         assert!(errs.is_empty());
         // Also persist a blob.
@@ -94,7 +94,7 @@ async fn large_room_hydrates_quickly() {
             let node = g.get_nodes(&[id]).into_iter().next().unwrap().clone();
             batch.push(node);
         }
-        let (accepted, _) = import_nodes(&room, batch).await;
+        let (accepted, _, _) = import_nodes(&room, batch).await;
         assert_eq!(accepted, N);
         drop(room);
     }
@@ -113,3 +113,4 @@ async fn large_room_hydrates_quickly() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+

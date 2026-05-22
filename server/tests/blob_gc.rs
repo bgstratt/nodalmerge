@@ -70,7 +70,7 @@ async fn blob_gc_two_phase_deletes_orphans_only() {
 
     // --- install a SetBlob node that references ONLY the live hash --------
     let node = make_setblob_node(&sk, "avatar", live_hash);
-    let (accepted, errs) = import_nodes(&room, vec![node]).await;
+    let (accepted, _, errs) = import_nodes(&room, vec![node]).await;
     assert_eq!(accepted, 1);
     assert!(errs.is_empty());
 
@@ -137,7 +137,7 @@ async fn blob_gc_clears_tombstone_when_blob_becomes_live_again() {
 
     // Now install a SetBlob op referencing it.
     let node = make_setblob_node(&sk, "k", hash);
-    let (accepted, _) = import_nodes(&room, vec![node]).await;
+    let (accepted, _, _) = import_nodes(&room, vec![node]).await;
     assert_eq!(accepted, 1);
 
     // Even with grace=0, the sweep must clear the tombstone rather than
@@ -165,3 +165,4 @@ async fn blob_gc_is_noop_on_in_memory_persistence() {
     let deleted = rooms.sweep_blobs(Duration::ZERO).await;
     assert_eq!(deleted, 0, "NoPersistence must never report deletions");
 }
+

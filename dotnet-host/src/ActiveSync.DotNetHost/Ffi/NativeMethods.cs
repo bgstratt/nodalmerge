@@ -47,11 +47,27 @@ public static class NativeMethods
         out AsBytesOwned outEventsBin
     );
 
+    [DllImport(LibraryName, EntryPoint = "as_host_submit_command_ex")]
+    public static extern AsStatus HostSubmitCommandEx(
+        nint engine,
+        AsBytesView commandBin,
+        out AsBytesOwned outEventsBin,
+        out AsBytesOwned outDenyMetadataJson
+    );
+
     [DllImport(LibraryName, EntryPoint = "as_host_submit_command_json")]
     public static extern AsStatus HostSubmitCommandJson(
         nint engine,
         AsBytesView commandJson,
         out AsBytesOwned outEventsJson
+    );
+
+    [DllImport(LibraryName, EntryPoint = "as_host_submit_command_json_ex")]
+    public static extern AsStatus HostSubmitCommandJsonEx(
+        nint engine,
+        AsBytesView commandJson,
+        out AsBytesOwned outEventsJson,
+        out AsBytesOwned outDenyMetadataJson
     );
 
     [DllImport(LibraryName, EntryPoint = "as_bytes_owned_free")]

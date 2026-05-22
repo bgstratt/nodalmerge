@@ -1,5 +1,6 @@
 using ActiveSync.DotNetHost.Ffi;
 using ActiveSync.DotNetHost.Runtime;
+using System.Diagnostics.Metrics;
 
 namespace ActiveSync.DotNetHost.Tests;
 
@@ -69,6 +70,40 @@ public class RuntimeMessageProcessorTests
     }
 
     [Fact]
+    public void Bridge_failure_with_deny_metadata_surfaces_diagnostics_in_error_envelope()
+    {
+        var bridge = new FakeRuntimeCommandBridge(
+            FfiJsonBridgeResult.Failure(
+                AsStatus.Protocol,
+                new FfiDenyMetadata(
+                    "reject.protocol_violation",
+                    "client-hello",
+                    "unknown",
+                    "peer mismatch"
+                )
+            )
+        );
+        var mapper = new RuntimeProtocolMapper();
+        var processor = new RuntimeMessageProcessor(bridge, mapper);
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+
+        var result = processor.ProcessIncomingText("{\"type\":\"noop\"}", state);
+
+        Assert.False(result.DispatchSucceeded);
+        Assert.False(result.ShouldCloseConnection);
+        Assert.Single(result.OutboundMessages);
+        Assert.Contains("\"status\":\"Protocol\"", result.OutboundMessages[0]);
+        Assert.Contains("\"msg\":\"peer mismatch\"", result.OutboundMessages[0]);
+        Assert.Contains("\"reason_class\":\"reject.protocol_violation\"", result.OutboundMessages[0]);
+        Assert.Contains("\"command\":\"client-hello\"", result.OutboundMessages[0]);
+    }
+
+    [Fact]
     public void Event_map_failure_emits_error_and_no_close()
     {
         var bridge = new FakeRuntimeCommandBridge(
@@ -133,6 +168,76 @@ public class RuntimeMessageProcessorTests
         Assert.False(result.ShouldCloseConnection);
         Assert.Single(result.OutboundMessages);
         Assert.Contains("\"status\":\"Protocol\"", result.OutboundMessages[0]);
+    }
+
+    [Fact]
+    public void Set_policy_without_capability_returns_control_plane_forbidden_error_envelope()
+    {
+        using var metrics = new ControlPlaneDenyMeterCapture();
+        var bridge = new FakeRuntimeCommandBridge();
+        var mapper = new RuntimeProtocolMapper();
+        var processor = new RuntimeMessageProcessor(bridge, mapper);
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+
+        var beforeDenied = metrics.GetTotalByTags(
+            "dotnet-host",
+            "set-policy",
+            "policy.admin",
+            "reject.control_plane_forbidden"
+        );
+
+        var result = processor.ProcessIncomingText("{\"type\":\"set-policy\",\"default\":\"allow\",\"rules\":[]}", state);
+
+        Assert.False(result.DispatchSucceeded);
+        Assert.False(result.ShouldCloseConnection);
+        Assert.Single(result.OutboundMessages);
+        Assert.Contains("\"type\":\"error\"", result.OutboundMessages[0]);
+        Assert.Contains("reject.control_plane_forbidden: command=set-policy requires=policy.admin", result.OutboundMessages[0]);
+        Assert.Empty(bridge.Commands);
+        Assert.True(
+            metrics.GetTotalByTags("dotnet-host", "set-policy", "policy.admin", "reject.control_plane_forbidden")
+            >= beforeDenied + 1
+        );
+    }
+
+    [Fact]
+    public void Start_tick_without_capability_returns_control_plane_forbidden_error_envelope()
+    {
+        using var metrics = new ControlPlaneDenyMeterCapture();
+        var bridge = new FakeRuntimeCommandBridge();
+        var mapper = new RuntimeProtocolMapper();
+        var processor = new RuntimeMessageProcessor(bridge, mapper);
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+
+        var beforeDenied = metrics.GetTotalByTags(
+            "dotnet-host",
+            "start-tick",
+            "tick.admin",
+            "reject.control_plane_forbidden"
+        );
+
+        var result = processor.ProcessIncomingText("{\"type\":\"start-tick\"}", state);
+
+        Assert.False(result.DispatchSucceeded);
+        Assert.False(result.ShouldCloseConnection);
+        Assert.Single(result.OutboundMessages);
+        Assert.Contains("\"type\":\"error\"", result.OutboundMessages[0]);
+        Assert.Contains("reject.control_plane_forbidden: command=start-tick requires=tick.admin", result.OutboundMessages[0]);
+        Assert.Empty(bridge.Commands);
+        Assert.True(
+            metrics.GetTotalByTags("dotnet-host", "start-tick", "tick.admin", "reject.control_plane_forbidden")
+            >= beforeDenied + 1
+        );
     }
 
     [Fact]
@@ -277,5 +382,82 @@ internal sealed class FakeRuntimeCommandBridge : IRuntimeCommandBridge
         }
 
         return _results.Dequeue();
+    }
+}
+
+internal sealed class ControlPlaneDenyMeterCapture : IDisposable
+{
+    private readonly MeterListener _listener;
+    private readonly Dictionary<string, long> _totalsByTags = new(StringComparer.Ordinal);
+
+    public ControlPlaneDenyMeterCapture()
+    {
+        _listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, listener) =>
+            {
+                if (string.Equals(instrument.Meter.Name, "ActiveSync.DotNetHost.RuntimeControlPlane", StringComparison.Ordinal)
+                    && string.Equals(instrument.Name, "runtime_control_plane_denied_total", StringComparison.Ordinal))
+                {
+                    listener.EnableMeasurementEvents(instrument);
+                }
+            }
+        };
+
+        _listener.SetMeasurementEventCallback<long>((_, measurement, tags, _) =>
+        {
+            var host = "<unknown>";
+            var command = "<unknown>";
+            var requiredCapability = "<unknown>";
+            var reasonClass = "<unknown>";
+
+            foreach (var tag in tags)
+            {
+                if (string.Equals(tag.Key, "host", StringComparison.Ordinal) && tag.Value is string hostValue)
+                {
+                    host = hostValue;
+                }
+                else if (string.Equals(tag.Key, "command", StringComparison.Ordinal) && tag.Value is string commandValue)
+                {
+                    command = commandValue;
+                }
+                else if (string.Equals(tag.Key, "required_capability", StringComparison.Ordinal) && tag.Value is string capabilityValue)
+                {
+                    requiredCapability = capabilityValue;
+                }
+                else if (string.Equals(tag.Key, "reason_class", StringComparison.Ordinal) && tag.Value is string reasonValue)
+                {
+                    reasonClass = reasonValue;
+                }
+            }
+
+            var key = BuildKey(host, command, requiredCapability, reasonClass);
+            if (_totalsByTags.TryGetValue(key, out var current))
+            {
+                _totalsByTags[key] = current + measurement;
+            }
+            else
+            {
+                _totalsByTags[key] = measurement;
+            }
+        });
+
+        _listener.Start();
+    }
+
+    public long GetTotalByTags(string host, string command, string requiredCapability, string reasonClass)
+    {
+        var key = BuildKey(host, command, requiredCapability, reasonClass);
+        return _totalsByTags.TryGetValue(key, out var total) ? total : 0;
+    }
+
+    public void Dispose()
+    {
+        _listener.Dispose();
+    }
+
+    private static string BuildKey(string host, string command, string requiredCapability, string reasonClass)
+    {
+        return $"{host}|{command}|{requiredCapability}|{reasonClass}";
     }
 }

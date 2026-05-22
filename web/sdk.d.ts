@@ -41,6 +41,14 @@ export interface ChangeEvent {
 
 export type Unsubscribe = () => void;
 
+export interface NamespaceCapabilitySpec {
+  read?: string[];
+  write?: string[];
+  derive?: string[];
+}
+
+export type TokenCapsOption = string[] | NamespaceCapabilitySpec;
+
 export interface MapHandle {
   set(key: string, value: JsonValue): void;
   setBlob(key: string, bytes: Uint8Array, options?: { contentType?: string }): string;
@@ -165,6 +173,22 @@ export interface ConflictEvent {
   raw: unknown;
 }
 
+export interface RejectionEvent {
+  at: number;
+  source: 'server';
+  reasonClass: string | null;
+  command: string | null;
+  requiredCapability: string | null;
+  message: string;
+  status: number | null;
+  raw: unknown;
+}
+
+export interface ActiveSyncRejectionError extends Error {
+  rejection?: RejectionEvent;
+  serverEnvelope?: Record<string, unknown>;
+}
+
 export interface UndoManager {
   undo(): boolean;
   redo(): boolean;
@@ -203,7 +227,11 @@ export interface Doc {
   onChange(cb: (ev: ChangeEvent) => void): Unsubscribe;
   onConnect(cb: () => void): Unsubscribe;
   onDisconnect(cb: () => void): Unsubscribe;
-  onError(cb: (err: Error) => void): Unsubscribe;
+  onError(cb: (err: ActiveSyncRejectionError) => void): Unsubscribe;
+  /** Typed server-side rejection stream parsed from error envelopes and reject prefixes. */
+  onRejection(cb: (ev: RejectionEvent) => void): Unsubscribe;
+  /** Return buffered rejections newer than `sinceMs` (default 5 minutes). */
+  recentRejections(sinceMs?: number): RejectionEvent[];
   /** G9 conflict surfacing hook. */
   onConflict(cb: (ev: ConflictEvent) => void): Unsubscribe;
   /** Return buffered conflicts newer than `sinceMs` (default 5 minutes). */
@@ -231,7 +259,17 @@ export interface CreateDocOptions {
   room: string;
   authorSeed?: Uint8Array;
   roomSeed?: Uint8Array;
-  tokenCaps?: string[];
+  /**
+   * Capability grants for room token signing.
+   *
+   * String-array form uses full capability strings:
+   *   ["read:world/**", "write:intent/**"]
+   *
+   * Object form is namespace-focused ergonomics and expands to canonical
+   * capability strings:
+   *   { read: ["world"], write: ["intent"] }
+   */
+  tokenCaps?: TokenCapsOption;
   tokenExpirySecs?: number;
   /**
    * Server-mint hook (downstream Phase 5a). When provided, the SDK calls
@@ -245,7 +283,14 @@ export interface CreateDocOptions {
     expiry_secs: number;
     capabilities: string[];
     sig_hex: string;
+    continuity?: {
+      predecessor_peer_pubkey: string;
+      overlap_not_after: number;
+      revoked_predecessors?: string[];
+    };
   }>;
+  /** Typed server-side rejection callback (same payload as `doc.onRejection`). */
+  onRejection?: (ev: RejectionEvent) => void;
   autoConnect?: boolean;
   /** F3a: glob patterns for client-side materialization. Default `["**"]`. */
   subscribe?: string[];
@@ -273,6 +318,15 @@ export interface CreateDocOptions {
 
 export function createDoc(opts: CreateDocOptions): Promise<Doc>;
 export function ready(): Promise<unknown>;
+
+/** Build a single capability string like `read:world/**`. */
+export function capability(
+  scope: 'read' | 'write' | 'derive',
+  pathPattern: string,
+): string;
+
+/** Build canonical namespace capability strings from a namespace spec. */
+export function namespaceCapabilities(spec?: NamespaceCapabilitySpec): string[];
 
 export interface AttachServerOptions {
   mode?: 'immediate' | 'wait-for-welcome' | 'manual';

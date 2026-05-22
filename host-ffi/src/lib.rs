@@ -45,6 +45,14 @@ struct FfiCommandEnvelope {
     command: HostCommand,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FfiDenyMetadata {
+    reason_class: String,
+    command: String,
+    required_capability: String,
+    deny_message: Option<String>,
+}
+
 fn make_owned_bytes(bytes: Vec<u8>) -> as_bytes_owned {
     if bytes.is_empty() {
         return as_bytes_owned {
@@ -63,11 +71,97 @@ fn map_host_core_error(err: HostCoreError) -> as_status {
     match err {
         HostCoreError::InvalidCommand => as_status::AS_ERR_INVALID_ARG,
         HostCoreError::RoomNotFound | HostCoreError::SessionNotFound => as_status::AS_ERR_NOT_FOUND,
+        HostCoreError::AuthViolation => as_status::AS_ERR_AUTH,
+        HostCoreError::PolicyViolation => as_status::AS_ERR_POLICY,
         HostCoreError::ProtocolViolation | HostCoreError::SessionAlreadyOpen => {
             as_status::AS_ERR_PROTOCOL
         }
         HostCoreError::InternalInvariant => as_status::AS_ERR_INTERNAL,
     }
+}
+
+fn command_label(command: &HostCommand) -> &'static str {
+    match command {
+        HostCommand::EnsureRoom => "ensure-room",
+        HostCommand::OpenSession { .. } => "open-session",
+        HostCommand::CloseSession { .. } => "close-session",
+        HostCommand::ClientHello { .. } => "client-hello",
+        HostCommand::MapSet { .. } => "map-set",
+        HostCommand::MapDelete { .. } => "map-delete",
+        HostCommand::MapGet { .. } => "map-get",
+        HostCommand::MapAll { .. } => "map-all",
+        HostCommand::TextInsert { .. } => "text-insert",
+        HostCommand::TextDelete { .. } => "text-delete",
+        HostCommand::TextGet { .. } => "text-get",
+        HostCommand::ListPush { .. } => "list-push",
+        HostCommand::ListInsert { .. } => "list-insert",
+        HostCommand::ListDelete { .. } => "list-delete",
+        HostCommand::ListMove { .. } => "list-move",
+        HostCommand::ListUpdate { .. } => "list-update",
+        HostCommand::ListGet { .. } => "list-get",
+        HostCommand::BlobSet { .. } => "blob-set",
+        HostCommand::BlobGet { .. } => "blob-get",
+        HostCommand::BlobGetMany { .. } => "blob-get-many",
+        HostCommand::RequestUpload { .. } => "request-upload",
+        HostCommand::BlobRequest { .. } => "blob-request",
+        HostCommand::PresenceSet { .. } => "presence-set",
+        HostCommand::PresenceGetAll => "presence-get",
+        HostCommand::PresenceSweep { .. } => "presence-sweep",
+        HostCommand::Subscribe { .. } => "subscribe",
+        HostCommand::SetPolicy { .. } => "set-policy",
+        HostCommand::SetRoomKey { .. } => "set-room-key",
+        HostCommand::ImportPack { .. } => "pack",
+        HostCommand::RequestServerPack { .. } => "request-server-pack",
+        HostCommand::MstRequest { .. } => "mst-request",
+        HostCommand::MstDone { .. } => "mst-done",
+        HostCommand::GetRecentConflicts { .. } => "recent-conflicts",
+        HostCommand::RelayPeerSignal { .. } => "relay-peer-signal",
+        HostCommand::Noop => "noop",
+    }
+}
+
+fn capability_label_for_command(command: &HostCommand) -> &'static str {
+    match command {
+        HostCommand::SetPolicy { .. } => "policy.admin",
+        HostCommand::SetRoomKey { .. } => "room.admin",
+        _ => "unknown",
+    }
+}
+
+fn deny_reason_class(status: as_status, command: &HostCommand) -> Option<&'static str> {
+    if status == as_status::AS_ERR_AUTH {
+        return Some("reject.auth_violation");
+    }
+
+    if status == as_status::AS_ERR_POLICY {
+        return Some(match command {
+            HostCommand::SetPolicy { .. } | HostCommand::SetRoomKey { .. } => {
+                "reject.control_plane_forbidden"
+            }
+            _ => "reject.policy_violation",
+        });
+    }
+
+    if status == as_status::AS_ERR_PROTOCOL {
+        return Some("reject.protocol_violation");
+    }
+
+    None
+}
+
+fn map_host_core_error_with_metadata(
+    err: HostCoreError,
+    command: &HostCommand,
+) -> (as_status, Option<FfiDenyMetadata>) {
+    let status = map_host_core_error(err.clone());
+    let metadata = deny_reason_class(status, command).map(|reason_class| FfiDenyMetadata {
+        reason_class: reason_class.to_string(),
+        command: command_label(command).to_string(),
+        required_capability: capability_label_for_command(command).to_string(),
+        deny_message: Some(err.to_string()),
+    });
+
+    (status, metadata)
 }
 
 #[unsafe(no_mangle)]
@@ -161,6 +255,84 @@ pub unsafe extern "C" fn as_host_submit_command(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn as_host_submit_command_ex(
+    engine: *mut as_host_engine,
+    command_bin: as_bytes_view,
+    out_events_bin: *mut as_bytes_owned,
+    out_deny_metadata_json: *mut as_bytes_owned,
+) -> as_status {
+    if engine.is_null() || out_events_bin.is_null() || out_deny_metadata_json.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+
+    if command_bin.len > 0 && command_bin.ptr.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+
+    // SAFETY: pointer validated above.
+    unsafe {
+        *out_deny_metadata_json = as_bytes_owned {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        };
+    }
+
+    let command_bytes = if command_bin.len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: validated non-null pointer with caller-provided byte length.
+        unsafe { std::slice::from_raw_parts(command_bin.ptr, command_bin.len) }
+    };
+
+    let envelope: FfiCommandEnvelope = match postcard::from_bytes(command_bytes) {
+        Ok(envelope) => envelope,
+        Err(_) => return as_status::AS_ERR_INVALID_ARG,
+    };
+
+    let engine_ref = {
+        // SAFETY: engine pointer validated as non-null above and is valid for this call.
+        unsafe { &mut (*engine).inner }
+    };
+
+    let result = match engine_ref.apply(activesync_host_core::api::CommandEnvelope::new(
+        envelope.room_id,
+        envelope.command.clone(),
+    )) {
+        Ok(result) => result,
+        Err(err) => {
+            let (status, metadata) = map_host_core_error_with_metadata(err, &envelope.command);
+            if let Some(metadata) = metadata {
+                let metadata_json = match serde_json::to_vec(&metadata) {
+                    Ok(bytes) => bytes,
+                    Err(_) => return as_status::AS_ERR_INTERNAL,
+                };
+
+                let owned = make_owned_bytes(metadata_json);
+                // SAFETY: out pointer validated as non-null above and points to caller-owned storage.
+                unsafe {
+                    *out_deny_metadata_json = owned;
+                }
+            }
+
+            return status;
+        }
+    };
+
+    let event_bytes = match postcard::to_allocvec(&result.events) {
+        Ok(bytes) => bytes,
+        Err(_) => return as_status::AS_ERR_INTERNAL,
+    };
+
+    let owned = make_owned_bytes(event_bytes);
+    // SAFETY: out_events_bin was validated as non-null above and points to caller-owned storage.
+    unsafe {
+        *out_events_bin = owned;
+    }
+
+    as_status::AS_OK
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn as_host_submit_command_json(
     engine: *mut as_host_engine,
     command_json: as_bytes_view,
@@ -197,6 +369,84 @@ pub unsafe extern "C" fn as_host_submit_command_json(
     )) {
         Ok(result) => result,
         Err(err) => return map_host_core_error(err),
+    };
+
+    let events_json = match serde_json::to_vec(&result.events) {
+        Ok(bytes) => bytes,
+        Err(_) => return as_status::AS_ERR_INTERNAL,
+    };
+
+    let owned = make_owned_bytes(events_json);
+    // SAFETY: out_events_json was validated as non-null above and points to caller-owned storage.
+    unsafe {
+        *out_events_json = owned;
+    }
+
+    as_status::AS_OK
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn as_host_submit_command_json_ex(
+    engine: *mut as_host_engine,
+    command_json: as_bytes_view,
+    out_events_json: *mut as_bytes_owned,
+    out_deny_metadata_json: *mut as_bytes_owned,
+) -> as_status {
+    if engine.is_null() || out_events_json.is_null() || out_deny_metadata_json.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+
+    if command_json.len > 0 && command_json.ptr.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+
+    // SAFETY: pointer validated above.
+    unsafe {
+        *out_deny_metadata_json = as_bytes_owned {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        };
+    }
+
+    let command_bytes = if command_json.len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: validated non-null pointer with caller-provided byte length.
+        unsafe { std::slice::from_raw_parts(command_json.ptr, command_json.len) }
+    };
+
+    let envelope: FfiCommandEnvelope = match serde_json::from_slice(command_bytes) {
+        Ok(envelope) => envelope,
+        Err(_) => return as_status::AS_ERR_INVALID_ARG,
+    };
+
+    let engine_ref = {
+        // SAFETY: engine pointer validated as non-null above and is valid for this call.
+        unsafe { &mut (*engine).inner }
+    };
+
+    let result = match engine_ref.apply(activesync_host_core::api::CommandEnvelope::new(
+        envelope.room_id,
+        envelope.command.clone(),
+    )) {
+        Ok(result) => result,
+        Err(err) => {
+            let (status, metadata) = map_host_core_error_with_metadata(err, &envelope.command);
+            if let Some(metadata) = metadata {
+                let metadata_json = match serde_json::to_vec(&metadata) {
+                    Ok(bytes) => bytes,
+                    Err(_) => return as_status::AS_ERR_INTERNAL,
+                };
+
+                let owned = make_owned_bytes(metadata_json);
+                // SAFETY: out pointer validated as non-null above and points to caller-owned storage.
+                unsafe {
+                    *out_deny_metadata_json = owned;
+                }
+            }
+
+            return status;
+        }
     };
 
     let events_json = match serde_json::to_vec(&result.events) {

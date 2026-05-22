@@ -2,6 +2,8 @@ use activesync_server::{keypair, metrics, room, store, ws_handler};
 
 use std::sync::Arc;
 use axum::{Router, routing::get};
+use activesync_core::PolicyTimelineEntry;
+use serde::Deserialize;
 use tower_http::cors::{CorsLayer, Any};
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -23,7 +25,11 @@ async fn main() {
     // replays it, and prints the resolved state + canonical hash to stdout.
     if args.get(1).map(|s| s.as_str()) == Some("replay") {
         let source = args.get(2).map(|s| s.as_str()).unwrap_or("-");
-        return run_replay(source);
+        let timeline = load_replay_policy_timeline(&args).unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        });
+        return run_replay(source, timeline.as_deref());
     }
 
     // E1: load or generate persistent server keypair.
@@ -347,7 +353,12 @@ fn parse_usize_flag(args: &[String], flag: &str, default_for_msg: usize) -> Opti
 
 /// D4: Replay a base64-encoded node pack and print resolved state + hash.
 /// `source` is a file path, or "-" to read from stdin.
-fn run_replay(source: &str) {    use activesync_core::{unpack_nodes, replay};
+///
+/// Optional policy timeline input can be provided via:
+/// - `--policy-timeline <json-file>`
+/// - `--policy-timeline-json '<json-array-or-object>'`
+fn run_replay(source: &str, timeline: Option<&[PolicyTimelineEntry]>) {
+    use activesync_core::{replay, replay_with_policy_timeline, unpack_nodes};
 
     // Read raw bytes from file or stdin.
     let raw_bytes: Vec<u8> = if source == "-" {
@@ -375,9 +386,21 @@ fn run_replay(source: &str) {    use activesync_core::{unpack_nodes, replay};
         std::process::exit(1);
     });
 
-    eprintln!("Replaying {} node(s)...", nodes.len());
+    if let Some(tl) = timeline {
+        eprintln!(
+            "Replaying {} node(s) with {} policy timeline entrie(s)...",
+            nodes.len(),
+            tl.len()
+        );
+    } else {
+        eprintln!("Replaying {} node(s)...", nodes.len());
+    }
 
-    let state = replay(&nodes, None).unwrap_or_else(|e| {
+    let state = match timeline {
+        Some(tl) => replay_with_policy_timeline(&nodes, tl),
+        None => replay(&nodes, None),
+    }
+    .unwrap_or_else(|e| {
         eprintln!("replay error: {e}");
         std::process::exit(1);
     });
@@ -392,6 +415,98 @@ fn run_replay(source: &str) {    use activesync_core::{unpack_nodes, replay};
     }
 
     eprintln!("\nCanonical hash: {}", state.hash.to_hex());
+}
+
+#[derive(Debug)]
+enum ReplayTimelineArg {
+    File(std::path::PathBuf),
+    Json(String),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ReplayTimelinePayload {
+    Entries(Vec<PolicyTimelineEntry>),
+    Wrapped { timeline: Vec<PolicyTimelineEntry> },
+}
+
+fn load_replay_policy_timeline(args: &[String]) -> Result<Option<Vec<PolicyTimelineEntry>>, String> {
+    let arg = parse_replay_policy_timeline_arg(args)?;
+    let Some(arg) = arg else {
+        return Ok(None);
+    };
+
+    let raw = match arg {
+        ReplayTimelineArg::File(path) => {
+            if path.as_os_str() == "-" {
+                return Err("--policy-timeline '-' is not supported; pass a JSON file path or use --policy-timeline-json".to_string());
+            }
+            std::fs::read_to_string(&path)
+                .map_err(|e| format!("failed to read policy timeline file {}: {e}", path.display()))?
+        }
+        ReplayTimelineArg::Json(json) => json,
+    };
+
+    let payload: ReplayTimelinePayload = serde_json::from_str(&raw)
+        .map_err(|e| format!("invalid policy timeline JSON: {e}"))?;
+
+    let timeline = match payload {
+        ReplayTimelinePayload::Entries(entries) => entries,
+        ReplayTimelinePayload::Wrapped { timeline } => timeline,
+    };
+    Ok(Some(timeline))
+}
+
+fn parse_replay_policy_timeline_arg(args: &[String]) -> Result<Option<ReplayTimelineArg>, String> {
+    let mut file_value: Option<String> = None;
+    let mut json_value: Option<String> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+
+        if a == "--policy-timeline" {
+            let Some(v) = args.get(i + 1) else {
+                return Err("--policy-timeline requires a path argument".to_string());
+            };
+            file_value = Some(v.clone());
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--policy-timeline=") {
+            file_value = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+
+        if a == "--policy-timeline-json" {
+            let Some(v) = args.get(i + 1) else {
+                return Err("--policy-timeline-json requires a JSON argument".to_string());
+            };
+            json_value = Some(v.clone());
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--policy-timeline-json=") {
+            json_value = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    if file_value.is_some() && json_value.is_some() {
+        return Err("use only one of --policy-timeline or --policy-timeline-json".to_string());
+    }
+
+    if let Some(path) = file_value {
+        return Ok(Some(ReplayTimelineArg::File(std::path::PathBuf::from(path))));
+    }
+    if let Some(json) = json_value {
+        return Ok(Some(ReplayTimelineArg::Json(json)));
+    }
+    Ok(None)
 }
 
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
@@ -434,4 +549,67 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use activesync_core::{Policy, PolicyDefault, PolicyRule};
+
+    fn sample_timeline_json() -> String {
+        let entry = PolicyTimelineEntry {
+            effective_lamport: 2,
+            policy: Policy {
+                rules: vec![PolicyRule {
+                    path_glob: "protected/**".to_string(),
+                    can_write: vec![[1u8; 32]],
+                    can_read: vec![],
+                    can_derive: vec![],
+                }],
+                default: PolicyDefault::DenyAll,
+            },
+        };
+        serde_json::to_string(&vec![entry]).unwrap()
+    }
+
+    #[test]
+    fn parse_replay_policy_timeline_arg_prefers_file_flag() {
+        let args = vec![
+            "activesync-server".to_string(),
+            "replay".to_string(),
+            "pack.b64".to_string(),
+            "--policy-timeline".to_string(),
+            "timeline.json".to_string(),
+        ];
+
+        let parsed = parse_replay_policy_timeline_arg(&args).unwrap();
+        assert!(matches!(parsed, Some(ReplayTimelineArg::File(_))));
+    }
+
+    #[test]
+    fn parse_replay_policy_timeline_arg_rejects_conflicting_flags() {
+        let args = vec![
+            "activesync-server".to_string(),
+            "replay".to_string(),
+            "pack.b64".to_string(),
+            "--policy-timeline=timeline.json".to_string(),
+            "--policy-timeline-json=[]".to_string(),
+        ];
+
+        assert!(parse_replay_policy_timeline_arg(&args).is_err());
+    }
+
+    #[test]
+    fn load_replay_policy_timeline_from_inline_json() {
+        let args = vec![
+            "activesync-server".to_string(),
+            "replay".to_string(),
+            "pack.b64".to_string(),
+            format!("--policy-timeline-json={}", sample_timeline_json()),
+        ];
+
+        let timeline = load_replay_policy_timeline(&args).unwrap().unwrap();
+        assert_eq!(timeline.len(), 1);
+        assert_eq!(timeline[0].effective_lamport, 2);
+    }
 }

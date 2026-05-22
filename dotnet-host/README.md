@@ -68,7 +68,16 @@ This folder contains the PR7 prototype for a host-owned .NET runtime that calls 
 	- close-session: maps to CloseSession host command and closes the socket only when dispatch succeeds.
 	- Conflict events from host-core map to `conflict` (streamed, one frame per entry) and `recent-conflicts` (snapshot list) for SDK `onConflict` and recent-history parity.
 - `session_id` behavior: if `hello`, `open-session`, `client-hello`, or `close-session` provides `session_id`, the runtime mapper persists that value in connection state and reuses it for subsequent commands when omitted.
-- `hello.token` is forwarded into the host `ClientHello` payload when provided (`peer_pubkey`, `expiry`, `caps[]`, `sig`). Missing required token fields are rejected by the mapper.
+- `hello.token` is forwarded into the host `ClientHello` payload when provided (`peer_pubkey`, `expiry`, `caps[]`, `sig`, optional `continuity`). Missing required token fields are rejected by the mapper.
+- Server-peer control-plane bypass parity is configured via `ActiveSync:Runtime:ServerPeerPubkeyHex`.
+	- When set, runtime handshake paths (`hello`, `open-session`, `client-hello`) mark a connection as server-peer only when the inbound `pubkey` exactly matches this trusted value (case-insensitive hex compare).
+	- Server-peer sessions can execute control-plane commands without explicit `policy.admin` / `room.admin` / `tick.admin` capability tokens.
+	- Leave unset (or empty) to disable bypass.
+- Phase C continuity-v1 validation runs when `hello.token.continuity` is present:
+	- `predecessor_peer_pubkey` required.
+	- `overlap_not_after` required.
+	- predecessor must differ from current `peer_pubkey`.
+	- overlap expiry and revoked predecessor checks return deterministic mapper rejections.
 - Connection affinity is enforced after initialization: explicit `room`/`pubkey` values in follow-on commands cannot switch away from the initialized connection identity.
 - Host events are translated back to typed runtime responses (welcome, session-opened, session-closed, noop-ack).
 - Unsupported message types return an error message (keeps connection open).
@@ -176,6 +185,40 @@ Examples:
 - dotnet test dotnet-host/ActiveSync.DotNetHost.slnx
 - dotnet test dotnet-host/ActiveSync.DotNetHost.slnx --filter "FullyQualifiedName~DemoReadinessSmokeTests"
 
+## Device Switch + Key Rotation Migration (Phase C slice 2)
+
+Use this flow when rotating client key material from predecessor key A to successor key B.
+
+1. Keep A accepted while B starts first runtime session.
+2. Issue B token with continuity metadata:
+	- `continuity.predecessor_peer_pubkey = A`
+	- `continuity.overlap_not_after = <unix-seconds cutoff>`
+	- `continuity.revoked_predecessors = []`
+3. After overlap closes, issue B token with `continuity.revoked_predecessors` containing A.
+4. Stop minting tokens for A.
+
+Operational expectation:
+
+1. B is accepted inside overlap window.
+2. B is rejected after overlap cutoff.
+3. B is rejected if A is marked revoked.
+
+### Fast Authz Loop Helpers
+
+From `dotnet-host`:
+
+- Quick local authz/runtime loop (excludes long integration/acceptance suites):
+	- `pwsh -File .\quick-dotnet-authz.ps1`
+- The quick loop also excludes native host-ffi binding tests and stress/churn/soak websocket cases by default to keep feedback fast and avoid native-library/env coupling in day-to-day runs.
+- Optional extra filter layering:
+	- `pwsh -File .\quick-dotnet-authz.ps1 -AdditionalFilter "FullyQualifiedName~RuntimeWebSocketEndpointTests"`
+- Refresh 8-test authz conformance baseline TRX artifact + parsed counters:
+	- `pwsh -File .\dotnet-authz-baseline-trx.ps1`
+
+Default baseline artifact path:
+
+- `docs/acceptance/authz-dotnet-conformance-targeted.trx`
+
 ## SpeechSlate-Shape Local Smoke
 
 Use this to validate hosted AS service readiness before wiring full SpeechSlate web-react + API runs.
@@ -216,6 +259,21 @@ Embedded mode options:
 - `ActiveSync:Auth:JwtBridgeEmbedded:SigningKey` (minimum 32 chars for HS256)
 
 Development defaults in `appsettings.Development.json` are configured for `JwtBridgeEmbedded` so the host can run standalone without requiring a sidecar.
+
+Runtime server-peer bypass example:
+
+- `ActiveSync:Runtime:ServerPeerPubkeyHex = "<trusted-server-peer-pubkey-hex>"`
+- JSON example:
+
+```json
+{
+	"ActiveSync": {
+		"Runtime": {
+			"ServerPeerPubkeyHex": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+		}
+	}
+}
+```
 
 ## Notes
 

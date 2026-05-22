@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 
 namespace ActiveSync.DotNetHost.Ffi;
 
@@ -31,6 +32,62 @@ public sealed class HostFfiClient : IDisposable
         if (status != AsStatus.Ok || _engine == nint.Zero)
         {
             throw new InvalidOperationException($"as_host_engine_new failed: {status}");
+        }
+    }
+
+    public (AsStatus status, byte[] eventsPayload, FfiDenyMetadata? denyMetadata) SubmitCommandWithDenyMetadata(byte[] commandPayload)
+    {
+        if (commandPayload is null)
+        {
+            throw new ArgumentNullException(nameof(commandPayload));
+        }
+
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+
+            GCHandle? pinned = null;
+            try
+            {
+                var view = new AsBytesView
+                {
+                    Ptr = nint.Zero,
+                    Len = (nuint)commandPayload.Length
+                };
+
+                if (commandPayload.Length > 0)
+                {
+                    pinned = GCHandle.Alloc(commandPayload, GCHandleType.Pinned);
+                    view.Ptr = pinned.Value.AddrOfPinnedObject();
+                }
+
+                try
+                {
+                    var status = NativeMethods.HostSubmitCommandEx(
+                        _engine,
+                        view,
+                        out var eventsOwned,
+                        out var denyOwned
+                    );
+
+                    var events = CopyOwnedBytes(eventsOwned);
+                    var denyMetadata = ParseDenyMetadata(denyOwned);
+                    return (status, events, denyMetadata);
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    var status = NativeMethods.HostSubmitCommand(_engine, view, out var eventsOwned);
+                    var events = CopyOwnedBytes(eventsOwned);
+                    return (status, events, null);
+                }
+            }
+            finally
+            {
+                if (pinned.HasValue)
+                {
+                    pinned.Value.Free();
+                }
+            }
         }
     }
 
@@ -149,6 +206,64 @@ public sealed class HostFfiClient : IDisposable
         }
     }
 
+    public (AsStatus status, string eventsJson, FfiDenyMetadata? denyMetadata) SubmitCommandJsonWithDenyMetadata(string commandJson)
+    {
+        if (commandJson is null)
+        {
+            throw new ArgumentNullException(nameof(commandJson));
+        }
+
+        var commandBytes = Encoding.UTF8.GetBytes(commandJson);
+
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+
+            GCHandle? pinned = null;
+            try
+            {
+                var view = new AsBytesView
+                {
+                    Ptr = nint.Zero,
+                    Len = (nuint)commandBytes.Length
+                };
+
+                if (commandBytes.Length > 0)
+                {
+                    pinned = GCHandle.Alloc(commandBytes, GCHandleType.Pinned);
+                    view.Ptr = pinned.Value.AddrOfPinnedObject();
+                }
+
+                try
+                {
+                    var status = NativeMethods.HostSubmitCommandJsonEx(
+                        _engine,
+                        view,
+                        out var eventsOwned,
+                        out var denyOwned
+                    );
+
+                    var eventsJson = CopyOwnedString(eventsOwned);
+                    var denyMetadata = ParseDenyMetadata(denyOwned);
+                    return (status, eventsJson, denyMetadata);
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    var status = NativeMethods.HostSubmitCommandJson(_engine, view, out var eventsOwned);
+                    var eventsJson = CopyOwnedString(eventsOwned);
+                    return (status, eventsJson, null);
+                }
+            }
+            finally
+            {
+                if (pinned.HasValue)
+                {
+                    pinned.Value.Free();
+                }
+            }
+        }
+    }
+
     public void Dispose()
     {
         lock (_sync)
@@ -174,6 +289,49 @@ public sealed class HostFfiClient : IDisposable
         if (_disposed)
         {
             throw new ObjectDisposedException(nameof(HostFfiClient));
+        }
+    }
+
+    private static byte[] CopyOwnedBytes(AsBytesOwned owned)
+    {
+        try
+        {
+            if (owned.Ptr == nint.Zero || owned.Len == 0)
+            {
+                return [];
+            }
+
+            var bytes = new byte[(int)owned.Len];
+            Marshal.Copy(owned.Ptr, bytes, 0, bytes.Length);
+            return bytes;
+        }
+        finally
+        {
+            NativeMethods.BytesOwnedFree(owned);
+        }
+    }
+
+    private static string CopyOwnedString(AsBytesOwned owned)
+    {
+        var bytes = CopyOwnedBytes(owned);
+        return bytes.Length == 0 ? "[]" : Encoding.UTF8.GetString(bytes);
+    }
+
+    private static FfiDenyMetadata? ParseDenyMetadata(AsBytesOwned owned)
+    {
+        var bytes = CopyOwnedBytes(owned);
+        if (bytes.Length == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<FfiDenyMetadata>(bytes);
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 }

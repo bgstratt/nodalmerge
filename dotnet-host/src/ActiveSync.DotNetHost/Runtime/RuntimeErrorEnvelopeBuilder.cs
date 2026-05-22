@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace ActiveSync.DotNetHost.Runtime;
 
@@ -15,10 +16,43 @@ public static class RuntimeErrorEnvelopeBuilder
 
     public static string BuildStatusError(string status)
     {
-        return JsonSerializer.Serialize(new
+        return BuildStatusError(status, null, null, null, null);
+    }
+
+    public static string BuildStatusError(
+        string status,
+        string? message,
+        string? reasonClass,
+        string? command,
+        string? requiredCapability
+    )
+    {
+        var error = new JsonObject
         {
-            type = "error",
-            status
-        });
+            ["type"] = "error",
+            ["status"] = status
+        };
+
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            error["msg"] = message;
+        }
+
+        if (!string.IsNullOrWhiteSpace(reasonClass))
+        {
+            error["reason_class"] = reasonClass;
+        }
+
+        if (!string.IsNullOrWhiteSpace(command))
+        {
+            error["command"] = command;
+        }
+
+        if (!string.IsNullOrWhiteSpace(requiredCapability))
+        {
+            error["required_capability"] = requiredCapability;
+        }
+
+        return error.ToJsonString();
     }
 }

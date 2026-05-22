@@ -1,0 +1,36 @@
+[
+  {
+    "target": "rust-combined-server",
+    "uri": "ws://127.0.0.1:7878/ws/bench-room",
+    "mode": "rust",
+    "status": "ok",
+    "samples": 60,
+    "avg_ms": 107.862,
+    "p50_ms": 107.773,
+    "p95_ms": 109.616,
+    "p99_ms": 110.763,
+    "min_ms": 105.576,
+    "max_ms": 110.763,
+    "approx_rps": 9.271
+  },
+  {
+    "target": "rust-integrated-hosted-server",
+    "uri": "ws://127.0.0.1:7979/ws/bench-room",
+    "mode": "rust",
+    "status": "skipped-unreachable"
+  },
+  {
+    "target": "dotnet-host-runtime",
+    "uri": "ws://127.0.0.1:8787/ws/runtime",
+    "mode": "dotnet",
+    "status": "ok",
+    "samples": 60,
+    "avg_ms": 1.202,
+    "p50_ms": 1.105,
+    "p95_ms": 1.423,
+    "p99_ms": 3.753,
+    "min_ms": 1.044,
+    "max_ms": 3.753,
+    "approx_rps": 831.82
+  }
+]

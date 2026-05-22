@@ -30,6 +30,11 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton(options);
 
+        var capabilityCompositionOptions = CapabilityCompositionOptions.FromConfiguration(configuration);
+        capabilityCompositionOptions.Validate();
+        services.AddSingleton(capabilityCompositionOptions);
+        services.AddSingleton<CapabilityProfileExpander>();
+
         RegisterNodeProvider(services, options, configuration);
         RegisterBlobProvider(services, options, configuration);
         RegisterAuthProvider(services, options, configuration);
@@ -308,13 +313,17 @@ internal sealed class DefaultRoomTokenAuthProvider : IRoomTokenAuthProvider
 internal sealed class JwtBridgeEmbeddedRoomTokenAuthProvider : IRoomTokenAuthProvider
 {
     private readonly JwtBridgeEmbeddedAuthOptions _options;
+    private readonly CapabilityProfileExpander _capabilityProfileExpander;
     private readonly SymmetricSecurityKey _signingKey;
     private readonly TokenValidationParameters _validationParameters;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
 
-    public JwtBridgeEmbeddedRoomTokenAuthProvider(JwtBridgeEmbeddedAuthOptions options)
+    public JwtBridgeEmbeddedRoomTokenAuthProvider(
+        JwtBridgeEmbeddedAuthOptions options,
+        CapabilityProfileExpander capabilityProfileExpander)
     {
         _options = options;
+        _capabilityProfileExpander = capabilityProfileExpander;
         _signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.SigningKey));
         var previousSigningKeys = _options.PreviousSigningKeys
             .Select(previous => new SymmetricSecurityKey(Encoding.UTF8.GetBytes(previous)))
@@ -380,8 +389,32 @@ internal sealed class JwtBridgeEmbeddedRoomTokenAuthProvider : IRoomTokenAuthPro
             return ValueTask.FromResult(RoomTokenValidationResult.Invalid("expiry mismatch"));
         }
 
-        var tokenCaps = principal.FindAll("cap").Select(x => x.Value).ToHashSet(StringComparer.Ordinal);
-        var requestedCaps = request.Capabilities.ToHashSet(StringComparer.Ordinal);
+        var tokenProfileVersion = principal.FindFirst("capability_profile_version")?.Value;
+        var requestedCapsExpanded = request.Capabilities;
+        if (_capabilityProfileExpander.IsEnabled
+            && !_capabilityProfileExpander.TryExpand(
+                request.Capabilities,
+                request.CapabilityProfileVersion,
+                out requestedCapsExpanded,
+                out var requestExpandError))
+        {
+            return ValueTask.FromResult(RoomTokenValidationResult.Invalid(requestExpandError ?? "capability expansion failed"));
+        }
+
+        var tokenCapsRaw = principal.FindAll("cap").Select(x => x.Value).ToArray();
+        var tokenCapsExpanded = (IReadOnlyList<string>)tokenCapsRaw;
+        if (_capabilityProfileExpander.IsEnabled
+            && !_capabilityProfileExpander.TryExpand(
+                tokenCapsRaw,
+                tokenProfileVersion,
+                out tokenCapsExpanded,
+                out var tokenExpandError))
+        {
+            return ValueTask.FromResult(RoomTokenValidationResult.Invalid(tokenExpandError ?? "capability expansion failed"));
+        }
+
+        var tokenCaps = tokenCapsExpanded.ToHashSet(StringComparer.Ordinal);
+        var requestedCaps = requestedCapsExpanded.ToHashSet(StringComparer.Ordinal);
         if (!tokenCaps.SetEquals(requestedCaps))
         {
             return ValueTask.FromResult(RoomTokenValidationResult.Invalid("capability mismatch"));
@@ -416,12 +449,32 @@ internal sealed class JwtBridgeEmbeddedRoomTokenAuthProvider : IRoomTokenAuthPro
             caps = ["read:**"];
         }
 
+        IReadOnlyList<string> expandedCaps = [];
+        if (_capabilityProfileExpander.IsEnabled
+            && !_capabilityProfileExpander.TryExpand(
+                caps,
+                request.CapabilityProfileVersion,
+                out expandedCaps,
+                out var expandError))
+        {
+            throw new InvalidOperationException(expandError ?? "capability expansion failed");
+        }
+
+        if (_capabilityProfileExpander.IsEnabled)
+        {
+            caps = expandedCaps.ToArray();
+        }
+
         var expiresAtUtc = DateTimeOffset.FromUnixTimeSeconds(expiry).UtcDateTime;
         var claims = new List<Claim>
         {
             new("room", request.RoomId),
             new("peer_pubkey", request.PeerPubkeyHex)
         };
+        if (_capabilityProfileExpander.IsEnabled)
+        {
+            claims.Add(new("capability_profile_version", request.CapabilityProfileVersion ?? string.Empty));
+        }
         claims.AddRange(caps.Select(cap => new Claim("cap", cap)));
 
         var descriptor = new SecurityTokenDescriptor
@@ -452,10 +505,14 @@ internal sealed class JwtBridgeSidecarRoomTokenAuthProvider : IRoomTokenAuthProv
     private const string SidecarHttpClientName = "ActiveSync.JwtBridgeSidecar";
 
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly CapabilityProfileExpander _capabilityProfileExpander;
 
-    public JwtBridgeSidecarRoomTokenAuthProvider(IHttpClientFactory httpClientFactory)
+    public JwtBridgeSidecarRoomTokenAuthProvider(
+        IHttpClientFactory httpClientFactory,
+        CapabilityProfileExpander capabilityProfileExpander)
     {
         _httpClientFactory = httpClientFactory;
+        _capabilityProfileExpander = capabilityProfileExpander;
     }
 
     public async ValueTask<RoomTokenValidationResult> ValidateAsync(
@@ -463,13 +520,25 @@ internal sealed class JwtBridgeSidecarRoomTokenAuthProvider : IRoomTokenAuthProv
         CancellationToken cancellationToken = default
     )
     {
+        var caps = request.Capabilities;
+        if (_capabilityProfileExpander.IsEnabled
+            && !_capabilityProfileExpander.TryExpand(
+                request.Capabilities,
+                request.CapabilityProfileVersion,
+                out caps,
+                out var expandError))
+        {
+            return RoomTokenValidationResult.Invalid(expandError ?? "capability expansion failed");
+        }
+
         var client = _httpClientFactory.CreateClient(SidecarHttpClientName);
         var payload = new
         {
             room = request.RoomId,
             peer_pubkey_hex = request.PeerPubkeyHex,
             expiry_secs = request.ExpiryUnixSeconds,
-            capabilities = request.Capabilities,
+            capabilities = caps,
+            capability_profile_version = request.CapabilityProfileVersion,
             sig_hex = request.SignatureHex
         };
 
@@ -510,13 +579,31 @@ internal sealed class JwtBridgeSidecarRoomTokenAuthProvider : IRoomTokenAuthProv
         CancellationToken cancellationToken = default
     )
     {
+        var requestedCaps = request.RequestedCapabilities;
+        IReadOnlyList<string> expandedCaps = [];
+        if (_capabilityProfileExpander.IsEnabled
+            && !_capabilityProfileExpander.TryExpand(
+                request.RequestedCapabilities ?? [],
+                request.CapabilityProfileVersion,
+                out expandedCaps,
+                out var expandError))
+        {
+            throw new InvalidOperationException(expandError ?? "capability expansion failed");
+        }
+
+        if (_capabilityProfileExpander.IsEnabled)
+        {
+            requestedCaps = expandedCaps.ToArray();
+        }
+
         var client = _httpClientFactory.CreateClient(SidecarHttpClientName);
         var payload = new
         {
             room = request.RoomId,
             peerPubkeyHex = request.PeerPubkeyHex,
             lifetimeSeconds = request.LifetimeSeconds,
-            capabilities = request.RequestedCapabilities
+            capabilities = requestedCaps,
+            capabilityProfileVersion = request.CapabilityProfileVersion
         };
 
         HttpResponseMessage response;

@@ -1,0 +1,238 @@
+{
+  "timestamp": "20260522-135151",
+  "files": [
+    ".\\benchmarks\\results\\benchmark-matrix-baseline-a-20260522-135151.json .\\benchmarks\\results\\benchmark-matrix-auth-b-20260522-135151.json .\\benchmarks\\results\\benchmark-matrix-baseline-c-20260522-135151.json .\\benchmarks\\results\\benchmark-matrix-auth-d-20260522-135151.json"
+  ],
+  "aggregate": [
+    {
+      "target": "dotnet-host-runtime-alias",
+      "metric": "map_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "metric": "list_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "metric": "blob_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "metric": "map_p95_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "metric": "list_p95_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "metric": "blob_p95_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "metric": "map_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "metric": "list_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "metric": "blob_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "metric": "map_p95_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "metric": "list_p95_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "metric": "blob_p95_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    }
+  ],
+  "per_peer": [
+    {
+      "target": "dotnet-host-runtime-alias",
+      "peers": 2,
+      "metric": "map_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "peers": 2,
+      "metric": "list_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "peers": 2,
+      "metric": "blob_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "peers": 10,
+      "metric": "map_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "peers": 10,
+      "metric": "list_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "peers": 10,
+      "metric": "blob_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "peers": 20,
+      "metric": "map_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "peers": 20,
+      "metric": "list_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "peers": 20,
+      "metric": "blob_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "peers": 2,
+      "metric": "map_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "peers": 2,
+      "metric": "list_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "peers": 2,
+      "metric": "blob_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "peers": 10,
+      "metric": "map_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "peers": 10,
+      "metric": "list_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "peers": 10,
+      "metric": "blob_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "peers": 20,
+      "metric": "map_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "peers": 20,
+      "metric": "list_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    },
+    {
+      "target": "rust-combined-server",
+      "peers": 20,
+      "metric": "blob_avg_ms",
+      "baseline": null,
+      "auth": null,
+      "delta_pct": null
+    }
+  ]
+}

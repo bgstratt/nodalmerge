@@ -1,0 +1,44 @@
+{
+  "schema_version": "benchmark-matrix-result.v1",
+  "run_id": "bench-matrix-20260522-185432",
+  "generated_utc": "2026-05-22T18:55:20.0200643Z",
+  "matrix_path": "./benchmarks/benchmark-matrix.v1.json",
+  "rows": [
+    {
+      "id": "baseline-default-auth",
+      "label": "Baseline/default auth profile",
+      "status": "ok",
+      "dimensions": {
+        "auth_mode": "default",
+        "room_scale": "2,10,20 peers",
+        "command_mix": "map60/list60/blob20@4k",
+        "reconnect_churn": "3 iterations",
+        "guardrails": "none"
+      },
+      "scenario_result_path": "./benchmarks/results/bench-matrix-20260522-185432-baseline-default-auth-sdk-scenarios.json",
+      "started_utc": "2026-05-22T18:54:32.8626045Z",
+      "completed_utc": "2026-05-22T18:55:19.9170142Z",
+      "aggregates": {
+        "dotnet-host-runtime-alias": {
+          "map_avg_ms": 713.681,
+          "map_p95_ms": 736.901,
+          "list_avg_ms": 999.474,
+          "list_p95_ms": 1021.366,
+          "blob_avg_ms": 373.316,
+          "blob_p95_ms": 389.67
+        },
+        "rust-combined-server": {
+          "map_avg_ms": 684.43,
+          "map_p95_ms": 692.438,
+          "list_avg_ms": 921.15,
+          "list_p95_ms": 939.241,
+          "blob_avg_ms": 387.458,
+          "blob_p95_ms": 398.041
+        }
+      },
+      "gate": {
+        "status": "baseline"
+      }
+    }
+  ]
+}

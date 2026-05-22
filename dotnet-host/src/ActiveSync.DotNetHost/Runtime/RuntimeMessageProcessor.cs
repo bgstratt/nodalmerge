@@ -1,10 +1,16 @@
 using ActiveSync.DotNetHost.Ffi;
+using System.Diagnostics.Metrics;
 using System.Text.Json.Nodes;
 
 namespace ActiveSync.DotNetHost.Runtime;
 
 public sealed class RuntimeMessageProcessor
 {
+    private static readonly Meter RuntimeControlPlaneMeter = new("ActiveSync.DotNetHost.RuntimeControlPlane", "1.0.0");
+    private static readonly Counter<long> RuntimeControlPlaneDeniedCounter = RuntimeControlPlaneMeter.CreateCounter<long>(
+        "runtime_control_plane_denied_total"
+    );
+
     private readonly IRuntimeCommandBridge _bridge;
     private readonly RuntimeProtocolMapper _mapper;
 
@@ -37,6 +43,7 @@ public sealed class RuntimeMessageProcessor
         var mapResult = _mapper.MapIncomingMessageToCommandJsons(incomingJson, state);
         if (!mapResult.IsSuccess)
         {
+            RecordControlPlaneDenyMetricIfApplicable(mapResult.Error);
             outbound.Add(
                 RuntimeErrorEnvelopeBuilder.BuildMessageError(mapResult.Error ?? "runtime map failed")
             );
@@ -53,7 +60,13 @@ public sealed class RuntimeMessageProcessor
             {
                 dispatchSucceeded = false;
                 outbound.Add(
-                    RuntimeErrorEnvelopeBuilder.BuildStatusError(bridgeResult.Status.ToString())
+                    RuntimeErrorEnvelopeBuilder.BuildStatusError(
+                        bridgeResult.Status.ToString(),
+                        bridgeResult.DenyMetadata?.DenyMessage,
+                        bridgeResult.DenyMetadata?.ReasonClass,
+                        bridgeResult.DenyMetadata?.Command,
+                        bridgeResult.DenyMetadata?.RequiredCapability
+                    )
                 );
                 break;
             }
@@ -191,7 +204,15 @@ public sealed class RuntimeMessageProcessor
         var bridgeResult = _bridge.ProcessJsonCommand(commandJson);
         if (!bridgeResult.IsSuccess)
         {
-            outbound.Add(RuntimeErrorEnvelopeBuilder.BuildStatusError(bridgeResult.Status.ToString()));
+            outbound.Add(
+                RuntimeErrorEnvelopeBuilder.BuildStatusError(
+                    bridgeResult.Status.ToString(),
+                    bridgeResult.DenyMetadata?.DenyMessage,
+                    bridgeResult.DenyMetadata?.ReasonClass,
+                    bridgeResult.DenyMetadata?.Command,
+                    bridgeResult.DenyMetadata?.RequiredCapability
+                )
+            );
             return RuntimeMessageProcessResult.DispatchFailure(outbound, shouldCloseConnection: false);
         }
 
@@ -315,6 +336,84 @@ public sealed class RuntimeMessageProcessor
         {
             return false;
         }
+    }
+
+    private static void RecordControlPlaneDenyMetricIfApplicable(string? mapError)
+    {
+        if (!TryParseControlPlaneForbidden(mapError, out var command, out var requiredCapability))
+        {
+            return;
+        }
+
+        RuntimeControlPlaneDeniedCounter.Add(
+            1,
+            KeyValuePair.Create<string, object?>("host", "dotnet-host"),
+            KeyValuePair.Create<string, object?>("command", command),
+            KeyValuePair.Create<string, object?>("required_capability", requiredCapability),
+            KeyValuePair.Create<string, object?>("reason_class", "reject.control_plane_forbidden")
+        );
+    }
+
+    private static bool TryParseControlPlaneForbidden(
+        string? mapError,
+        out string command,
+        out string requiredCapability
+    )
+    {
+        command = "unknown";
+        requiredCapability = "unknown";
+
+        if (string.IsNullOrWhiteSpace(mapError))
+        {
+            return false;
+        }
+
+        const string prefix = "reject.control_plane_forbidden:";
+        if (!mapError.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var body = mapError[prefix.Length..].Trim();
+        var segments = body.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var segment in segments)
+        {
+            if (segment.StartsWith("command=", StringComparison.Ordinal))
+            {
+                command = segment["command=".Length..];
+            }
+            else if (segment.StartsWith("requires=", StringComparison.Ordinal))
+            {
+                requiredCapability = segment["requires=".Length..];
+            }
+        }
+
+        command = NormalizeCommandLabel(command);
+        requiredCapability = NormalizeCapabilityLabel(requiredCapability);
+        return true;
+    }
+
+    private static string NormalizeCommandLabel(string value)
+    {
+        return value switch
+        {
+            "set-policy" => "set-policy",
+            "set-room-key" => "set-room-key",
+            "start-tick" => "start-tick",
+            "stop-tick" => "stop-tick",
+            _ => "unknown"
+        };
+    }
+
+    private static string NormalizeCapabilityLabel(string value)
+    {
+        return value switch
+        {
+            "policy.admin" => "policy.admin",
+            "room.admin" => "room.admin",
+            "tick.admin" => "tick.admin",
+            _ => "unknown"
+        };
     }
 
     private static TextAtRequestParseResult ParseTextAtRequest(string incomingJson, string expectedType)

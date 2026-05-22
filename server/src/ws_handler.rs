@@ -23,7 +23,9 @@
 //!   presence  { type, from, data:{...} }
 //!   error     { type, msg }
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::path::PathBuf;
+use std::collections::HashSet;
 use axum::{
     extract::{Path, State, WebSocketUpgrade, ws::{CloseFrame, Message, WebSocket}},
     response::Response,
@@ -169,6 +171,12 @@ use crate::adapter_context::{
     ClientDispatchBuild,
     ClientDispatchCommand,
     build_client_dispatch_context,
+};
+use crate::capability_profile::{
+    CapabilityProfile,
+    flatten_capabilities,
+    load_capability_profile_from_path,
+    profile_supports_version,
 };
 use crate::room::{Rooms, Room, import_nodes};
 
@@ -330,24 +338,168 @@ fn glob_match(mut pattern: &[u8], mut path: &[u8]) -> bool {
     }
 }
 
-/// Apply the peer's subscription to a broadcast envelope. Returns the original
-/// envelope string when no filtering is needed, an owned string when nodes
-/// were filtered, or `None` when every node was filtered out (caller should
-/// skip the send entirely).
-fn filter_pack_for_subscriber(env: &str, sub: &Subscription) -> Option<String> {
-    if sub.matches_everything() { return Some(env.to_string()); }
+#[derive(Clone, Debug, Default)]
+struct ScopeFilterOutcome {
+    filtered_env: Option<String>,
+    filter_applied: bool,
+    accepted_count: usize,
+    rejected_count: usize,
+    incoming_bytes: usize,
+    accepted_bytes: usize,
+}
+
+impl ScopeFilterOutcome {
+    fn filtered_nodes(&self) -> usize {
+        self.rejected_count
+    }
+
+    fn filtered_bytes(&self) -> usize {
+        self.incoming_bytes.saturating_sub(self.accepted_bytes)
+    }
+}
+
+fn filter_pack_for_subscriber_with_stats(env: &str, sub: &Subscription) -> ScopeFilterOutcome {
+    if sub.matches_everything() {
+        return ScopeFilterOutcome {
+            filtered_env: Some(env.to_string()),
+            ..ScopeFilterOutcome::default()
+        };
+    }
     // Parse just enough to decide.
-    let v: Value = match serde_json::from_str(env) { Ok(v) => v, Err(_) => return Some(env.to_string()) };
-    if v["type"] != "pack" { return Some(env.to_string()); }
-    let nodes_b64 = match v["nodes"].as_str() { Some(s) => s, None => return Some(env.to_string()) };
-    let bytes = match base64_decode(nodes_b64) { Ok(b) => b, Err(_) => return Some(env.to_string()) };
-    let nodes: Vec<SyncNode> = match unpack_nodes(&bytes) { Ok(n) => n, Err(_) => return Some(env.to_string()) };
+    let v: Value = match serde_json::from_str(env) {
+        Ok(v) => v,
+        Err(_) => {
+            return ScopeFilterOutcome {
+                filtered_env: Some(env.to_string()),
+                ..ScopeFilterOutcome::default()
+            }
+        }
+    };
+    if v["type"] != "pack" {
+        return ScopeFilterOutcome {
+            filtered_env: Some(env.to_string()),
+            ..ScopeFilterOutcome::default()
+        };
+    }
+    let nodes_b64 = match v["nodes"].as_str() {
+        Some(s) => s,
+        None => {
+            return ScopeFilterOutcome {
+                filtered_env: Some(env.to_string()),
+                ..ScopeFilterOutcome::default()
+            }
+        }
+    };
+    let bytes = match base64_decode(nodes_b64) {
+        Ok(b) => b,
+        Err(_) => {
+            return ScopeFilterOutcome {
+                filtered_env: Some(env.to_string()),
+                ..ScopeFilterOutcome::default()
+            }
+        }
+    };
+    let nodes: Vec<SyncNode> = match unpack_nodes(&bytes) {
+        Ok(n) => n,
+        Err(_) => {
+            return ScopeFilterOutcome {
+                filtered_env: Some(env.to_string()),
+                ..ScopeFilterOutcome::default()
+            }
+        }
+    };
+    let incoming_count = nodes.len();
+    let incoming_bytes = bytes.len();
     let kept: Vec<SyncNode> = nodes.into_iter().filter(|n| sub.accepts_node(n)).collect();
-    if kept.is_empty() { return None; }
+    let accepted_count = kept.len();
+    let rejected_count = incoming_count.saturating_sub(accepted_count);
+    if kept.is_empty() {
+        return ScopeFilterOutcome {
+            filtered_env: None,
+            filter_applied: true,
+            accepted_count,
+            rejected_count,
+            incoming_bytes,
+            accepted_bytes: 0,
+        };
+    }
     let kept_refs: Vec<&SyncNode> = kept.iter().collect();
+    let accepted_bytes_raw = pack_nodes(&kept_refs);
+    let accepted_bytes = accepted_bytes_raw.len();
     let mut out = v.clone();
-    out["nodes"] = Value::String(base64_encode(&pack_nodes(&kept_refs)));
-    Some(out.to_string())
+    out["nodes"] = Value::String(base64_encode(&accepted_bytes_raw));
+    ScopeFilterOutcome {
+        filtered_env: Some(out.to_string()),
+        filter_applied: true,
+        accepted_count,
+        rejected_count,
+        incoming_bytes,
+        accepted_bytes,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScopeCatchupBudget {
+    max_filtered_node_count: usize,
+    max_filtered_payload_bytes: usize,
+}
+
+fn scoped_catchup_budget() -> ScopeCatchupBudget {
+    static BUDGET: OnceLock<ScopeCatchupBudget> = OnceLock::new();
+    *BUDGET.get_or_init(|| ScopeCatchupBudget {
+        max_filtered_node_count: std::env::var("ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_NODES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4096),
+        max_filtered_payload_bytes: std::env::var("ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1024 * 1024),
+    })
+}
+
+fn should_drop_filtered_catchup_for_budget(
+    accepted_count: usize,
+    accepted_bytes: usize,
+    budget: ScopeCatchupBudget,
+) -> bool {
+    accepted_count > budget.max_filtered_node_count
+        || accepted_bytes > budget.max_filtered_payload_bytes
+}
+
+fn record_scope_filter_metrics(room_id: &str, stage: &str, outcome: &ScopeFilterOutcome) {
+    if !outcome.filter_applied {
+        return;
+    }
+
+    let filtered_nodes = outcome.filtered_nodes();
+    let filtered_bytes = outcome.filtered_bytes();
+    if filtered_nodes > 0 {
+        metrics::counter!(
+            "activesync_filtered_nodes_total",
+            "room" => room_id.to_string(),
+            "stage" => stage.to_string(),
+        )
+        .increment(filtered_nodes as u64);
+    }
+    if filtered_bytes > 0 {
+        metrics::counter!(
+            "activesync_filtered_bytes_total",
+            "room" => room_id.to_string(),
+            "stage" => stage.to_string(),
+        )
+        .increment(filtered_bytes as u64);
+    }
+}
+
+fn record_scope_filter_drop(room_id: &str, stage: &str, reason: &str) {
+    metrics::counter!(
+        "activesync_filtered_pack_dropped_total",
+        "room" => room_id.to_string(),
+        "stage" => stage.to_string(),
+        "reason" => reason.to_string(),
+    )
+    .increment(1);
 }
 
 pub async fn handler(
@@ -442,11 +594,11 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     // C3: if the room is locked, verify the capability token before proceeding.
     // G6: record the token's expiry so the main loop can disconnect the
     // session the instant it lapses (short-lived tokens + SDK refresh hook).
-    let token_deadline: Option<tokio::time::Instant> = {
+    let (token_deadline, session_caps): (Option<tokio::time::Instant>, HashSet<String>) = {
         let auth_key = room.auth_key.read().await;
-        let verified_expiry_secs = if let Some(ref room_vk) = *auth_key {
+        let verified_token = if let Some(ref room_vk) = *auth_key {
             match verify_hello_token(&hello, room_vk, &pubkey_hex, &room_id) {
-                Ok(expiry_secs) => Some(expiry_secs),
+                Ok(v) => Some(v),
                 Err(e) => {
                     send_error(&mut sink, &format!("auth: {e}")).await;
                     return;
@@ -460,8 +612,15 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        plan_token_deadline_remaining_secs(verified_expiry_secs, now_secs)
-            .map(|remaining| tokio::time::Instant::now() + std::time::Duration::from_secs(remaining))
+        let deadline = plan_token_deadline_remaining_secs(
+            verified_token.as_ref().map(|t| t.expiry_secs),
+            now_secs,
+        )
+        .map(|remaining| tokio::time::Instant::now() + std::time::Duration::from_secs(remaining));
+        let caps = verified_token
+            .map(|t| t.capabilities.into_iter().collect())
+            .unwrap_or_else(HashSet::new);
+        (deadline, caps)
     };
 
     let client_known = parse_client_frontier_node_ids(&hello);
@@ -559,13 +718,32 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     if has_catchup {
         let env = serialize_catchup_pack_envelope_json(catchup_b64);
         let sub = subscription.read().unwrap().clone();
-        let planned = plan_filtered_catchup_send_payload(filter_pack_for_subscriber(&env, &sub));
+        let outcome = filter_pack_for_subscriber_with_stats(&env, &sub);
+        record_scope_filter_metrics(&room_id, "catchup", &outcome);
+        let planned = plan_filtered_catchup_send_payload(outcome.filtered_env.clone());
         if let Some(filtered) = planned {
-            let send_ok = emit_single_send(&mut sink, &room_id, filtered).await;
-            if should_terminate_after_filtered_catchup_send(send_ok) {
-                room.deregister_peer(&pubkey_hex).await;
-                return;
+            if should_drop_filtered_catchup_for_budget(
+                outcome.accepted_count,
+                outcome.accepted_bytes,
+                scoped_catchup_budget(),
+            ) {
+                tracing::info!(
+                    peer = %short,
+                    room = %room_id,
+                    accepted_count = outcome.accepted_count,
+                    accepted_bytes = outcome.accepted_bytes,
+                    "dropping filtered catchup payload due to scoped catchup budget"
+                );
+                record_scope_filter_drop(&room_id, "catchup", "budget_exceeded");
+            } else {
+                let send_ok = emit_single_send(&mut sink, &room_id, filtered).await;
+                if should_terminate_after_filtered_catchup_send(send_ok) {
+                    room.deregister_peer(&pubkey_hex).await;
+                    return;
+                }
             }
+        } else if outcome.filter_applied {
+            record_scope_filter_drop(&room_id, "catchup", "empty_after_filter");
         }
     }
 
@@ -601,7 +779,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
             msg = stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if !handle_client_message(&text, &room, &pubkey_hex, &room_id, &server_key, &mut sink, &subscription, node_limiter.as_ref(), byte_limiter.as_ref(), &negotiated_caps).await {
+                        if !handle_client_message(&text, &room, &pubkey_hex, is_server_peer, &room_id, &server_key, &mut sink, &subscription, &session_caps, node_limiter.as_ref(), byte_limiter.as_ref(), &negotiated_caps).await {
                             break;
                         }
                     }
@@ -637,9 +815,16 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
                         // dropped entirely when nothing matches. All other
                         // message types pass through unchanged.
                         let sub = subscription.read().unwrap().clone();
-                        let out = match filter_pack_for_subscriber(&env, &sub) {
+                        let outcome = filter_pack_for_subscriber_with_stats(&env, &sub);
+                        record_scope_filter_metrics(&room_id, "broadcast", &outcome);
+                        let out = match outcome.filtered_env {
                             Some(s) => s,
-                            None => continue,
+                            None => {
+                                if outcome.filter_applied {
+                                    record_scope_filter_drop(&room_id, "broadcast", "empty_after_filter");
+                                }
+                                continue;
+                            }
                         };
                         let send_ok = emit_single_send(&mut sink, &room_id, out).await;
                         if should_break_main_loop_after_push_send(send_ok) { break; }
@@ -686,10 +871,12 @@ async fn handle_client_message(
     text: &str,
     room: &Arc<Room>,
     pubkey_hex: &str,
+    is_server_peer: bool,
     room_id: &str,
     server_key: &Arc<SigningKey>,
     sink: &mut SplitSink<WebSocket, Message>,
     subscription: &Arc<std::sync::RwLock<Subscription>>,
+    session_caps: &HashSet<String>,
     node_limiter: Option<&PeerLimiter>,
     byte_limiter: Option<&PeerLimiter>,
     negotiated_caps: &SyncCapabilities,
@@ -1019,6 +1206,10 @@ async fn handle_client_message(
         // Only accepted if the room is currently open (auth_key is None).
         // Once set, the key cannot be changed without restarting the server.
         ClientDispatchCommand::SetRoomKey => {
+            if !is_control_plane_allowed(is_server_peer, session_caps, "room.admin") {
+                send_error(sink, "reject.control_plane_forbidden: command=set-room-key requires=room.admin").await;
+                return true;
+            }
             let vk_hex = extract_set_room_key_pubkey_text(&msg);
             let parsed_vk = parse_verifying_key(&vk_hex);
             match classify_set_room_key_parse_result(parsed_vk.is_some()) {
@@ -1060,6 +1251,10 @@ async fn handle_client_message(
         // The server's own pubkey may be listed to designate it as the sole
         // authority for a protected path (Authoritative mode).
         ClientDispatchCommand::SetPolicy => {
+            if !is_control_plane_allowed(is_server_peer, session_caps, "policy.admin") {
+                send_error(sink, "reject.control_plane_forbidden: command=set-policy requires=policy.admin").await;
+                return true;
+            }
             let policy = parse_policy(&msg, sink).await;
             match classify_set_policy_parse_result(policy.is_some()) {
                 SetPolicyParseResult::ApplyPolicy => {
@@ -1095,6 +1290,10 @@ async fn handle_client_message(
         // Respond with "tick-started" (first call) or "tick-already-running"
         // (idempotent: a loop is already active for this room).
         ClientDispatchCommand::StartTick => {
+            if !is_control_plane_allowed(is_server_peer, session_caps, "tick.admin") {
+                send_error(sink, "reject.control_plane_forbidden: command=start-tick requires=tick.admin").await;
+                return true;
+            }
             let interval_ms = extract_start_tick_interval_ms(&msg);
             let intent_prefix = extract_start_tick_intent_prefix(&msg);
             let started = room.start_tick(Arc::clone(server_key), interval_ms, intent_prefix);
@@ -1105,6 +1304,10 @@ async fn handle_client_message(
 
         // E1: stop the tick loop for this room --------------------------------
         ClientDispatchCommand::StopTick => {
+            if !is_control_plane_allowed(is_server_peer, session_caps, "tick.admin") {
+                send_error(sink, "reject.control_plane_forbidden: command=stop-tick requires=tick.admin").await;
+                return true;
+            }
             room.stop_tick();
             let reply = serde_json::to_string(&assemble_tick_stopped_envelope())
                 .expect("tick-stopped envelope should always serialize");
@@ -1230,6 +1433,47 @@ async fn send_error(sink: &mut SplitSink<WebSocket, Message>, msg: &str) {
     let j = serde_json::to_string(&assemble_error_envelope(msg.to_string()))
         .expect("error envelope should always serialize");
     let _ = sink.send(Message::Text(j.into())).await;
+}
+
+#[inline]
+fn is_control_plane_allowed(
+    is_server_peer: bool,
+    session_caps: &HashSet<String>,
+    required_capability: &str,
+) -> bool {
+    is_server_peer || session_caps.contains(required_capability)
+}
+
+/// Canonical control-plane capability mapping used by the Rust server ingress.
+pub fn required_capability_for_control_plane_command(command: &str) -> Option<&'static str> {
+    match command {
+        "set-policy" => Some("policy.admin"),
+        "set-room-key" => Some("room.admin"),
+        "start-tick" | "stop-tick" => Some("tick.admin"),
+        _ => None,
+    }
+}
+
+/// Evaluate whether a control-plane command is allowed for a session.
+///
+/// Returns `Ok(())` if allowed. On deny, returns the deterministic rejection
+/// message emitted by this ingress path.
+pub fn evaluate_control_plane_authorization(
+    is_server_peer: bool,
+    session_caps: &HashSet<String>,
+    command: &str,
+) -> Result<(), String> {
+    let Some(required) = required_capability_for_control_plane_command(command) else {
+        return Ok(());
+    };
+
+    if is_control_plane_allowed(is_server_peer, session_caps, required) {
+        Ok(())
+    } else {
+        Err(format!(
+            "reject.control_plane_forbidden: command={command} requires={required}"
+        ))
+    }
 }
 
 /// Shared adapter emitter for single session-targeted text envelopes.
@@ -1423,16 +1667,118 @@ fn hex_from_bytes(bytes: &[u8]) -> String {
 ///
 /// On success returns the token's `expiry_secs` (Unix seconds) so the
 /// session loop can disconnect the peer the moment it expires (G6).
+struct VerifiedToken {
+    expiry_secs: u64,
+    capabilities: Vec<String>,
+}
+
+fn validate_identity_continuity_v1(tok: &Value, current_peer: &[u8; 32], now_secs: u64) -> Result<(), String> {
+    let Some(continuity) = tok.get("continuity") else {
+        return Ok(());
+    };
+
+    let predecessor_hex = continuity
+        .get("predecessor_peer_pubkey")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing token.continuity.predecessor_peer_pubkey".to_string())?;
+    let predecessor = parse_hex_32(predecessor_hex)
+        .ok_or_else(|| "invalid token.continuity.predecessor_peer_pubkey".to_string())?;
+    if &predecessor == current_peer {
+        return Err("token continuity predecessor must differ from current peer".to_string());
+    }
+
+    let overlap_not_after = continuity
+        .get("overlap_not_after")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "missing token.continuity.overlap_not_after".to_string())?;
+    if now_secs > overlap_not_after {
+        return Err("token continuity overlap window expired".to_string());
+    }
+
+    let revoked: HashSet<String> = continuity
+        .get("revoked_predecessors")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    if revoked.contains(&predecessor_hex.trim().to_ascii_lowercase()) {
+        return Err("token continuity predecessor is revoked".to_string());
+    }
+
+    Ok(())
+}
+
+static CAPABILITY_PROFILE_CACHE: OnceLock<Result<Option<CapabilityProfile>, String>> = OnceLock::new();
+
+fn configured_capability_profile() -> Result<Option<&'static CapabilityProfile>, String> {
+    let loaded = CAPABILITY_PROFILE_CACHE.get_or_init(|| {
+        let Some(path_raw) = std::env::var_os("ACTIVESYNC_CAPABILITY_PROFILE_PATH") else {
+            return Ok(None);
+        };
+
+        let path = PathBuf::from(path_raw);
+        let profile = load_capability_profile_from_path(&path)
+            .map_err(|e| format!("failed to load capability profile {}: {e}", path.display()))?;
+        Ok(Some(profile))
+    });
+
+    match loaded {
+        Ok(Some(profile)) => Ok(Some(profile)),
+        Ok(None) => Ok(None),
+        Err(err) => Err(err.clone()),
+    }
+}
+
+fn maybe_expand_profile_capabilities(
+    caps: &[String],
+    token_profile_version: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let Some(profile) = configured_capability_profile()? else {
+        return Ok(caps.to_vec());
+    };
+
+    expand_profile_capabilities_with_profile(profile, caps, token_profile_version)
+}
+
+fn expand_profile_capabilities_with_profile(
+    profile: &CapabilityProfile,
+    caps: &[String],
+    token_profile_version: Option<&str>,
+) -> Result<Vec<String>, String> {
+
+    let presented = token_profile_version
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "missing token.capability_profile_version while capability composition is enabled".to_string())?;
+
+    if !profile_supports_version(profile, presented) {
+        return Err(format!(
+            "unknown token.capability_profile_version '{presented}' (expected '{}' or configured compatibility versions)",
+            profile.profile_version
+        ));
+    }
+
+    flatten_capabilities(profile, &caps.to_vec())
+        .map_err(|e| format!("capability profile expansion failed: {e}"))
+}
+
 fn verify_hello_token(
     hello: &Value,
     room_vk: &VerifyingKey,
     peer_pubkey_hex: &str,
     room_id: &str,
-) -> Result<u64, String> {
+) -> Result<VerifiedToken, String> {
     let tok = hello.get("token").ok_or("room is locked — include a capability token in hello")?;
     let peer_hex   = tok["peer_pubkey"].as_str().ok_or("missing token.peer_pubkey")?;
     let expiry     = tok["expiry"].as_u64().ok_or("missing token.expiry")?;
     let sig_hex    = tok["sig"].as_str().ok_or("missing token.sig")?;
+    let token_profile_version = tok["capability_profile_version"]
+        .as_str()
+        .or_else(|| tok["profile_version"].as_str());
     // Capabilities: optional array of strings; empty = full access.
     let caps: Vec<String> = tok["caps"]
         .as_array()
@@ -1454,7 +1800,13 @@ fn verify_hello_token(
 
     token.verify(room_id, room_vk, &peer_bytes, now)
         .map_err(|e| e.to_string())?;
-    Ok(expiry)
+    validate_identity_continuity_v1(tok, &peer_bytes, now)?;
+    let flattened_caps = maybe_expand_profile_capabilities(&token.capabilities, token_profile_version)?;
+
+    Ok(VerifiedToken {
+        expiry_secs: expiry,
+        capabilities: flattened_caps,
+    })
 }
 
 /// Parse a 32-byte Ed25519 verifying key from a 64-char hex string.
@@ -1627,5 +1979,154 @@ mod subscription_tests {
     fn empty_pattern_list_means_everything() {
         let s = Subscription::from_patterns(vec![]);
         assert!(s.matches_everything());
+    }
+
+    #[test]
+    fn scoped_catchup_budget_drops_when_node_limit_exceeded() {
+        let budget = ScopeCatchupBudget {
+            max_filtered_node_count: 2,
+            max_filtered_payload_bytes: 512,
+        };
+
+        assert!(should_drop_filtered_catchup_for_budget(3, 128, budget));
+        assert!(!should_drop_filtered_catchup_for_budget(2, 128, budget));
+    }
+
+    #[test]
+    fn scoped_catchup_budget_drops_when_payload_limit_exceeded() {
+        let budget = ScopeCatchupBudget {
+            max_filtered_node_count: 10,
+            max_filtered_payload_bytes: 128,
+        };
+
+        assert!(should_drop_filtered_catchup_for_budget(3, 129, budget));
+        assert!(!should_drop_filtered_catchup_for_budget(3, 128, budget));
+    }
+}
+
+#[cfg(test)]
+mod control_plane_auth_tests {
+    use super::*;
+
+    #[test]
+    fn server_peer_always_allowed() {
+        let caps = HashSet::new();
+        assert!(is_control_plane_allowed(true, &caps, "policy.admin"));
+    }
+
+    #[test]
+    fn matching_capability_allows_non_server_peer() {
+        let mut caps = HashSet::new();
+        caps.insert("tick.admin".to_string());
+        assert!(is_control_plane_allowed(false, &caps, "tick.admin"));
+    }
+
+    #[test]
+    fn missing_capability_denies_non_server_peer() {
+        let mut caps = HashSet::new();
+        caps.insert("policy.admin".to_string());
+        assert!(!is_control_plane_allowed(false, &caps, "room.admin"));
+    }
+}
+
+#[cfg(test)]
+mod capability_profile_runtime_tests {
+    use super::expand_profile_capabilities_with_profile;
+    use crate::capability_profile::{CapabilityNode, CapabilityProfile};
+
+    #[test]
+    fn compatibility_window_accepts_supported_profile_version() {
+        let profile = CapabilityProfile {
+            profile_version: "capprof-v3".to_string(),
+            supported_profile_versions: vec!["capprof-v2".to_string()],
+            nodes: vec![CapabilityNode {
+                capability: "policy.admin".to_string(),
+                inherits: vec![],
+            }],
+            limits: None,
+        };
+
+        let caps = vec!["policy.admin".to_string()];
+        let expanded =
+            expand_profile_capabilities_with_profile(&profile, &caps, Some("capprof-v2"))
+                .expect("expected version within compatibility window");
+        assert_eq!(expanded, vec!["policy.admin".to_string()]);
+    }
+
+    #[test]
+    fn compatibility_window_rejects_unsupported_profile_version() {
+        let profile = CapabilityProfile {
+            profile_version: "capprof-v3".to_string(),
+            supported_profile_versions: vec!["capprof-v2".to_string()],
+            nodes: vec![CapabilityNode {
+                capability: "policy.admin".to_string(),
+                inherits: vec![],
+            }],
+            limits: None,
+        };
+
+        let caps = vec!["policy.admin".to_string()];
+        let err = expand_profile_capabilities_with_profile(&profile, &caps, Some("capprof-v1"))
+            .expect_err("expected rejection for unsupported version");
+        assert!(err.contains("unknown token.capability_profile_version"));
+    }
+}
+
+#[cfg(test)]
+mod identity_continuity_runtime_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn peer(hex_byte: u8) -> [u8; 32] {
+        [hex_byte; 32]
+    }
+
+    fn peer_hex(hex_byte: u8) -> String {
+        hex_from_bytes(&[hex_byte; 32])
+    }
+
+    #[test]
+    fn continuity_validation_allows_predecessor_within_overlap() {
+        let tok = json!({
+            "continuity": {
+                "predecessor_peer_pubkey": peer_hex(0x11),
+                "overlap_not_after": 200,
+                "revoked_predecessors": []
+            }
+        });
+
+        let result = validate_identity_continuity_v1(&tok, &peer(0x22), 150);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn continuity_validation_rejects_expired_overlap() {
+        let tok = json!({
+            "continuity": {
+                "predecessor_peer_pubkey": peer_hex(0x11),
+                "overlap_not_after": 100,
+                "revoked_predecessors": []
+            }
+        });
+
+        let err = validate_identity_continuity_v1(&tok, &peer(0x22), 101)
+            .expect_err("expected overlap expiry rejection");
+        assert!(err.contains("overlap window expired"));
+    }
+
+    #[test]
+    fn continuity_validation_rejects_revoked_predecessor() {
+        let predecessor = peer_hex(0x11);
+        let tok = json!({
+            "continuity": {
+                "predecessor_peer_pubkey": predecessor,
+                "overlap_not_after": 200,
+                "revoked_predecessors": [peer_hex(0x11)]
+            }
+        });
+
+        let err = validate_identity_continuity_v1(&tok, &peer(0x22), 120)
+            .expect_err("expected revoked predecessor rejection");
+        assert!(err.contains("predecessor is revoked"));
     }
 }

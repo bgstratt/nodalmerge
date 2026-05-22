@@ -1,0 +1,29 @@
+{
+  "generated_utc": "2026-05-22T05:48:04.8954228Z",
+  "history_path": ".\\docs\\acceptance\\tmp-promotion-history-phasec2.jsonl",
+  "total_records": 1,
+  "latest": {
+    "captured_utc": "2026-05-22T05:44:49.3777504Z",
+    "workflow_run_id": "local-phasec2",
+    "workflow_run_number": "1",
+    "overall_signal": "not_evaluated",
+    "capcomp_streak_event": "not_evaluated",
+    "benchmark_streak_event": "not_evaluated",
+    "capcomp_promotion_signal": "not_evaluated",
+    "benchmark_status": "not_evaluated",
+    "gate_verdict": "NOT_EVALUATED",
+    "canonical_run_id": "local-nightly-admin",
+    "capcomp_run_id": ""
+  },
+  "streaks": {
+    "required_consecutive_runs": 14,
+    "capcomp_consecutive_passes": 0,
+    "benchmark_consecutive_passes": 0,
+    "combined_consecutive_passes": 0,
+    "capcomp_ready": false,
+    "benchmark_ready": false,
+    "combined_ready": false,
+    "gate_verdict_consecutive_passes": 0,
+    "gate_verdict_ready": false
+  }
+}

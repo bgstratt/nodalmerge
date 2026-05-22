@@ -1,0 +1,66 @@
+{
+  "name": "multi_transition_order_independent",
+  "timeline": [
+    {
+      "effective_lamport": 3,
+      "default": "DenyAll",
+      "rules": [
+        {
+          "path_glob": "protected/**",
+          "can_write_authors": ["A"]
+        }
+      ]
+    },
+    {
+      "effective_lamport": 2,
+      "default": "DenyAll",
+      "rules": [
+        {
+          "path_glob": "protected/**",
+          "can_write_authors": ["B"]
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "author": "B",
+      "lamport": 1,
+      "parents": [],
+      "ops": [
+        {
+          "key": "protected/x",
+          "value": "l1"
+        }
+      ]
+    },
+    {
+      "author": "A",
+      "lamport": 3,
+      "parents": [0],
+      "ops": [
+        {
+          "key": "protected/x",
+          "value": "l3"
+        }
+      ]
+    },
+    {
+      "author": "B",
+      "lamport": 2,
+      "parents": [0],
+      "ops": [
+        {
+          "key": "protected/y",
+          "value": "l2"
+        }
+      ]
+    }
+  ],
+  "expect": {
+    "map": {
+      "protected/x": "l3",
+      "protected/y": "l2"
+    }
+  }
+}

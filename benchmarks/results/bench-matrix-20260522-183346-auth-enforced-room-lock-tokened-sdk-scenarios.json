@@ -1,0 +1,328 @@
+{
+  "started_at_unix_ms": 1779474831033,
+  "completed_at_unix_ms": 1779474878436,
+  "config": {
+    "peerCounts": [
+      2,
+      10,
+      20
+    ],
+    "iterations": 3,
+    "mapOps": 60,
+    "listOps": 60,
+    "blobOps": 20,
+    "blobSizeBytes": 4096,
+    "warmupOps": 8,
+    "timeoutMs": 30000,
+    "opDelayMs": 0,
+    "transport": "ws-only",
+    "authMode": "room-lock-tokened",
+    "tokenExpirySecs": 3600,
+    "authTokenCaps": [
+      "read:bench/**",
+      "write:bench/**"
+    ]
+  },
+  "results": [
+    {
+      "target": "rust-combined-server",
+      "serverUrl": "ws://127.0.0.1:7878",
+      "peerCount": 2,
+      "status": "ok",
+      "warmup_samples": 3,
+      "warmup_avg_ms": 92.595,
+      "warmup_p95_ms": 93.224,
+      "map_samples": 3,
+      "map_avg_ms": 572.47,
+      "map_p95_ms": 575.999,
+      "list_samples": 3,
+      "list_avg_ms": 732.867,
+      "list_p95_ms": 735.573,
+      "blob_samples": 3,
+      "blob_avg_ms": 213.83,
+      "blob_p95_ms": 247.414,
+      "runs": [
+        {
+          "iteration": 0,
+          "warmup_ms": 93.224,
+          "map_ms": 566.663,
+          "map_error": null,
+          "list_ms": 734.507,
+          "list_error": null,
+          "blob_ms": 197.548,
+          "blob_error": null
+        },
+        {
+          "iteration": 1,
+          "warmup_ms": 91.967,
+          "map_ms": 574.749,
+          "map_error": null,
+          "list_ms": 728.52,
+          "list_error": null,
+          "blob_ms": 247.414,
+          "blob_error": null
+        },
+        {
+          "iteration": 2,
+          "warmup_ms": 92.593,
+          "map_ms": 575.999,
+          "map_error": null,
+          "list_ms": 735.573,
+          "list_error": null,
+          "blob_ms": 196.527,
+          "blob_error": null
+        }
+      ]
+    },
+    {
+      "target": "rust-combined-server",
+      "serverUrl": "ws://127.0.0.1:7878",
+      "peerCount": 10,
+      "status": "ok",
+      "warmup_samples": 3,
+      "warmup_avg_ms": 94.146,
+      "warmup_p95_ms": 94.431,
+      "map_samples": 3,
+      "map_avg_ms": 613.431,
+      "map_p95_ms": 615.168,
+      "list_samples": 3,
+      "list_avg_ms": 849.854,
+      "list_p95_ms": 857.105,
+      "blob_samples": 3,
+      "blob_avg_ms": 326.373,
+      "blob_p95_ms": 349.709,
+      "runs": [
+        {
+          "iteration": 0,
+          "warmup_ms": 93.982,
+          "map_ms": 615.168,
+          "map_error": null,
+          "list_ms": 857.105,
+          "list_error": null,
+          "blob_ms": 349.709,
+          "blob_error": null
+        },
+        {
+          "iteration": 1,
+          "warmup_ms": 94.431,
+          "map_ms": 611.672,
+          "map_error": null,
+          "list_ms": 847.129,
+          "list_error": null,
+          "blob_ms": 297.7,
+          "blob_error": null
+        },
+        {
+          "iteration": 2,
+          "warmup_ms": 94.025,
+          "map_ms": 613.454,
+          "map_error": null,
+          "list_ms": 845.328,
+          "list_error": null,
+          "blob_ms": 331.709,
+          "blob_error": null
+        }
+      ]
+    },
+    {
+      "target": "rust-combined-server",
+      "serverUrl": "ws://127.0.0.1:7878",
+      "peerCount": 20,
+      "status": "ok",
+      "warmup_samples": 3,
+      "warmup_avg_ms": 92.919,
+      "warmup_p95_ms": 93.859,
+      "map_samples": 3,
+      "map_avg_ms": 690.032,
+      "map_p95_ms": 693.8,
+      "list_samples": 3,
+      "list_avg_ms": 1043.727,
+      "list_p95_ms": 1045.094,
+      "blob_samples": 3,
+      "blob_avg_ms": 464.492,
+      "blob_p95_ms": 471.416,
+      "runs": [
+        {
+          "iteration": 0,
+          "warmup_ms": 92.444,
+          "map_ms": 686.749,
+          "map_error": null,
+          "list_ms": 1045.094,
+          "list_error": null,
+          "blob_ms": 471.416,
+          "blob_error": null
+        },
+        {
+          "iteration": 1,
+          "warmup_ms": 92.453,
+          "map_ms": 689.547,
+          "map_error": null,
+          "list_ms": 1041.12,
+          "list_error": null,
+          "blob_ms": 451.153,
+          "blob_error": null
+        },
+        {
+          "iteration": 2,
+          "warmup_ms": 93.859,
+          "map_ms": 693.8,
+          "map_error": null,
+          "list_ms": 1044.967,
+          "list_error": null,
+          "blob_ms": 470.906,
+          "blob_error": null
+        }
+      ]
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "serverUrl": "ws://127.0.0.1:8787",
+      "peerCount": 2,
+      "status": "ok",
+      "warmup_samples": 3,
+      "warmup_avg_ms": 94.146,
+      "warmup_p95_ms": 94.932,
+      "map_samples": 3,
+      "map_avg_ms": 633.755,
+      "map_p95_ms": 655.533,
+      "list_samples": 3,
+      "list_avg_ms": 822.217,
+      "list_p95_ms": 822.84,
+      "blob_samples": 3,
+      "blob_avg_ms": 241.756,
+      "blob_p95_ms": 250.608,
+      "runs": [
+        {
+          "iteration": 0,
+          "warmup_ms": 94.932,
+          "map_ms": 655.533,
+          "map_error": null,
+          "list_ms": 821.443,
+          "list_error": null,
+          "blob_ms": 237.359,
+          "blob_error": null
+        },
+        {
+          "iteration": 1,
+          "warmup_ms": 94.58,
+          "map_ms": 622.582,
+          "map_error": null,
+          "list_ms": 822.368,
+          "list_error": null,
+          "blob_ms": 237.301,
+          "blob_error": null
+        },
+        {
+          "iteration": 2,
+          "warmup_ms": 92.925,
+          "map_ms": 623.15,
+          "map_error": null,
+          "list_ms": 822.84,
+          "list_error": null,
+          "blob_ms": 250.608,
+          "blob_error": null
+        }
+      ]
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "serverUrl": "ws://127.0.0.1:8787",
+      "peerCount": 10,
+      "status": "ok",
+      "warmup_samples": 3,
+      "warmup_avg_ms": 93.65,
+      "warmup_p95_ms": 93.997,
+      "map_samples": 3,
+      "map_avg_ms": 640.051,
+      "map_p95_ms": 654.715,
+      "list_samples": 3,
+      "list_avg_ms": 852.673,
+      "list_p95_ms": 853.488,
+      "blob_samples": 3,
+      "blob_avg_ms": 305.6,
+      "blob_p95_ms": 312.532,
+      "runs": [
+        {
+          "iteration": 0,
+          "warmup_ms": 93.052,
+          "map_ms": 638.135,
+          "map_error": null,
+          "list_ms": 851.769,
+          "list_error": null,
+          "blob_ms": 293.005,
+          "blob_error": null
+        },
+        {
+          "iteration": 1,
+          "warmup_ms": 93.997,
+          "map_ms": 654.715,
+          "map_error": null,
+          "list_ms": 852.761,
+          "list_error": null,
+          "blob_ms": 311.262,
+          "blob_error": null
+        },
+        {
+          "iteration": 2,
+          "warmup_ms": 93.901,
+          "map_ms": 627.302,
+          "map_error": null,
+          "list_ms": 853.488,
+          "list_error": null,
+          "blob_ms": 312.532,
+          "blob_error": null
+        }
+      ]
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "serverUrl": "ws://127.0.0.1:8787",
+      "peerCount": 20,
+      "status": "ok",
+      "warmup_samples": 3,
+      "warmup_avg_ms": 94.469,
+      "warmup_p95_ms": 96.059,
+      "map_samples": 3,
+      "map_avg_ms": 641.112,
+      "map_p95_ms": 643.623,
+      "list_samples": 3,
+      "list_avg_ms": 964.167,
+      "list_p95_ms": 989.07,
+      "blob_samples": 3,
+      "blob_avg_ms": 412.832,
+      "blob_p95_ms": 419.705,
+      "runs": [
+        {
+          "iteration": 0,
+          "warmup_ms": 93.743,
+          "map_ms": 639.728,
+          "map_error": null,
+          "list_ms": 973.227,
+          "list_error": null,
+          "blob_ms": 416.263,
+          "blob_error": null
+        },
+        {
+          "iteration": 1,
+          "warmup_ms": 93.606,
+          "map_ms": 643.623,
+          "map_error": null,
+          "list_ms": 930.205,
+          "list_error": null,
+          "blob_ms": 419.705,
+          "blob_error": null
+        },
+        {
+          "iteration": 2,
+          "warmup_ms": 96.059,
+          "map_ms": 639.986,
+          "map_error": null,
+          "list_ms": 989.07,
+          "list_error": null,
+          "blob_ms": 402.529,
+          "blob_error": null
+        }
+      ]
+    }
+  ]
+}

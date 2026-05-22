@@ -1,0 +1,47 @@
+{
+  "generated_utc": "2026-05-22T13:01:29.8178256Z",
+  "sources": {
+    "canonical_parity_path": ".\\docs\\acceptance\\authz-conformance-parity.json",
+    "canonical_parity_found": true,
+    "capcomp_parity_path": ".\\docs\\acceptance\\authz-conformance-parity-supp-capcomp-qualified-20260522-01.json",
+    "capcomp_parity_found": false
+  },
+  "run": {
+    "canonical_run_id": "local-nightly-20260522-125553-admin",
+    "capcomp_run_id": null,
+    "canonical_git_commit": "ff2b0d650d44fdf4fb2fe2815ce1079cf52a2bb4",
+    "capcomp_git_commit": null
+  },
+  "capcomp": {
+    "promotion_signal": "not_evaluated",
+    "streak_event": "not_evaluated",
+    "parity_status": null,
+    "vector_count": null,
+    "parity_mismatch_count": null,
+    "rust_fail_count": null,
+    "dotnet_fail_count": null
+  },
+  "benchmark": {
+    "status": "not_evaluated",
+    "streak_event": "not_evaluated",
+    "source": "none",
+    "baseline_run_id": null,
+    "candidate_run_id": null,
+    "p50_latency_regression_pct": null,
+    "p95_latency_regression_pct": null,
+    "alloc_regression_pct": null,
+    "thresholds": {
+      "p50_latency_regression_pct_max": 5.0,
+      "p95_latency_regression_pct_max": 10.0,
+      "alloc_regression_pct_max": 10.0
+    }
+  },
+  "streak": {
+    "capcomp_increment_eligible": false,
+    "benchmark_increment_eligible": false,
+    "overall_signal": "not_evaluated",
+    "gate_verdict": "NOT_EVALUATED",
+    "required_consecutive_runs": 14,
+    "next_action": "collect_missing_evidence_inputs"
+  }
+}

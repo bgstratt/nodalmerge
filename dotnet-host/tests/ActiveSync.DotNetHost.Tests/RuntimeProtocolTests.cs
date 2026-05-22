@@ -5,7 +5,7 @@ namespace ActiveSync.DotNetHost.Tests;
 public class RuntimeProtocolTests
 {
     [Fact]
-    public void Hello_maps_to_ensure_open_and_client_hello_commands()
+    public void Hello_maps_to_ensure_open_client_hello_and_initial_request_pack_commands()
     {
         var mapper = new RuntimeProtocolMapper();
         var state = new RuntimeConnectionState(42);
@@ -16,10 +16,34 @@ public class RuntimeProtocolTests
         );
 
         Assert.True(result.IsSuccess);
-        Assert.Equal(3, result.CommandJsons.Count);
+        Assert.Equal(4, result.CommandJsons.Count);
         Assert.Contains("EnsureRoom", result.CommandJsons[0]);
         Assert.Contains("OpenSession", result.CommandJsons[1]);
         Assert.Contains("ClientHello", result.CommandJsons[2]);
+        Assert.Contains("RequestServerPack", result.CommandJsons[3]);
+        Assert.Contains("\"known_ids\":[]", result.CommandJsons[3]);
+    }
+
+    [Fact]
+    public void Hello_handshake_guardrail_keeps_bootstrap_command_order_and_shapes()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(77);
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"frontier\":[]}",
+            state
+        );
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.CommandJsons.Count >= 4, "hello bootstrap must emit at least 4 commands");
+        Assert.Contains("EnsureRoom", result.CommandJsons[0]);
+        Assert.Contains("OpenSession", result.CommandJsons[1]);
+        Assert.Contains("\"session_id\":77", result.CommandJsons[1]);
+        Assert.Contains("ClientHello", result.CommandJsons[2]);
+        Assert.Contains("\"peer_pubkey_hex\":\"peer-a\"", result.CommandJsons[2]);
+        Assert.Contains("RequestServerPack", result.CommandJsons[3]);
+        Assert.Contains("\"known_ids\":[]", result.CommandJsons[3]);
     }
 
     [Fact]
@@ -53,6 +77,118 @@ public class RuntimeProtocolTests
         Assert.False(result.IsSuccess);
         Assert.Equal("hello.token.sig is required", result.Error);
     }
+
+    [Fact]
+    public void Hello_marks_state_as_server_peer_when_pubkey_matches_configured_server_peer()
+    {
+        var mapper = new RuntimeProtocolMapper("server-peer-hex");
+        var state = new RuntimeConnectionState(42);
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"server-peer-hex\",\"frontier\":[]}",
+            state
+        );
+
+        Assert.True(result.IsSuccess);
+        Assert.True(state.IsServerPeer);
+    }
+
+        [Fact]
+        public void Identity_continuity_proof_allows_successor_signer_during_overlap_window()
+        {
+                var mapper = new RuntimeProtocolMapper();
+                var state = new RuntimeConnectionState(42);
+                var overlapNotAfter = (ulong)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 60);
+
+                var result = mapper.MapIncomingMessageToCommandJsons(
+                        """
+                        {
+                            "type":"hello",
+                            "room":"room-a",
+                            "pubkey":"peer-b",
+                            "token":{
+                                "peer_pubkey":"peer-b",
+                                "expiry":123,
+                                "caps":["read:world/**"],
+                                "sig":"cd",
+                                "continuity":{
+                                    "predecessor_peer_pubkey":"peer-a",
+                                    "overlap_not_after":{{OVERLAP}},
+                                    "revoked_predecessors":[]
+                                }
+                            }
+                        }
+                        """.Replace("{{OVERLAP}}", overlapNotAfter.ToString()),
+                        state
+                );
+
+                Assert.True(result.IsSuccess);
+                Assert.Contains("\"continuity\"", result.CommandJsons[2]);
+                Assert.Contains("\"predecessor_peer_pubkey\":\"peer-a\"", result.CommandJsons[2]);
+        }
+
+        [Fact]
+        public void Identity_continuity_proof_rejects_after_overlap_window_expiry()
+        {
+                var mapper = new RuntimeProtocolMapper();
+                var state = new RuntimeConnectionState(42);
+
+                var result = mapper.MapIncomingMessageToCommandJsons(
+                        "{" +
+                        "\"type\":\"hello\"," +
+                        "\"room\":\"room-a\"," +
+                        "\"pubkey\":\"peer-b\"," +
+                        "\"token\":{" +
+                        "\"peer_pubkey\":\"peer-b\"," +
+                        "\"expiry\":123," +
+                        "\"caps\":[\"read:world/**\"]," +
+                        "\"sig\":\"cd\"," +
+                        "\"continuity\":{" +
+                        "\"predecessor_peer_pubkey\":\"peer-a\"," +
+                        "\"overlap_not_after\":1," +
+                        "\"revoked_predecessors\":[]" +
+                        "}" +
+                        "}" +
+                        "}",
+                        state
+                );
+
+                Assert.False(result.IsSuccess);
+                Assert.Equal("hello.token.continuity overlap window expired", result.Error);
+        }
+
+        [Fact]
+        public void Identity_continuity_proof_rejects_revoked_predecessor_key()
+        {
+                var mapper = new RuntimeProtocolMapper();
+                var state = new RuntimeConnectionState(42);
+                var overlapNotAfter = (ulong)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 60);
+
+                var result = mapper.MapIncomingMessageToCommandJsons(
+                        """
+                        {
+                            "type":"hello",
+                            "room":"room-a",
+                            "pubkey":"peer-b",
+                            "token":{
+                                "peer_pubkey":"peer-b",
+                                "expiry":123,
+                                "caps":["read:world/**"],
+                                "sig":"cd",
+                                "continuity":{
+                                    "predecessor_peer_pubkey":"peer-a",
+                                    "overlap_not_after":{{OVERLAP}},
+                                    "revoked_predecessors":["peer-a"]
+                                }
+                            }
+                        }
+                        """.Replace("{{OVERLAP}}", overlapNotAfter.ToString()),
+                        state
+                );
+
+                Assert.False(result.IsSuccess);
+                Assert.Equal("hello.token.continuity predecessor key is revoked", result.Error);
+        }
 
     [Fact]
     public void Event_mapper_converts_welcome_prepared_to_welcome_wire_message()
@@ -131,6 +267,7 @@ public class RuntimeProtocolTests
             RoomId = "room-a",
             PeerPubkeyHex = "peer-a"
         };
+        state.SessionCapabilities.Add("room.admin");
 
         var result = mapper.MapIncomingMessageToCommandJsons(
             "{\"type\":\"set-room-key\",\"pubkey\":\"11\"}",
@@ -153,6 +290,7 @@ public class RuntimeProtocolTests
             RoomId = "room-a",
             PeerPubkeyHex = "peer-a"
         };
+        state.SessionCapabilities.Add("room.admin");
 
         var result = mapper.MapIncomingMessageToCommandJsons(
             "{\"type\":\"set-room-key\"}",
@@ -922,6 +1060,7 @@ public class RuntimeProtocolTests
             RoomId = "room-a",
             PeerPubkeyHex = "peer-a"
         };
+        state.SessionCapabilities.Add("policy.admin");
 
         var result = mapper.MapIncomingMessageToCommandJsons(
             "{\"type\":\"set-policy\",\"default\":\"deny\",\"rules\":[{\"path_glob\":\"world/**\",\"can_write\":[\"11\"]}]}",
@@ -945,6 +1084,7 @@ public class RuntimeProtocolTests
             RoomId = "room-a",
             PeerPubkeyHex = "peer-a"
         };
+        state.SessionCapabilities.Add("policy.admin");
 
         var result = mapper.MapIncomingMessageToCommandJsons(
             "{\"type\":\"set-policy\",\"default\":\"custom\"}",
@@ -965,6 +1105,7 @@ public class RuntimeProtocolTests
             RoomId = "room-a",
             PeerPubkeyHex = "peer-a"
         };
+        state.SessionCapabilities.Add("policy.admin");
 
         var result = mapper.MapIncomingMessageToCommandJsons(
             "{\"type\":\"set-policy\",\"rules\":[{\"can_write\":[\"11\"]}]}",
@@ -995,6 +1136,154 @@ public class RuntimeProtocolTests
         Assert.Single(result.CommandJsons);
         Assert.Contains("ImportPack", result.CommandJsons[0]);
         Assert.Contains("\"nodes_b64\":\"AQID\"", result.CommandJsons[0]);
+    }
+
+    [Fact]
+    public void Set_room_key_rejects_without_room_admin_capability()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"set-room-key\",\"pubkey\":\"11\"}",
+            state
+        );
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("reject.control_plane_forbidden: command=set-room-key requires=room.admin", result.Error);
+    }
+
+    [Fact]
+    public void Set_policy_rejects_without_policy_admin_capability()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"set-policy\",\"default\":\"allow\",\"rules\":[]}",
+            state
+        );
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("reject.control_plane_forbidden: command=set-policy requires=policy.admin", result.Error);
+    }
+
+    [Fact]
+    public void Set_policy_allows_server_peer_without_policy_admin_capability()
+    {
+        var mapper = new RuntimeProtocolMapper("server-peer-hex");
+        var state = new RuntimeConnectionState(1);
+
+        var hello = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"server-peer-hex\",\"frontier\":[]}",
+            state
+        );
+        Assert.True(hello.IsSuccess);
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"set-policy\",\"default\":\"allow\",\"rules\":[]}",
+            state
+        );
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.CommandJsons);
+        Assert.Contains("SetPolicy", result.CommandJsons[0]);
+    }
+
+    [Fact]
+    public void Start_tick_maps_to_host_command_after_hello()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+        state.SessionCapabilities.Add("tick.admin");
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"start-tick\",\"interval_ms\":33,\"intent_prefix\":\"intent/\"}",
+            state
+        );
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.CommandJsons);
+        Assert.Contains("StartTick", result.CommandJsons[0]);
+        Assert.Contains("\"interval_ms\":33", result.CommandJsons[0]);
+        Assert.Contains("\"intent_prefix\":\"intent/\"", result.CommandJsons[0]);
+    }
+
+    [Fact]
+    public void Stop_tick_maps_to_host_command_after_hello()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+        state.SessionCapabilities.Add("tick.admin");
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"stop-tick\"}",
+            state
+        );
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.CommandJsons);
+        Assert.Contains("\"command\":\"StopTick\"", result.CommandJsons[0]);
+    }
+
+    [Fact]
+    public void Start_tick_rejects_without_tick_admin_capability()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"start-tick\"}",
+            state
+        );
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("reject.control_plane_forbidden: command=start-tick requires=tick.admin", result.Error);
+    }
+
+    [Fact]
+    public void Stop_tick_rejects_without_tick_admin_capability()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"stop-tick\"}",
+            state
+        );
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("reject.control_plane_forbidden: command=stop-tick requires=tick.admin", result.Error);
     }
 
     [Fact]
@@ -1199,5 +1488,43 @@ public class RuntimeProtocolTests
         Assert.Contains("\"room\":\"room-a\"", result.OutboundMessages[0]);
         Assert.Contains("\"type\":\"recent-conflicts\"", result.OutboundMessages[1]);
         Assert.Contains("\"entries\"", result.OutboundMessages[1]);
+    }
+
+    [Fact]
+    public void Event_mapper_pack_imported_with_kept_nodes_maps_to_pack_ack_counts()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var eventsJson =
+            "[" +
+            "{\"PackImported\":{\"room_id\":\"room-a\",\"incoming_count\":2,\"accepted_count\":1,\"rejected_count\":1}}" +
+            "]";
+
+        var result = mapper.MapEventsJsonToOutboundMessages(eventsJson);
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.OutboundMessages);
+        Assert.Contains("\"type\":\"pack-ack\"", result.OutboundMessages[0]);
+        Assert.Contains("\"incoming_count\":2", result.OutboundMessages[0]);
+        Assert.Contains("\"accepted_count\":1", result.OutboundMessages[0]);
+        Assert.Contains("\"rejected_count\":1", result.OutboundMessages[0]);
+    }
+
+    [Fact]
+    public void Event_mapper_pack_imported_with_zero_kept_nodes_maps_to_pack_ack_counts()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var eventsJson =
+            "[" +
+            "{\"PackImported\":{\"room_id\":\"room-a\",\"incoming_count\":2,\"accepted_count\":0,\"rejected_count\":2}}" +
+            "]";
+
+        var result = mapper.MapEventsJsonToOutboundMessages(eventsJson);
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.OutboundMessages);
+        Assert.Contains("\"type\":\"pack-ack\"", result.OutboundMessages[0]);
+        Assert.Contains("\"incoming_count\":2", result.OutboundMessages[0]);
+        Assert.Contains("\"accepted_count\":0", result.OutboundMessages[0]);
+        Assert.Contains("\"rejected_count\":2", result.OutboundMessages[0]);
     }
 }

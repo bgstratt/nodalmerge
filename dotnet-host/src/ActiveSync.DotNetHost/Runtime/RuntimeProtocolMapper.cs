@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Linq;
 using System.Text.Json.Serialization;
+using ActiveSync.Host.Composition;
 
 namespace ActiveSync.DotNetHost.Runtime;
 
@@ -11,6 +12,34 @@ public sealed class RuntimeProtocolMapper
     {
         PropertyNameCaseInsensitive = true
     };
+
+    private readonly CapabilityProfileExpander _capabilityProfileExpander;
+    private readonly string? _trustedServerPeerPubkeyHex;
+
+    public RuntimeProtocolMapper()
+        : this(new CapabilityProfileExpander(new CapabilityCompositionOptions(Enabled: false, ProfilePath: null)), null)
+    {
+    }
+
+    public RuntimeProtocolMapper(string? trustedServerPeerPubkeyHex)
+        : this(new CapabilityProfileExpander(new CapabilityCompositionOptions(Enabled: false, ProfilePath: null)), trustedServerPeerPubkeyHex)
+    {
+    }
+
+    public RuntimeProtocolMapper(CapabilityProfileExpander capabilityProfileExpander)
+        : this(capabilityProfileExpander, null)
+    {
+    }
+
+    public RuntimeProtocolMapper(
+        CapabilityProfileExpander capabilityProfileExpander,
+        string? trustedServerPeerPubkeyHex)
+    {
+        _capabilityProfileExpander = capabilityProfileExpander;
+        _trustedServerPeerPubkeyHex = string.IsNullOrWhiteSpace(trustedServerPeerPubkeyHex)
+            ? null
+            : trustedServerPeerPubkeyHex.Trim();
+    }
 
     public RuntimeMapResult MapIncomingMessageToCommandJsons(
         string incomingJson,
@@ -53,6 +82,7 @@ public sealed class RuntimeProtocolMapper
 
             state.RoomId = message.Room;
             state.PeerPubkeyHex = message.Pubkey;
+            UpdateServerPeerStatus(state, state.PeerPubkeyHex);
             state.IsInitialized = true;
             state.SessionId = ResolveSessionId(message, state);
 
@@ -69,6 +99,12 @@ public sealed class RuntimeProtocolMapper
                 {
                     return RuntimeMapResult.Failure(tokenError);
                 }
+            }
+
+            var capabilityError = TrySetSessionCapabilities(state, message.Token?.GetCapabilities(), message.Token?.GetCapabilityProfileVersion());
+            if (capabilityError is not null)
+            {
+                return RuntimeMapResult.Failure(capabilityError);
             }
 
             var clientHelloPayload = new JsonObject
@@ -179,7 +215,9 @@ public sealed class RuntimeProtocolMapper
 
             state.RoomId = roomId;
             state.PeerPubkeyHex = peerPubkeyHex;
+            UpdateServerPeerStatus(state, state.PeerPubkeyHex);
             state.IsInitialized = true;
+            SetSessionCapabilities(state, null);
 
             var sessionId = ResolveSessionId(message, state);
             state.SessionId = sessionId;
@@ -233,6 +271,7 @@ public sealed class RuntimeProtocolMapper
 
             state.RoomId = roomId;
             state.PeerPubkeyHex = peerPubkeyHex;
+            UpdateServerPeerStatus(state, state.PeerPubkeyHex);
             state.IsInitialized = true;
 
             var capsNode = new JsonObject
@@ -248,6 +287,12 @@ public sealed class RuntimeProtocolMapper
                 {
                     return RuntimeMapResult.Failure(tokenError);
                 }
+            }
+
+            var capabilityError = TrySetSessionCapabilities(state, message.Token?.GetCapabilities(), message.Token?.GetCapabilityProfileVersion());
+            if (capabilityError is not null)
+            {
+                return RuntimeMapResult.Failure(capabilityError);
             }
 
             var clientHelloPayload = new JsonObject
@@ -326,6 +371,11 @@ public sealed class RuntimeProtocolMapper
                 return RuntimeMapResult.Failure("hello must be sent first");
             }
 
+            if (!IsControlPlaneAllowed(state, "room.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=set-room-key requires=room.admin");
+            }
+
             if (string.IsNullOrWhiteSpace(message.Pubkey))
             {
                 return RuntimeMapResult.Failure("set-room-key.pubkey is required");
@@ -350,6 +400,11 @@ public sealed class RuntimeProtocolMapper
             if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
             {
                 return RuntimeMapResult.Failure("hello must be sent first");
+            }
+
+            if (!IsControlPlaneAllowed(state, "policy.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=set-policy requires=policy.admin");
             }
 
             var defaultValue = string.IsNullOrWhiteSpace(message.PolicyDefault)
@@ -388,6 +443,60 @@ public sealed class RuntimeProtocolMapper
                         }
                     }
                 )
+            ]);
+        }
+
+        if (string.Equals(type, "start-tick", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
+            {
+                return RuntimeMapResult.Failure("hello must be sent first");
+            }
+
+            if (!IsControlPlaneAllowed(state, "tick.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=start-tick requires=tick.admin");
+            }
+
+            var intervalMs = message.IntervalMs.GetValueOrDefault(16);
+            if (intervalMs == 0)
+            {
+                intervalMs = 1;
+            }
+
+            var intentPrefix = string.IsNullOrWhiteSpace(message.IntentPrefix)
+                ? "intent/"
+                : message.IntentPrefix!;
+
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(
+                    state.RoomId,
+                    new JsonObject
+                    {
+                        ["StartTick"] = new JsonObject
+                        {
+                            ["interval_ms"] = intervalMs,
+                            ["intent_prefix"] = intentPrefix
+                        }
+                    }
+                )
+            ]);
+        }
+
+        if (string.Equals(type, "stop-tick", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
+            {
+                return RuntimeMapResult.Failure("hello must be sent first");
+            }
+
+            if (!IsControlPlaneAllowed(state, "tick.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=stop-tick requires=tick.admin");
+            }
+
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(state.RoomId, JsonValue.Create("StopTick")!)
             ]);
         }
 
@@ -1888,6 +1997,66 @@ public sealed class RuntimeProtocolMapper
         return !string.IsNullOrWhiteSpace(message.Pubkey);
     }
 
+    private static bool IsControlPlaneAllowed(RuntimeConnectionState state, string requiredCapability)
+    {
+        return state.IsServerPeer || state.SessionCapabilities.Contains(requiredCapability);
+    }
+
+    private void UpdateServerPeerStatus(RuntimeConnectionState state, string? peerPubkeyHex)
+    {
+        if (string.IsNullOrWhiteSpace(_trustedServerPeerPubkeyHex))
+        {
+            return;
+        }
+
+        state.IsServerPeer = string.Equals(
+            peerPubkeyHex?.Trim(),
+            _trustedServerPeerPubkeyHex,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string? TrySetSessionCapabilities(
+        RuntimeConnectionState state,
+        string[]? capabilities,
+        string? capabilityProfileVersion)
+    {
+        if (!_capabilityProfileExpander.IsEnabled)
+        {
+            SetSessionCapabilities(state, capabilities);
+            return null;
+        }
+
+        var assigned = (IReadOnlyList<string>)(capabilities ?? []);
+        if (!_capabilityProfileExpander.TryExpand(
+                assigned,
+                capabilityProfileVersion,
+                out var expanded,
+                out var error))
+        {
+            return error ?? "capability expansion failed";
+        }
+
+        SetSessionCapabilities(state, expanded.ToArray());
+        return null;
+    }
+
+    private static void SetSessionCapabilities(RuntimeConnectionState state, string[]? capabilities)
+    {
+        state.SessionCapabilities.Clear();
+        if (capabilities is null)
+        {
+            return;
+        }
+
+        foreach (var capability in capabilities)
+        {
+            if (!string.IsNullOrWhiteSpace(capability))
+            {
+                state.SessionCapabilities.Add(capability.Trim());
+            }
+        }
+    }
+
     private static string? ValidateToken(RuntimeInboundToken token)
     {
         if (string.IsNullOrWhiteSpace(token.GetPeerPubkey()))
@@ -1905,18 +2074,86 @@ public sealed class RuntimeProtocolMapper
             return "hello.token.sig is required";
         }
 
+        var continuity = token.Continuity;
+        if (continuity is null)
+        {
+            return null;
+        }
+
+        var predecessor = continuity.GetPredecessorPeerPubkey();
+        if (string.IsNullOrWhiteSpace(predecessor))
+        {
+            return "hello.token.continuity.predecessor_peer_pubkey is required";
+        }
+
+        var overlapNotAfter = continuity.GetOverlapNotAfter();
+        if (overlapNotAfter is null)
+        {
+            return "hello.token.continuity.overlap_not_after is required";
+        }
+
+        var currentPeer = token.GetPeerPubkey();
+        if (string.Equals(predecessor.Trim(), currentPeer?.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return "hello.token.continuity.predecessor_peer_pubkey must differ from hello.token.peer_pubkey";
+        }
+
+        var nowSecs = (ulong)Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        if (nowSecs > overlapNotAfter.Value)
+        {
+            return "hello.token.continuity overlap window expired";
+        }
+
+        var revoked = continuity.GetRevokedPredecessors();
+        if (revoked is not null)
+        {
+            foreach (var revokedPredecessor in revoked)
+            {
+                if (string.Equals(revokedPredecessor?.Trim(), predecessor.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return "hello.token.continuity predecessor key is revoked";
+                }
+            }
+        }
+
         return null;
     }
 
     private static JsonObject BuildTokenJson(RuntimeInboundToken token)
     {
-        return new JsonObject
+        var json = new JsonObject
         {
             ["peer_pubkey"] = token.GetPeerPubkey(),
             ["expiry"] = token.GetExpiry(),
             ["caps"] = new JsonArray((token.GetCapabilities() ?? []).Select(x => (JsonNode?)x).ToArray()),
             ["sig"] = token.GetSignature()
         };
+
+        var profileVersion = token.GetCapabilityProfileVersion();
+        if (!string.IsNullOrWhiteSpace(profileVersion))
+        {
+            json["capability_profile_version"] = profileVersion;
+        }
+
+        var continuity = token.Continuity;
+        if (continuity is not null)
+        {
+            var continuityJson = new JsonObject
+            {
+                ["predecessor_peer_pubkey"] = continuity.GetPredecessorPeerPubkey(),
+                ["overlap_not_after"] = continuity.GetOverlapNotAfter()
+            };
+
+            var revoked = continuity.GetRevokedPredecessors();
+            if (revoked is not null)
+            {
+                continuityJson["revoked_predecessors"] = new JsonArray(revoked.Select(x => (JsonNode?)x).ToArray());
+            }
+
+            json["continuity"] = continuityJson;
+        }
+
+        return json;
     }
 }
 
@@ -1933,6 +2170,8 @@ public sealed class RuntimeConnectionState
     public string? RoomId { get; set; }
     public string? PeerPubkeyHex { get; set; }
     public string? TraceId { get; set; }
+    public bool IsServerPeer { get; set; }
+    public HashSet<string> SessionCapabilities { get; } = new(StringComparer.Ordinal);
 }
 
 public sealed record RuntimeMapResult(
@@ -2026,6 +2265,10 @@ public sealed class RuntimeInboundMessage
     public RuntimeInboundPolicyRule[]? PolicyRules { get; set; }
     [JsonPropertyName("since_unix_ms")]
     public ulong? SinceUnixMs { get; set; }
+    [JsonPropertyName("interval_ms")]
+    public ulong? IntervalMs { get; set; }
+    [JsonPropertyName("intent_prefix")]
+    public string? IntentPrefix { get; set; }
     [JsonPropertyName("blobs")]
     public RuntimeInboundBlob[]? Blobs { get; set; }
 }
@@ -2065,10 +2308,16 @@ public sealed class RuntimeInboundToken
     public string[]? Caps { get; set; }
     [JsonPropertyName("capabilities")]
     public string[]? Capabilities { get; set; }
+    [JsonPropertyName("capability_profile_version")]
+    public string? CapabilityProfileVersion { get; set; }
+    [JsonPropertyName("profile_version")]
+    public string? ProfileVersion { get; set; }
     [JsonPropertyName("sig")]
     public string? Sig { get; set; }
     [JsonPropertyName("sig_hex")]
     public string? SigHex { get; set; }
+    [JsonPropertyName("continuity")]
+    public RuntimeInboundTokenContinuity? Continuity { get; set; }
 
     public string? GetPeerPubkey() =>
         !string.IsNullOrWhiteSpace(PeerPubkey) ? PeerPubkey : PeerPubkeyHex;
@@ -2078,8 +2327,32 @@ public sealed class RuntimeInboundToken
     public string[]? GetCapabilities() =>
         Caps is { Length: > 0 } ? Caps : Capabilities;
 
+    public string? GetCapabilityProfileVersion() =>
+        !string.IsNullOrWhiteSpace(CapabilityProfileVersion) ? CapabilityProfileVersion : ProfileVersion;
+
     public string? GetSignature() =>
         !string.IsNullOrWhiteSpace(Sig) ? Sig : SigHex;
+}
+
+public sealed class RuntimeInboundTokenContinuity
+{
+    [JsonPropertyName("predecessor_peer_pubkey")]
+    public string? PredecessorPeerPubkey { get; set; }
+    [JsonPropertyName("predecessor_peer_pubkey_hex")]
+    public string? PredecessorPeerPubkeyHex { get; set; }
+    [JsonPropertyName("overlap_not_after")]
+    public ulong? OverlapNotAfter { get; set; }
+    [JsonPropertyName("overlap_not_after_epoch_secs")]
+    public ulong? OverlapNotAfterEpochSecs { get; set; }
+    [JsonPropertyName("revoked_predecessors")]
+    public string[]? RevokedPredecessors { get; set; }
+
+    public string? GetPredecessorPeerPubkey() =>
+        !string.IsNullOrWhiteSpace(PredecessorPeerPubkey) ? PredecessorPeerPubkey : PredecessorPeerPubkeyHex;
+
+    public ulong? GetOverlapNotAfter() => OverlapNotAfter ?? OverlapNotAfterEpochSecs;
+
+    public string[]? GetRevokedPredecessors() => RevokedPredecessors;
 }
 
 public sealed class RuntimeInboundPolicyRule

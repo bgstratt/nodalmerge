@@ -36,9 +36,14 @@ pub use list::{FracIdx, REBALANCE_THRESHOLD, between, before, after, first, reso
 pub use hash::Hash;
 pub use error::SyncError;
 pub use policy::{Policy, PolicyRule, PolicyDefault};
-pub use compaction::{compact, compact_incremental, verify_snapshot, is_snapshot_node,
+pub use compaction::{compact, compact_with_policy_timeline,
+                     compact_incremental, compact_incremental_with_policy_timeline,
+                     verify_snapshot, is_snapshot_node, snapshot_policy_timeline_compatible,
                      rebuild_from_snapshot, pack_snapshot_pack, unpack_snapshot_pack,
-                     SnapshotMeta, SNAP_HASH_KEY, SNAP_FRONT_KEY, SNAP_BASE_KEY};
-pub use replay::{replay, ResolvedState, canonical_hash};
+                     SnapshotMeta, SNAP_HASH_KEY, SNAP_FRONT_KEY, SNAP_BASE_KEY,
+                     SNAP_POLICY_TIMELINE_HASH_KEY, SNAP_POLICY_CUTOVER_LAMPORT_KEY};
+pub use replay::{replay, replay_with_policy_timeline, PolicyTimelineEntry,
+                 policy_timeline_hash, policy_timeline_cutover_lamport,
+                 ResolvedState, canonical_hash};
 pub use storage::{NodeStore, BlobStore, MemoryNodeStore, MemoryBlobStore};
 pub use token::{RoomToken, TokenError};

@@ -1,0 +1,219 @@
+{
+  "schema_version": "benchmark-matrix.v1",
+  "description": "Cross-host benchmark profiles for optional auth/security/guardrail features using shared SDK workloads.",
+  "defaults": {
+    "warmupOps": 8,
+    "timeoutMs": 30000,
+    "transport": "ws-only",
+    "targets": "rust-combined-server,dotnet-host-runtime-alias",
+    "iterations": 3,
+    "peerCounts": [
+      2,
+      10,
+      20
+    ],
+    "commandMix": {
+      "mapOps": 60,
+      "listOps": 60,
+      "blobOps": 20,
+      "blobSizeBytes": 4096
+    }
+  },
+  "gates": {
+    "map_avg_regression_pct_max": 20,
+    "list_avg_regression_pct_max": 20,
+    "blob_avg_regression_pct_max": 20,
+    "map_p95_regression_pct_max": 30,
+    "list_p95_regression_pct_max": 30,
+    "blob_p95_regression_pct_max": 30
+  },
+  "rows": [
+    {
+      "id": "baseline-default-auth",
+      "label": "Baseline/default auth profile",
+      "dimensions": {
+        "auth_mode": "default",
+        "room_scale": "2,10,20 peers",
+        "command_mix": "map60/list60/blob20@4k",
+        "reconnect_churn": "3 iterations",
+        "guardrails": "none"
+      },
+      "dotnet": {
+        "env": {
+          "ActiveSync__Providers__Auth": "Default",
+          "ActiveSync__Runtime__ServerPeerPubkeyHex": ""
+        }
+      },
+      "rust": {
+        "env": {}
+      }
+    },
+    {
+      "id": "auth-enforced-room-lock-tokened",
+      "label": "Auth-enforced room lock plus tokened sessions",
+      "dimensions": {
+        "auth_mode": "room-lock-tokened",
+        "room_scale": "2,10,20 peers",
+        "command_mix": "map60/list60/blob20@4k",
+        "reconnect_churn": "3 iterations",
+        "guardrails": "room key lock + hello token"
+      },
+      "scenario": {
+        "authMode": "room-lock-tokened",
+        "tokenExpirySecs": 3600,
+        "authTokenCaps": [
+          "read:bench/**",
+          "write:bench/**"
+        ],
+        "authAdminCaps": [
+          "read:bench/**",
+          "write:bench/**",
+          "room.admin"
+        ]
+      },
+      "dotnet": {
+        "env": {
+          "ActiveSync__Providers__Auth": "Default",
+          "ActiveSync__Runtime__ServerPeerPubkeyHex": ""
+        }
+      },
+      "rust": {
+        "env": {}
+      }
+    },
+    {
+      "id": "capcomp-profile-on",
+      "label": "Capability composition enabled with profile",
+      "dimensions": {
+        "auth_mode": "default",
+        "room_scale": "2,10,20 peers",
+        "command_mix": "map60/list60/blob20@4k",
+        "reconnect_churn": "3 iterations",
+        "guardrails": "capability composition profile on"
+      },
+      "dotnet": {
+        "env": {
+          "ActiveSync__Providers__Auth": "Default",
+          "ActiveSync__Auth__CapabilityComposition__Enabled": "true",
+          "ActiveSync__Auth__CapabilityComposition__ProfilePath": "./benchmarks/profiles/capability-profile.v1.json"
+        }
+      },
+      "rust": {
+        "env": {
+          "ACTIVESYNC_CAPABILITY_COMPOSITION_ENABLED": "true",
+          "ACTIVESYNC_CAPABILITY_PROFILE_PATH": "./benchmarks/profiles/capability-profile.v1.json"
+        }
+      }
+    },
+    {
+      "id": "scope-budget-strict",
+      "label": "Strict scope budget limits",
+      "dimensions": {
+        "auth_mode": "default",
+        "room_scale": "2,10,20 peers",
+        "command_mix": "map60/list60/blob20@4k",
+        "reconnect_churn": "3 iterations",
+        "guardrails": "tight catchup filter budget"
+      },
+      "dotnet": {
+        "env": {
+          "ActiveSync__Providers__Auth": "Default"
+        }
+      },
+      "rust": {
+        "env": {
+          "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_NODES": "48",
+          "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_BYTES": "196608"
+        }
+      }
+    },
+    {
+      "id": "compaction-disabled",
+      "label": "Runtime compaction disabled",
+      "dimensions": {
+        "auth_mode": "default",
+        "room_scale": "2,10,20 peers",
+        "command_mix": "map60/list60/blob20@4k",
+        "reconnect_churn": "3 iterations",
+        "guardrails": "compaction off"
+      },
+      "dotnet": {
+        "env": {
+          "ActiveSync__Providers__Auth": "Default",
+          "ActiveSync__Runtime__Dag__Compaction__Enabled": "false"
+        }
+      },
+      "rust": {
+        "env": {}
+      }
+    },
+    {
+      "id": "server-peer-unset",
+      "label": "Server peer pubkey unset",
+      "dimensions": {
+        "auth_mode": "default",
+        "room_scale": "2,10,20 peers",
+        "command_mix": "map60/list60/blob20@4k",
+        "reconnect_churn": "3 iterations",
+        "guardrails": "server-peer bypass disabled"
+      },
+      "dotnet": {
+        "env": {
+          "ActiveSync__Providers__Auth": "Default",
+          "ActiveSync__Runtime__ServerPeerPubkeyHex": ""
+        }
+      },
+      "rust": {
+        "env": {}
+      }
+    },
+    {
+      "id": "server-peer-configured",
+      "label": "Server peer pubkey configured",
+      "dimensions": {
+        "auth_mode": "default",
+        "room_scale": "2,10,20 peers",
+        "command_mix": "map60/list60/blob20@4k",
+        "reconnect_churn": "3 iterations",
+        "guardrails": "server-peer bypass configured"
+      },
+      "dotnet": {
+        "env": {
+          "ActiveSync__Providers__Auth": "Default",
+          "ActiveSync__Runtime__ServerPeerPubkeyHex": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+        }
+      },
+      "rust": {
+        "env": {}
+      }
+    },
+    {
+      "id": "embedded-auth-guardrails",
+      "label": "Embedded auth plus runtime guardrails",
+      "dimensions": {
+        "auth_mode": "JwtBridgeEmbedded",
+        "room_scale": "2,10,20 peers",
+        "command_mix": "map60/list60/blob20@4k",
+        "reconnect_churn": "3 iterations",
+        "guardrails": "scope budget + server-peer config + compaction"
+      },
+      "dotnet": {
+        "env": {
+          "ActiveSync__Providers__Auth": "JwtBridgeEmbedded",
+          "ActiveSync__Runtime__ServerPeerPubkeyHex": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+          "ActiveSync__Runtime__Dag__Compaction__Enabled": "true",
+          "ActiveSync__Auth__CapabilityComposition__Enabled": "true",
+          "ActiveSync__Auth__CapabilityComposition__ProfilePath": "./benchmarks/profiles/capability-profile.v1.json"
+        }
+      },
+      "rust": {
+        "env": {
+          "ACTIVESYNC_CAPABILITY_COMPOSITION_ENABLED": "true",
+          "ACTIVESYNC_CAPABILITY_PROFILE_PATH": "./benchmarks/profiles/capability-profile.v1.json",
+          "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_NODES": "128",
+          "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_BYTES": "1048576"
+        }
+      }
+    }
+  ]
+}

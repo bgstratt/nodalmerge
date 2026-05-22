@@ -17,6 +17,12 @@ pub enum HostCoreError {
     #[error("protocol violation")]
     ProtocolViolation,
 
+    #[error("auth violation")]
+    AuthViolation,
+
+    #[error("policy violation")]
+    PolicyViolation,
+
     #[error("internal invariant")]
     InternalInvariant,
 }

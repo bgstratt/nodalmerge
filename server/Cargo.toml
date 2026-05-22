@@ -8,6 +8,10 @@ description = "ActiveSync reflector server: authenticates peers and broadcasts s
 name = "activesync-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "authz-conformance-runner"
+path = "src/bin/authz_conformance_runner.rs"
+
 [dependencies]
 activesync-core = { version = "0.1.0", path = "../core" }
 activesync-gc = { version = "0.1.0", path = "../gc" }

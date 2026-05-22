@@ -1,4 +1,5 @@
 using ActiveSync.DotNetHost.Ffi;
+using System.Diagnostics.Metrics;
 using System.Net.WebSockets;
 using System.Text;
 
@@ -39,6 +40,76 @@ public class FfiWebSocketLoopRunnerTests
         Assert.Single(socket.SentTextMessages);
         Assert.Contains("\"status\":\"Protocol\"", socket.SentTextMessages[0]);
         Assert.Equal("client requested close", socket.CloseDescription);
+    }
+
+    [Fact]
+    public async Task Policy_status_failure_emits_control_plane_deny_metric_with_fixed_labels()
+    {
+        using var metrics = new FfiControlPlaneDenyMeterCapture();
+        var beforeDenied = metrics.GetTotalByTags(
+            "dotnet-host",
+            "ffi",
+            "unknown",
+            "reject.control_plane_forbidden"
+        );
+
+        var runner = new FfiWebSocketLoopRunner();
+        var bridge = new TestFfiBinaryBridge(FfiBridgeResult.Failure(AsStatus.Policy));
+        var socket = new FfiFakeWebSocket([
+            FfiFakeReceiveFrame.Binary([0xA1]),
+            FfiFakeReceiveFrame.Close()
+        ]);
+
+        await runner.RunAsync(socket, bridge);
+
+        Assert.Single(socket.SentTextMessages);
+        Assert.Contains("\"status\":\"Policy\"", socket.SentTextMessages[0]);
+        Assert.True(
+            metrics.GetTotalByTags("dotnet-host", "ffi", "unknown", "reject.control_plane_forbidden")
+            >= beforeDenied + 1
+        );
+    }
+
+    [Fact]
+    public async Task Policy_status_failure_with_deny_metadata_emits_concrete_metric_labels()
+    {
+        using var metrics = new FfiControlPlaneDenyMeterCapture();
+        var beforeDenied = metrics.GetTotalByTags(
+            "dotnet-host",
+            "set-policy",
+            "policy.admin",
+            "reject.control_plane_forbidden"
+        );
+
+        var runner = new FfiWebSocketLoopRunner();
+        var bridge = new TestFfiBinaryBridge(
+            FfiBridgeResult.Failure(
+                AsStatus.Policy,
+                new FfiDenyMetadata(
+                    "reject.control_plane_forbidden",
+                    "set-policy",
+                    "policy.admin",
+                    "reject.control_plane_forbidden: set-policy requires policy.admin"
+                )
+            )
+        );
+        var socket = new FfiFakeWebSocket([
+            FfiFakeReceiveFrame.Binary([0xA1]),
+            FfiFakeReceiveFrame.Close()
+        ]);
+
+        await runner.RunAsync(socket, bridge);
+
+        Assert.Single(socket.SentTextMessages);
+        Assert.Contains("\"status\":\"Policy\"", socket.SentTextMessages[0]);
+        Assert.True(
+            metrics.GetTotalByTags(
+                "dotnet-host",
+                "set-policy",
+                "policy.admin",
+                "reject.control_plane_forbidden"
+            ) >= beforeDenied + 1
+        );
     }
 
     [Fact]
@@ -542,4 +613,81 @@ internal enum FfiReceiveFailureMode
     None,
     WebSocketException,
     ObjectDisposedException
+}
+
+internal sealed class FfiControlPlaneDenyMeterCapture : IDisposable
+{
+    private readonly MeterListener _listener;
+    private readonly Dictionary<string, long> _totalsByTags = new(StringComparer.Ordinal);
+
+    public FfiControlPlaneDenyMeterCapture()
+    {
+        _listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, listener) =>
+            {
+                if (string.Equals(instrument.Meter.Name, "ActiveSync.DotNetHost.RuntimeControlPlane", StringComparison.Ordinal)
+                    && string.Equals(instrument.Name, "runtime_control_plane_denied_total", StringComparison.Ordinal))
+                {
+                    listener.EnableMeasurementEvents(instrument);
+                }
+            }
+        };
+
+        _listener.SetMeasurementEventCallback<long>((_, measurement, tags, _) =>
+        {
+            var host = "<unknown>";
+            var command = "<unknown>";
+            var requiredCapability = "<unknown>";
+            var reasonClass = "<unknown>";
+
+            foreach (var tag in tags)
+            {
+                if (string.Equals(tag.Key, "host", StringComparison.Ordinal) && tag.Value is string hostValue)
+                {
+                    host = hostValue;
+                }
+                else if (string.Equals(tag.Key, "command", StringComparison.Ordinal) && tag.Value is string commandValue)
+                {
+                    command = commandValue;
+                }
+                else if (string.Equals(tag.Key, "required_capability", StringComparison.Ordinal) && tag.Value is string capabilityValue)
+                {
+                    requiredCapability = capabilityValue;
+                }
+                else if (string.Equals(tag.Key, "reason_class", StringComparison.Ordinal) && tag.Value is string reasonValue)
+                {
+                    reasonClass = reasonValue;
+                }
+            }
+
+            var key = BuildKey(host, command, requiredCapability, reasonClass);
+            if (_totalsByTags.TryGetValue(key, out var current))
+            {
+                _totalsByTags[key] = current + measurement;
+            }
+            else
+            {
+                _totalsByTags[key] = measurement;
+            }
+        });
+
+        _listener.Start();
+    }
+
+    public long GetTotalByTags(string host, string command, string requiredCapability, string reasonClass)
+    {
+        var key = BuildKey(host, command, requiredCapability, reasonClass);
+        return _totalsByTags.TryGetValue(key, out var total) ? total : 0;
+    }
+
+    public void Dispose()
+    {
+        _listener.Dispose();
+    }
+
+    private static string BuildKey(string host, string command, string requiredCapability, string reasonClass)
+    {
+        return $"{host}|{command}|{requiredCapability}|{reasonClass}";
+    }
 }

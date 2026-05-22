@@ -1,5 +1,9 @@
 # ActiveSync Server — Deployment
 
+Authorization execution references:
+- [AUTHORIZATION_CORE_HOST_SEPARATION_PLAN.md](AUTHORIZATION_CORE_HOST_SEPARATION_PLAN.md)
+- [AUTHORIZATION_CORE_HOST_EXECUTION_TRACKER.md](AUTHORIZATION_CORE_HOST_EXECUTION_TRACKER.md)
+
 The `activesync-server` binary is a websocket reflector: it multiplexes peers
 by room, merges and relays packs, and (optionally) persists room state to
 disk. This document covers the operational basics.
@@ -167,6 +171,37 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
   token's blast radius is bounded by the TTL. Unlocked rooms (no
   `auth_key`) have no session deadline. No server flags, no wire
   change, no new state.
+
+## Compaction Cadence And Replay Truncation (Phase B)
+
+Use these defaults unless workload data suggests otherwise:
+
+- Scheduled compaction: set `--snapshot-interval 2000` for moderate/high churn rooms.
+- Incremental chain bound: keep `--snapshot-max-chain 10` so restore cost stays bounded.
+- Manual emergency compaction: trigger runtime `{ "type": "compact-room" }` from an admin-authorized peer.
+
+Replay truncation watermark semantics:
+
+- Effective replay watermark is the latest accepted snapshot node for a room.
+- Nodes strictly before the watermark are considered truncated history for restore purposes.
+- Restore path must rebuild from `snapshot + post-snapshot delta`; pre-watermark history is not required for correctness.
+
+Rollback path (operator):
+
+1. Stop the server for the target deployment.
+2. Restore `activesync.db` (+ `-wal`/`-shm` when present) and `blobs/` from backup.
+3. Start server with the restored `--store` path and same room auth policy configuration.
+4. Run the snapshot restore drill to verify deterministic restore/hash semantics:
+   `pwsh -File .\docs\acceptance\Run-SnapshotRestoreDrill.ps1`
+5. If drill fails, keep the rollback deployment isolated and investigate snapshot metadata/hash mismatch before reopening traffic.
+
+CI drill contract:
+
+- Canonical nightly runs `docs/acceptance/Run-SnapshotRestoreDrill.ps1`.
+- Artifact `docs/acceptance/snapshot-restore-drill.json` must report:
+  - `status = pass`
+  - `assertions.snapshot_restore_forward_replay = true`
+  - `assertions.snapshot_hash_equality = true`
 
 ## Metrics (`--metrics-addr <ip:port>`)
 

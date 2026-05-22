@@ -176,6 +176,7 @@ public sealed class RuntimeTokenValidationService
             tokenPeer,
             (long)tokenExpiry.Value,
             token.GetCapabilities() ?? [],
+            token.GetCapabilityProfileVersion(),
             tokenSig
         );
 

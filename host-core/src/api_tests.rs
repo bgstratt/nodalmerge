@@ -1389,7 +1389,7 @@ fn client_hello_requires_valid_token_when_room_is_locked() {
             },
         ))
         .expect_err("locked room hello without token should fail");
-    assert_eq!(missing_token_err, HostCoreError::ProtocolViolation);
+    assert_eq!(missing_token_err, HostCoreError::AuthViolation);
 
     let token = RoomToken::sign(
         "room-auth",

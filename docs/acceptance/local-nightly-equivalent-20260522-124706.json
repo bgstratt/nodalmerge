@@ -1,0 +1,51 @@
+{
+  "run_id": "local-nightly-20260522-124706",
+  "output_tag": "20260522-124706",
+  "utc_timestamp": "2026-05-22T12:47:42.0039938Z",
+  "status": "pass",
+  "failed_step_count": 0,
+  "artifacts": {
+    "canonical_parity": "docs/acceptance/authz-conformance-parity.json",
+    "snapshot_drill": "docs/acceptance/snapshot-restore-drill-local-20260522-124706.json",
+    "promotion_readiness": "docs/acceptance/promotion-readiness-local-20260522-124706.json",
+    "history_jsonl": "docs/acceptance/_history/promotion-readiness-history.jsonl",
+    "history_summary": "docs/acceptance/_history/promotion-readiness-history-summary.json"
+  },
+  "steps": [
+    {
+      "name": "canonical admin_command_only",
+      "status": "pass",
+      "duration_seconds": 8.135
+    },
+    {
+      "name": "snapshot restore drill",
+      "status": "pass",
+      "duration_seconds": 6.83
+    },
+    {
+      "name": "supplemental hybrid",
+      "status": "pass",
+      "duration_seconds": 11.908
+    },
+    {
+      "name": "supplemental replicated_signed_ops_only",
+      "status": "pass",
+      "duration_seconds": 4.218
+    },
+    {
+      "name": "supplemental capcomp admin_command_only",
+      "status": "pass",
+      "duration_seconds": 4.148
+    },
+    {
+      "name": "promotion readiness summary",
+      "status": "pass",
+      "duration_seconds": 0.341
+    },
+    {
+      "name": "promotion readiness history append",
+      "status": "pass",
+      "duration_seconds": 0.371
+    }
+  ]
+}

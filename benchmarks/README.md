@@ -1,5 +1,7 @@
 # Hosted Service Benchmarks
 
+For a drift-aware interpretation playbook with go/no-go thresholds and a concrete baseline/auth alternating sample, see `benchmarks/benchmarks.md`.
+
 This folder provides a simple websocket round-trip benchmark harness for:
 
 1. rust-combined-server (`activesync-server`)
@@ -75,6 +77,49 @@ Useful options:
 3. `--blobSizeBytes 4096`
 4. `--warmupOps 8`
 5. `--timeoutMs 30000`
+6. `--authMode room-lock-tokened` (locks room via `set-room-key` and benchmarks tokened hello sessions)
+7. `--authTokenCaps read:bench/**,write:bench/**`
+8. `--authAdminCaps read:bench/**,write:bench/**,room.admin`
+9. `--tokenExpirySecs 3600`
+
+## Benchmark matrix runner (auth/security/guardrails)
+
+Use the matrix runner when you want repeatable profile comparisons across optional auth/security/guardrail setup while keeping the same workload semantics on both hosts.
+
+Matrix definition file:
+
+1. `benchmarks/benchmark-matrix.v1.json`
+
+Result schema:
+
+1. `benchmarks/results/benchmark-matrix-result.schema.v1.json`
+
+Run all rows:
+
+```powershell
+pwsh -File .\benchmarks\Run-BenchmarkMatrix.ps1
+```
+
+Run selected rows only:
+
+```powershell
+pwsh -File .\benchmarks\Run-BenchmarkMatrix.ps1 -RowIds baseline-default-auth,embedded-auth-guardrails
+```
+
+Seed a fast baseline artifact for repeatable reporting:
+
+```powershell
+pwsh -File .\benchmarks\Run-BenchmarkMatrix.ps1 -RowIds baseline-default-auth -OutputPath .\benchmarks\results\benchmark-matrix-baseline.json
+```
+
+Current matrix dimensions include:
+
+1. auth mode (default, embedded, and `room-lock-tokened` scenario mode)
+2. room scale (`peers` sweep)
+3. command mix (`mapOps`, `listOps`, `blobOps`, blob size)
+4. reconnect/churn intensity (iteration count)
+5. guardrail/security toggles (scope budget strictness, server-peer configured/unset, compaction on/off)
+6. capability composition profile-on rows (`benchmarks/profiles/capability-profile.v1.json`)
 
 ## Target defaults
 

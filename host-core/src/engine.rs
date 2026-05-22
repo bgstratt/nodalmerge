@@ -451,9 +451,9 @@ impl HostEngine {
                 }
 
                 if let Some(room_vk_bytes) = self.room_auth_keys.get(&envelope.room_id) {
-                    let token = hello.token.as_ref().ok_or(HostCoreError::ProtocolViolation)?;
+                    let token = hello.token.as_ref().ok_or(HostCoreError::AuthViolation)?;
                     let peer_pubkey = parse_hex_32(&hello.peer_pubkey_hex)
-                        .ok_or(HostCoreError::ProtocolViolation)?;
+                        .ok_or(HostCoreError::AuthViolation)?;
                     let room_vk = ed25519_dalek::VerifyingKey::from_bytes(room_vk_bytes)
                         .map_err(|_| HostCoreError::InternalInvariant)?;
                     let room_token = RoomToken::from_wire(
@@ -462,7 +462,7 @@ impl HostEngine {
                         token.caps.clone(),
                         &token.sig,
                     )
-                    .map_err(|_| HostCoreError::ProtocolViolation)?;
+                    .map_err(|_| HostCoreError::AuthViolation)?;
 
                     let now_secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -470,7 +470,7 @@ impl HostEngine {
                         .as_secs();
                     room_token
                         .verify(&envelope.room_id, &room_vk, &peer_pubkey, now_secs)
-                        .map_err(|_| HostCoreError::ProtocolViolation)?;
+                        .map_err(|_| HostCoreError::AuthViolation)?;
                 }
 
                 let negotiated = CapabilitySet {

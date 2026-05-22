@@ -19,6 +19,7 @@
 //!   meaningful map; the hash will still be deterministic either way).
 
 use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     error::SyncError,
@@ -40,6 +41,16 @@ pub struct ResolvedState {
     pub hash: Hash,
 }
 
+/// A policy timeline transition point for deterministic replay.
+///
+/// The policy becomes effective for any node with `lamport >= effective_lamport`
+/// until superseded by a later timeline entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyTimelineEntry {
+    pub effective_lamport: u64,
+    pub policy: Policy,
+}
+
 /// Replay an ordered (or unordered) sequence of `SyncNode`s and produce a
 /// deterministic `ResolvedState`.
 ///
@@ -56,10 +67,31 @@ pub struct ResolvedState {
 /// Returns `SyncError` if a node has an invalid signature or hash, or if
 /// nodes reference parents that never arrive (broken pack).
 pub fn replay(nodes: &[SyncNode], policy: Option<&Policy>) -> Result<ResolvedState, SyncError> {
+    let timeline = policy
+        .map(|p| {
+            vec![PolicyTimelineEntry {
+                effective_lamport: 0,
+                policy: p.clone(),
+            }]
+        })
+        .unwrap_or_default();
+
+    replay_with_policy_timeline(nodes, &timeline)
+}
+
+/// Replay nodes with a lamport-versioned policy timeline.
+///
+/// This is the P2 timeline scaffold: callers can describe policy transitions
+/// as version points and replay will evaluate each node against the policy that
+/// was effective at that node's lamport.
+pub fn replay_with_policy_timeline(
+    nodes: &[SyncNode],
+    timeline: &[PolicyTimelineEntry],
+) -> Result<ResolvedState, SyncError> {
     let mut graph = StateGraph::new();
-    if let Some(p) = policy {
-        graph.set_policy(p.clone());
-    }
+    let default_policy = Policy::default();
+    let mut sorted_timeline = timeline.to_vec();
+    sorted_timeline.sort_by_key(|entry| entry.effective_lamport);
 
     // Multi-pass topological insert: keep retrying nodes with missing parents
     // until either all are inserted or no progress is made (broken pack).
@@ -71,6 +103,7 @@ pub fn replay(nodes: &[SyncNode], policy: Option<&Policy>) -> Result<ResolvedSta
         let before = pending.len();
         let mut still_pending = Vec::new();
         for node in pending {
+            graph.set_policy(policy_for_lamport(node.lamport(), &sorted_timeline, &default_policy).clone());
             match graph.apply_remote(node.clone()) {
                 Ok(()) => {}
                 Err(SyncError::DuplicateNode(_)) => {}
@@ -97,6 +130,39 @@ pub fn replay(nodes: &[SyncNode], policy: Option<&Policy>) -> Result<ResolvedSta
 
     let hash = canonical_hash(&raw);
     Ok(ResolvedState { map: raw, hash })
+}
+
+/// Deterministic fingerprint of a policy timeline for snapshot compatibility.
+///
+/// The timeline is normalized by `effective_lamport` before hashing so callers
+/// can provide entries in any order.
+pub fn policy_timeline_hash(timeline: &[PolicyTimelineEntry]) -> Hash {
+    let mut sorted_timeline = timeline.to_vec();
+    sorted_timeline.sort_by_key(|entry| entry.effective_lamport);
+    let bytes = postcard::to_allocvec(&sorted_timeline).expect("timeline is always serializable");
+    Hash::of(&bytes)
+}
+
+/// Highest policy cutover lamport in a timeline.
+pub fn policy_timeline_cutover_lamport(timeline: &[PolicyTimelineEntry]) -> Option<u64> {
+    timeline.iter().map(|entry| entry.effective_lamport).max()
+}
+
+fn policy_for_lamport<'a>(
+    lamport: u64,
+    timeline: &'a [PolicyTimelineEntry],
+    default_policy: &'a Policy,
+) -> &'a Policy {
+    let mut selected = default_policy;
+    for entry in timeline {
+        if entry.effective_lamport <= lamport {
+            selected = &entry.policy;
+        } else {
+            break;
+        }
+    }
+
+    selected
 }
 
 /// Compute a deterministic Blake3 hash over a resolved map.
@@ -293,6 +359,112 @@ mod tests {
             replay(&[bad_node], Some(&policy)),
             Err(SyncError::PolicyViolation { .. })
         ));
+    }
+
+    #[test]
+    fn replay_timeline_applies_new_policy_at_cutover_lamport() {
+        use crate::policy::{Policy, PolicyDefault, PolicyRule};
+
+        let ka = key_a();
+        let kb = key_b();
+        let author_a = ka.verifying_key().to_bytes();
+
+        let tightened = Policy {
+            rules: vec![PolicyRule {
+                path_glob: "protected/**".into(),
+                can_write: vec![author_a],
+                can_read: vec![],
+                can_derive: vec![],
+            }],
+            default: PolicyDefault::DenyAll,
+        };
+
+        let before_cutover = signed_node(&kb, 1, vec![set("protected/x", "before")], vec![]);
+        let after_cutover = signed_node(
+            &kb,
+            2,
+            vec![set("protected/x", "after")],
+            vec![before_cutover.id],
+        );
+
+        let timeline = vec![PolicyTimelineEntry {
+            effective_lamport: 2,
+            policy: tightened,
+        }];
+
+        assert!(matches!(
+            replay_with_policy_timeline(&[before_cutover, after_cutover], &timeline),
+            Err(SyncError::PolicyViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_timeline_allows_authorized_writer_after_cutover() {
+        use crate::policy::{Policy, PolicyDefault, PolicyRule};
+
+        let ka = key_a();
+        let author_a = ka.verifying_key().to_bytes();
+
+        let tightened = Policy {
+            rules: vec![PolicyRule {
+                path_glob: "protected/**".into(),
+                can_write: vec![author_a],
+                can_read: vec![],
+                can_derive: vec![],
+            }],
+            default: PolicyDefault::DenyAll,
+        };
+
+        let n1 = signed_node(&ka, 1, vec![set("protected/x", "before")], vec![]);
+        let n2 = signed_node(&ka, 2, vec![set("protected/x", "after")], vec![n1.id]);
+
+        let timeline = vec![PolicyTimelineEntry {
+            effective_lamport: 2,
+            policy: tightened,
+        }];
+
+        let resolved = replay_with_policy_timeline(&[n1, n2], &timeline).unwrap();
+        assert_eq!(resolved.map.get("protected/x").map(|v| v.as_slice()), Some(b"after".as_slice()));
+    }
+
+    #[test]
+    fn policy_timeline_hash_is_stable_for_equal_timelines() {
+        use crate::policy::{Policy, PolicyDefault, PolicyRule};
+
+        let ka = key_a();
+        let kb = key_b();
+
+        let p1 = Policy {
+            rules: vec![PolicyRule {
+                path_glob: "protected/**".into(),
+                can_write: vec![ka.verifying_key().to_bytes()],
+                can_read: vec![],
+                can_derive: vec![],
+            }],
+            default: PolicyDefault::DenyAll,
+        };
+
+        let p2 = Policy {
+            rules: vec![PolicyRule {
+                path_glob: "protected/**".into(),
+                can_write: vec![kb.verifying_key().to_bytes()],
+                can_read: vec![],
+                can_derive: vec![],
+            }],
+            default: PolicyDefault::DenyAll,
+        };
+
+        let t1 = vec![
+            PolicyTimelineEntry { effective_lamport: 10, policy: p2.clone() },
+            PolicyTimelineEntry { effective_lamport: 5, policy: p1.clone() },
+        ];
+        let t2 = vec![
+            PolicyTimelineEntry { effective_lamport: 5, policy: p1 },
+            PolicyTimelineEntry { effective_lamport: 10, policy: p2 },
+        ];
+
+        assert_eq!(policy_timeline_hash(&t1), policy_timeline_hash(&t2));
+        assert_eq!(policy_timeline_cutover_lamport(&t1), Some(10));
     }
 
     // -------------------------------------------------------------------------

@@ -7,6 +7,7 @@ pub mod keypair;
 pub mod metrics;
 pub mod gc_adapter;
 pub mod adapter_context;
+pub mod capability_profile;
 pub mod room;
 pub mod store;
 pub mod ws_handler;

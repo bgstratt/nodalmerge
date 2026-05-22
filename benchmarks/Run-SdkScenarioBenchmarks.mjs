@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { initSync } from "../web/pkg/activesync_bridge.js";
+import { initSync, room_pubkey_hex } from "../web/pkg/activesync_bridge.js";
 import { createDoc } from "../web/sdk.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -29,6 +29,10 @@ const warmupOps = parseIntSafe(args.warmupOps, 8);
 const timeoutMs = parseIntSafe(args.timeoutMs, 30000);
 const opDelayMs = Number.parseInt(String(args.opDelayMs ?? "0"), 10);
 const transportMode = String(args.transport ?? "ws-only");
+const authMode = String(args.authMode ?? "none");
+const tokenExpirySecs = parseIntSafe(args.tokenExpirySecs, 60 * 60);
+const authTokenCaps = parseStringList(args.authTokenCaps, ["read:bench/**", "write:bench/**"]);
+const authAdminCaps = parseStringList(args.authAdminCaps, ["read:bench/**", "write:bench/**", "room.admin"]);
 const outputJsonPath = args.outputJsonPath || "";
 const targetFilter = args.targets ? new Set(args.targets.split(",").map((x) => x.trim()).filter(Boolean)) : null;
 
@@ -55,6 +59,9 @@ console.log(
       timeoutMs,
       opDelayMs,
       transport: transportMode,
+      authMode,
+      tokenExpirySecs,
+      authTokenCaps,
       targets: selectedTargets.map((t) => t.name),
     },
     null,
@@ -74,9 +81,21 @@ for (const target of selectedTargets) {
     for (let iteration = 0; iteration < iterations; iteration++) {
       const room = `bench-${target.name}-${peerCount}p-${Date.now()}-${iteration}-${Math.random().toString(16).slice(2, 8)}`;
       let docs = [];
+      let authSetup = null;
 
       try {
-        docs = await createPeers(target.serverUrl, room, peerCount, transportMode);
+        authSetup = await setupAuthMode({
+          authMode,
+          serverUrl: target.serverUrl,
+          room,
+          transportMode,
+          timeoutMs,
+          tokenExpirySecs,
+          authTokenCaps,
+          authAdminCaps,
+        });
+
+        docs = await createPeers(target.serverUrl, room, peerCount, transportMode, authSetup);
         await waitForAllConnected(docs, timeoutMs);
 
         const warmupStarted = nowMs();
@@ -116,6 +135,9 @@ for (const target of selectedTargets) {
         scenarioRuns.push({ iteration, status: "error", error: msg });
       } finally {
         closePeers(docs);
+        if (authSetup?.cleanup) {
+          await authSetup.cleanup();
+        }
       }
     }
 
@@ -189,6 +211,9 @@ const output = {
     timeoutMs,
     opDelayMs,
     transport: transportMode,
+    authMode,
+    tokenExpirySecs,
+    authTokenCaps,
   },
   results,
 };
@@ -233,6 +258,15 @@ function parseIntList(value, fallback) {
   return list.length > 0 ? list : fallback;
 }
 
+function parseStringList(value, fallback) {
+  if (!value) return fallback;
+  const list = String(value)
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  return list.length > 0 ? [...new Set(list)] : fallback;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -269,19 +303,68 @@ function makeBlobBytes(sizeBytes, salt) {
   return bytes;
 }
 
-async function createPeers(serverUrl, room, peerCount, transportMode) {
+async function createPeers(serverUrl, room, peerCount, transportMode, authSetup) {
   const docs = [];
   for (let i = 0; i < peerCount; i++) {
-    const doc = await createDoc({
+    const createDocOptions = {
       serverUrl,
       room,
       authorSeed: randomSeed32(),
       autoConnect: true,
       transport: transportMode,
-    });
+    };
+
+    if (authSetup?.mode === "room-lock-tokened") {
+      createDocOptions.roomSeed = authSetup.roomSeed;
+      createDocOptions.tokenCaps = authSetup.tokenCaps;
+      createDocOptions.tokenExpirySecs = authSetup.tokenExpirySecs;
+    }
+
+    const doc = await createDoc(createDocOptions);
     docs.push(doc);
   }
   return docs;
+}
+
+async function setupAuthMode({
+  authMode,
+  serverUrl,
+  room,
+  transportMode,
+  timeoutMs,
+  tokenExpirySecs,
+  authTokenCaps,
+  authAdminCaps,
+}) {
+  if (authMode !== "room-lock-tokened") {
+    return null;
+  }
+
+  const roomSeed = randomSeed32();
+  const adminDoc = await createDoc({
+    serverUrl,
+    room,
+    authorSeed: randomSeed32(),
+    roomSeed,
+    tokenCaps: authAdminCaps,
+    tokenExpirySecs,
+    autoConnect: true,
+    transport: transportMode,
+  });
+
+  await waitForAllConnected([adminDoc], timeoutMs);
+  const roomPubkeyHex = room_pubkey_hex(roomSeed);
+  adminDoc.send({ type: "set-room-key", pubkey: roomPubkeyHex });
+  await sleep(250);
+  adminDoc.close();
+
+  return {
+    mode: "room-lock-tokened",
+    roomSeed,
+    tokenCaps: authTokenCaps,
+    tokenExpirySecs,
+    cleanup: async () => {},
+  };
 }
 
 function closePeers(docs) {

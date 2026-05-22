@@ -140,7 +140,7 @@ async fn run_current_hello_catchup(fx: &GoldenFixture) -> CanonicalTrace {
     let room = rooms.get_or_create(&fx.room_id).await;
     let author = SigningKey::from_bytes(&[0x22u8; 32]);
     let node = make_map_set_node(&author, "world/greeting", b"hello");
-    let (accepted, errs) = import_nodes(&room, vec![node]).await;
+    let (accepted, _, errs) = import_nodes(&room, vec![node]).await;
     assert_eq!(accepted, 1);
     assert!(errs.is_empty());
 
@@ -437,7 +437,7 @@ async fn run_current_tick_compaction(fx: &GoldenFixture) -> CanonicalTrace {
     // Ensure the room has at least one node before compaction.
     let author = SigningKey::from_bytes(&[0x72u8; 32]);
     let node = make_map_set_node(&author, "world/seed", b"v1");
-    let (accepted, errs) = import_nodes(&room, vec![node]).await;
+    let (accepted, _, errs) = import_nodes(&room, vec![node]).await;
     assert_eq!(accepted, 1);
     assert!(errs.is_empty());
 
@@ -695,3 +695,4 @@ async fn parity_tick_compaction_control_fixture() {
     assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
     assert_trace_against_fixture(&baseline, &fx);
 }
+

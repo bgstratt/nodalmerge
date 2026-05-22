@@ -229,6 +229,63 @@ Expired tokens disconnect the client with close code `4002`; the SDK's
 
 ## 8. What to read next
 
+## 9. Operational Replay With Policy Timeline
+
+Use this when you need replay verification to match policy-at-time behavior.
+
+Replay with timeline from a JSON file:
+
+```bash
+activesync-server replay ./pack.b64 --policy-timeline ./timeline.json
+```
+
+Replay with inline timeline JSON:
+
+```bash
+activesync-server replay ./pack.b64 --policy-timeline-json '[{"effective_lamport":2,"policy":{"rules":[{"path_glob":"protected/**","can_write":[[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]],"can_read":[],"can_derive":[]}],"default":"DenyAll"}}]'
+```
+
+Supported payload shapes:
+
+1. Bare array of timeline entries.
+2. Wrapped object with `timeline` property.
+
+```json
+[
+  {
+    "effective_lamport": 2,
+    "policy": {
+      "rules": [
+        {
+          "path_glob": "protected/**",
+          "can_write": [[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]],
+          "can_read": [],
+          "can_derive": []
+        }
+      ],
+      "default": "DenyAll"
+    }
+  }
+]
+```
+
+```json
+{
+  "timeline": [
+    {
+      "effective_lamport": 2,
+      "policy": {
+        "rules": [],
+        "default": "AllowAll"
+      }
+    }
+  ]
+}
+```
+
+Timeline entries use the same core model as `PolicyTimelineEntry`, and replay
+dispatches through the same timeline path used by core tests.
+
 - **[sdk.md](sdk.md)** — complete API reference, all options, edge cases.
 - **[deployment.md](deployment.md)** — ops guide: backups, tuning, metrics.
 - **[self-host.md](self-host.md)** — 5-minute Docker + JWT bridge walkthrough.
@@ -237,3 +294,33 @@ Expired tokens disconnect the client with close code `4002`; the SDK's
   are the way they are).
 - **[../web/demo.js](../web/demo.js)** — full reference client: IndexedDB,
   blob caching, reconnect UI, presence.
+
+## 10. Authz Nightly Dispatch (Operator Quick Reference)
+
+Use these examples to run `.github/workflows/authz-conformance-nightly.yml`
+with benchmark evidence inputs.
+
+Manual benchmark percentages:
+
+```bash
+gh workflow run authz-conformance-nightly.yml \
+  -f auth_path_benchmark_baseline_run_id=baseline-20260521 \
+  -f auth_path_benchmark_candidate_run_id=candidate-20260522 \
+  -f auth_path_benchmark_p50_regression_pct=1.4 \
+  -f auth_path_benchmark_p95_regression_pct=2.1 \
+  -f auth_path_benchmark_alloc_regression_pct=0.0
+```
+
+JSON-driven benchmark comparison:
+
+```bash
+gh workflow run authz-conformance-nightly.yml \
+  -f auth_path_benchmark_baseline_run_id=baseline-20260521 \
+  -f auth_path_benchmark_candidate_run_id=candidate-20260522 \
+  -f auth_path_benchmark_baseline_json_path=benchmarks/results/hosted-baseline.json \
+  -f auth_path_benchmark_candidate_json_path=benchmarks/results/hosted-candidate.json \
+  -f auth_path_benchmark_target=dotnet-host-runtime
+```
+
+For full artifact schema and promotion-gate semantics, see
+[AUTHORIZATION_CONFORMANCE_SPEC.md](AUTHORIZATION_CONFORMANCE_SPEC.md).

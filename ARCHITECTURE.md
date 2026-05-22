@@ -1,5 +1,9 @@
 # ActiveSync Architecture
 
+Authorization execution references:
+- [docs/AUTHORIZATION_CORE_HOST_SEPARATION_PLAN.md](docs/AUTHORIZATION_CORE_HOST_SEPARATION_PLAN.md)
+- [docs/AUTHORIZATION_CORE_HOST_EXECUTION_TRACKER.md](docs/AUTHORIZATION_CORE_HOST_EXECUTION_TRACKER.md)
+
 > A Rust/WASM CRDT engine with cryptographic identity, content-addressed
 > storage, and a transport stack that scales from "two browser tabs" to
 > "10⁶-node graphs over a thin WebSocket pipe."

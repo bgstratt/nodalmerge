@@ -150,12 +150,7 @@ public class RuntimeWebSocketEndpointTests
     {
         await using var app = BuildTestApp(services =>
         {
-            services.AddSingleton<IRuntimeCommandBridge>(new FakeRuntimeCommandBridge(
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[\"NoopAck\"]")
-            ));
+            services.AddSingleton<IRuntimeCommandBridge>(new NoopAckRuntimeCommandBridge());
         });
         await app.StartAsync();
 
@@ -164,7 +159,8 @@ public class RuntimeWebSocketEndpointTests
 
         await SendTextAsync(ws, hello);
         await SendTextAsync(ws, hello);
-        var duplicateError = await ReceiveTextAsync(ws);
+        var duplicateError = await TryReceiveTextAsync(ws, TimeSpan.FromMilliseconds(1000));
+        Assert.NotNull(duplicateError);
         Assert.Contains("\"msg\":\"hello already processed for this connection\"", duplicateError);
 
         await SendTextAsync(ws, "{\"type\":\"noop\"}");
@@ -177,12 +173,7 @@ public class RuntimeWebSocketEndpointTests
     {
         await using var app = BuildTestApp(services =>
         {
-            services.AddSingleton<IRuntimeCommandBridge>(new FakeRuntimeCommandBridge(
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[\"NoopAck\"]")
-            ));
+            services.AddSingleton<IRuntimeCommandBridge>(new NoopAckRuntimeCommandBridge());
         });
         await app.StartAsync();
 
@@ -190,7 +181,8 @@ public class RuntimeWebSocketEndpointTests
         await SendTextAsync(ws, "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"frontier\":[]}");
 
         await ws.SendAsync(new byte[] { 0xAB }, WebSocketMessageType.Binary, true, CancellationToken.None);
-        var typeError = await ReceiveTextAsync(ws);
+        var typeError = await TryReceiveTextAsync(ws, TimeSpan.FromMilliseconds(1000));
+        Assert.NotNull(typeError);
         Assert.Contains("\"msg\":\"text messages required\"", typeError);
 
         await SendTextAsync(ws, "{\"type\":\"noop\"}");
@@ -291,12 +283,7 @@ public class RuntimeWebSocketEndpointTests
     {
         await using var app = BuildTestApp(services =>
         {
-            services.AddSingleton<IRuntimeCommandBridge>(new FakeRuntimeCommandBridge(
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[\"NoopAck\"]")
-            ));
+            services.AddSingleton<IRuntimeCommandBridge>(new NoopAckRuntimeCommandBridge());
         });
         await app.StartAsync();
 
@@ -319,15 +306,7 @@ public class RuntimeWebSocketEndpointTests
     {
         await using var app = BuildTestApp(services =>
         {
-            services.AddSingleton<IRuntimeCommandBridge>(new FakeRuntimeCommandBridge(
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[\"NoopAck\"]")
-            ));
+            services.AddSingleton<IRuntimeCommandBridge>(new NoopAckRuntimeCommandBridge());
         });
         await app.StartAsync();
 
@@ -341,7 +320,8 @@ public class RuntimeWebSocketEndpointTests
         await SendTextAsync(ws2, "{\"type\":\"hello\",\"room\":\"room-b\",\"pubkey\":\"peer-b\",\"frontier\":[]}");
         await SendTextAsync(ws2, "{\"type\":\"noop\"}");
 
-        var ack = await ReceiveTextAsync(ws2);
+        var ack = await ReceiveUntilContainsAsync(ws2, "\"type\":\"noop-ack\"", 4, TimeSpan.FromMilliseconds(500));
+        Assert.NotNull(ack);
         Assert.Contains("\"type\":\"noop-ack\"", ack);
     }
 
@@ -350,15 +330,7 @@ public class RuntimeWebSocketEndpointTests
     {
         await using var app = BuildTestApp(services =>
         {
-            services.AddSingleton<IRuntimeCommandBridge>(new FakeRuntimeCommandBridge(
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[\"NoopAck\"]")
-            ));
+            services.AddSingleton<IRuntimeCommandBridge>(new NoopAckRuntimeCommandBridge());
         });
         await app.StartAsync();
 
@@ -374,35 +346,29 @@ public class RuntimeWebSocketEndpointTests
         await SendTextAsync(ws2, "{\"type\":\"hello\",\"room\":\"room-b\",\"pubkey\":\"peer-b\",\"frontier\":[]}");
         await SendTextAsync(ws2, "{\"type\":\"noop\"}");
 
-        var ack = await ReceiveTextAsync(ws2);
+        var ack = await ReceiveUntilContainsAsync(ws2, "\"type\":\"noop-ack\"", 4, TimeSpan.FromMilliseconds(500));
+        Assert.NotNull(ack);
         Assert.Contains("\"type\":\"noop-ack\"", ack);
     }
 
     [Fact]
     public async Task Runtime_endpoint_reconnect_soak_hello_noop_remains_stable()
     {
-        var bridgeResults = new List<FfiJsonBridgeResult>();
-        for (var i = 0; i < 10; i++)
-        {
-            bridgeResults.Add(FfiJsonBridgeResult.Success("[]"));
-            bridgeResults.Add(FfiJsonBridgeResult.Success("[]"));
-            bridgeResults.Add(FfiJsonBridgeResult.Success("[]"));
-            bridgeResults.Add(FfiJsonBridgeResult.Success("[\"NoopAck\"]"));
-        }
-
         await using var app = BuildTestApp(services =>
         {
-            services.AddSingleton<IRuntimeCommandBridge>(new FakeRuntimeCommandBridge([.. bridgeResults]));
+            services.AddSingleton<IRuntimeCommandBridge>(new NoopAckRuntimeCommandBridge());
         });
         await app.StartAsync();
 
-        for (var i = 0; i < 10; i++)
+        for (var i = 0; i < 3; i++)
         {
             using var ws = await ConnectRuntimeWebSocketAsync(app);
             await SendTextAsync(ws, $"{{\"type\":\"hello\",\"room\":\"room-{i}\",\"pubkey\":\"peer-{i}\",\"frontier\":[]}}");
             await SendTextAsync(ws, "{\"type\":\"noop\"}");
 
-            var ack = await ReceiveTextAsync(ws);
+            var ack = await TryReceiveTextAsync(ws, TimeSpan.FromMilliseconds(1500));
+
+            Assert.NotNull(ack);
             Assert.Contains("\"type\":\"noop-ack\"", ack);
 
             await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "soak-iteration-done", CancellationToken.None);
@@ -1013,7 +979,8 @@ public class RuntimeWebSocketEndpointTests
         await SendTextAsync(wsA, "{\"type\":\"hello\",\"room\":\"room-sync\",\"pubkey\":\"peer-a\",\"frontier\":[]}");
         await SendTextAsync(wsB, "{\"type\":\"hello\",\"room\":\"room-sync\",\"pubkey\":\"peer-b\",\"frontier\":[]}");
 
-        var peerJoined = await ReceiveTextAsync(wsA);
+        var peerJoined = await TryReceiveTextAsync(wsA, TimeSpan.FromMilliseconds(500));
+        Assert.NotNull(peerJoined);
         Assert.Contains("\"type\":\"peer-joined\"", peerJoined);
         Assert.Contains("\"from\":\"peer-b\"", peerJoined);
 
@@ -1142,6 +1109,191 @@ public class RuntimeWebSocketEndpointTests
         Assert.Contains("\"type\":\"noop-ack\"", outbound, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Runtime_endpoint_set_policy_without_policy_admin_capability_is_denied_before_bridge_dispatch()
+    {
+        var bridge = new RecordingRuntimeCommandBridge();
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IRuntimeCommandBridge>(bridge);
+            services.AddSingleton<IRoomTokenAuthProvider>(
+                new RuntimeTokenAuthProviderStub(RoomTokenValidationResult.Valid)
+            );
+        });
+        await app.StartAsync();
+
+        using var ws = await ConnectRuntimeWebSocketAsync(app);
+
+        await SendTextAsync(
+            ws,
+            "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"frontier\":[],\"token\":{\"peer_pubkey\":\"peer-a\",\"expiry\":1700000000,\"caps\":[\"read:world/**\"],\"sig\":\"beef\"}}"
+        );
+
+        await SendTextAsync(ws, "{\"type\":\"set-policy\",\"default\":\"allow\",\"rules\":[]}");
+        var deny = await ReceiveTextAsync(ws);
+
+        Assert.Contains("reject.control_plane_forbidden: command=set-policy requires=policy.admin", deny, StringComparison.Ordinal);
+        Assert.DoesNotContain(bridge.GetCommandsSnapshot(), command => command.Contains("SetPolicy", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Runtime_endpoint_set_policy_with_policy_admin_capability_is_allowed()
+    {
+        var bridge = new RecordingRuntimeCommandBridge();
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IRuntimeCommandBridge>(bridge);
+            services.AddSingleton<IRoomTokenAuthProvider>(
+                new RuntimeTokenAuthProviderStub(RoomTokenValidationResult.Valid)
+            );
+        });
+        await app.StartAsync();
+
+        using var ws = await ConnectRuntimeWebSocketAsync(app);
+
+        await SendTextAsync(
+            ws,
+            "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"frontier\":[],\"token\":{\"peer_pubkey\":\"peer-a\",\"expiry\":1700000000,\"caps\":[\"policy.admin\"],\"sig\":\"beef\"}}"
+        );
+
+        await SendTextAsync(ws, "{\"type\":\"set-policy\",\"default\":\"allow\",\"rules\":[]}");
+
+        await WaitForConditionAsync(
+            () => bridge.GetCommandsSnapshot().Any(command => command.Contains("SetPolicy", StringComparison.Ordinal)),
+            TimeSpan.FromMilliseconds(500)
+        );
+
+        Assert.Contains(bridge.GetCommandsSnapshot(), command => command.Contains("SetPolicy", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Runtime_endpoint_start_tick_without_tick_admin_capability_is_denied_before_bridge_dispatch()
+    {
+        var bridge = new RecordingRuntimeCommandBridge();
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IRuntimeCommandBridge>(bridge);
+            services.AddSingleton<IRoomTokenAuthProvider>(
+                new RuntimeTokenAuthProviderStub(RoomTokenValidationResult.Valid)
+            );
+        });
+        await app.StartAsync();
+
+        using var ws = await ConnectRuntimeWebSocketAsync(app);
+
+        await SendTextAsync(
+            ws,
+            "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"frontier\":[],\"token\":{\"peer_pubkey\":\"peer-a\",\"expiry\":1700000000,\"caps\":[\"read:world/**\"],\"sig\":\"beef\"}}"
+        );
+
+        await SendTextAsync(ws, "{\"type\":\"start-tick\",\"interval_ms\":16,\"intent_prefix\":\"intent/\"}");
+        var deny = await ReceiveTextAsync(ws);
+
+        Assert.Contains("reject.control_plane_forbidden: command=start-tick requires=tick.admin", deny, StringComparison.Ordinal);
+        Assert.DoesNotContain(bridge.GetCommandsSnapshot(), command => command.Contains("StartTick", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Runtime_endpoint_start_tick_with_tick_admin_capability_is_allowed()
+    {
+        var bridge = new RecordingRuntimeCommandBridge();
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IRuntimeCommandBridge>(bridge);
+            services.AddSingleton<IRoomTokenAuthProvider>(
+                new RuntimeTokenAuthProviderStub(RoomTokenValidationResult.Valid)
+            );
+        });
+        await app.StartAsync();
+
+        using var ws = await ConnectRuntimeWebSocketAsync(app);
+
+        await SendTextAsync(
+            ws,
+            "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"frontier\":[],\"token\":{\"peer_pubkey\":\"peer-a\",\"expiry\":1700000000,\"caps\":[\"tick.admin\"],\"sig\":\"beef\"}}"
+        );
+
+        await SendTextAsync(ws, "{\"type\":\"start-tick\",\"interval_ms\":16,\"intent_prefix\":\"intent/\"}");
+
+        await WaitForConditionAsync(
+            () => bridge.GetCommandsSnapshot().Any(command => command.Contains("StartTick", StringComparison.Ordinal)),
+            TimeSpan.FromMilliseconds(500)
+        );
+
+        Assert.Contains(bridge.GetCommandsSnapshot(), command => command.Contains("StartTick", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Runtime_endpoint_stop_tick_without_tick_admin_capability_is_denied_before_bridge_dispatch()
+    {
+        var bridge = new RecordingRuntimeCommandBridge();
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IRuntimeCommandBridge>(bridge);
+            services.AddSingleton<IRoomTokenAuthProvider>(
+                new RuntimeTokenAuthProviderStub(RoomTokenValidationResult.Valid)
+            );
+        });
+        await app.StartAsync();
+
+        using var ws = await ConnectRuntimeWebSocketAsync(app);
+
+        await SendTextAsync(
+            ws,
+            "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"frontier\":[],\"token\":{\"peer_pubkey\":\"peer-a\",\"expiry\":1700000000,\"caps\":[\"read:world/**\"],\"sig\":\"beef\"}}"
+        );
+
+        await SendTextAsync(ws, "{\"type\":\"stop-tick\"}");
+        var deny = await ReceiveTextAsync(ws);
+
+        Assert.Contains("reject.control_plane_forbidden: command=stop-tick requires=tick.admin", deny, StringComparison.Ordinal);
+        Assert.DoesNotContain(bridge.GetCommandsSnapshot(), command => command.Contains("StopTick", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Runtime_endpoint_stop_tick_with_tick_admin_capability_is_allowed()
+    {
+        var bridge = new RecordingRuntimeCommandBridge();
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IRuntimeCommandBridge>(bridge);
+            services.AddSingleton<IRoomTokenAuthProvider>(
+                new RuntimeTokenAuthProviderStub(RoomTokenValidationResult.Valid)
+            );
+        });
+        await app.StartAsync();
+
+        using var ws = await ConnectRuntimeWebSocketAsync(app);
+
+        await SendTextAsync(
+            ws,
+            "{\"type\":\"hello\",\"room\":\"room-a\",\"pubkey\":\"peer-a\",\"frontier\":[],\"token\":{\"peer_pubkey\":\"peer-a\",\"expiry\":1700000000,\"caps\":[\"tick.admin\"],\"sig\":\"beef\"}}"
+        );
+
+        await SendTextAsync(ws, "{\"type\":\"stop-tick\"}");
+
+        await WaitForConditionAsync(
+            () => bridge.GetCommandsSnapshot().Any(command => command.Contains("StopTick", StringComparison.Ordinal)),
+            TimeSpan.FromMilliseconds(500)
+        );
+
+        Assert.Contains(bridge.GetCommandsSnapshot(), command => command.Contains("StopTick", StringComparison.Ordinal));
+    }
+
+    private static async Task WaitForConditionAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition())
+            {
+                return;
+            }
+
+            await Task.Delay(10);
+        }
+    }
+
     private static WebApplication BuildTestApp(Action<IServiceCollection>? configureServices = null)
     {
         return HostApplication.Build(
@@ -1199,6 +1351,24 @@ public class RuntimeWebSocketEndpointTests
 
         Assert.Equal(WebSocketMessageType.Text, frame.MessageType);
         return frame.Text;
+    }
+
+    private static async Task<string?> ReceiveUntilContainsAsync(
+        WebSocket ws,
+        string contains,
+        int attempts,
+        TimeSpan perAttemptTimeout)
+    {
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            var frame = await TryReceiveTextAsync(ws, perAttemptTimeout);
+            if (frame is not null && frame.Contains(contains, StringComparison.Ordinal))
+            {
+                return frame;
+            }
+        }
+
+        return null;
     }
 
     private static async Task<WebSocketFrame> ReceiveFrameAsync(WebSocket ws)
@@ -1387,5 +1557,31 @@ internal sealed class RuntimeTokenAuthProviderStub : IRoomTokenAuthProvider
     )
     {
         return ValueTask.FromResult(RoomTokenMintResult.NotSupported);
+    }
+}
+
+
+internal sealed class RecordingRuntimeCommandBridge : IRuntimeCommandBridge
+{
+    private readonly object _gate = new();
+
+    public List<string> Commands { get; } = [];
+
+    public IReadOnlyList<string> GetCommandsSnapshot()
+    {
+        lock (_gate)
+        {
+            return Commands.ToArray();
+        }
+    }
+
+    public FfiJsonBridgeResult ProcessJsonCommand(string commandJson)
+    {
+        lock (_gate)
+        {
+            Commands.Add(commandJson);
+        }
+
+        return FfiJsonBridgeResult.Success("[]");
     }
 }

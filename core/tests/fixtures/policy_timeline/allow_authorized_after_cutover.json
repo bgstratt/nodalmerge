@@ -1,0 +1,44 @@
+{
+  "name": "allow_authorized_after_cutover",
+  "timeline": [
+    {
+      "effective_lamport": 2,
+      "default": "DenyAll",
+      "rules": [
+        {
+          "path_glob": "protected/**",
+          "can_write_authors": ["A"]
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "author": "A",
+      "lamport": 1,
+      "parents": [],
+      "ops": [
+        {
+          "key": "protected/x",
+          "value": "before"
+        }
+      ]
+    },
+    {
+      "author": "A",
+      "lamport": 2,
+      "parents": [0],
+      "ops": [
+        {
+          "key": "protected/x",
+          "value": "after"
+        }
+      ]
+    }
+  ],
+  "expect": {
+    "map": {
+      "protected/x": "after"
+    }
+  }
+}

@@ -9,6 +9,95 @@ This runbook covers pre-publish checks and publish steps for:
 2. npm (bridge + sdk-js wrapper)
 3. crates.io (core + host + ffi + bridge)
 
+## 0. One-Command Local Packaging
+
+For local staging of all package surfaces into one output root:
+
+```powershell
+pwsh -File ./pack-local-artifacts.ps1 -Version 0.1.0-local
+```
+
+Output folders:
+
+1. `artifacts/package-local/npm` (`*.tgz`)
+2. `artifacts/package-local/nuget` (`*.nupkg`)
+3. `artifacts/package-local/crates` (`*.crate`)
+
+Notes:
+
+1. `wasm-pack` is required for bridge package generation.
+2. `cargo package` without `--allow-dirty` requires a clean working tree.
+3. For active dev branches, add `-AllowDirtyCrates` while keeping publish flows clean/repeatable.
+4. The local bundler uses `cargo package --no-verify` for dependency-ordered workspace staging; keep the publish dry-run checks in Sections 1 and 4 before external release.
+5. If dependent crates are not yet published to crates.io, use `-AllowCrateDependencyFailures` for local staging while still producing available `.crate` artifacts.
+
+## 0.1 Two-Machine Local Publish + Consume
+
+Goal: clone this repo on machine A or B, build local artifacts, and consume them from another app without project references.
+
+### Step A: Build local artifacts on each machine
+
+From repo root:
+
+```powershell
+pwsh -File ./pack-local-artifacts.ps1 -Version 0.1.0-local -AllowDirtyCrates -AllowCrateDependencyFailures
+```
+
+This produces:
+
+1. `artifacts/package-local/nuget` (NuGet packages)
+2. `artifacts/package-local/npm` (npm tarballs)
+3. `artifacts/package-local/crates` (crate archives)
+
+### Step B: Consume NuGet packages in another .NET app
+
+Create or update a `NuGet.config` in the consuming app:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+	<packageSources>
+		<clear />
+		<add key="local-activesync" value="C:\\path\\to\\activesync\\artifacts\\package-local\\nuget" />
+		<add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+	</packageSources>
+</configuration>
+```
+
+Then add package references in the consumer project:
+
+1. `ActiveSync.Host.Abstractions` version `0.1.0-local`
+2. `ActiveSync.Host.Composition` version `0.1.0-local`
+3. optional native RID packages when needed by deployment mode
+
+### Step C: Consume Rust crates in another app without workspace project refs
+
+1. Expand local `.crate` archives into unpacked directories:
+
+```powershell
+pwsh -File ./expand-local-crates.ps1
+```
+
+2. In the consuming `Cargo.toml`, reference unpacked package paths:
+
+```toml
+[dependencies]
+activesync-core = { path = "C:/path/to/activesync/artifacts/package-local/crates/unpacked/activesync-core-0.1.0" }
+activesync-host-core = { path = "C:/path/to/activesync/artifacts/package-local/crates/unpacked/activesync-host-core-0.1.0" }
+activesync-host-ffi = { path = "C:/path/to/activesync/artifacts/package-local/crates/unpacked/activesync-host-ffi-0.1.0" }
+```
+
+This keeps the consumer independent from workspace project references while still using package snapshots generated from this repo.
+
+### Step D: Optional npm local consume
+
+In a consuming JS app:
+
+```powershell
+npm install C:\path\to\activesync\artifacts\package-local\npm\activesync-bridge-0.1.0.tgz
+npm install C:\path\to\activesync\artifacts\package-local\npm\activesync-sdk-js-0.1.0.tgz
+```
+
 ## 1. Preflight Gates
 
 Run from repo root unless noted.
@@ -61,7 +150,7 @@ If bridge assets need refresh:
 
 ```bash
 cd bridge
-wasm-pack build --target web --out-dir pkg
+wasm-pack build --target web
 ```
 
 ### 3.2 Validate package contents

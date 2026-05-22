@@ -15,7 +15,8 @@ public static class HostApplication
         string Room,
         [property: JsonPropertyName("peerPubkeyHex")] string PeerPubkeyHex,
         [property: JsonPropertyName("lifetimeSeconds")] int? LifetimeSeconds,
-        IReadOnlyList<string>? Capabilities
+        IReadOnlyList<string>? Capabilities,
+        [property: JsonPropertyName("capabilityProfileVersion")] string? CapabilityProfileVersion
     );
 
     private sealed record SyncTokenValidateRequest(
@@ -23,6 +24,7 @@ public static class HostApplication
         [property: JsonPropertyName("peer_pubkey_hex")] string PeerPubkeyHex,
         [property: JsonPropertyName("expiry_secs")] long ExpirySecs,
         IReadOnlyList<string> Capabilities,
+        [property: JsonPropertyName("capability_profile_version")] string? CapabilityProfileVersion,
         [property: JsonPropertyName("sig_hex")] string SigHex
     );
 
@@ -291,7 +293,8 @@ public static class HostApplication
                         request.Room,
                         request.PeerPubkeyHex,
                         request.LifetimeSeconds,
-                        request.Capabilities
+                        request.Capabilities,
+                        request.CapabilityProfileVersion
                     ),
                     cancellationToken
                 );
@@ -321,6 +324,10 @@ public static class HostApplication
                     return Results.StatusCode(StatusCodes.Status502BadGateway);
                 }
 
+                return Results.BadRequest(new { error = ex.Message });
+            }
+            catch (InvalidOperationException ex)
+            {
                 return Results.BadRequest(new { error = ex.Message });
             }
 
@@ -355,6 +362,7 @@ public static class HostApplication
                         request.PeerPubkeyHex,
                         request.ExpirySecs,
                         request.Capabilities,
+                        request.CapabilityProfileVersion,
                         request.SigHex
                     ),
                     cancellationToken
@@ -374,6 +382,10 @@ public static class HostApplication
                     return Results.StatusCode(StatusCodes.Status502BadGateway);
                 }
 
+                return Results.BadRequest(new { error = ex.Message });
+            }
+            catch (InvalidOperationException ex)
+            {
                 return Results.BadRequest(new { error = ex.Message });
             }
 

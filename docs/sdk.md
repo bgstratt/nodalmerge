@@ -12,11 +12,17 @@ The SDK ships alongside the WASM bridge under `web/` in this repo. Copy
 ## Quick start
 
 ```js
-import { createDoc } from './sdk.js';
+import { createDoc, namespaceCapabilities } from './sdk.js';
+
+const tokenCaps = namespaceCapabilities({
+  read: ['world'],
+  write: ['intent'],
+});
 
 const doc = await createDoc({
   serverUrl: 'ws://localhost:7878',
   room:      'demo-room-1',
+  tokenCaps,
 });
 
 const world   = doc.map('world');
@@ -41,9 +47,10 @@ doc.onChange(ev => {
 | `room`           | `string`     | — (required)   | Room id. Transport boundary; see PLAN.md decision log. |
 | `authorSeed`     | `Uint8Array` | random 32 B    | Persist this to keep identity across sessions. |
 | `roomSeed`       | `Uint8Array` | `null`         | Room private-key seed (C3). If set, a capability token is signed on every connect. |
-| `tokenCaps`      | `string[]`   | `[]`           | Path-scoped grants, e.g. `["write:intent/**"]`. Empty = full access. |
+| `tokenCaps`      | `string[] \| { read?: string[], write?: string[], derive?: string[] }`   | `[]`           | Path-scoped grants. String-array form accepts canonical values (for example `["write:intent/**"]`). Object form is namespace ergonomic (for example `{ read:["world"], write:["intent"] }`). Empty = full access. |
 | `tokenExpirySecs`| `number`     | `86400`        | Token TTL. |
-| `tokenProvider`  | `(ctx) => Promise<{ peer_pubkey_hex, expiry_secs, capabilities, sig_hex }>` | — | Optional async mint/refresh hook for server-signed RoomToken payloads. Takes precedence over `roomSeed` signing when provided. |
+| `tokenProvider`  | `(ctx) => Promise<{ peer_pubkey_hex, expiry_secs, capabilities, sig_hex, continuity? }>` | — | Optional async mint/refresh hook for server-signed RoomToken payloads. Takes precedence over `roomSeed` signing when provided. `continuity` supports Phase C device-switch/key-rotation overlap flow. |
+| `onRejection`    | `(ev) => void` | `null`      | Typed server rejection callback. Receives parsed `reasonClass`, `command`, `requiredCapability`, `message`, and raw envelope. |
 | `autoConnect`    | `boolean`    | `true`         | If false, call `doc.connect()` manually. |
 | `subscribe`      | `string[]`   | `["**"]`       | F3a: glob patterns for client-side materialization. See [Subscriptions](#subscriptions-f3a). |
 | `transport`      | `'auto' \| 'ws-only'` | `'auto'` | `'auto'` enables WS + WebRTC mesh when available; `'ws-only'` disables WebRTC. |
@@ -60,12 +67,151 @@ doc.onChange(ev => {
 - `doc.text(key)` → `TextHandle` — per-character RGA with tombstones.
 - `doc.list(key)` → `ListHandle<T>` — ordered list with fractional-index CRDT semantics (F8).
 - `doc.onChange(cb)`, `doc.onConnect(cb)`, `doc.onDisconnect(cb)`, `doc.onError(cb)` — each returns an unsubscribe function.
+- `doc.onRejection(cb)`, `doc.recentRejections(sinceMs?)` — typed server rejection stream + bounded history buffer.
 - `doc.onConflict(cb)`, `doc.recentConflicts(sinceMs?)` — conflict surfacing hook + bounded history buffer.
 - `doc.connect()`, `doc.disconnect()`, `doc.close()`.
 - `doc.peers()` — peer transport view (`ws` vs `webrtc`) and channel readiness.
 - `doc.undoManager({ scope?, captureTimeout?, maxItems? })` — app-layer undo/redo manager using compensating ops.
 - `doc.pubkeyHex`, `doc.authorSeed`, `doc.isConnected`.
 - `doc.store` — escape hatch to the raw `SyncStore` for advanced use (speculative reads, frontier inspection).
+
+### Capability helper APIs
+
+- `capability(scope, pathPattern)` → builds one capability string.
+- `namespaceCapabilities(spec)` → builds canonical sorted capability strings from namespace roots.
+
+```js
+import { capability, namespaceCapabilities } from './sdk.js';
+
+capability('read', 'world/**');
+// -> "read:world/**"
+
+namespaceCapabilities({
+  read: ['world'],
+  write: ['intent', 'world/patches/**'],
+});
+// -> ["read:world/**", "write:intent/**", "write:world/patches/**"]
+```
+
+### Typed rejection surfaces
+
+Server error envelopes and deterministic `reject.*` prefixes are normalized into
+typed rejection events.
+
+```js
+doc.onRejection((ev) => {
+  if (ev.reasonClass === 'reject.control_plane_forbidden') {
+    console.warn('Denied command:', ev.command, 'requires', ev.requiredCapability);
+  }
+});
+
+doc.onError((err) => {
+  // Backward compatible: still an Error object.
+  if (err.rejection) {
+    console.log('typed rejection from onError', err.rejection.reasonClass);
+  }
+});
+
+const recent = doc.recentRejections();
+console.log('recent rejections', recent.length);
+```
+
+### Intent vs canonical refinement
+
+Use separate namespaces to represent optimistic intent and authoritative state.
+
+```js
+const intent = doc.map('intent/player');
+const world = doc.map('world/player');
+
+// Optimistic local write.
+intent.set('move', { dx: 1, dy: 0, nonce: crypto.randomUUID() });
+
+// Authoritative canonical update arrives asynchronously.
+world.onChange(() => {
+  renderPlayer(world.get('position'));
+});
+
+// Typed rejection informs user-visible refinement.
+doc.onRejection((ev) => {
+  if (ev.reasonClass?.startsWith('reject.')) {
+    toast(`Action denied: ${ev.message}`);
+  }
+});
+```
+
+### Local-first with authoritative refinement
+
+Pattern: render speculative UI immediately, then reconcile when canonical state
+or typed rejections arrive.
+
+```js
+const intent = doc.map('intent/orders');
+const world = doc.map('world/orders');
+
+function placeOrder(order) {
+  // Local-first optimistic state.
+  intent.set(order.id, { ...order, state: 'pending' });
+  renderPending(order.id);
+}
+
+// Canonical truth from authoritative host/server path.
+world.onChange(() => {
+  renderCanonical(world.all());
+});
+
+// Rejection-driven refinement.
+doc.onRejection((ev) => {
+  if (!ev.reasonClass) return;
+  renderRejected(ev.message, {
+    reasonClass: ev.reasonClass,
+    command: ev.command,
+    requiredCapability: ev.requiredCapability,
+  });
+});
+```
+
+### Device switch and key rotation flow (Phase C slice 2)
+
+Use this flow when a user moves from old device key A to new device key B.
+
+1. Keep key A active while key B performs first handshake.
+2. Mint key B token with continuity metadata:
+   - `predecessor_peer_pubkey`: key A
+   - `overlap_not_after`: Unix-seconds cutoff for overlap window
+   - `revoked_predecessors`: empty during overlap
+3. After overlap window and client cutover are complete, mint key B tokens with key A listed in `revoked_predecessors`.
+4. Persist new device author seed and stop issuing key A tokens.
+
+Example `tokenProvider` output during overlap:
+
+```js
+const tokenProvider = async ({ room, pubkeyHex }) => {
+  const token = await fetch('/sync/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ room, peer_pubkey_hex: pubkeyHex }),
+  }).then(r => r.json());
+
+  return {
+    peer_pubkey_hex: token.peer_pubkey_hex,
+    expiry_secs: token.expiry_secs,
+    capabilities: token.capabilities,
+    sig_hex: token.sig_hex,
+    continuity: {
+      predecessor_peer_pubkey: token.continuity.predecessor_peer_pubkey,
+      overlap_not_after: token.continuity.overlap_not_after,
+      revoked_predecessors: token.continuity.revoked_predecessors ?? [],
+    },
+  };
+};
+```
+
+Expected behavior during migration:
+
+1. Successor key is allowed while `now <= overlap_not_after`.
+2. Successor key is rejected after overlap expiry.
+3. Successor key is rejected when predecessor is listed as revoked.
 
 ### `MapHandle`
 

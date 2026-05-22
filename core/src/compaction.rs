@@ -41,7 +41,7 @@ use crate::{
     hash::Hash,
     node::{NodeId, SyncNode, pack_nodes, unpack_nodes},
     op::{Op, MapOp, Transaction},
-    replay::canonical_hash,
+    replay::{canonical_hash, policy_timeline_cutover_lamport, policy_timeline_hash, PolicyTimelineEntry},
 };
 
 // ---------------------------------------------------------------------------
@@ -57,6 +57,14 @@ pub const SNAP_FRONT_KEY: &str = "\x00snap:front";
 /// Op key that carries the optional base-snapshot `NodeId` ([u8;32]) for
 /// incremental (chained) snapshots (E4).  Absent in full snapshots.
 pub const SNAP_BASE_KEY: &str = "\x00snap:base";
+
+/// Op key that carries the optional policy timeline fingerprint (32 raw bytes)
+/// used to validate replay/compaction policy-history compatibility (P2).
+pub const SNAP_POLICY_TIMELINE_HASH_KEY: &str = "\x00snap:policy:hash";
+
+/// Op key that carries the optional highest policy cutover lamport (u64 LE)
+/// represented by the snapshot's policy timeline metadata.
+pub const SNAP_POLICY_CUTOVER_LAMPORT_KEY: &str = "\x00snap:policy:cutover";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -77,6 +85,11 @@ pub struct SnapshotMeta {
     /// E4: For incremental snapshots, the NodeId of the previous snapshot this
     /// one chains from.  `None` for full (standalone) snapshots.
     pub base_id: Option<NodeId>,
+    /// Optional fingerprint of the policy timeline that should be used when
+    /// replaying/verifying this snapshot.
+    pub policy_timeline_hash: Option<Hash>,
+    /// Optional highest policy cutover lamport encoded by the compactor.
+    pub policy_cutover_lamport: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +113,19 @@ pub struct SnapshotMeta {
 pub fn compact(
     graph: &StateGraph,
     signing_key: &ed25519_dalek::SigningKey,
+) -> Result<SyncNode, SyncError> {
+    compact_with_policy_timeline(graph, signing_key, &[])
+}
+
+/// Compact using optional policy timeline metadata for replay compatibility.
+///
+/// The snapshot hash remains a hash of resolved state, while policy timeline
+/// metadata is encoded as optional sentinel keys so verifiers can ensure they
+/// are replaying under the same policy-history assumptions.
+pub fn compact_with_policy_timeline(
+    graph: &StateGraph,
+    signing_key: &ed25519_dalek::SigningKey,
+    timeline: &[PolicyTimelineEntry],
 ) -> Result<SyncNode, SyncError> {
     // Resolve ALL nodes in the graph — speculative and remote alike.
     // compact() is an archival operation: the point is to snapshot the full
@@ -133,10 +159,11 @@ pub fn compact(
             actual:   Hash([0u8; 32]),
         })?;
 
-    let ops = vec![
+    let mut ops = vec![
         Op::Map(MapOp::Set { key: SNAP_HASH_KEY.to_string(),  value: snap_hash.0.to_vec() }),
         Op::Map(MapOp::Set { key: SNAP_FRONT_KEY.to_string(), value: frontier_bytes }),
     ];
+    ops.extend(policy_timeline_ops(timeline));
 
     let author: [u8; 32] = signing_key.verifying_key().to_bytes();
     // Lamport = graph lamport + 1 so the snapshot sorts after all subsumed nodes.
@@ -179,6 +206,16 @@ pub fn compact_incremental(
     signing_key: &ed25519_dalek::SigningKey,
     base_snapshot_id: NodeId,
 ) -> Result<SyncNode, SyncError> {
+    compact_incremental_with_policy_timeline(graph, signing_key, base_snapshot_id, &[])
+}
+
+/// Incremental snapshot with optional policy timeline compatibility metadata.
+pub fn compact_incremental_with_policy_timeline(
+    graph: &StateGraph,
+    signing_key: &ed25519_dalek::SigningKey,
+    base_snapshot_id: NodeId,
+    timeline: &[PolicyTimelineEntry],
+) -> Result<SyncNode, SyncError> {
     let resolved: BTreeMap<String, Vec<u8>> = graph
         .resolve()
         .into_iter()
@@ -204,12 +241,13 @@ pub fn compact_incremental(
             actual:   Hash([0u8; 32]),
         })?;
 
-    let ops = vec![
+    let mut ops = vec![
         Op::Map(MapOp::Set { key: SNAP_HASH_KEY.to_string(),  value: snap_hash.0.to_vec() }),
         Op::Map(MapOp::Set { key: SNAP_FRONT_KEY.to_string(), value: frontier_bytes }),
         // E4: chain pointer to the previous snapshot.
         Op::Map(MapOp::Set { key: SNAP_BASE_KEY.to_string(),  value: base_snapshot_id.0.to_vec() }),
     ];
+    ops.extend(policy_timeline_ops(timeline));
 
     let author: [u8; 32] = signing_key.verifying_key().to_bytes();
     let lamport = graph.lamport() + 1;
@@ -246,6 +284,8 @@ pub fn verify_snapshot(node: &SyncNode) -> Result<SnapshotMeta, SyncError> {
     let mut snap_hash_bytes: Option<[u8; 32]> = None;
     let mut frontier: Option<Vec<NodeId>> = None;
     let mut base_id: Option<NodeId> = None;
+    let mut policy_timeline_hash: Option<Hash> = None;
+    let mut policy_cutover_lamport: Option<u64> = None;
 
     for op in &node.transaction.ops {
         if let Op::Map(MapOp::Set { key, value }) = op {
@@ -270,6 +310,14 @@ pub fn verify_snapshot(node: &SyncNode) -> Result<SnapshotMeta, SyncError> {
                 if let Ok(arr) = <[u8; 32]>::try_from(value.as_slice()) {
                     base_id = Some(Hash(arr));
                 }
+            } else if key == SNAP_POLICY_TIMELINE_HASH_KEY {
+                if let Ok(arr) = <[u8; 32]>::try_from(value.as_slice()) {
+                    policy_timeline_hash = Some(Hash(arr));
+                }
+            } else if key == SNAP_POLICY_CUTOVER_LAMPORT_KEY {
+                if let Ok(arr) = <[u8; 8]>::try_from(value.as_slice()) {
+                    policy_cutover_lamport = Some(u64::from_le_bytes(arr));
+                }
             }
         }
     }
@@ -284,7 +332,52 @@ pub fn verify_snapshot(node: &SyncNode) -> Result<SnapshotMeta, SyncError> {
         actual:   Hash([0u8; 32]),
     })?;
 
-    Ok(SnapshotMeta { snapshot_hash, frontier, author: node.transaction.author, base_id })
+    Ok(SnapshotMeta {
+        snapshot_hash,
+        frontier,
+        author: node.transaction.author,
+        base_id,
+        policy_timeline_hash,
+        policy_cutover_lamport,
+    })
+}
+
+/// Returns true when snapshot policy metadata is compatible with `timeline`.
+///
+/// If a snapshot omits policy metadata, this returns true for backward
+/// compatibility with pre-P2 snapshots.
+pub fn snapshot_policy_timeline_compatible(meta: &SnapshotMeta, timeline: &[PolicyTimelineEntry]) -> bool {
+    if meta.policy_timeline_hash.is_none() && meta.policy_cutover_lamport.is_none() {
+        return true;
+    }
+
+    let expected_hash = policy_timeline_hash(timeline);
+    let expected_cutover = policy_timeline_cutover_lamport(timeline);
+
+    meta.policy_timeline_hash == Some(expected_hash)
+        && meta.policy_cutover_lamport == expected_cutover
+}
+
+fn policy_timeline_ops(timeline: &[PolicyTimelineEntry]) -> Vec<Op> {
+    if timeline.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ops = Vec::with_capacity(2);
+    let hash = policy_timeline_hash(timeline);
+    ops.push(Op::Map(MapOp::Set {
+        key: SNAP_POLICY_TIMELINE_HASH_KEY.to_string(),
+        value: hash.0.to_vec(),
+    }));
+
+    if let Some(cutover) = policy_timeline_cutover_lamport(timeline) {
+        ops.push(Op::Map(MapOp::Set {
+            key: SNAP_POLICY_CUTOVER_LAMPORT_KEY.to_string(),
+            value: cutover.to_le_bytes().to_vec(),
+        }));
+    }
+
+    ops
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +492,8 @@ mod tests {
     use crate::{
         graph::StateGraph,
         op::{Op, MapOp},
-        replay::replay,
+        policy::{Policy, PolicyDefault, PolicyRule},
+        replay::{replay, PolicyTimelineEntry},
     };
     use ed25519_dalek::SigningKey;
 
@@ -423,6 +517,21 @@ mod tests {
             g.apply_local(key, 0, vec![set_op(k, v)]).unwrap();
         }
         g
+    }
+
+    fn timeline_for(author: [u8; 32]) -> Vec<PolicyTimelineEntry> {
+        vec![PolicyTimelineEntry {
+            effective_lamport: 2,
+            policy: Policy {
+                rules: vec![PolicyRule {
+                    path_glob: "protected/**".to_string(),
+                    can_write: vec![author],
+                    can_read: Vec::new(),
+                    can_derive: Vec::new(),
+                }],
+                default: PolicyDefault::DenyAll,
+            },
+        }]
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -555,6 +664,39 @@ mod tests {
         let replayed = replay(&nodes, None).unwrap();
         assert_eq!(meta.snapshot_hash, replayed.hash,
             "snapshot_hash and replay().hash must be identical");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 6b. snapshot carries policy timeline metadata when provided (P2 Task 3)
+    // ─────────────────────────────────────────────────────────────────────────
+    #[test]
+    fn compact_with_policy_timeline_sets_snapshot_policy_metadata() {
+        let key = test_key();
+        let graph = build_graph(&key, &[("protected/x", b"1")]);
+        let timeline = timeline_for(key.verifying_key().to_bytes());
+
+        let snap = compact_with_policy_timeline(&graph, &key, &timeline).unwrap();
+        let meta = verify_snapshot(&snap).unwrap();
+
+        assert!(meta.policy_timeline_hash.is_some());
+        assert_eq!(meta.policy_cutover_lamport, Some(2));
+        assert!(snapshot_policy_timeline_compatible(&meta, &timeline));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 6c. snapshot policy metadata mismatch is detected
+    // ─────────────────────────────────────────────────────────────────────────
+    #[test]
+    fn snapshot_policy_metadata_detects_incompatible_timeline() {
+        let key = test_key();
+        let graph = build_graph(&key, &[("protected/x", b"1")]);
+        let timeline_a = timeline_for(key.verifying_key().to_bytes());
+        let timeline_b = timeline_for(other_key().verifying_key().to_bytes());
+
+        let snap = compact_with_policy_timeline(&graph, &key, &timeline_a).unwrap();
+        let meta = verify_snapshot(&snap).unwrap();
+
+        assert!(!snapshot_policy_timeline_compatible(&meta, &timeline_b));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -18,7 +18,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IFfiBinaryBridge>(sp => sp.GetRequiredService<FfiBridgeProcessor>());
         services.AddSingleton<FfiWebSocketLoopRunner>();
         services.AddSingleton<IRuntimeCommandBridge>(sp => sp.GetRequiredService<FfiBridgeProcessor>());
-        services.AddSingleton<RuntimeProtocolMapper>();
+        services.AddSingleton<RuntimeProtocolMapper>(_ =>
+            new RuntimeProtocolMapper(
+                configuration?.GetValue<string>("ActiveSync:Runtime:ServerPeerPubkeyHex")));
         services.AddSingleton<RuntimeSessionIdAllocator>();
         services.AddSingleton<RuntimeRoomBroker>();
         services.AddSingleton(compactionOptions);

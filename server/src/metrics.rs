@@ -130,6 +130,19 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
         "activesync_token_expired_disconnects_total",
         "Peers disconnected with WS close code 4002 after their capability token's `expiry` lapsed mid-session."
     );
+    // Scoped replication (Phase A): filtering/catch-up observability.
+    describe_counter!(
+        "activesync_filtered_nodes_total",
+        "Total nodes removed by subscription filtering before relay/catch-up send. Labels: `room`, `stage` (`catchup`|`broadcast`)."
+    );
+    describe_counter!(
+        "activesync_filtered_bytes_total",
+        "Total node-payload bytes removed by subscription filtering before relay/catch-up send. Labels: `room`, `stage` (`catchup`|`broadcast`)."
+    );
+    describe_counter!(
+        "activesync_filtered_pack_dropped_total",
+        "Filtered packs dropped before send. Labels: `room`, `stage` (`catchup`|`broadcast`), `reason` (`empty_after_filter`|`budget_exceeded`)."
+    );
     // G11 — hot-room memory observability.
     describe_gauge!(
         "activesync_room_bytes_resident",

@@ -1,0 +1,57 @@
+{
+  "run_id": "qualified-local-20260522-03",
+  "output_tag": "qualified-20260522-03",
+  "utc_timestamp": "2026-05-22T13:03:58.3863189Z",
+  "status": "pass",
+  "failed_step_count": 0,
+  "artifacts": {
+    "canonical_parity": "docs/acceptance/authz-conformance-parity.json",
+    "benchmark_evidence": "docs/acceptance/authz-auth-path-benchmark-result-local-qualified-20260522-03.json",
+    "snapshot_drill": "docs/acceptance/snapshot-restore-drill-local-qualified-20260522-03.json",
+    "promotion_readiness": "docs/acceptance/promotion-readiness-local-qualified-20260522-03.json",
+    "history_jsonl": "docs/acceptance/_history/promotion-readiness-history.jsonl",
+    "history_summary": "docs/acceptance/_history/promotion-readiness-history-summary.json"
+  },
+  "steps": [
+    {
+      "name": "benchmark evidence generation",
+      "status": "pass",
+      "duration_seconds": 0.375
+    },
+    {
+      "name": "canonical admin_command_only",
+      "status": "pass",
+      "duration_seconds": 4.174
+    },
+    {
+      "name": "snapshot restore drill",
+      "status": "pass",
+      "duration_seconds": 2.645
+    },
+    {
+      "name": "supplemental hybrid",
+      "status": "pass",
+      "duration_seconds": 7.827
+    },
+    {
+      "name": "supplemental replicated_signed_ops_only",
+      "status": "pass",
+      "duration_seconds": 4.186
+    },
+    {
+      "name": "supplemental capcomp admin_command_only",
+      "status": "pass",
+      "duration_seconds": 4.153
+    },
+    {
+      "name": "promotion readiness summary",
+      "status": "pass",
+      "duration_seconds": 0.335
+    },
+    {
+      "name": "promotion readiness history append",
+      "status": "pass",
+      "duration_seconds": 0.353
+    }
+  ]
+}

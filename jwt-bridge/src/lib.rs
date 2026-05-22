@@ -65,6 +65,9 @@ use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use thiserror::Error;
 
+mod capability_profile;
+use capability_profile::maybe_expand_minted_capabilities;
+
 // ─── Errors ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -77,6 +80,8 @@ pub enum BridgeError {
     BadClaim(&'static str),
     #[error("could not mint RoomToken: {0}")]
     RoomToken(#[from] TokenError),
+    #[error("capability profile expansion failed: {0}")]
+    CapabilityProfile(String),
 }
 
 // ─── Config ────────────────────────────────────────────────────────────────
@@ -143,6 +148,9 @@ struct BridgeClaims {
     /// Optional. Path-scoped grants e.g. `["read:world/**", "write:intent/**"]`.
     #[serde(default)]
     caps: Vec<String>,
+    /// Optional. Host capability profile version expected by this token.
+    #[serde(default)]
+    capability_profile_version: Option<String>,
 }
 
 // ─── Minting ───────────────────────────────────────────────────────────────
@@ -171,6 +179,12 @@ pub fn mint_room_token(cfg: &BridgeConfig, jwt: &str) -> Result<RoomToken, Bridg
     let pubkey = hex_to_32(&claims.pubkey)
         .ok_or(BridgeError::BadClaim("pubkey (expected 64 hex chars)"))?;
 
+    let caps = maybe_expand_minted_capabilities(
+        &claims.caps,
+        claims.capability_profile_version.as_deref(),
+    )
+    .map_err(BridgeError::CapabilityProfile)?;
+
     // 4. Mint. The RoomToken signature binds `room | pubkey | expiry | caps`
     //    with the room's Ed25519 key — identical to what `RoomToken::sign`
     //    would produce locally. Downstream server-side verification doesn't
@@ -179,7 +193,7 @@ pub fn mint_room_token(cfg: &BridgeConfig, jwt: &str) -> Result<RoomToken, Bridg
         &claims.room,
         &pubkey,
         claims.exp,
-        &claims.caps,
+        &caps,
         &cfg.room_key,
     ))
 }

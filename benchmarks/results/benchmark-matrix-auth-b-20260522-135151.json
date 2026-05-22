@@ -1,0 +1,44 @@
+{
+  "schema_version": "benchmark-matrix-result.v1",
+  "run_id": "bench-matrix-20260522-185235",
+  "generated_utc": "2026-05-22T18:53:29.4946115Z",
+  "matrix_path": "./benchmarks/benchmark-matrix.v1.json",
+  "rows": [
+    {
+      "id": "auth-enforced-room-lock-tokened",
+      "label": "Auth-enforced room lock plus tokened sessions",
+      "status": "ok",
+      "dimensions": {
+        "auth_mode": "room-lock-tokened",
+        "room_scale": "2,10,20 peers",
+        "command_mix": "map60/list60/blob20@4k",
+        "reconnect_churn": "3 iterations",
+        "guardrails": "room key lock + hello token"
+      },
+      "scenario_result_path": "./benchmarks/results/bench-matrix-20260522-185235-auth-enforced-room-lock-tokened-sdk-scenarios.json",
+      "started_utc": "2026-05-22T18:52:35.1604359Z",
+      "completed_utc": "2026-05-22T18:53:29.3924449Z",
+      "aggregates": {
+        "rust-combined-server": {
+          "map_avg_ms": 646.049,
+          "map_p95_ms": 670.23,
+          "list_avg_ms": 890.399,
+          "list_p95_ms": 913.129,
+          "blob_avg_ms": 376.604,
+          "blob_p95_ms": 387.407
+        },
+        "dotnet-host-runtime-alias": {
+          "map_avg_ms": 705.449,
+          "map_p95_ms": 714.045,
+          "list_avg_ms": 971.726,
+          "list_p95_ms": 988.802,
+          "blob_avg_ms": 368.524,
+          "blob_p95_ms": 378.055
+        }
+      },
+      "gate": {
+        "status": "baseline"
+      }
+    }
+  ]
+}

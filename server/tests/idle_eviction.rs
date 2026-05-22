@@ -45,7 +45,7 @@ async fn durable_idle_room_is_evicted_and_rehydrates() {
         room.register_peer("peer-a".into()).await;
         let sk = SigningKey::from_bytes(&[0x22u8; 32]);
         let node = make_node(&sk, "hello", b"world");
-        let (accepted, errs) = import_nodes(&room, vec![node]).await;
+        let (accepted, _, errs) = import_nodes(&room, vec![node]).await;
         assert_eq!(accepted, 1);
         assert!(errs.is_empty());
         room.deregister_peer("peer-a").await;
@@ -104,3 +104,4 @@ async fn connected_room_is_not_evicted() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+

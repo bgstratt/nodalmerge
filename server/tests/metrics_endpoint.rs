@@ -79,7 +79,7 @@ async fn metrics_endpoint_exposes_baseline_series() {
 
     let peer_key = SigningKey::from_bytes(&[0x55u8; 32]);
     let n = make_node(&peer_key, "k", b"v");
-    let (accepted, errs) = import_nodes(&room, vec![n]).await;
+    let (accepted, _, errs) = import_nodes(&room, vec![n]).await;
     assert_eq!(accepted, 1, "import_nodes should accept 1 node (errors: {errs:?})");
 
     room.deregister_peer("deadbeef").await;
@@ -149,3 +149,4 @@ fn peer_label_truncates_to_12_chars() {
     assert_eq!(server_metrics::peer_label("0123456789abcdef0123"), "0123456789ab");
     assert_eq!(server_metrics::peer_label("short"), "short");
 }
+

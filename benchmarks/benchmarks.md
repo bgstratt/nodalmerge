@@ -73,3 +73,41 @@ Based on this run set: currently Green/Yellow, not Red.
 ## Important caveat
 
 The timed map/list/blob scenario blocks measure steady-state session behavior. They do not currently break out separate timing fields for auth setup (room-key bootstrap and token provisioning). Add explicit setup timing fields if you want a full cold-path auth tax number in the same report.
+
+## Rust trace microbench (260k ops) - signed/unsigned, batch/non-batch
+
+Date: 2026-05-22
+Source trace: `docs/rustcode.json`
+Runner: `core/src/bin/text_trace_rustcode_oneshot.rs`
+
+Command shape used for each row (with env var toggles):
+
+```powershell
+& "C:\Users\bgstr\.cargo\bin\cargo.exe" run --release --manifest-path ".\core\Cargo.toml" --bin text_trace_rustcode_oneshot
+```
+
+All rows below use `ACTIVESYNC_TEXT_TRACE_MAX_OPS=260000`.
+
+| Variant | signed | use_batch | batch_size | applied_ops | apply_ms | ops_per_sec |
+|---|---:|---:|---:|---:|---:|---:|
+| unsigned non-batch | 0 | 0 | n/a | 260000 | 335 | 774955 |
+| unsigned batch | 0 | 1 | default | 260000 | 382 | 679002 |
+| signed non-batch | 1 | 0 | n/a | 260000 | 8500 | 30587 |
+| signed batch | 1 | 1 | default | 260000 | 680 | 382220 |
+| signed batch (50k) | 1 | 1 | 50000 | 260000 | 722 | 360029 |
+
+Interpretation notes:
+
+1. `apply_ms` and `ops_per_sec` are apply-phase only (pre-translated nodes), not JSON parse/adapter translation time.
+2. Signed mode includes Ed25519 verification cost during apply; batch mode uses batched verify in `apply_remote_batch`.
+3. For this run, batching helps significantly in signed mode, while unsigned mode is slightly faster without batch.
+
+## Full ecosystem benchmarks retained (.NET host vs Rust host)
+
+This microbench section is additive and does not replace host-level apples-to-apples measurements.
+
+Existing ecosystem benchmark coverage remains in place:
+
+1. `benchmarks/Run-SdkScenarioBenchmarks.mjs` (semantic map/list/blob scenarios across targets)
+2. `benchmarks/Run-BenchmarkMatrix.ps1` with `benchmarks/benchmark-matrix.v1.json` (auth/security/guardrail profile rows)
+3. target comparison includes `rust-combined-server` and `dotnet-host-runtime-alias` as documented above in this file

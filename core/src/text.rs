@@ -17,9 +17,9 @@
 //! output but its `OpId` remains valid as a `before`/`after` anchor for
 //! future insertions.
 
-use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::node::SyncNode;
@@ -458,7 +458,7 @@ impl CountedPositionIndex {
 /// This scaffold keeps two layers:
 /// - metadata (`entries`, `children`, `pending_deletes`)
 /// - dense visible cache (`visible_ids`, `visible_string`)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct TextProjection {
     entries: HashMap<CompactId, ProjectionEntry>,
     root_children: Vec<CompactId>,
@@ -483,15 +483,34 @@ pub struct TextProjection {
     delete_ops_applied: u64,
     range_insert_ops_applied: u64,
     range_delete_ops_applied: u64,
-    resolve_seq_calls: Cell<u64>,
-    resolve_string_calls: Cell<u64>,
-    resolve_range_calls: Cell<u64>,
+    resolve_seq_calls: Mutex<u64>,
+    resolve_string_calls: Mutex<u64>,
+    resolve_range_calls: Mutex<u64>,
     invalidation_count: u64,
     index_update_time_ns: u64,
     index_rebuild_time_ns: u64,
 }
 
 impl TextProjection {
+    fn increment_counter(counter: &Mutex<u64>) {
+        match counter.lock() {
+            Ok(mut guard) => {
+                *guard = guard.saturating_add(1);
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = guard.saturating_add(1);
+            }
+        }
+    }
+
+    fn read_counter(counter: &Mutex<u64>) -> u64 {
+        match counter.lock() {
+            Ok(guard) => *guard,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
     fn compact_id_for(&mut self, id: OpId) -> CompactId {
         CompactId::from_op_id(id, &mut self.actor_table)
     }
@@ -895,13 +914,12 @@ impl TextProjection {
     }
 
     pub fn resolve_seq(&self) -> Vec<(OpId, char)> {
-        self.resolve_seq_calls.set(self.resolve_seq_calls.get().saturating_add(1));
+        Self::increment_counter(&self.resolve_seq_calls);
         self.build_visible_seq_pairs()
     }
 
     pub fn resolve_string(&self) -> String {
-        self.resolve_string_calls
-            .set(self.resolve_string_calls.get().saturating_add(1));
+        Self::increment_counter(&self.resolve_string_calls);
         self.visible_string.clone()
     }
 
@@ -914,8 +932,7 @@ impl TextProjection {
     }
 
     pub fn resolve_string_range(&self, start: usize, len: usize) -> String {
-        self.resolve_range_calls
-            .set(self.resolve_range_calls.get().saturating_add(1));
+        Self::increment_counter(&self.resolve_range_calls);
         if len == 0 {
             return String::new();
         }
@@ -952,9 +969,9 @@ impl TextProjection {
             delete_ops_applied: self.delete_ops_applied,
             range_insert_ops_applied: self.range_insert_ops_applied,
             range_delete_ops_applied: self.range_delete_ops_applied,
-            resolve_seq_calls: self.resolve_seq_calls.get(),
-            resolve_string_calls: self.resolve_string_calls.get(),
-            resolve_range_calls: self.resolve_range_calls.get(),
+            resolve_seq_calls: Self::read_counter(&self.resolve_seq_calls),
+            resolve_string_calls: Self::read_counter(&self.resolve_string_calls),
+            resolve_range_calls: Self::read_counter(&self.resolve_range_calls),
             invalidation_count: self.invalidation_count,
             index_update_time_ns: self.index_update_time_ns,
             index_rebuild_time_ns: self.index_rebuild_time_ns,

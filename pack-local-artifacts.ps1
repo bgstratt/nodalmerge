@@ -32,6 +32,54 @@ function Resolve-CommandPath {
     return $null
 }
 
+function Get-CrateVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CargoTomlPath
+    )
+
+    if (-not (Test-Path $CargoTomlPath)) {
+        throw "Cargo.toml not found at $CargoTomlPath"
+    }
+
+    $content = Get-Content -Path $CargoTomlPath -Raw
+    $match = [regex]::Match($content, '(?m)^version\s*=\s*"([^"]+)"\s*$')
+    if (-not $match.Success) {
+        throw "Could not parse crate version from $CargoTomlPath"
+    }
+
+    return $match.Groups[1].Value
+}
+
+function New-LocalCrateArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CrateId,
+        [Parameter(Mandatory = $true)]
+        [string]$CrateDir,
+        [Parameter(Mandatory = $true)]
+        [string]$CrateOutputDir,
+        [Parameter(Mandatory = $true)]
+        [string]$TarPath
+    )
+
+    $cargoToml = Join-Path $CrateDir "Cargo.toml"
+    $version = Get-CrateVersion -CargoTomlPath $cargoToml
+    $archiveName = "$CrateId-$version-local.crate"
+    $archivePath = Join-Path $CrateOutputDir $archiveName
+
+    if (Test-Path $archivePath) {
+        Remove-Item -Path $archivePath -Force
+    }
+
+    & $TarPath -czf $archivePath -C $CrateDir .
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create fallback local crate archive for $CrateId"
+    }
+
+    return $archivePath
+}
+
 $repoRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $outputRootFull = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
 
@@ -61,6 +109,11 @@ if (-not $SkipNpm -and -not $npmPath) {
 }
 if (-not $SkipNpm -and -not $wasmPackPath) {
     throw "wasm-pack executable not found. Install wasm-pack to build bridge/pkg assets."
+}
+
+$tarPath = if ($SkipCrates) { $null } else { Resolve-CommandPath -Name "tar" }
+if (-not $SkipCrates -and -not $tarPath) {
+    throw "tar executable not found. Install tar to enable fallback local crate archiving."
 }
 
 Write-Host "Packaging output root: $outputRootFull"
@@ -124,6 +177,13 @@ try {
 
     if (-not $SkipCrates) {
         Write-Host "[crates] Packaging crate artifacts (.crate) ..."
+        $crateDirs = @{
+            "activesync-core" = "core"
+            "activesync-host-core" = "host-core"
+            "activesync-host-ffi" = "host-ffi"
+            "activesync-host-axum" = "host-axum"
+            "activesync-bridge" = "bridge"
+        }
         $crateIds = @(
             "activesync-core",
             "activesync-host-core",
@@ -132,7 +192,18 @@ try {
             "activesync-bridge"
         )
 
+        # Ensure crate output from this run is fresh and not contaminated by stale files.
+        if (Test-Path $crateOutput) {
+            Get-ChildItem -Path $crateOutput -Filter "*.crate" -File -ErrorAction SilentlyContinue | Remove-Item -Force
+        }
+
+        $cargoPackageDir = Join-Path $repoRoot "target\package"
+        if (Test-Path $cargoPackageDir) {
+            Get-ChildItem -Path $cargoPackageDir -Filter "*.crate" -File -ErrorAction SilentlyContinue | Remove-Item -Force
+        }
+
         $crateFailures = New-Object System.Collections.Generic.List[string]
+        $crateFallbacks = New-Object System.Collections.Generic.List[string]
 
         foreach ($crateId in $crateIds) {
             $cargoArgList = @("package", "--package", $crateId, "--no-verify")
@@ -146,6 +217,16 @@ try {
                 if ($AllowCrateDependencyFailures) {
                     Write-Warning $msg
                     $crateFailures.Add($msg)
+
+                    $crateRelDir = $crateDirs[$crateId]
+                    if (-not $crateRelDir) {
+                        throw "No crate directory mapping configured for $crateId"
+                    }
+
+                    $crateDir = Join-Path $repoRoot $crateRelDir
+                    $fallbackArchive = New-LocalCrateArchive -CrateId $crateId -CrateDir $crateDir -CrateOutputDir $crateOutput -TarPath $tarPath
+                    Write-Warning "Created fallback local crate archive: $fallbackArchive"
+                    $crateFallbacks.Add($fallbackArchive)
                     continue
                 }
 
@@ -153,7 +234,6 @@ try {
             }
         }
 
-        $cargoPackageDir = Join-Path $repoRoot "target\package"
         if (Test-Path $cargoPackageDir) {
             Get-ChildItem -Path $cargoPackageDir -Filter "*.crate" | ForEach-Object {
                 Copy-Item -Path $_.FullName -Destination (Join-Path $crateOutput $_.Name) -Force
@@ -162,6 +242,9 @@ try {
 
         if ($crateFailures.Count -gt 0) {
             Write-Warning "Some crate packages were not produced. See warnings above for details."
+        }
+        if ($crateFallbacks.Count -gt 0) {
+            Write-Warning "Fallback local crate archives were created for failed cargo-package crates."
         }
     }
 }

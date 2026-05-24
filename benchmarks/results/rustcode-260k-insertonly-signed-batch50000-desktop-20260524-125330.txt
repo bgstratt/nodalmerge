@@ -1,0 +1,12 @@
+trace_path=c:\Users\bgstr\source\repos\activesync\core\..\docs\rustcode.json
+max_ops=Some(260000)
+use_batch=true
+batch_size=Some(50000)
+signed=true
+applied_ops=260000
+resolved_len=53922
+parse_ms=15
+translate_ms=8539
+apply_ms=720
+ops_per_sec=361058
+

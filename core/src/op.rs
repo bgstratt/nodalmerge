@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use crate::hash::Hash;
 use crate::list::FracIdx;
+use crate::text_range::TextRangeAnchor;
 
 /// Stable identity of a character in the RGA text sequence.
 ///
@@ -132,6 +133,20 @@ pub enum TextOp {
         key: String,
         target: OpId,
     },
+    /// Insert a text span at an anchor. Runtime paths lower this to
+    /// deterministic one-char inserts.
+    InsertRange {
+        key: String,
+        anchor: TextRangeAnchor,
+        text: String,
+    },
+    /// Delete a visible character span from an anchor. Runtime paths lower
+    /// this to deterministic one-char deletes.
+    DeleteRange {
+        key: String,
+        anchor: TextRangeAnchor,
+        len_chars: usize,
+    },
 }
 
 /// A single mutation to the shared state.
@@ -196,7 +211,10 @@ impl TextOp {
     /// Key this op acts on.
     pub fn key(&self) -> &str {
         match self {
-            TextOp::Insert { key, .. } | TextOp::Delete { key, .. } => key,
+            TextOp::Insert { key, .. }
+            | TextOp::Delete { key, .. }
+            | TextOp::InsertRange { key, .. }
+            | TextOp::DeleteRange { key, .. } => key,
         }
     }
 }

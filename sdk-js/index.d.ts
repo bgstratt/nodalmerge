@@ -67,6 +67,17 @@ export type ActiveSyncSdkEvent =
   | "runtime-message"
   | "transport";
 
+export type TextInsertAnchor =
+  | { kind: "offset"; pos: number }
+  | { kind: "start" }
+  | { kind: "end" }
+  | { kind: "after"; lamport: number | bigint; author: string };
+
+export type TextDeleteAnchor =
+  | { kind: "offset"; pos: number }
+  | { kind: "start" }
+  | { kind: "after"; lamport: number | bigint; author: string };
+
 export declare class ActiveSyncSdk {
   constructor(options: ActiveSyncSdkOptions);
   initialize(): Promise<void>;
@@ -81,7 +92,13 @@ export declare class ActiveSyncSdk {
   sync: {
     set: (key: string, value: string) => void;
     get: (key: string) => string | null;
+    getText: (key: string) => string;
+    getTextCanonical: (key: string) => string;
     del: (key: string) => void;
+    insertTextAt: (key: string, pos: number, text: string) => void;
+    deleteTextAt: (key: string, pos: number, len: number) => void;
+    insertTextRange: (key: string, anchor: TextInsertAnchor, text: string) => void;
+    deleteTextRange: (key: string, anchor: TextDeleteAnchor, len: number) => void;
     push: () => void;
     pull: () => void;
   };

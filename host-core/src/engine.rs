@@ -711,6 +711,33 @@ impl HostEngine {
                     }],
                 })
             }
+            HostCommand::TextGetCanonical { namespace, key } => {
+                if !self.rooms.contains(&envelope.room_id) {
+                    return Err(HostCoreError::RoomNotFound);
+                }
+                if key.is_empty() {
+                    return Err(HostCoreError::InvalidCommand);
+                }
+
+                let scoped_key = scoped_map_key(&namespace, &key);
+                let room_docs = self
+                    .room_texts
+                    .entry(envelope.room_id.clone())
+                    .or_default();
+                let doc = room_docs.entry(scoped_key).or_default();
+                let entries = text_entries_in_rga_order(doc);
+                let value = text_string_from_entries(&entries);
+
+                Ok(CommandResult {
+                    events: vec![HostEvent::TextValueRead {
+                        room_id: envelope.room_id,
+                        namespace,
+                        key,
+                        value,
+                        entries,
+                    }],
+                })
+            }
             HostCommand::ListPush {
                 namespace,
                 key,

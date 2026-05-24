@@ -63,6 +63,44 @@ const stop = sdk.compat.onRuntimeEvent("pack", (msg) => {
 stop();
 ```
 
+## Text Range Convenience API
+
+The SDK now includes range-oriented text helpers under `sdk.sync`:
+
+- `insertTextAt(key, pos, text)`
+- `deleteTextAt(key, pos, len)`
+- `insertTextRange(key, anchor, text)`
+- `deleteTextRange(key, anchor, len)`
+
+Anchor object shapes:
+
+- Insert anchors:
+  - `{ kind: "offset", pos }`
+  - `{ kind: "start" }`
+  - `{ kind: "end" }`
+  - `{ kind: "after", lamport, author }`
+- Delete anchors:
+  - `{ kind: "offset", pos }`
+  - `{ kind: "start" }`
+  - `{ kind: "after", lamport, author }`
+
+Example:
+
+```ts
+sdk.sync.insertTextRange("doc:title", { kind: "start" }, "Hello");
+sdk.sync.insertTextRange("doc:title", { kind: "end" }, " world");
+sdk.sync.deleteTextRange("doc:title", { kind: "offset", pos: 5 }, 1);
+
+// Anchor after a specific op id (lamport + 64-char author hex):
+sdk.sync.insertTextRange("doc:title", {
+  kind: "after",
+  lamport: 42,
+  author: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}, "!");
+```
+
+These helpers apply locally; call `sdk.sync.push()` to send changes.
+
 ## Notes
 
 - This SDK intentionally wraps the lower-level bridge with straightforward defaults.

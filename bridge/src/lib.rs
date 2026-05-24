@@ -1,11 +1,12 @@
 use activesync_core::{
     BlobStore, Ibf, MerkleSearchTree, MemoryBlobStore, MapOp, Op, TextOp, StateGraph, SyncCapabilities,
+    TextRangeAnchor, TextRangeOp,
     TickConfig,
     derive_room_key, decrypt_ops, is_encrypted_node, extract_encrypted_payload, wrap_encrypted_ops,
     E2EE_KEY,
     pack_nodes, unpack_nodes,
     replay, canonical_hash,
-    compact, rebuild_from_snapshot, pack_snapshot_pack, unpack_snapshot_pack, verify_snapshot,
+    compact, rebuild_from_snapshot, unpack_snapshot_pack, verify_snapshot,
 };
 use activesync_core::conflicts::{ConflictEvent, ConflictFingerprint};
 use ed25519_dalek::SigningKey;
@@ -456,6 +457,138 @@ impl SyncStore {
     /// Returns an empty string if no text ops for this key exist yet.
     pub fn resolve_text(&self, key: &str) -> String {
         self.graph.resolve_text(key)
+    }
+
+    /// Resolve canonical replay-derived text for `key`.
+    ///
+    /// This is intended for persistence/export/audit call-sites that must not
+    /// depend on runtime projection mode.
+    pub fn resolve_text_canonical(&self, key: &str) -> String {
+        self.graph.resolve_text_canonical(key)
+    }
+
+    /// Internal helper: persist one canonical range op node.
+    fn commit_text_range_op(&mut self, range_op: TextRangeOp, wall_ms: u64) -> Result<(), JsValue> {
+        self.graph
+            .apply_local_text_range_op(&self.signing_key, wall_ms, range_op)
+            .map(|_| ())
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Insert `text` at character position `pos` (0-based) using range-op
+    /// lowering, then commit the lowered stream as deterministic one-char ops.
+    pub fn insert_text_range(&mut self, key: &str, pos: u32, text: &str) -> Result<(), JsValue> {
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        let now_ms = js_sys::Date::now() as u64;
+        let range_op = TextRangeOp::Insert {
+            key: key.to_string(),
+            anchor: TextRangeAnchor::Offset(pos as usize),
+            text: text.to_string(),
+        };
+        self.commit_text_range_op(range_op, now_ms)
+    }
+
+    /// Delete `len` characters starting at position `pos` (0-based) using
+    /// range-op lowering into deterministic one-char deletions.
+    pub fn delete_text_range(&mut self, key: &str, pos: u32, len: u32) -> Result<(), JsValue> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let now_ms = js_sys::Date::now() as u64;
+        let range_op = TextRangeOp::Delete {
+            key: key.to_string(),
+            anchor: TextRangeAnchor::Offset(pos as usize),
+            len_chars: len as usize,
+        };
+        self.commit_text_range_op(range_op, now_ms)
+    }
+
+    /// Insert `text` at start-of-document anchor.
+    pub fn insert_text_range_start(&mut self, key: &str, text: &str) -> Result<(), JsValue> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let now_ms = js_sys::Date::now() as u64;
+        let range_op = TextRangeOp::Insert {
+            key: key.to_string(),
+            anchor: TextRangeAnchor::Start,
+            text: text.to_string(),
+        };
+        self.commit_text_range_op(range_op, now_ms)
+    }
+
+    /// Insert `text` at end-of-document anchor.
+    pub fn insert_text_range_end(&mut self, key: &str, text: &str) -> Result<(), JsValue> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let now_ms = js_sys::Date::now() as u64;
+        let range_op = TextRangeOp::Insert {
+            key: key.to_string(),
+            anchor: TextRangeAnchor::End,
+            text: text.to_string(),
+        };
+        self.commit_text_range_op(range_op, now_ms)
+    }
+
+    /// Insert `text` after a specific anchor char id (`lamport`, `author_hex32`).
+    pub fn insert_text_range_after(
+        &mut self,
+        key: &str,
+        after_lamport: u64,
+        after_author_hex32: &str,
+        text: &str,
+    ) -> Result<(), JsValue> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let after = parse_op_id(after_lamport, after_author_hex32)?;
+        let now_ms = js_sys::Date::now() as u64;
+        let range_op = TextRangeOp::Insert {
+            key: key.to_string(),
+            anchor: TextRangeAnchor::After(after),
+            text: text.to_string(),
+        };
+        self.commit_text_range_op(range_op, now_ms)
+    }
+
+    /// Delete `len` chars beginning at start-of-document anchor.
+    pub fn delete_text_range_start(&mut self, key: &str, len: u32) -> Result<(), JsValue> {
+        if len == 0 {
+            return Ok(());
+        }
+        let now_ms = js_sys::Date::now() as u64;
+        let range_op = TextRangeOp::Delete {
+            key: key.to_string(),
+            anchor: TextRangeAnchor::Start,
+            len_chars: len as usize,
+        };
+        self.commit_text_range_op(range_op, now_ms)
+    }
+
+    /// Delete `len` chars beginning after a specific anchor char id.
+    pub fn delete_text_range_after(
+        &mut self,
+        key: &str,
+        after_lamport: u64,
+        after_author_hex32: &str,
+        len: u32,
+    ) -> Result<(), JsValue> {
+        if len == 0 {
+            return Ok(());
+        }
+        let after = parse_op_id(after_lamport, after_author_hex32)?;
+        let now_ms = js_sys::Date::now() as u64;
+        let range_op = TextRangeOp::Delete {
+            key: key.to_string(),
+            anchor: TextRangeAnchor::After(after),
+            len_chars: len as usize,
+        };
+        self.commit_text_range_op(range_op, now_ms)
     }
 
     // -------------------------------------------------------------------------
@@ -988,6 +1121,12 @@ fn parse_item_id(hex: &str) -> Result<activesync_core::ItemId, JsValue> {
     Ok(activesync_core::ItemId(bytes))
 }
 
+fn parse_op_id(lamport: u64, author_hex32: &str) -> Result<activesync_core::OpId, JsValue> {
+    let author = hex_to_array_32(author_hex32)
+        .ok_or_else(|| JsValue::from_str("author must be 64 hex chars"))?;
+    Ok(activesync_core::OpId { lamport, author })
+}
+
 /// Compute the fractional position to drop a (possibly-moving) item at logical
 /// `index` within the resolved list `seq`.
 ///
@@ -1066,7 +1205,7 @@ fn base64_encode(data: &[u8]) -> String {
         let b0 = chunk[0] as usize;
         let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
         let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
-        out.push(CHARS[(b0 >> 2)] as char);
+        out.push(CHARS[b0 >> 2] as char);
         out.push(CHARS[((b0 & 3) << 4) | (b1 >> 4)] as char);
         if chunk.len() > 1 { out.push(CHARS[((b1 & 0xf) << 2) | (b2 >> 6)] as char); } else { out.push('='); }
         if chunk.len() > 2 { out.push(CHARS[b2 & 0x3f] as char); } else { out.push('='); }

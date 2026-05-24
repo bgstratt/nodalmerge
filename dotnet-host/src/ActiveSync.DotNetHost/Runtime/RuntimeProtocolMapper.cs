@@ -837,6 +837,34 @@ public sealed class RuntimeProtocolMapper
             ]);
         }
 
+        if (string.Equals(type, "text-get-canonical", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
+            {
+                return RuntimeMapResult.Failure("hello must be sent first");
+            }
+
+            if (string.IsNullOrWhiteSpace(message.Key))
+            {
+                return RuntimeMapResult.Failure("text-get-canonical.key is required");
+            }
+
+            var namespaceValue = ResolveNamespace(message);
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(
+                    state.RoomId,
+                    new JsonObject
+                    {
+                        ["TextGetCanonical"] = new JsonObject
+                        {
+                            ["namespace"] = namespaceValue,
+                            ["key"] = message.Key
+                        }
+                    }
+                )
+            ]);
+        }
+
         if (string.Equals(type, "list-push", StringComparison.OrdinalIgnoreCase))
         {
             if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))

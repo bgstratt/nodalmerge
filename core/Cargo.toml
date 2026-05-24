@@ -10,6 +10,10 @@ categories = ["data-structures", "network-programming"]
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["text_projection"]
+text_projection = []
+
 [dependencies]
 aes-gcm = { workspace = true }
 blake3 = { workspace = true }
@@ -50,5 +54,9 @@ harness = false
 
 [[bench]]
 name = "text_trace_rustcode"
+harness = false
+
+[[bench]]
+name = "text_write_path"
 harness = false
 

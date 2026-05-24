@@ -416,6 +416,21 @@ fn text_insert_get_delete_roundtrip_emits_expected_events() {
         panic!("expected TextValueRead after delete");
     };
     assert_eq!(value, "a");
+
+    let read_canonical = engine
+        .apply(CommandEnvelope::new(
+            "room-text",
+            HostCommand::TextGetCanonical {
+                namespace: "doc".to_string(),
+                key: "title".to_string(),
+            },
+        ))
+        .expect("canonical text get should succeed");
+
+    let HostEvent::TextValueRead { value, .. } = &read_canonical.events[0] else {
+        panic!("expected TextValueRead from canonical text get");
+    };
+    assert_eq!(value, "a");
 }
 
 #[test]

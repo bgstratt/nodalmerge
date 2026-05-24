@@ -131,6 +131,58 @@ function normalizeTransportMode(mode) {
   return "ws-only";
 }
 
+function isNonNegativeInteger(value) {
+  return Number.isInteger(value) && value >= 0;
+}
+
+function normalizeRangeAnchor(anchor, op) {
+  if (!anchor || typeof anchor !== "object") {
+    throw new Error(`${op} anchor must be an object`);
+  }
+
+  const kind = typeof anchor.kind === "string" ? anchor.kind : "";
+  if (kind === "offset") {
+    if (!isNonNegativeInteger(anchor.pos)) {
+      throw new Error(`${op} offset anchor requires non-negative integer pos`);
+    }
+    return { kind, pos: anchor.pos };
+  }
+
+  if (kind === "start") {
+    return { kind };
+  }
+
+  if (kind === "end") {
+    if (op === "delete") {
+      throw new Error("delete does not support end anchor");
+    }
+    return { kind };
+  }
+
+  if (kind === "after") {
+    const { lamport, author } = anchor;
+    let lamportBig;
+    if (typeof lamport === "bigint") {
+      lamportBig = lamport;
+    } else {
+      const lamportNum = Number(lamport);
+      if (!Number.isFinite(lamportNum) || !Number.isInteger(lamportNum)) {
+        throw new Error(`${op} after anchor requires integer lamport`);
+      }
+      lamportBig = BigInt(lamportNum);
+    }
+    if (lamportBig < 0n) {
+      throw new Error(`${op} after anchor requires non-negative lamport`);
+    }
+    if (typeof author !== "string" || !/^[0-9a-fA-F]{64}$/.test(author)) {
+      throw new Error(`${op} after anchor requires 64-char hex author`);
+    }
+    return { kind, lamport: lamportBig, author: author.toLowerCase() };
+  }
+
+  throw new Error(`${op} anchor kind must be one of: offset, start, end, after`);
+}
+
 export function parseRuntimeMessage(data) {
   const parsed = parseJsonOrDefault(data, null);
   if (!parsed || typeof parsed !== "object") {
@@ -316,8 +368,85 @@ export class ActiveSyncSdk {
       return textDecoder.decode(fromBase64(b64));
     },
 
+    getText: (key) => {
+      return this.store.resolve_text(key);
+    },
+
+    getTextCanonical: (key) => {
+      return this.store.resolve_text_canonical(key);
+    },
+
     del: (key) => {
       this.store.delete(key);
+    },
+
+    insertTextAt: (key, pos, text) => {
+      if (typeof text !== "string" || text.length === 0) {
+        return;
+      }
+      if (!isNonNegativeInteger(pos)) {
+        throw new Error("insertTextAt pos must be a non-negative integer");
+      }
+      this.store.insert_text_range(key, pos, text);
+    },
+
+    deleteTextAt: (key, pos, len) => {
+      if (!isNonNegativeInteger(pos)) {
+        throw new Error("deleteTextAt pos must be a non-negative integer");
+      }
+      if (!isNonNegativeInteger(len)) {
+        throw new Error("deleteTextAt len must be a non-negative integer");
+      }
+      if (len === 0) {
+        return;
+      }
+      this.store.delete_text_range(key, pos, len);
+    },
+
+    insertTextRange: (key, anchor, text) => {
+      if (typeof text !== "string" || text.length === 0) {
+        return;
+      }
+      const normalized = normalizeRangeAnchor(anchor, "insert");
+      switch (normalized.kind) {
+        case "offset":
+          this.store.insert_text_range(key, normalized.pos, text);
+          return;
+        case "start":
+          this.store.insert_text_range_start(key, text);
+          return;
+        case "end":
+          this.store.insert_text_range_end(key, text);
+          return;
+        case "after":
+          this.store.insert_text_range_after(key, normalized.lamport, normalized.author, text);
+          return;
+        default:
+          throw new Error("Unsupported insert anchor kind");
+      }
+    },
+
+    deleteTextRange: (key, anchor, len) => {
+      if (!isNonNegativeInteger(len)) {
+        throw new Error("deleteTextRange len must be a non-negative integer");
+      }
+      if (len === 0) {
+        return;
+      }
+      const normalized = normalizeRangeAnchor(anchor, "delete");
+      switch (normalized.kind) {
+        case "offset":
+          this.store.delete_text_range(key, normalized.pos, len);
+          return;
+        case "start":
+          this.store.delete_text_range_start(key, len);
+          return;
+        case "after":
+          this.store.delete_text_range_after(key, normalized.lamport, normalized.author, len);
+          return;
+        default:
+          throw new Error("Unsupported delete anchor kind");
+      }
     },
 
     push: () => {

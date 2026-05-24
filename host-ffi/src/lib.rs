@@ -93,6 +93,7 @@ fn command_label(command: &HostCommand) -> &'static str {
         HostCommand::TextInsert { .. } => "text-insert",
         HostCommand::TextDelete { .. } => "text-delete",
         HostCommand::TextGet { .. } => "text-get",
+        HostCommand::TextGetCanonical { .. } => "text-get-canonical",
         HostCommand::ListPush { .. } => "list-push",
         HostCommand::ListInsert { .. } => "list-insert",
         HostCommand::ListDelete { .. } => "list-delete",

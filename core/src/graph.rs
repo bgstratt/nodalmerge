@@ -1,4 +1,7 @@
 use std::collections::{HashMap, HashSet, BTreeMap};
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "text_projection")]
+use std::time::Instant;
 use crate::{
     compaction::is_snapshot_node,
     error::SyncError,
@@ -8,7 +11,12 @@ use crate::{
     op::{Op, MapOp, TextOp, Transaction},
     policy::Policy,
     storage::{NodeStore, MemoryNodeStore},
+    text::{ProjectionUpdateOp, TextParityMismatch, TextProjectionMode},
+    text_range::TextRangeOp,
+    text_range::TextRangeAnchor,
 };
+#[cfg(feature = "text_projection")]
+use crate::text::{TextProjection, TextProjectionDebugStats};
 
 /// G5 — maximum gap between a node's Lamport clock and the local
 /// `graph.lamport()`. Legitimate concurrent fan-out on a busy room stays
@@ -41,6 +49,73 @@ pub type ResolvedMap = HashMap<String, Vec<u8>>;
 pub struct BatchResult {
     pub accepted: Vec<NodeId>,
     pub rejected: Vec<(NodeId, SyncError)>,
+}
+
+/// Runtime counters for text resolve behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextRuntimeCounters {
+    pub projection_hits: u64,
+    pub replay_fallbacks: u64,
+}
+
+/// Runtime counters for text apply/update behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextApplyRuntimeCounters {
+    pub projection_update_calls: u64,
+    pub projection_update_total_ns: u64,
+    pub projection_invalidation_count: u64,
+    pub projection_rebuild_count: u64,
+    pub index_maintenance_total_ns: u64,
+    pub index_rebuild_total_ns: u64,
+    pub dirty_range_count_total: u64,
+    pub dirty_span_chars_total: u64,
+    pub dirty_range_merge_count_total: u64,
+}
+
+/// Runtime lifecycle tier for a text key's projection state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TextRuntimeTemperature {
+    /// No resident projection state for the key; oplog-only.
+    #[default]
+    Cold,
+    /// Projection resident and servicing reads/writes.
+    Warm,
+    /// Heavily accessed key; projection + index + cached flattening are hot.
+    Hot,
+}
+
+/// Thresholds controlling Warm->Hot transition classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextRuntimeTemperatureThresholds {
+    /// Promote to Hot when accumulated projection read calls reach this value.
+    pub hot_read_calls: u64,
+    /// Promote to Hot when accumulated projection write calls reach this value.
+    pub hot_write_calls: u64,
+}
+
+impl Default for TextRuntimeTemperatureThresholds {
+    fn default() -> Self {
+        Self {
+            hot_read_calls: 64,
+            hot_write_calls: 2048,
+        }
+    }
+}
+
+/// Projection residency policy controlling eviction pressure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextProjectionResidencyPolicy {
+    /// Maximum number of projection-resident keys to keep materialized.
+    /// `usize::MAX` means effectively unbounded.
+    pub max_resident_keys: usize,
+}
+
+impl Default for TextProjectionResidencyPolicy {
+    fn default() -> Self {
+        Self {
+            max_resident_keys: usize::MAX,
+        }
+    }
 }
 
 /// Verify the signatures of the nodes at `indices` within `nodes`.
@@ -175,11 +250,87 @@ pub struct StateGraph<N: NodeStore = MemoryNodeStore> {
     /// re-verification when the same node is re-broadcast (server echo,
     /// reconnect catchup, replay). Never persisted; cleared on process exit.
     verified_ids: HashSet<NodeId>,
+    /// Per-key incremental text materializations.
+    #[cfg(feature = "text_projection")]
+    text_projections: HashMap<String, TextProjection>,
+    /// Runtime projection read/parity behavior.
+    text_projection_mode: TextProjectionMode,
+    /// Recent parity mismatch diagnostics.
+    #[cfg(feature = "text_projection")]
+    text_projection_mismatches: Vec<TextParityMismatch>,
+    /// Number of projection self-heal rebuilds triggered by parity mismatch.
+    #[cfg(feature = "text_projection")]
+    text_projection_self_heals: u64,
+    /// Parity check sampling frequency in updates (1 = every update).
+    #[cfg(feature = "text_projection")]
+    text_parity_sample_every: u64,
+    /// Number of text-updates observed since parity mode activation.
+    #[cfg(feature = "text_projection")]
+    text_parity_update_count: u64,
+    /// Optional allow-list for parity checks. Empty => all touched keys.
+    #[cfg(feature = "text_projection")]
+    text_parity_selected_keys: HashSet<String>,
+    /// Number of parity-check runs executed.
+    #[cfg(feature = "text_projection")]
+    text_parity_check_runs: u64,
+    /// Count of resolve calls served by projection.
+    text_projection_hits: AtomicU64,
+    /// Count of resolve calls served by replay fallback.
+    text_replay_fallbacks: AtomicU64,
+    /// Count of projection update hook invocations in apply paths.
+    text_apply_projection_update_calls: AtomicU64,
+    /// Aggregate time spent in projection update hook invocations.
+    text_apply_projection_update_ns: AtomicU64,
+    /// Runtime tier thresholds for text key lifecycle classification.
+    text_temperature_thresholds: TextRuntimeTemperatureThresholds,
+    /// Residency policy for projection demotion/eviction.
+    #[cfg(feature = "text_projection")]
+    text_projection_residency_policy: TextProjectionResidencyPolicy,
+    /// Last-touch clock per projection-resident key.
+    #[cfg(feature = "text_projection")]
+    text_projection_last_touch: HashMap<String, u64>,
+    /// Monotonic touch clock used for LRU-style eviction ordering.
+    #[cfg(feature = "text_projection")]
+    text_projection_touch_clock: u64,
 }
 
 impl Default for StateGraph<MemoryNodeStore> {
     fn default() -> Self {
-        StateGraph { nodes: MemoryNodeStore::new(), leaves: HashSet::new(), lamport: 0, policy: Policy::default(), frontier: Frontier::default(), local_node_ids: HashSet::new(), verified_ids: HashSet::new() }
+        StateGraph {
+            nodes: MemoryNodeStore::new(),
+            leaves: HashSet::new(),
+            lamport: 0,
+            policy: Policy::default(),
+            frontier: Frontier::default(),
+            local_node_ids: HashSet::new(),
+            verified_ids: HashSet::new(),
+            #[cfg(feature = "text_projection")]
+            text_projections: HashMap::new(),
+            text_projection_mode: TextProjectionMode::Enabled,
+            #[cfg(feature = "text_projection")]
+            text_projection_mismatches: Vec::new(),
+            #[cfg(feature = "text_projection")]
+            text_projection_self_heals: 0,
+            #[cfg(feature = "text_projection")]
+            text_parity_sample_every: 16,
+            #[cfg(feature = "text_projection")]
+            text_parity_update_count: 0,
+            #[cfg(feature = "text_projection")]
+            text_parity_selected_keys: HashSet::new(),
+            #[cfg(feature = "text_projection")]
+            text_parity_check_runs: 0,
+            text_projection_hits: AtomicU64::new(0),
+            text_replay_fallbacks: AtomicU64::new(0),
+            text_apply_projection_update_calls: AtomicU64::new(0),
+            text_apply_projection_update_ns: AtomicU64::new(0),
+            text_temperature_thresholds: TextRuntimeTemperatureThresholds::default(),
+            #[cfg(feature = "text_projection")]
+            text_projection_residency_policy: TextProjectionResidencyPolicy::default(),
+            #[cfg(feature = "text_projection")]
+            text_projection_last_touch: HashMap::new(),
+            #[cfg(feature = "text_projection")]
+            text_projection_touch_clock: 0,
+        }
     }
 }
 
@@ -192,7 +343,363 @@ impl StateGraph<MemoryNodeStore> {
 impl<N: NodeStore> StateGraph<N> {
     /// Construct a `StateGraph` with a custom storage backend.
     pub fn with_store(nodes: N) -> Self {
-        StateGraph { nodes, leaves: HashSet::new(), lamport: 0, policy: Policy::default(), frontier: Frontier::default(), local_node_ids: HashSet::new(), verified_ids: HashSet::new() }
+        StateGraph {
+            nodes,
+            leaves: HashSet::new(),
+            lamport: 0,
+            policy: Policy::default(),
+            frontier: Frontier::default(),
+            local_node_ids: HashSet::new(),
+            verified_ids: HashSet::new(),
+            #[cfg(feature = "text_projection")]
+            text_projections: HashMap::new(),
+            text_projection_mode: TextProjectionMode::Enabled,
+            #[cfg(feature = "text_projection")]
+            text_projection_mismatches: Vec::new(),
+            #[cfg(feature = "text_projection")]
+            text_projection_self_heals: 0,
+            #[cfg(feature = "text_projection")]
+            text_parity_sample_every: 16,
+            #[cfg(feature = "text_projection")]
+            text_parity_update_count: 0,
+            #[cfg(feature = "text_projection")]
+            text_parity_selected_keys: HashSet::new(),
+            #[cfg(feature = "text_projection")]
+            text_parity_check_runs: 0,
+            text_projection_hits: AtomicU64::new(0),
+            text_replay_fallbacks: AtomicU64::new(0),
+            text_apply_projection_update_calls: AtomicU64::new(0),
+            text_apply_projection_update_ns: AtomicU64::new(0),
+            text_temperature_thresholds: TextRuntimeTemperatureThresholds::default(),
+            #[cfg(feature = "text_projection")]
+            text_projection_residency_policy: TextProjectionResidencyPolicy::default(),
+            #[cfg(feature = "text_projection")]
+            text_projection_last_touch: HashMap::new(),
+            #[cfg(feature = "text_projection")]
+            text_projection_touch_clock: 0,
+        }
+    }
+
+    /// Update text projection read/parity behavior.
+    pub fn set_text_projection_mode(&mut self, mode: TextProjectionMode) {
+        self.text_projection_mode = mode;
+        #[cfg(feature = "text_projection")]
+        {
+        self.text_parity_update_count = 0;
+        if mode != TextProjectionMode::Disabled {
+            self.rebuild_all_text_projections();
+        }
+        }
+    }
+
+    /// Configure parity sampling cadence in updates (`1` = every update).
+    pub fn set_text_parity_sample_every(&mut self, every: u64) {
+        #[cfg(feature = "text_projection")]
+        {
+        self.text_parity_sample_every = every.max(1);
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            let _ = every;
+        }
+    }
+
+    /// Configure optional parity key allow-list; empty list means "all keys".
+    pub fn set_text_parity_selected_keys(&mut self, keys: Vec<String>) {
+        #[cfg(feature = "text_projection")]
+        {
+        self.text_parity_selected_keys = keys.into_iter().collect();
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            let _ = keys;
+        }
+    }
+
+    /// Number of parity-check runs executed.
+    pub fn text_parity_check_runs(&self) -> u64 {
+        #[cfg(feature = "text_projection")]
+        {
+        self.text_parity_check_runs
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            0
+        }
+    }
+
+    /// Current text projection mode.
+    pub fn text_projection_mode(&self) -> TextProjectionMode {
+        self.text_projection_mode
+    }
+
+    /// Recent projection parity mismatches.
+    pub fn text_projection_mismatches(&self) -> &[TextParityMismatch] {
+        #[cfg(feature = "text_projection")]
+        {
+        &self.text_projection_mismatches
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            &[]
+        }
+    }
+
+    /// Number of parity-triggered projection self-heal rebuilds.
+    pub fn text_projection_self_heal_count(&self) -> u64 {
+        #[cfg(feature = "text_projection")]
+        {
+        self.text_projection_self_heals
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            0
+        }
+    }
+
+    /// Snapshot current runtime text resolve counters.
+    pub fn text_runtime_counters(&self) -> TextRuntimeCounters {
+        TextRuntimeCounters {
+            projection_hits: self.text_projection_hits.load(Ordering::Relaxed),
+            replay_fallbacks: self.text_replay_fallbacks.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Reset runtime text resolve counters to zero.
+    pub fn reset_text_runtime_counters(&self) {
+        self.text_projection_hits.store(0, Ordering::Relaxed);
+        self.text_replay_fallbacks.store(0, Ordering::Relaxed);
+    }
+
+    /// Snapshot current runtime text apply/update counters.
+    pub fn text_apply_runtime_counters(&self) -> TextApplyRuntimeCounters {
+        #[cfg(feature = "text_projection")]
+        {
+            let mut invalidations = 0u64;
+            let mut rebuilds = 0u64;
+            let mut index_updates = 0u64;
+            let mut index_rebuilds = 0u64;
+            let mut dirty_range_count = 0u64;
+            let mut dirty_span_chars = 0u64;
+            let mut dirty_range_merges = 0u64;
+            for projection in self.text_projections.values() {
+                let stats = projection.debug_stats();
+                invalidations = invalidations.saturating_add(stats.invalidation_count);
+                rebuilds = rebuilds.saturating_add(stats.full_rebuild_count);
+                index_updates = index_updates.saturating_add(stats.index_update_time_ns);
+                index_rebuilds = index_rebuilds.saturating_add(stats.index_rebuild_time_ns);
+                dirty_range_count = dirty_range_count.saturating_add(stats.dirty_range_count as u64);
+                dirty_span_chars = dirty_span_chars.saturating_add(stats.dirty_span_chars as u64);
+                dirty_range_merges =
+                    dirty_range_merges.saturating_add(stats.dirty_range_merge_count);
+            }
+            return TextApplyRuntimeCounters {
+                projection_update_calls: self
+                    .text_apply_projection_update_calls
+                    .load(Ordering::Relaxed),
+                projection_update_total_ns: self
+                    .text_apply_projection_update_ns
+                    .load(Ordering::Relaxed),
+                projection_invalidation_count: invalidations,
+                projection_rebuild_count: rebuilds,
+                index_maintenance_total_ns: index_updates,
+                index_rebuild_total_ns: index_rebuilds,
+                dirty_range_count_total: dirty_range_count,
+                dirty_span_chars_total: dirty_span_chars,
+                dirty_range_merge_count_total: dirty_range_merges,
+            };
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            TextApplyRuntimeCounters {
+                projection_update_calls: self
+                    .text_apply_projection_update_calls
+                    .load(Ordering::Relaxed),
+                projection_update_total_ns: self
+                    .text_apply_projection_update_ns
+                    .load(Ordering::Relaxed),
+                projection_invalidation_count: 0,
+                projection_rebuild_count: 0,
+                index_maintenance_total_ns: 0,
+                index_rebuild_total_ns: 0,
+                dirty_range_count_total: 0,
+                dirty_span_chars_total: 0,
+                dirty_range_merge_count_total: 0,
+            }
+        }
+    }
+
+    /// Reset runtime text apply/update counters to zero.
+    pub fn reset_text_apply_runtime_counters(&self) {
+        self.text_apply_projection_update_calls
+            .store(0, Ordering::Relaxed);
+        self.text_apply_projection_update_ns.store(0, Ordering::Relaxed);
+    }
+
+    /// Projection debug stats for a specific key (feature-gated).
+    #[cfg(feature = "text_projection")]
+    pub fn text_projection_debug_stats(&self, key: &str) -> Option<TextProjectionDebugStats> {
+        self.text_projections.get(key).map(|p| p.debug_stats())
+    }
+
+    /// Configure runtime temperature transition thresholds.
+    pub fn set_text_runtime_temperature_thresholds(
+        &mut self,
+        thresholds: TextRuntimeTemperatureThresholds,
+    ) {
+        self.text_temperature_thresholds = thresholds;
+    }
+
+    /// Return runtime temperature transition thresholds.
+    pub fn text_runtime_temperature_thresholds(&self) -> TextRuntimeTemperatureThresholds {
+        self.text_temperature_thresholds
+    }
+
+    /// Current runtime lifecycle temperature for one key.
+    pub fn text_runtime_temperature_for_key(&self, key: &str) -> TextRuntimeTemperature {
+        #[cfg(feature = "text_projection")]
+        {
+            let Some(stats) = self.text_projection_debug_stats(key) else {
+                return TextRuntimeTemperature::Cold;
+            };
+
+            let read_calls = stats
+                .resolve_seq_calls
+                .saturating_add(stats.resolve_string_calls)
+                .saturating_add(stats.resolve_range_calls);
+            let write_calls = stats
+                .insert_ops_applied
+                .saturating_add(stats.delete_ops_applied)
+                .saturating_add(stats.range_insert_ops_applied)
+                .saturating_add(stats.range_delete_ops_applied);
+
+            if read_calls >= self.text_temperature_thresholds.hot_read_calls
+                || write_calls >= self.text_temperature_thresholds.hot_write_calls
+            {
+                TextRuntimeTemperature::Hot
+            } else {
+                TextRuntimeTemperature::Warm
+            }
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            let _ = key;
+            TextRuntimeTemperature::Cold
+        }
+    }
+
+    /// Snapshot lifecycle temperature for all projection-resident keys.
+    pub fn text_runtime_temperature_snapshot(&self) -> HashMap<String, TextRuntimeTemperature> {
+        #[cfg(feature = "text_projection")]
+        {
+            let mut out = HashMap::new();
+            for key in self.text_projections.keys() {
+                out.insert(key.clone(), self.text_runtime_temperature_for_key(key));
+            }
+            out
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            HashMap::new()
+        }
+    }
+
+    /// Configure projection residency demotion/eviction policy.
+    pub fn set_text_projection_residency_policy(
+        &mut self,
+        policy: TextProjectionResidencyPolicy,
+    ) {
+        #[cfg(feature = "text_projection")]
+        {
+            self.text_projection_residency_policy = policy;
+            self.enforce_text_projection_residency_policy();
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            let _ = policy;
+        }
+    }
+
+    /// Current projection residency policy.
+    pub fn text_projection_residency_policy(&self) -> TextProjectionResidencyPolicy {
+        #[cfg(feature = "text_projection")]
+        {
+            self.text_projection_residency_policy
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            TextProjectionResidencyPolicy::default()
+        }
+    }
+
+    /// Number of currently resident text projections.
+    pub fn text_projection_resident_key_count(&self) -> usize {
+        #[cfg(feature = "text_projection")]
+        {
+            self.text_projections.len()
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            0
+        }
+    }
+
+    /// Demote one projection key to cold state by dropping resident materialization.
+    pub fn demote_text_projection_key(&mut self, key: &str) -> bool {
+        #[cfg(feature = "text_projection")]
+        {
+            self.text_projection_last_touch.remove(key);
+            self.text_projections.remove(key).is_some()
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            let _ = key;
+            false
+        }
+    }
+
+    /// Ensure a projection for `key` is resident; returns `true` when rebuilt.
+    pub fn ensure_text_projection_resident(&mut self, key: &str) -> bool {
+        #[cfg(feature = "text_projection")]
+        {
+            if self.text_projection_mode == TextProjectionMode::Disabled {
+                return false;
+            }
+            if self.text_projections.contains_key(key) {
+                self.touch_text_projection_key(key);
+                return false;
+            }
+            self.rebuild_text_projection_for_key(key);
+            self.touch_text_projection_key(key);
+            self.enforce_text_projection_residency_policy();
+            return true;
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            let _ = key;
+            false
+        }
+    }
+
+    /// Compact resident projection storage for a key without dropping metadata.
+    pub fn compact_text_projection_key(&mut self, key: &str) -> bool {
+        #[cfg(feature = "text_projection")]
+        {
+            let compacted = self
+                .text_projections
+                .get_mut(key)
+                .map(|projection| projection.compact_cold_storage())
+                .unwrap_or(false);
+            if compacted {
+                self.touch_text_projection_key(key);
+            }
+            compacted
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            let _ = key;
+            false
+        }
     }
 
     /// Replace the room policy. All subsequent `apply_remote` calls will
@@ -234,17 +741,67 @@ impl<N: NodeStore> StateGraph<N> {
         // field; mixing them blows past `LAMPORT_SLACK` (G5) and poisons
         // every peer's clock with wall-clock-scale values.
         self.lamport += 1;
+        let tx_lamport = self.lamport;
+        let extra_insert_ids: u64 = ops
+            .iter()
+            .map(|op| match op {
+                Op::Text(TextOp::InsertRange { text, .. }) => {
+                    text.chars().count().saturating_sub(1) as u64
+                }
+                _ => 0,
+            })
+            .sum();
+        self.lamport = self.lamport.saturating_add(extra_insert_ids);
         let author: [u8; 32] = signing_key.verifying_key().to_bytes();
         let parents: Vec<Hash> = self.leaves.iter().copied().collect();
-        let tx = Transaction { author, lamport: self.lamport, wall_ms, ops, parents };
+        let tx = Transaction { author, lamport: tx_lamport, wall_ms, ops, parents };
         let node = SyncNode::new_signed(tx, signing_key);
         let id = node.id;
-        self.insert_node(node)?;
+        self.insert_node(node.clone())?;
+        self.update_text_projection_from_node(&node);
         // E2: mark this node as locally authored (speculative, not yet confirmed).
         self.local_node_ids.insert(id);
         // We just signed this node ourselves; signature is valid by construction.
         self.verified_ids.insert(id);
         Ok(id)
+    }
+
+    /// Lower a range op using the current visible sequence and apply it as
+    /// a single canonical persisted range op.
+    pub fn apply_local_text_range_op(
+        &mut self,
+        signing_key: &ed25519_dalek::SigningKey,
+        wall_ms: u64,
+        op: TextRangeOp,
+    ) -> Result<Vec<NodeId>, SyncError> {
+        let key = match &op {
+            TextRangeOp::Insert { key, .. } | TextRangeOp::Delete { key, .. } => key.clone(),
+        };
+        let raw_anchor = match &op {
+            TextRangeOp::Insert { anchor, .. } | TextRangeOp::Delete { anchor, .. } => *anchor,
+        };
+        let canonical_anchor = match raw_anchor {
+            TextRangeAnchor::Offset(_) => {
+                let seq = self.resolve_text_seq_with_chars(&key);
+                Self::canonicalize_range_anchor(&seq, raw_anchor)
+            }
+            _ => raw_anchor,
+        };
+
+        let text_op = match op {
+            TextRangeOp::Insert { key, text, .. } => Op::Text(TextOp::InsertRange {
+                key,
+                anchor: canonical_anchor,
+                text,
+            }),
+            TextRangeOp::Delete { key, len_chars, .. } => Op::Text(TextOp::DeleteRange {
+                key,
+                anchor: canonical_anchor,
+                len_chars,
+            }),
+        };
+        let id = self.apply_local(signing_key, wall_ms, vec![text_op])?;
+        Ok(vec![id])
     }
 
     /// Insert a node received from a remote peer.
@@ -296,6 +853,14 @@ impl<N: NodeStore> StateGraph<N> {
     /// Performs parent + policy checks and inserts. Used by both
     /// `apply_remote` and `apply_remote_batch`.
     fn apply_remote_verified(&mut self, node: SyncNode) -> Result<(), SyncError> {
+        self.apply_remote_verified_no_projection(node.clone())?;
+        self.update_text_projection_from_node(&node);
+        Ok(())
+    }
+
+    /// Apply a node whose hash + signature have already been validated,
+    /// excluding projection updates (used by coalesced batch apply paths).
+    fn apply_remote_verified_no_projection(&mut self, node: SyncNode) -> Result<(), SyncError> {
         // All parents must already exist locally.
         for parent in node.parents() {
             if !self.nodes.contains(parent) {
@@ -313,7 +878,9 @@ impl<N: NodeStore> StateGraph<N> {
                     Op::Map(MapOp::Delete { key })     => key.as_str(),
                     Op::Map(MapOp::SetBlob{ key, .. }) => key.as_str(),
                     Op::Text(TextOp::Insert { key, .. })
-                    | Op::Text(TextOp::Delete { key, .. }) => key.as_str(),
+                    | Op::Text(TextOp::Delete { key, .. })
+                    | Op::Text(TextOp::InsertRange { key, .. })
+                    | Op::Text(TextOp::DeleteRange { key, .. }) => key.as_str(),
                     Op::List(lop) => lop.key(),
                 };
                 if !self.policy.can_write(key, author) {
@@ -324,8 +891,356 @@ impl<N: NodeStore> StateGraph<N> {
                 }
             }
         }
-        self.insert_node(node)?;
+        self.insert_node(node.clone())?;
         Ok(())
+    }
+
+    fn canonicalize_range_anchor(seq: &[(crate::op::OpId, char)], anchor: TextRangeAnchor) -> TextRangeAnchor {
+    match anchor {
+        TextRangeAnchor::Offset(i) => {
+            let idx = i.min(seq.len());
+            if idx == 0 {
+                TextRangeAnchor::Start
+            } else if idx >= seq.len() {
+                TextRangeAnchor::End
+            } else {
+                TextRangeAnchor::After(seq[idx - 1].0)
+            }
+        }
+        other => other,
+    }
+}
+
+    #[cfg(feature = "text_projection")]
+    fn update_text_projection_from_node(&mut self, node: &SyncNode) {
+        let started = Instant::now();
+        let mut touched: HashSet<String> = HashSet::new();
+        for op in &node.transaction.ops {
+            match op {
+                Op::Text(TextOp::Insert { key, .. })
+                | Op::Text(TextOp::Delete { key, .. })
+                | Op::Text(TextOp::InsertRange { key, .. })
+                | Op::Text(TextOp::DeleteRange { key, .. }) => {
+                    self.text_projections
+                        .entry(key.clone())
+                        .or_default()
+                        .apply_node(node, key);
+                    touched.insert(key.clone());
+                }
+                _ => {}
+            }
+        }
+
+        if self.text_projection_mode == TextProjectionMode::ParityCheck && !touched.is_empty() {
+            self.text_parity_update_count = self.text_parity_update_count.saturating_add(1);
+            let sample_every = self.text_parity_sample_every.max(1);
+            if self.text_parity_update_count % sample_every == 0 {
+                let keys_to_check: HashSet<String> = if self.text_parity_selected_keys.is_empty() {
+                    touched.clone()
+                } else {
+                    touched
+                        .iter()
+                        .filter(|k| self.text_parity_selected_keys.contains(*k))
+                        .cloned()
+                        .collect()
+                };
+
+                if !keys_to_check.is_empty() {
+                    self.text_parity_check_runs = self.text_parity_check_runs.saturating_add(1);
+                    self.run_text_projection_parity_for_keys(&keys_to_check, Some(node.id));
+                }
+            }
+        }
+
+        for key in &touched {
+            self.touch_text_projection_key(key);
+        }
+        self.enforce_text_projection_residency_policy();
+
+        let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.text_apply_projection_update_calls
+            .fetch_add(1, Ordering::Relaxed);
+        self.text_apply_projection_update_ns
+            .fetch_add(elapsed_ns, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "text_projection"))]
+    fn update_text_projection_from_node(&mut self, _node: &SyncNode) {}
+
+    #[cfg(feature = "text_projection")]
+    fn update_text_projection_from_nodes_batch(&mut self, nodes: &[SyncNode]) {
+        if nodes.is_empty() {
+            return;
+        }
+
+        let started = Instant::now();
+        let mut touched: HashSet<String> = HashSet::new();
+        let mut touched_node_count = 0u64;
+
+        let mut coalesced_updates: HashMap<String, Vec<ProjectionUpdateOp>> = HashMap::new();
+        let mut fallback_range_keys: HashSet<String> = HashSet::new();
+
+        for node in nodes {
+            let mut node_touched = false;
+            let tx = &node.transaction;
+            let tx_id = crate::op::OpId {
+                lamport: tx.lamport,
+                author: tx.author,
+            };
+            for op in &tx.ops {
+                match op {
+                    Op::Text(TextOp::Insert { key, after, ch }) => {
+                        coalesced_updates
+                            .entry(key.clone())
+                            .or_default()
+                            .push(ProjectionUpdateOp::Insert {
+                                id: tx_id,
+                                after: *after,
+                                ch: *ch,
+                            });
+                        touched.insert(key.clone());
+                        node_touched = true;
+                    }
+                    Op::Text(TextOp::Delete { key, target }) => {
+                        coalesced_updates
+                            .entry(key.clone())
+                            .or_default()
+                            .push(ProjectionUpdateOp::Delete { target: *target });
+                        touched.insert(key.clone());
+                        node_touched = true;
+                    }
+                    Op::Text(TextOp::InsertRange { key, .. })
+                    | Op::Text(TextOp::DeleteRange { key, .. }) => {
+                        fallback_range_keys.insert(key.clone());
+                        touched.insert(key.clone());
+                        node_touched = true;
+                    }
+                    _ => {}
+                }
+            }
+            if node_touched {
+                touched_node_count = touched_node_count.saturating_add(1);
+            }
+        }
+
+        for key in &touched {
+            let projection = self.text_projections.entry(key.clone()).or_default();
+            if fallback_range_keys.contains(key) {
+                for node in nodes {
+                    projection.apply_node(node, key);
+                }
+            } else {
+                let updates = coalesced_updates
+                    .get(key)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                projection.apply_updates_coalesced(updates);
+            }
+        }
+
+        if self.text_projection_mode == TextProjectionMode::ParityCheck && !touched.is_empty() {
+            let sample_every = self.text_parity_sample_every.max(1);
+            for _ in 0..touched_node_count {
+                self.text_parity_update_count = self.text_parity_update_count.saturating_add(1);
+                if self.text_parity_update_count % sample_every != 0 {
+                    continue;
+                }
+                let keys_to_check: HashSet<String> = if self.text_parity_selected_keys.is_empty() {
+                    touched.clone()
+                } else {
+                    touched
+                        .iter()
+                        .filter(|k| self.text_parity_selected_keys.contains(*k))
+                        .cloned()
+                        .collect()
+                };
+                if keys_to_check.is_empty() {
+                    continue;
+                }
+                self.text_parity_check_runs = self.text_parity_check_runs.saturating_add(1);
+                self.run_text_projection_parity_for_keys(&keys_to_check, None);
+            }
+        }
+
+        for key in &touched {
+            self.touch_text_projection_key(key);
+        }
+        self.enforce_text_projection_residency_policy();
+
+        let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.text_apply_projection_update_calls
+            .fetch_add(touched_node_count, Ordering::Relaxed);
+        self.text_apply_projection_update_ns
+            .fetch_add(elapsed_ns, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "text_projection"))]
+    fn update_text_projection_from_nodes_batch(&mut self, _nodes: &[SyncNode]) {}
+
+    #[cfg(feature = "text_projection")]
+    fn run_text_projection_parity_for_keys(
+        &mut self,
+        keys: &HashSet<String>,
+        trigger_node: Option<NodeId>,
+    ) {
+        for key in keys {
+            let projected = self
+                .text_projections
+                .get(key)
+                .map(|p| p.resolve_seq())
+                .unwrap_or_default();
+            let legacy = self.resolve_text_seq_legacy(key);
+            if projected == legacy {
+                continue;
+            }
+
+            self.text_projection_mismatches.push(TextParityMismatch {
+                key: key.clone(),
+                trigger_node,
+                projected_len: projected.len(),
+                legacy_len: legacy.len(),
+                first_projected: projected.first().map(|(id, _)| *id),
+                first_legacy: legacy.first().map(|(id, _)| *id),
+            });
+
+            self.rebuild_text_projection_for_key(key);
+            self.text_projection_self_heals = self.text_projection_self_heals.saturating_add(1);
+        }
+    }
+
+    #[cfg(feature = "text_projection")]
+    fn rebuild_all_text_projections(&mut self) {
+        let keys = self.collect_text_keys();
+        for key in keys {
+            self.rebuild_text_projection_for_key(&key);
+            self.touch_text_projection_key(&key);
+        }
+        self.enforce_text_projection_residency_policy();
+    }
+
+    #[cfg(feature = "text_projection")]
+    fn rebuild_text_projection_for_key(&mut self, key: &str) {
+        let nodes = self.all_nodes_for_text();
+        let projection = TextProjection::from_nodes(&nodes, key);
+        self.text_projections.insert(key.to_string(), projection);
+    }
+
+    #[cfg(feature = "text_projection")]
+    fn touch_text_projection_key(&mut self, key: &str) {
+        self.text_projection_touch_clock = self.text_projection_touch_clock.saturating_add(1);
+        self.text_projection_last_touch
+            .insert(key.to_string(), self.text_projection_touch_clock);
+    }
+
+    #[cfg(feature = "text_projection")]
+    fn projection_is_hot_with_stats(&self, stats: &TextProjectionDebugStats) -> bool {
+        let read_calls = stats
+            .resolve_seq_calls
+            .saturating_add(stats.resolve_string_calls)
+            .saturating_add(stats.resolve_range_calls);
+        let write_calls = stats
+            .insert_ops_applied
+            .saturating_add(stats.delete_ops_applied)
+            .saturating_add(stats.range_insert_ops_applied)
+            .saturating_add(stats.range_delete_ops_applied);
+        read_calls >= self.text_temperature_thresholds.hot_read_calls
+            || write_calls >= self.text_temperature_thresholds.hot_write_calls
+    }
+
+    #[cfg(feature = "text_projection")]
+    fn enforce_text_projection_residency_policy(&mut self) {
+        let limit = self.text_projection_residency_policy.max_resident_keys;
+        if self.text_projections.len() <= limit {
+            return;
+        }
+
+        while self.text_projections.len() > limit {
+            let mut warm_candidate: Option<(String, u64)> = None;
+            let mut fallback_candidate: Option<(String, u64)> = None;
+
+            for key in self.text_projections.keys() {
+                let touched = *self.text_projection_last_touch.get(key).unwrap_or(&0);
+                let stats = self
+                    .text_projections
+                    .get(key)
+                    .map(|p| p.debug_stats())
+                    .unwrap_or_default();
+                let is_hot = self.projection_is_hot_with_stats(&stats);
+
+                let update_candidate = |slot: &mut Option<(String, u64)>| {
+                    if slot.as_ref().map(|(_, t)| touched < *t).unwrap_or(true) {
+                        *slot = Some((key.clone(), touched));
+                    }
+                };
+
+                update_candidate(&mut fallback_candidate);
+                if !is_hot {
+                    update_candidate(&mut warm_candidate);
+                }
+            }
+
+            let victim = warm_candidate.or(fallback_candidate).map(|(k, _)| k);
+            let Some(victim_key) = victim else {
+                break;
+            };
+
+            self.text_projections.remove(&victim_key);
+            self.text_projection_last_touch.remove(&victim_key);
+        }
+    }
+
+    #[cfg(feature = "text_projection")]
+    fn collect_text_keys(&self) -> HashSet<String> {
+        let mut keys = HashSet::new();
+        let node_ids = self.nodes.all_ids();
+        for id in &node_ids {
+            let Some(node) = self.nodes.get(id) else { continue };
+            for op in &node.transaction.ops {
+                if let Op::Text(TextOp::Insert { key, .. })
+                | Op::Text(TextOp::Delete { key, .. })
+                | Op::Text(TextOp::InsertRange { key, .. })
+                | Op::Text(TextOp::DeleteRange { key, .. }) = op {
+                    keys.insert(key.clone());
+                }
+            }
+        }
+        keys
+    }
+
+    #[cfg(feature = "text_projection")]
+    fn all_nodes_for_text(&self) -> Vec<&SyncNode> {
+        let mut nodes: Vec<&SyncNode> = self
+            .nodes
+            .all_ids()
+            .iter()
+            .filter_map(|id| self.nodes.get(id))
+            .collect();
+        nodes.sort_unstable_by(|a, b| {
+            a.transaction
+                .lamport
+                .cmp(&b.transaction.lamport)
+                .then_with(|| a.transaction.author.cmp(&b.transaction.author))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        nodes
+    }
+
+    #[cfg(feature = "text_projection")]
+    fn resolve_projection_transient(&self, key: &str) -> TextProjection {
+        let nodes = self.all_nodes_for_text();
+        TextProjection::from_nodes(&nodes, key)
+    }
+
+    fn resolve_text_seq_legacy(&self, key: &str) -> Vec<(crate::op::OpId, char)> {
+        let node_ids = self.nodes.all_ids();
+        let nodes: Vec<&SyncNode> = node_ids.iter().filter_map(|id| self.nodes.get(id)).collect();
+        crate::text::resolve_text_seq(&nodes, key)
+    }
+
+    fn resolve_text_legacy(&self, key: &str) -> String {
+        let node_ids = self.nodes.all_ids();
+        let nodes: Vec<&SyncNode> = node_ids.iter().filter_map(|id| self.nodes.get(id)).collect();
+        crate::text::resolve_text(&nodes, key)
     }
 
     /// Bulk-ingest a batch of remote nodes with parallel batched signature
@@ -396,6 +1311,7 @@ impl<N: NodeStore> StateGraph<N> {
         let verify_ok = self.verify_nodes_batched(&to_verify);
 
         // Step 4: apply in input order.
+        let mut accepted_nodes: Vec<SyncNode> = Vec::new();
         for (node, ok) in to_verify.into_iter().zip(verify_ok) {
             if !ok {
                 let id = node.id;
@@ -405,11 +1321,16 @@ impl<N: NodeStore> StateGraph<N> {
             // Mark verified so any future re-broadcast skips the crypto check.
             self.verified_ids.insert(node.id);
             let id = node.id;
-            match self.apply_remote_verified(node) {
-                Ok(()) => result.accepted.push(id),
+            match self.apply_remote_verified_no_projection(node.clone()) {
+                Ok(()) => {
+                    result.accepted.push(id);
+                    accepted_nodes.push(node);
+                }
                 Err(e) => result.rejected.push((id, e)),
             }
         }
+
+        self.update_text_projection_from_nodes_batch(&accepted_nodes);
 
         result
     }
@@ -690,11 +1611,30 @@ impl<N: NodeStore> StateGraph<N> {
     /// are excluded from the output but their IDs remain valid anchors for
     /// future insertions around them.
     pub fn resolve_text_seq(&self, key: &str) -> Vec<(crate::op::OpId, char)> {
-        let node_ids = self.nodes.all_ids();
-        let nodes: Vec<&SyncNode> = node_ids.iter()
-            .filter_map(|id| self.nodes.get(id))
-            .collect();
-        crate::text::resolve_text_seq(&nodes, key)
+        #[cfg(not(feature = "text_projection"))]
+        {
+            self.text_replay_fallbacks.fetch_add(1, Ordering::Relaxed);
+            return self.resolve_text_seq_legacy(key);
+        }
+
+        #[cfg(feature = "text_projection")]
+        match self.text_projection_mode {
+            TextProjectionMode::Disabled => {
+                self.text_replay_fallbacks.fetch_add(1, Ordering::Relaxed);
+                self.resolve_text_seq_legacy(key)
+            }
+            TextProjectionMode::Enabled | TextProjectionMode::ParityCheck => self
+                .text_projections
+                .get(key)
+                .map(|projection| {
+                    self.text_projection_hits.fetch_add(1, Ordering::Relaxed);
+                    projection.resolve_seq()
+                })
+                .unwrap_or_else(|| {
+                    self.text_projection_hits.fetch_add(1, Ordering::Relaxed);
+                    self.resolve_projection_transient(key).resolve_seq()
+                }),
+        }
     }
 
     /// Alias of `resolve_text_seq` — kept for bridge call-sites that want
@@ -705,11 +1645,153 @@ impl<N: NodeStore> StateGraph<N> {
 
     /// Resolve the RGA text for `key` as a plain UTF-8 string.
     pub fn resolve_text(&self, key: &str) -> String {
-        let node_ids = self.nodes.all_ids();
-        let nodes: Vec<&SyncNode> = node_ids.iter()
-            .filter_map(|id| self.nodes.get(id))
-            .collect();
-        crate::text::resolve_text(&nodes, key)
+        #[cfg(not(feature = "text_projection"))]
+        {
+            self.text_replay_fallbacks.fetch_add(1, Ordering::Relaxed);
+            return self.resolve_text_legacy(key);
+        }
+
+        #[cfg(feature = "text_projection")]
+        match self.text_projection_mode {
+            TextProjectionMode::Disabled => {
+                self.text_replay_fallbacks.fetch_add(1, Ordering::Relaxed);
+                self.resolve_text_legacy(key)
+            }
+            TextProjectionMode::Enabled | TextProjectionMode::ParityCheck => self
+                .text_projections
+                .get(key)
+                .map(|projection| {
+                    self.text_projection_hits.fetch_add(1, Ordering::Relaxed);
+                    projection.resolve_string()
+                })
+                .unwrap_or_else(|| {
+                    self.text_projection_hits.fetch_add(1, Ordering::Relaxed);
+                    self.resolve_projection_transient(key).resolve_string()
+                }),
+        }
+    }
+
+    /// Resolve canonical text for `key` via replay semantics.
+    ///
+    /// This accessor is intended for persistence/export/audit flows that
+    /// require canonical replay output independent of runtime projection mode.
+    pub fn resolve_text_canonical(&self, key: &str) -> String {
+        self.resolve_text_legacy(key)
+    }
+
+    /// Phase 2.5 skeleton: resolve a window of text by character offset.
+    ///
+    /// `start` and `len` are measured in Unicode scalar values for now.
+    /// This API shape is intentionally simple and will be refined as
+    /// offset/anchor semantics are finalized.
+    pub fn resolve_text_range(&self, key: &str, start: usize, len: usize) -> String {
+        if len == 0 {
+            return String::new();
+        }
+        #[cfg(not(feature = "text_projection"))]
+        {
+            return self
+                .resolve_text(key)
+                .chars()
+                .skip(start)
+                .take(len)
+                .collect();
+        }
+
+        #[cfg(feature = "text_projection")]
+        {
+            match self.text_projection_mode {
+                TextProjectionMode::Disabled => self
+                    .resolve_text(key)
+                    .chars()
+                    .skip(start)
+                    .take(len)
+                    .collect(),
+                TextProjectionMode::Enabled | TextProjectionMode::ParityCheck => self
+                    .text_projections
+                    .get(key)
+                    .map(|projection| projection.resolve_string_range(start, len))
+                    .unwrap_or_else(|| self.resolve_projection_transient(key).resolve_string_range(start, len)),
+            }
+        }
+    }
+
+    /// Phase 3 scaffold: map a visible character offset to a stable anchor.
+    pub fn resolve_text_anchor_for_offset(&self, key: &str, offset: usize) -> TextRangeAnchor {
+        #[cfg(not(feature = "text_projection"))]
+        {
+            let seq = self.resolve_text_seq_with_chars(key);
+            if offset == 0 {
+                return TextRangeAnchor::Start;
+            }
+            if offset >= seq.len() {
+                return TextRangeAnchor::End;
+            }
+            return TextRangeAnchor::After(seq[offset - 1].0);
+        }
+
+        #[cfg(feature = "text_projection")]
+        {
+            match self.text_projection_mode {
+                TextProjectionMode::Enabled | TextProjectionMode::ParityCheck => self
+                    .text_projections
+                    .get(key)
+                    .map(|projection| projection.anchor_for_offset(offset))
+                    .unwrap_or_else(|| self.resolve_projection_transient(key).anchor_for_offset(offset)),
+                TextProjectionMode::Disabled => {
+                    let seq = self.resolve_text_seq_with_chars(key);
+                    if offset == 0 {
+                        TextRangeAnchor::Start
+                    } else if offset >= seq.len() {
+                        TextRangeAnchor::End
+                    } else {
+                        TextRangeAnchor::After(seq[offset - 1].0)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Phase 3 scaffold: map an anchor to a visible character offset.
+    pub fn resolve_text_offset_for_anchor(&self, key: &str, anchor: TextRangeAnchor) -> usize {
+        #[cfg(not(feature = "text_projection"))]
+        {
+            let seq = self.resolve_text_seq_with_chars(key);
+            return match anchor {
+                TextRangeAnchor::Start => 0,
+                TextRangeAnchor::End => seq.len(),
+                TextRangeAnchor::Offset(i) => i.min(seq.len()),
+                TextRangeAnchor::After(id) => seq
+                    .iter()
+                    .position(|(existing, _)| *existing == id)
+                    .map(|i| i + 1)
+                    .unwrap_or(seq.len()),
+            };
+        }
+
+        #[cfg(feature = "text_projection")]
+        {
+            match self.text_projection_mode {
+                TextProjectionMode::Enabled | TextProjectionMode::ParityCheck => self
+                    .text_projections
+                    .get(key)
+                    .map(|projection| projection.offset_for_anchor(anchor))
+                    .unwrap_or_else(|| self.resolve_projection_transient(key).offset_for_anchor(anchor)),
+                TextProjectionMode::Disabled => {
+                    let seq = self.resolve_text_seq_with_chars(key);
+                    match anchor {
+                        TextRangeAnchor::Start => 0,
+                        TextRangeAnchor::End => seq.len(),
+                        TextRangeAnchor::Offset(i) => i.min(seq.len()),
+                        TextRangeAnchor::After(id) => seq
+                            .iter()
+                            .position(|(existing, _)| *existing == id)
+                            .map(|i| i + 1)
+                            .unwrap_or(seq.len()),
+                    }
+                }
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -800,6 +1882,1321 @@ mod tests {
         g.apply_local(&key_a(), 0, vec![set("name", "Alice")]).unwrap();
         let state = g.resolve();
         assert_eq!(state.get("name").map(|v| v.as_slice()), Some(b"Alice".as_slice()));
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_parity_mismatch_triggers_self_heal() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::ParityCheck);
+        g.set_text_parity_sample_every(1);
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+        assert_eq!(g.text_projection_self_heal_count(), 0);
+
+        // Force a projection mismatch so parity mode exercises self-heal.
+        g.text_projections
+            .insert("doc".into(), crate::text::TextProjection::default());
+
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+
+        assert!(
+            g.text_projection_self_heal_count() >= 1,
+            "parity mismatch should trigger at least one self-heal rebuild"
+        );
+        assert!(
+            !g.text_projection_mismatches().is_empty(),
+            "parity mismatch diagnostics should be captured"
+        );
+        assert_eq!(
+            g.resolve_text("doc"),
+            g.resolve_text_legacy("doc"),
+            "projection output should match replay output after self-heal"
+        );
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_parity_sampling_every_n_updates() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::ParityCheck);
+        g.set_text_parity_sample_every(2);
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+        assert_eq!(g.text_parity_check_runs(), 0);
+
+        let id_a = crate::op::OpId {
+            lamport: 1,
+            author: sk.verifying_key().to_bytes(),
+        };
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_a),
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+        assert_eq!(g.text_parity_check_runs(), 1);
+
+        let id_b = crate::op::OpId {
+            lamport: 2,
+            author: sk.verifying_key().to_bytes(),
+        };
+        g.apply_local(
+            &sk,
+            1002,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_b),
+                ch: 'c',
+            })],
+        )
+        .unwrap();
+        assert_eq!(g.text_parity_check_runs(), 1);
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_parity_selected_keys_filter_touches() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::ParityCheck);
+        g.set_text_parity_sample_every(1);
+        g.set_text_parity_selected_keys(vec!["doc".into()]);
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "other".into(),
+                after: None,
+                ch: 'x',
+            })],
+        )
+        .unwrap();
+        assert_eq!(g.text_parity_check_runs(), 0);
+
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'y',
+            })],
+        )
+        .unwrap();
+        assert_eq!(g.text_parity_check_runs(), 1);
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_parity_deterministic_corpus_has_zero_mismatches() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::ParityCheck);
+        g.set_text_parity_sample_every(1);
+
+        // Deterministic corpus mixing char and range operations across keys.
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+
+        let id_a = crate::op::OpId {
+            lamport: 1,
+            author: sk.verifying_key().to_bytes(),
+        };
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_a),
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+
+        g.apply_local(
+            &sk,
+            1002,
+            vec![Op::Text(TextOp::InsertRange {
+                key: "doc".into(),
+                anchor: TextRangeAnchor::End,
+                text: "cd".into(),
+            })],
+        )
+        .unwrap();
+
+        g.apply_local(
+            &sk,
+            1003,
+            vec![Op::Text(TextOp::Delete {
+                key: "doc".into(),
+                target: id_a,
+            })],
+        )
+        .unwrap();
+
+        g.apply_local(
+            &sk,
+            1004,
+            vec![Op::Text(TextOp::InsertRange {
+                key: "title".into(),
+                anchor: TextRangeAnchor::Start,
+                text: "Hi".into(),
+            })],
+        )
+        .unwrap();
+
+        g.apply_local(
+            &sk,
+            1005,
+            vec![Op::Text(TextOp::DeleteRange {
+                key: "doc".into(),
+                anchor: TextRangeAnchor::Offset(1),
+                len_chars: 1,
+            })],
+        )
+        .unwrap();
+
+        assert!(
+            g.text_parity_check_runs() >= 6,
+            "parity should have run for each deterministic corpus update"
+        );
+        assert!(
+            g.text_projection_mismatches().is_empty(),
+            "deterministic corpus should not produce parity mismatches"
+        );
+        assert_eq!(
+            g.text_projection_self_heal_count(),
+            0,
+            "zero mismatches should imply zero parity self-heals"
+        );
+        assert_eq!(g.resolve_text("doc"), g.resolve_text_legacy("doc"));
+        assert_eq!(g.resolve_text("title"), g.resolve_text_legacy("title"));
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_randomized_trace_matches_legacy_deterministically() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+
+        let key = "doc";
+        let mut visible_ids: Vec<crate::op::OpId> = Vec::new();
+
+        // Deterministic LCG so this corpus is stable across runs.
+        let mut seed: u64 = 0xC0FFEE_1234_5678;
+        let mut next_u64 = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            seed
+        };
+
+        for step in 0..300u64 {
+            let do_insert = visible_ids.is_empty() || (next_u64() % 100) < 70;
+
+            if do_insert {
+                let pos = if visible_ids.is_empty() {
+                    0usize
+                } else {
+                    (next_u64() as usize) % (visible_ids.len() + 1)
+                };
+                let after = if pos == 0 {
+                    None
+                } else {
+                    Some(visible_ids[pos - 1])
+                };
+                let ch = (b'a' + (next_u64() % 26) as u8) as char;
+
+                g.apply_local(
+                    &sk,
+                    10_000 + step,
+                    vec![Op::Text(TextOp::Insert {
+                        key: key.into(),
+                        after,
+                        ch,
+                    })],
+                )
+                .unwrap();
+
+                let inserted = crate::op::OpId {
+                    lamport: g.lamport(),
+                    author: sk.verifying_key().to_bytes(),
+                };
+                visible_ids.insert(pos, inserted);
+            } else {
+                let pos = (next_u64() as usize) % visible_ids.len();
+                let target = visible_ids.remove(pos);
+                g.apply_local(
+                    &sk,
+                    10_000 + step,
+                    vec![Op::Text(TextOp::Delete {
+                        key: key.into(),
+                        target,
+                    })],
+                )
+                .unwrap();
+            }
+
+            let projected = g.resolve_text(key);
+            let legacy = g.resolve_text_legacy(key);
+            assert_eq!(
+                projected, legacy,
+                "projection/legacy mismatch at randomized step {step}"
+            );
+        }
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_runtime_counters_track_hits_and_fallbacks() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'x',
+            })],
+        )
+        .unwrap();
+
+        g.set_text_projection_mode(TextProjectionMode::Disabled);
+        g.reset_text_runtime_counters();
+        let _ = g.resolve_text("doc");
+        let c1 = g.text_runtime_counters();
+        assert_eq!(c1.projection_hits, 0);
+        assert_eq!(c1.replay_fallbacks, 1);
+
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+        g.reset_text_runtime_counters();
+        let _ = g.resolve_text("doc");
+        let c2 = g.text_runtime_counters();
+        assert_eq!(c2.projection_hits, 1);
+        assert_eq!(c2.replay_fallbacks, 0);
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_runtime_temperature_tiers_transition() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+        g.set_text_runtime_temperature_thresholds(TextRuntimeTemperatureThresholds {
+            hot_read_calls: 4,
+            hot_write_calls: 100,
+        });
+
+        assert_eq!(
+            g.text_runtime_temperature_for_key("missing"),
+            TextRuntimeTemperature::Cold,
+            "keys without resident projection should be Cold"
+        );
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'x',
+            })],
+        )
+        .unwrap();
+
+        assert_eq!(
+            g.text_runtime_temperature_for_key("doc"),
+            TextRuntimeTemperature::Warm,
+            "resident projection with low activity should be Warm"
+        );
+
+        for _ in 0..4 {
+            let _ = g.resolve_text("doc");
+        }
+
+        assert_eq!(
+            g.text_runtime_temperature_for_key("doc"),
+            TextRuntimeTemperature::Hot,
+            "repeated reads should promote Warm key to Hot"
+        );
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_runtime_temperature_snapshot_reports_resident_keys() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+        g.set_text_runtime_temperature_thresholds(TextRuntimeTemperatureThresholds {
+            hot_read_calls: 1,
+            hot_write_calls: 10,
+        });
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "title".into(),
+                after: None,
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+
+        let _ = g.resolve_text("doc");
+        let snapshot = g.text_runtime_temperature_snapshot();
+
+        assert_eq!(snapshot.get("doc"), Some(&TextRuntimeTemperature::Hot));
+        assert_eq!(snapshot.get("title"), Some(&TextRuntimeTemperature::Warm));
+        assert!(!snapshot.contains_key("missing"));
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_residency_policy_evicts_oldest_warm_key() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+        g.set_text_runtime_temperature_thresholds(TextRuntimeTemperatureThresholds {
+            hot_read_calls: u64::MAX,
+            hot_write_calls: u64::MAX,
+        });
+        g.set_text_projection_residency_policy(TextProjectionResidencyPolicy {
+            max_resident_keys: 1,
+        });
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+        assert!(g.text_projection_debug_stats("doc").is_some());
+
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "title".into(),
+                after: None,
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+
+        assert_eq!(g.text_projection_resident_key_count(), 1);
+        assert!(
+            g.text_projection_debug_stats("doc").is_none(),
+            "oldest warm key should be evicted under max_resident_keys=1"
+        );
+        assert!(g.text_projection_debug_stats("title").is_some());
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_demote_and_rebuild_api_roundtrip() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'x',
+            })],
+        )
+        .unwrap();
+        assert!(g.text_projection_debug_stats("doc").is_some());
+
+        assert!(g.demote_text_projection_key("doc"));
+        assert!(g.text_projection_debug_stats("doc").is_none());
+
+        assert!(g.ensure_text_projection_resident("doc"));
+        assert!(g.text_projection_debug_stats("doc").is_some());
+        assert_eq!(g.resolve_text("doc"), "x");
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_rebuild_from_oplog_reproduces_identical_run_materialization_outputs() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+
+        let key = "doc";
+
+        // Build a deterministic mixed trace that exercises split/merge behavior.
+        for i in 0..14u64 {
+            let after = g.resolve_text_seq_with_chars(key).last().map(|(id, _)| *id);
+            let ch = (b'a' + (i % 26) as u8) as char;
+            g.apply_local(
+                &sk,
+                1000 + i,
+                vec![Op::Text(TextOp::Insert {
+                    key: key.into(),
+                    after,
+                    ch,
+                })],
+            )
+            .unwrap();
+        }
+
+        for (wall, anchor_idx, ch) in [
+            (3000u64, 2usize, 'X'),
+            (3001u64, 2usize, 'Y'),
+            (3002u64, 8usize, 'Z'),
+            (3003u64, 5usize, 'Q'),
+        ] {
+            let anchors = g.resolve_text_seq_with_chars(key);
+            let after = Some(anchors[anchor_idx.min(anchors.len().saturating_sub(1))].0);
+            g.apply_local(
+                &sk,
+                wall,
+                vec![Op::Text(TextOp::Insert {
+                    key: key.into(),
+                    after,
+                    ch,
+                })],
+            )
+            .unwrap();
+        }
+
+        // Delete a stable subset by current visible order to mix visible/tombstoned layout.
+        let visible_before_deletes = g.resolve_text_seq_with_chars(key);
+        for (step, (target, _)) in visible_before_deletes
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(idx, _)| idx % 5 == 1)
+            .take(4)
+        {
+            g.apply_local(
+                &sk,
+                4000 + step as u64,
+                vec![Op::Text(TextOp::Delete {
+                    key: key.into(),
+                    target,
+                })],
+            )
+            .unwrap();
+        }
+
+        let canonical_text = g.resolve_text_canonical(key);
+        let prior_mode = g.text_projection_mode();
+        g.set_text_projection_mode(TextProjectionMode::Disabled);
+        let canonical_seq = g.resolve_text_seq_with_chars(key);
+        g.set_text_projection_mode(prior_mode);
+
+        assert!(g.demote_text_projection_key(key));
+        assert!(g.text_projection_debug_stats(key).is_none());
+        assert!(g.ensure_text_projection_resident(key));
+
+        let rebuilt_text_first = g.resolve_text(key);
+        let rebuilt_seq_first = g.resolve_text_seq_with_chars(key);
+        let rebuilt_stats_first = g
+            .text_projection_debug_stats(key)
+            .expect("projection should exist after rebuild");
+
+        assert_eq!(rebuilt_text_first, canonical_text);
+        assert_eq!(rebuilt_seq_first, canonical_seq);
+
+        // Rebuild a second time and require deterministic materialization shape/output.
+        assert!(g.demote_text_projection_key(key));
+        assert!(g.ensure_text_projection_resident(key));
+
+        let rebuilt_text_second = g.resolve_text(key);
+        let rebuilt_seq_second = g.resolve_text_seq_with_chars(key);
+        let rebuilt_stats_second = g
+            .text_projection_debug_stats(key)
+            .expect("projection should exist after second rebuild");
+
+        assert_eq!(rebuilt_text_second, rebuilt_text_first);
+        assert_eq!(rebuilt_seq_second, rebuilt_seq_first);
+        assert_eq!(
+            rebuilt_stats_second.visible_len,
+            rebuilt_stats_first.visible_len
+        );
+        assert_eq!(
+            rebuilt_stats_second.index_weights_len,
+            rebuilt_stats_first.index_weights_len,
+            "run-level index weight count should match after rebuild"
+        );
+        assert_eq!(
+            rebuilt_stats_second.index_fenwick_len,
+            rebuilt_stats_first.index_fenwick_len
+        );
+        assert_eq!(
+            rebuilt_stats_second.metadata_entries,
+            rebuilt_stats_first.metadata_entries
+        );
+        assert_eq!(
+            rebuilt_stats_second.tombstone_count,
+            rebuilt_stats_first.tombstone_count
+        );
+        assert_eq!(
+            rebuilt_stats_second.tombstone_span_count,
+            rebuilt_stats_first.tombstone_span_count
+        );
+        assert_eq!(g.resolve_text_canonical(key), rebuilt_text_second);
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_cold_compaction_preserves_semantics() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+
+        // Grow projection buffers, then shrink visible set to leave slack.
+        for i in 0..2048u64 {
+            let after = if i == 0 {
+                None
+            } else {
+                Some(crate::op::OpId {
+                    lamport: i,
+                    author: sk.verifying_key().to_bytes(),
+                })
+            };
+            g.apply_local(
+                &sk,
+                1000 + i,
+                vec![Op::Text(TextOp::Insert {
+                    key: "doc".into(),
+                    after,
+                    ch: 'a',
+                })],
+            )
+            .unwrap();
+        }
+
+        let seq = g.resolve_text_seq_with_chars("doc");
+        for (idx, (id, _)) in seq.iter().take(2000).copied().enumerate() {
+            g.apply_local(
+                &sk,
+                5000 + idx as u64,
+                vec![Op::Text(TextOp::Delete {
+                    key: "doc".into(),
+                    target: id,
+                })],
+            )
+            .unwrap();
+        }
+
+        let expected = g.resolve_text("doc");
+        let expected_seq = g.resolve_text_seq_with_chars("doc");
+        let before = g
+            .text_projection_debug_stats("doc")
+            .expect("projection should exist before compaction");
+        assert!(before.visible_len > 0);
+
+        let _ = g.compact_text_projection_key("doc");
+
+        let after = g
+            .text_projection_debug_stats("doc")
+            .expect("projection should exist after compaction");
+        assert_eq!(g.resolve_text("doc"), expected);
+        assert_eq!(
+            g.resolve_text_seq_with_chars("doc"),
+            expected_seq,
+            "compaction must preserve canonical visible OpId identity ordering"
+        );
+        assert_eq!(
+            after.metadata_entries, before.metadata_entries,
+            "compaction must not squash historical metadata entries"
+        );
+        assert_eq!(
+            after.tombstone_count, before.tombstone_count,
+            "compaction must not drop tombstone history"
+        );
+        assert_eq!(
+            after.tombstone_span_count, before.tombstone_span_count,
+            "compaction must not merge semantic tombstone spans permanently"
+        );
+        assert!(
+            after.visible_string_capacity <= before.visible_string_capacity,
+            "compaction should not increase visible string capacity"
+        );
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_enabled_miss_does_not_use_replay_fallback() {
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+        g.reset_text_runtime_counters();
+
+        assert_eq!(g.resolve_text("missing"), "");
+        let counters = g.text_runtime_counters();
+        assert_eq!(counters.projection_hits, 1);
+        assert_eq!(counters.replay_fallbacks, 0);
+
+        let _ = g.resolve_text_anchor_for_offset("missing", 0);
+        let _ = g.resolve_text_offset_for_anchor("missing", TextRangeAnchor::Start);
+        let counters_after = g.text_runtime_counters();
+        assert_eq!(
+            counters_after.replay_fallbacks, 0,
+            "anchor/offset mapping in enabled mode should not invoke replay fallback"
+        );
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_debug_stats_expose_telemetry_counters() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+        let id_a = crate::op::OpId {
+            lamport: 1,
+            author: sk.verifying_key().to_bytes(),
+        };
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_a),
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+        g.apply_local(
+            &sk,
+            1002,
+            vec![Op::Text(TextOp::Delete {
+                key: "doc".into(),
+                target: id_a,
+            })],
+        )
+        .unwrap();
+
+        let _ = g.resolve_text_seq("doc");
+        let _ = g.resolve_text("doc");
+        let _ = g.resolve_text_range("doc", 0, 1);
+
+        let stats = g
+            .text_projection_debug_stats("doc")
+            .expect("debug stats should exist for key");
+        assert!(stats.insert_ops_applied >= 2);
+        assert!(stats.delete_ops_applied >= 1);
+        assert!(stats.resolve_seq_calls >= 1);
+        assert!(stats.resolve_string_calls >= 1);
+        assert!(stats.resolve_range_calls >= 1);
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_repeated_reads_without_writes_do_not_rebuild() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+        let id_a = crate::op::OpId {
+            lamport: 1,
+            author: sk.verifying_key().to_bytes(),
+        };
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_a),
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+
+        let before = g
+            .text_projection_debug_stats("doc")
+            .expect("projection stats should exist for key")
+            .full_rebuild_count;
+
+        for _ in 0..64 {
+            let _ = g.resolve_text("doc");
+            let _ = g.resolve_text_range("doc", 0, 2);
+            let _ = g.resolve_text_seq("doc");
+        }
+
+        let after = g
+            .text_projection_debug_stats("doc")
+            .expect("projection stats should exist for key")
+            .full_rebuild_count;
+
+        assert_eq!(
+            after, before,
+            "repeated reads with no writes should not trigger projection rebuilds"
+        );
+    }
+
+    #[test]
+    fn resolve_text_canonical_is_mode_independent() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+        let id_a = crate::op::OpId {
+            lamport: 1,
+            author: sk.verifying_key().to_bytes(),
+        };
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_a),
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+        let enabled_canonical = g.resolve_text_canonical("doc");
+        assert_eq!(enabled_canonical, "ab");
+
+        g.set_text_projection_mode(TextProjectionMode::Disabled);
+        let disabled_canonical = g.resolve_text_canonical("doc");
+        assert_eq!(disabled_canonical, "ab");
+
+        assert_eq!(enabled_canonical, disabled_canonical);
+
+        let counters_before = g.text_runtime_counters();
+        let _ = g.resolve_text_canonical("doc");
+        let counters_after = g.text_runtime_counters();
+        assert_eq!(counters_after.projection_hits, counters_before.projection_hits);
+        assert_eq!(
+            counters_after.replay_fallbacks, counters_before.replay_fallbacks,
+            "canonical resolver should not affect runtime hot-path counters"
+        );
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_out_of_order_remote_insert_application() {
+        let sk = key_a();
+        let mut src = StateGraph::new();
+        src.set_text_projection_mode(TextProjectionMode::Enabled);
+
+        let n1 = src
+            .apply_local(
+                &sk,
+                1000,
+                vec![Op::Text(TextOp::Insert {
+                    key: "doc".into(),
+                    after: None,
+                    ch: 'a',
+                })],
+            )
+            .unwrap();
+        let id_a = src.resolve_text_seq_with_chars("doc")[0].0;
+
+        let n2 = src
+            .apply_local(
+                &sk,
+                1001,
+                vec![Op::Text(TextOp::Insert {
+                    key: "doc".into(),
+                    after: Some(id_a),
+                    ch: 'b',
+                })],
+            )
+            .unwrap();
+
+        let exported: Vec<SyncNode> = src.get_nodes(&[n1, n2]).into_iter().cloned().collect();
+        let node_a = exported[0].clone();
+        let node_b = exported[1].clone();
+
+        let mut dst = StateGraph::new();
+        dst.set_text_projection_mode(TextProjectionMode::Enabled);
+
+        // Out-of-order delivery: dependent node arrives first and is retried after parent arrival.
+        assert!(matches!(dst.apply_remote(node_b.clone()), Err(SyncError::MissingParent(_))));
+        dst.apply_remote(node_a).unwrap();
+        dst.apply_remote(node_b).unwrap();
+
+        assert_eq!(dst.resolve_text("doc"), "ab");
+        assert_eq!(dst.resolve_text("doc"), dst.resolve_text_legacy("doc"));
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_multi_key_isolation_with_reordered_remote_batch() {
+        let sk = key_a();
+        let author = sk.verifying_key().to_bytes();
+
+        let mut exported = vec![
+            SyncNode::new_signed(
+                Transaction {
+                    author,
+                    lamport: 1,
+                    wall_ms: 1000,
+                    ops: vec![Op::Text(TextOp::InsertRange {
+                        key: "title".into(),
+                        anchor: TextRangeAnchor::Start,
+                        text: "Hi".into(),
+                    })],
+                    parents: vec![],
+                },
+                &sk,
+            ),
+            SyncNode::new_signed(
+                Transaction {
+                    author,
+                    lamport: 2,
+                    wall_ms: 1001,
+                    ops: vec![Op::Text(TextOp::InsertRange {
+                        key: "body".into(),
+                        anchor: TextRangeAnchor::Start,
+                        text: "XY".into(),
+                    })],
+                    parents: vec![],
+                },
+                &sk,
+            ),
+        ];
+        exported.reverse();
+
+        let mut dst = StateGraph::new();
+        dst.set_text_projection_mode(TextProjectionMode::Enabled);
+        let batch = dst.apply_remote_batch(exported);
+
+        assert_eq!(batch.accepted.len(), 2);
+        assert!(batch.rejected.is_empty());
+
+        assert_eq!(dst.resolve_text("title"), "Hi");
+        assert_eq!(dst.resolve_text("body"), "XY");
+        assert_eq!(dst.resolve_text("title"), dst.resolve_text_legacy("title"));
+        assert_eq!(dst.resolve_text("body"), dst.resolve_text_legacy("body"));
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_tombstone_interactions_with_descendants() {
+        let sk = key_a();
+        let author = sk.verifying_key().to_bytes();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+
+        let id_a = crate::op::OpId { lamport: 1, author };
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+
+        let id_b = crate::op::OpId { lamport: 2, author };
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_a),
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+
+        let id_c = crate::op::OpId { lamport: 3, author };
+        g.apply_local(
+            &sk,
+            1002,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_b),
+                ch: 'c',
+            })],
+        )
+        .unwrap();
+
+        g.apply_local(
+            &sk,
+            1003,
+            vec![Op::Text(TextOp::Delete {
+                key: "doc".into(),
+                target: id_b,
+            })],
+        )
+        .unwrap();
+
+        assert_eq!(g.resolve_text("doc"), "ac");
+        assert_eq!(g.resolve_text("doc"), g.resolve_text_legacy("doc"));
+
+        let seq = g.resolve_text_seq_with_chars("doc");
+        assert_eq!(seq.len(), 2);
+        assert_eq!(seq[0].0, id_a);
+        assert_eq!(seq[1].0, id_c);
+
+        g.apply_local(
+            &sk,
+            1004,
+            vec![Op::Text(TextOp::Delete {
+                key: "doc".into(),
+                target: id_a,
+            })],
+        )
+        .unwrap();
+
+        assert_eq!(g.resolve_text("doc"), "c");
+        assert_eq!(g.resolve_text("doc"), g.resolve_text_legacy("doc"));
+    }
+
+    #[cfg(feature = "text_projection")]
+    #[test]
+    fn text_projection_sibling_ordering_under_identical_after() {
+        let sk_a = key_a();
+        let sk_b = key_b();
+        let author_a = sk_a.verifying_key().to_bytes();
+        let author_b = sk_b.verifying_key().to_bytes();
+
+        let base = SyncNode::new_signed(
+            Transaction {
+                author: author_a,
+                lamport: 1,
+                wall_ms: 1000,
+                ops: vec![Op::Text(TextOp::Insert {
+                    key: "doc".into(),
+                    after: None,
+                    ch: 'a',
+                })],
+                parents: vec![],
+            },
+            &sk_a,
+        );
+        let base_id = crate::op::OpId {
+            lamport: 1,
+            author: author_a,
+        };
+
+        let sibling_a = SyncNode::new_signed(
+            Transaction {
+                author: author_a,
+                lamport: 2,
+                wall_ms: 1001,
+                ops: vec![Op::Text(TextOp::Insert {
+                    key: "doc".into(),
+                    after: Some(base_id),
+                    ch: 'x',
+                })],
+                parents: vec![],
+            },
+            &sk_a,
+        );
+        let sibling_b = SyncNode::new_signed(
+            Transaction {
+                author: author_b,
+                lamport: 2,
+                wall_ms: 1001,
+                ops: vec![Op::Text(TextOp::Insert {
+                    key: "doc".into(),
+                    after: Some(base_id),
+                    ch: 'y',
+                })],
+                parents: vec![],
+            },
+            &sk_b,
+        );
+
+        let mut g1 = StateGraph::new();
+        g1.set_text_projection_mode(TextProjectionMode::Enabled);
+        g1.apply_remote(base.clone()).unwrap();
+        g1.apply_remote(sibling_a.clone()).unwrap();
+        g1.apply_remote(sibling_b.clone()).unwrap();
+
+        let mut g2 = StateGraph::new();
+        g2.set_text_projection_mode(TextProjectionMode::Enabled);
+        g2.apply_remote(base).unwrap();
+        g2.apply_remote(sibling_b).unwrap();
+        g2.apply_remote(sibling_a).unwrap();
+
+        let t1 = g1.resolve_text("doc");
+        let t2 = g2.resolve_text("doc");
+        assert_eq!(t1, t2, "sibling ordering must be deterministic across delivery order");
+        assert_eq!(t1, g1.resolve_text_legacy("doc"));
+        assert_eq!(t2, g2.resolve_text_legacy("doc"));
+
+        let expected = if author_a > author_b { "axy" } else { "ayx" };
+        assert_eq!(t1, expected);
+    }
+
+    #[test]
+    fn resolve_text_range_skeleton_returns_char_window() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+        let id_a = crate::op::OpId {
+            lamport: 1,
+            author: sk.verifying_key().to_bytes(),
+        };
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_a),
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+
+        assert_eq!(g.resolve_text("doc"), "ab");
+        assert_eq!(g.resolve_text_range("doc", 0, 1), "a");
+        assert_eq!(g.resolve_text_range("doc", 1, 1), "b");
+        assert_eq!(g.resolve_text_range("doc", 2, 3), "");
+    }
+
+    #[test]
+    fn phase3_offset_anchor_scaffold_roundtrip() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+
+        // Build "abc"
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+        let id_a = crate::op::OpId {
+            lamport: 1,
+            author: sk.verifying_key().to_bytes(),
+        };
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_a),
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+        let id_b = crate::op::OpId {
+            lamport: 2,
+            author: sk.verifying_key().to_bytes(),
+        };
+        g.apply_local(
+            &sk,
+            1002,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_b),
+                ch: 'c',
+            })],
+        )
+        .unwrap();
+
+        assert_eq!(g.resolve_text_anchor_for_offset("doc", 0), TextRangeAnchor::Start);
+        assert_eq!(g.resolve_text_anchor_for_offset("doc", 1), TextRangeAnchor::After(id_a));
+        assert_eq!(g.resolve_text_anchor_for_offset("doc", 3), TextRangeAnchor::End);
+        assert_eq!(g.resolve_text_anchor_for_offset("doc", 99), TextRangeAnchor::End);
+
+        assert_eq!(g.resolve_text_offset_for_anchor("doc", TextRangeAnchor::Start), 0);
+        assert_eq!(g.resolve_text_offset_for_anchor("doc", TextRangeAnchor::After(id_a)), 1);
+        assert_eq!(g.resolve_text_offset_for_anchor("doc", TextRangeAnchor::After(id_b)), 2);
+        assert_eq!(g.resolve_text_offset_for_anchor("doc", TextRangeAnchor::End), 3);
+    }
+
+    #[test]
+    fn phase3_cursor_mapping_randomized_trace_roundtrips() {
+        let sk = key_a();
+        let mut g = StateGraph::new();
+        g.set_text_projection_mode(TextProjectionMode::Enabled);
+        let key = "doc";
+
+        let mut visible_ids: Vec<crate::op::OpId> = Vec::new();
+        let mut seed: u64 = 0xD00D_F00D_1234_5678;
+        let mut next_u64 = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            seed
+        };
+
+        for step in 0..300u64 {
+            let do_insert = visible_ids.is_empty() || (next_u64() % 100) < 70;
+            if do_insert {
+                let pos = if visible_ids.is_empty() {
+                    0usize
+                } else {
+                    (next_u64() as usize) % (visible_ids.len() + 1)
+                };
+                let after = if pos == 0 {
+                    None
+                } else {
+                    Some(visible_ids[pos - 1])
+                };
+                let ch = (b'a' + (next_u64() % 26) as u8) as char;
+                g.apply_local(
+                    &sk,
+                    20_000 + step,
+                    vec![Op::Text(TextOp::Insert {
+                        key: key.into(),
+                        after,
+                        ch,
+                    })],
+                )
+                .unwrap();
+                visible_ids.insert(
+                    pos,
+                    crate::op::OpId {
+                        lamport: g.lamport(),
+                        author: sk.verifying_key().to_bytes(),
+                    },
+                );
+            } else {
+                let pos = (next_u64() as usize) % visible_ids.len();
+                let target = visible_ids.remove(pos);
+                g.apply_local(
+                    &sk,
+                    20_000 + step,
+                    vec![Op::Text(TextOp::Delete {
+                        key: key.into(),
+                        target,
+                    })],
+                )
+                .unwrap();
+            }
+
+            let seq = g.resolve_text_seq_with_chars(key);
+            let len = seq.len();
+            let probes = [
+                0usize,
+                len / 2,
+                len,
+                len.saturating_add(5),
+            ];
+
+            for offset in probes {
+                let clamped = offset.min(len);
+                let anchor = g.resolve_text_anchor_for_offset(key, offset);
+                let roundtrip = g.resolve_text_offset_for_anchor(key, anchor);
+                assert_eq!(
+                    roundtrip, clamped,
+                    "offset->anchor->offset mismatch at step {step}: offset={offset}, len={len}"
+                );
+            }
+
+            for (idx, (id, _)) in seq.iter().enumerate() {
+                let off = g.resolve_text_offset_for_anchor(key, TextRangeAnchor::After(*id));
+                assert_eq!(
+                    off,
+                    idx + 1,
+                    "after(id)->offset mismatch at step {step}: idx={idx}"
+                );
+            }
+        }
     }
 
     #[test]

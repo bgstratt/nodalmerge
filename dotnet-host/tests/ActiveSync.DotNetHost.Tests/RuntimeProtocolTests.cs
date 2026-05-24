@@ -354,6 +354,29 @@ public class RuntimeProtocolTests
     }
 
     [Fact]
+    public void Text_get_canonical_maps_to_host_command_after_hello()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(42)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"text-get-canonical\",\"namespace\":\"doc\",\"key\":\"title\"}",
+            state
+        );
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.CommandJsons);
+        Assert.Contains("TextGetCanonical", result.CommandJsons[0]);
+        Assert.Contains("\"namespace\":\"doc\"", result.CommandJsons[0]);
+        Assert.Contains("\"key\":\"title\"", result.CommandJsons[0]);
+    }
+
+    [Fact]
     public void Incoming_invalid_json_returns_failure()
     {
         var mapper = new RuntimeProtocolMapper();

@@ -86,6 +86,10 @@ pub enum HostCommand {
         namespace: String,
         key: String,
     },
+    TextGetCanonical {
+        namespace: String,
+        key: String,
+    },
     ListPush {
         namespace: String,
         key: String,

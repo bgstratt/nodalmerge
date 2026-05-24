@@ -1,0 +1,133 @@
+name: core-text-projection
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/core-text-projection.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/core-text-projection.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-tests-projection-enabled:
+    name: core tests (projection enabled)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run activesync-core tests (default features)
+        run: cargo test -p activesync-core
+
+      - name: Emit large-doc acceptance metrics
+        env:
+          ACTIVESYNC_TEXT_LARGE_DOC_METRICS_PATH: core-text-large-doc-metrics.json
+          ACTIVESYNC_TEXT_LARGE_DOC_MAX_FULL_REBUILDS: "16"
+          ACTIVESYNC_TEXT_LARGE_DOC_MAX_CAPACITY_RATIO: "5.0"
+          ACTIVESYNC_TEXT_LARGE_DOC_MAX_DURATION_MS: "20000"
+        run: cargo test -p activesync-core large_doc_windowed_reads_and_allocation_behavior -- --nocapture
+
+      - name: Upload large-doc acceptance metrics artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-text-large-doc-metrics
+          path: core-text-large-doc-metrics.json
+          if-no-files-found: error
+
+  core-tests-projection-disabled:
+    name: core tests (projection disabled)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run activesync-core tests (no default features)
+        run: cargo test -p activesync-core --no-default-features
+
+  core-parity-profile:
+    name: core parity profile
+    runs-on: ubuntu-latest
+    env:
+      ACTIVESYNC_TEXT_TRACE_MAX_OPS: "2000"
+      ACTIVESYNC_TEXT_TRACE_PROJECTION_MODE: parity
+      ACTIVESYNC_TEXT_TRACE_PARITY_SAMPLE_EVERY: "1"
+      ACTIVESYNC_TEXT_TRACE_RANGE_LEN: "256"
+      ACTIVESYNC_TEXT_TRACE_RANGE_STRIDE: "512"
+      ACTIVESYNC_TEXT_TRACE_RANGE_WINDOWS: "8"
+      ACTIVESYNC_PARITY_SOAK_RUNS: "20"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run deterministic parity soak gate
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 "${ACTIVESYNC_PARITY_SOAK_RUNS}"); do
+            echo "[parity-soak] iteration ${i}/${ACTIVESYNC_PARITY_SOAK_RUNS}"
+            cargo test -p activesync-core text_projection_parity_deterministic_corpus_has_zero_mismatches -- --exact --nocapture
+          done
+
+      - name: Build parity benchmark profile
+        run: cargo bench -p activesync-core --bench text_trace_rustcode --no-run
+
+  core-cursor-mapping-roi:
+    name: core cursor mapping ROI gate
+    runs-on: ubuntu-latest
+    env:
+      ACTIVESYNC_TEXT_TRACE_MAX_OPS: "2000"
+      ACTIVESYNC_TEXT_TRACE_PROJECTION_MODE: enabled
+      ACTIVESYNC_TEXT_TRACE_RANGE_LEN: "256"
+      ACTIVESYNC_TEXT_TRACE_RANGE_STRIDE: "512"
+      ACTIVESYNC_TEXT_TRACE_RANGE_WINDOWS: "8"
+      ACTIVESYNC_CURSOR_MAPPING_MAX_MEDIAN_NS: "50000"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run cursor mapping benchmark probe
+        run: cargo bench -p activesync-core --bench text_trace_rustcode -- text_trace_rustcode_cursor_mapping_unsigned_enabled --sample-size 10 --measurement-time 1 --warm-up-time 1
+
+      - name: Enforce cursor mapping ROI gate
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          p = Path("target/criterion/text_trace_rustcode_cursor_mapping_unsigned_enabled/new/estimates.json")
+          if not p.exists():
+              raise SystemExit(f"Missing criterion estimates file: {p}")
+
+          data = json.loads(p.read_text(encoding="utf-8"))
+          median_ns = float(data["median"]["point_estimate"])
+          max_ns = float(os.environ.get("ACTIVESYNC_CURSOR_MAPPING_MAX_MEDIAN_NS", "50000"))
+
+          print(f"cursor_mapping_median_ns={median_ns:.2f}, threshold_ns={max_ns:.2f}")
+          if median_ns > max_ns:
+              raise SystemExit(
+                  f"Cursor mapping ROI gate failed: median {median_ns:.2f}ns exceeds {max_ns:.2f}ns"
+              )
+          PY

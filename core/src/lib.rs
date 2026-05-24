@@ -16,6 +16,7 @@ pub mod policy;
 pub mod replay;
 pub mod storage;
 pub mod text;
+pub mod text_range;
 pub mod token;
 
 pub use crypto::{derive_room_key, encrypt_ops, decrypt_ops,
@@ -25,6 +26,11 @@ pub use crypto::{derive_room_key, encrypt_ops, decrypt_ops,
 pub use graph::StateGraph;
 pub use graph::TickConfig;
 pub use graph::BatchResult;
+pub use graph::TextRuntimeCounters;
+pub use graph::TextApplyRuntimeCounters;
+pub use graph::TextRuntimeTemperature;
+pub use graph::TextRuntimeTemperatureThresholds;
+pub use graph::TextProjectionResidencyPolicy;
 pub use graph::{LAMPORT_SLACK, WALL_SKEW_MAX_MS};
 pub use frontier::Frontier;
 pub use capabilities::SyncCapabilities;
@@ -35,6 +41,16 @@ pub use op::{Op, MapOp, TextOp, ListOp, ItemId, OpId, Transaction};
 pub use list::{FracIdx, REBALANCE_THRESHOLD, between, before, after, first, resolve_list_seq};
 pub use hash::Hash;
 pub use error::SyncError;
+pub use text::{TextProjectionMode, TextParityMismatch, TextProjectionDebugStats};
+pub use text_range::{
+    TextRangeAnchor,
+    TextRangeOp,
+    LoweredTextEdit,
+    TextCharId,
+    derive_text_char_id,
+    lower_text_range_op,
+    materialize_lowered_edits,
+};
 pub use policy::{Policy, PolicyRule, PolicyDefault};
 pub use compaction::{compact, compact_with_policy_timeline,
                      compact_incremental, compact_incremental_with_policy_timeline,

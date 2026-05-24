@@ -797,13 +797,13 @@ impl TextProjection {
             return;
         }
         self.insert_ops_applied = self.insert_ops_applied.saturating_add(1);
-        let can_fast_append = self.can_fast_append(after);
+        let after_compact = after.map(|parent| self.compact_id_for(parent));
+        let can_fast_append = self.can_fast_append(after_compact);
         let tombstoned_at_birth = self.pending_deletes.remove(&compact_id);
         self.entries.insert(compact_id, ProjectionEntry { ch });
         if tombstoned_at_birth {
             self.tombstones.mark_deleted(compact_id);
         }
-        let after_compact = after.map(|parent| self.compact_id_for(parent));
         self.add_child_edge(after_compact, compact_id);
 
         if tombstoned_at_birth {
@@ -840,18 +840,18 @@ impl TextProjection {
         }
     }
 
-    fn can_fast_append(&self, after: Option<OpId>) -> bool {
-        match after {
+    fn can_fast_append(&self, after_compact: Option<CompactId>) -> bool {
+        match after_compact {
             None => self.visible_ids.is_empty() && self.root_children.is_empty(),
-            Some(parent) => {
-                let Some(tail_id) = self.visible_ids.last().and_then(|cid| cid.to_op_id(&self.actor_table)) else {
+            Some(parent_cid) => {
+                let Some(tail_cid) = self.visible_ids.last().copied() else {
                     return false;
                 };
-                if tail_id != parent {
+                if tail_cid != parent_cid {
                     return false;
                 }
-                self.compact_id_existing(parent)
-                    .and_then(|cid| self.children.get(&cid))
+                self.children
+                    .get(&parent_cid)
                     .is_none_or(Vec::is_empty)
             }
         }

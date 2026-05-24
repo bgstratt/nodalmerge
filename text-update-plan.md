@@ -993,6 +993,71 @@ Phase 5 evidence (in-progress):
   - Re-verification interpretation:
     - replayability/rebuildability/identity-preservation guardrails are now explicitly exercised and green in addition to canonical convergence checks.
     - physical densification remains constrained to lossless, replay-reversible representation changes.
+- Rapid-typing split benchmark evidence (Option C, 2026-05-24):
+  - Benchmark changes in `core/benches/text_write_path.rs`:
+    - retained existing mixed case: `append_single_char` (apply stream + one final read)
+    - added write-only case: `append_single_char_apply_only`
+    - added interactive case: `append_single_char_periodic_read` (read every `ACTIVESYNC_TEXT_WRITE_TYPING_READ_EVERY`, default `32`)
+  - Profile used for split run:
+    - `ACTIVESYNC_TEXT_WRITE_TYPING_OPS=2000`
+    - `ACTIVESYNC_TEXT_WRITE_TYPING_READ_EVERY=32`
+    - Criterion flags: `--sample-size 10 --measurement-time 1 --warm-up-time 1`
+  - Criterion median snapshot (`new/estimates.json`):
+    - mixed final-read case:
+      - enabled `4.225 ms`
+      - disabled `5.066 ms`
+    - apply-only case:
+      - enabled `4.145 ms`
+      - disabled `4.242 ms` (near parity)
+    - periodic-read case (every 32 ops):
+      - enabled `3.923 ms`
+      - disabled `29.724 ms`
+  - Interpretation:
+    - write-only rapid typing is effectively near-parity between modes in this profile.
+    - as soon as reads are interleaved at realistic cadence, enabled remains materially lower latency than disabled.
+    - this split confirms the rapid-typing anomaly is largely workload-shape amortization (deferred disabled cost) rather than a broad enabled write-path regression.
+- Rapid-typing low-risk optimization evidence (Option B slice 1, 2026-05-24):
+  - Code change in `core/src/text.rs`:
+    - optimized fast-append eligibility check to use compact-id comparisons (`CompactId`) instead of repeated `OpId` conversion/lookups in `apply_insert`/`can_fast_append` hot path.
+    - preserved ordering/tombstone/rebuild semantics; no behavior-contract changes.
+  - Correctness validation:
+    - `cargo test -p activesync-core text_projection_` => pass (22 passed, 0 failed)
+  - Re-benchmark method:
+    - isolated per-case runs (one benchmark id per process) to avoid group-order and parallel contention noise.
+    - knobs: `ACTIVESYNC_TEXT_WRITE_TYPING_OPS=2000`, `ACTIVESYNC_TEXT_WRITE_TYPING_READ_EVERY=32`
+    - flags: `--sample-size 10 --measurement-time 1 --warm-up-time 1`
+  - Criterion median snapshot (`new/estimates.json`, isolated runs):
+    - `append_single_char_apply_only`:
+      - enabled `3.955 ms` (was `4.145 ms` in Option C split baseline)
+      - disabled `3.990 ms` (was `4.242 ms`)
+    - `append_single_char_periodic_read`:
+      - enabled `3.957 ms` (was `3.923 ms`, same latency class)
+      - disabled `29.676 ms` (was `29.724 ms`, same latency class)
+  - Interpretation:
+    - enabled apply-only path improved directionally in this profile while preserving periodic-read behavior.
+    - enabled retains strong advantage under periodic reads (orders of magnitude class separation maintained vs disabled).
+    - this low-risk slice is safe to keep; additional write-path gains likely require deeper changes than fast-append eligibility checks alone.
+- Rapid-typing stable-profile repetition pass (2026-05-24, 3x isolated repetitions):
+  - Objective:
+    - satisfy the evidence-quality rule (repeated directional stability) before closing this optimization pass.
+  - Method:
+    - repeated each split case in isolated process runs (no parallel benchmark contention):
+      - `append_single_char_apply_only`
+      - `append_single_char_periodic_read`
+    - modes: enabled + disabled
+    - knobs: `ACTIVESYNC_TEXT_WRITE_TYPING_OPS=2000`, `ACTIVESYNC_TEXT_WRITE_TYPING_READ_EVERY=32`
+    - Criterion flags: `--sample-size 20 --measurement-time 2 --warm-up-time 1`
+  - Repetition medians (ms):
+    - apply-only:
+      - enabled: `4.162`, `4.053`, `4.110` (avg `4.108`)
+      - disabled: `3.971`, `4.072`, `4.389` (avg `4.144`)
+    - periodic-read:
+      - enabled: `4.147`, `4.131`, `4.169` (avg `4.149`)
+      - disabled: `30.225`, `29.099`, `29.574` (avg `29.633`)
+  - Repetition interpretation:
+    - apply-only remains near-parity class with a slight enabled average advantage in this pass.
+    - periodic-read remains consistently and materially faster in enabled mode (~7x class delta).
+    - optimization pass is considered stable enough to keep and defer deeper write-path work.
 - Run-split disabled-profile practicality note (2026-05-23):
   - High-churn disabled run (`ACTIVESYNC_TEXT_TRACE_RUN_SPLIT_BASE_LEN=4096`, `ACTIVESYNC_TEXT_TRACE_RUN_SPLIT_CHURN_STEPS=1000`) is operationally expensive for smoke profiling:
     - `text_trace_rustcode_read_only_range_run_split_unsigned_disabled`: `18.515 s` to `24.632 s`

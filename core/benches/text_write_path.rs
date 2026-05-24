@@ -125,6 +125,11 @@ fn bench_text_write_path(c: &mut Criterion) {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(2000);
+    let typing_read_every = std::env::var("ACTIVESYNC_TEXT_WRITE_TYPING_READ_EVERY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(32);
     let paste_bursts = std::env::var("ACTIVESYNC_TEXT_WRITE_PASTE_BURSTS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -377,6 +382,64 @@ fn bench_text_write_path(c: &mut Criterion) {
                         },
                     );
                     after = Some(inserted);
+                }
+
+                black_box(graph.resolve_text_range(TEXT_KEY, 0, 64).len());
+            });
+        });
+        group.bench_function("append_single_char_apply_only", |b| {
+            b.iter(|| {
+                let mut graph = StateGraph::new();
+                graph.set_text_projection_mode(projection_mode);
+                let mut lamport = 0u64;
+                let mut parents: Vec<Hash> = Vec::new();
+                let mut after: Option<OpId> = None;
+
+                for i in 0..typing_ops {
+                    let ch = (b'a' + (i % 26) as u8) as char;
+                    let inserted = apply_unsigned_text_op(
+                        &mut graph,
+                        &mut lamport,
+                        &mut parents,
+                        REMOTE_AUTHOR_A,
+                        TextOp::Insert {
+                            key: TEXT_KEY.to_string(),
+                            after,
+                            ch,
+                        },
+                    );
+                    after = Some(inserted);
+                }
+
+                black_box(graph.lamport());
+            });
+        });
+        group.bench_function("append_single_char_periodic_read", |b| {
+            b.iter(|| {
+                let mut graph = StateGraph::new();
+                graph.set_text_projection_mode(projection_mode);
+                let mut lamport = 0u64;
+                let mut parents: Vec<Hash> = Vec::new();
+                let mut after: Option<OpId> = None;
+
+                for i in 0..typing_ops {
+                    let ch = (b'a' + (i % 26) as u8) as char;
+                    let inserted = apply_unsigned_text_op(
+                        &mut graph,
+                        &mut lamport,
+                        &mut parents,
+                        REMOTE_AUTHOR_A,
+                        TextOp::Insert {
+                            key: TEXT_KEY.to_string(),
+                            after,
+                            ch,
+                        },
+                    );
+                    after = Some(inserted);
+
+                    if (i + 1) % typing_read_every == 0 {
+                        black_box(graph.resolve_text_range(TEXT_KEY, 0, 64).len());
+                    }
                 }
 
                 black_box(graph.resolve_text_range(TEXT_KEY, 0, 64).len());

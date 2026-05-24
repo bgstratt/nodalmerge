@@ -207,7 +207,20 @@ try {
     $hostArgs += $runtimeArgs
 
     Write-Host "Starting Host with delegated blob profile..."
-    $process = Start-Process dotnet -ArgumentList $hostArgs -NoNewWindow -PassThru -Env $hostEnv
+    $previousHostEnv = @{}
+    foreach ($entry in $hostEnv.GetEnumerator()) {
+        $previousHostEnv[$entry.Key] = [System.Environment]::GetEnvironmentVariable($entry.Key, [System.EnvironmentVariableTarget]::Process)
+        [System.Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, [System.EnvironmentVariableTarget]::Process)
+    }
+
+    try {
+        $process = Start-Process dotnet -ArgumentList $hostArgs -NoNewWindow -PassThru
+    }
+    finally {
+        foreach ($entry in $previousHostEnv.GetEnumerator()) {
+            [System.Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, [System.EnvironmentVariableTarget]::Process)
+        }
+    }
 
     $start = Get-Date
     $ready = $false
@@ -312,7 +325,6 @@ finally {
 
     if ($delegateStub) {
         Write-Host "Stopping delegated stub..."
-        Receive-Job -Id $delegateStub.Id -Keep -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
         Stop-Job -Id $delegateStub.Id -ErrorAction SilentlyContinue
         Remove-Job -Id $delegateStub.Id -Force -ErrorAction SilentlyContinue
     }

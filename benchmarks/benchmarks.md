@@ -88,6 +88,18 @@ Command shape used for each row (with env var toggles):
 
 All rows below use `ACTIVESYNC_TEXT_TRACE_MAX_OPS=260000`.
 
+### Environment comparability note
+
+Treat cross-run numbers as comparable only when hardware/runtime are aligned.
+Recent reruns were performed on a laptop-class host:
+
+1. Manufacturer/Model: ASUSTeK COMPUTER INC. ProArt P16 H7606WP_H7606WP
+2. RAM: 33,413,771,264 bytes (~31.1 GiB)
+3. CPU: AMD Ryzen AI 9 HX 370 (12 cores / 24 logical)
+4. OS: Windows 11 Home (10.0.26200)
+
+If earlier numbers were collected on a different desktop host (for example higher RAM class, different sustained thermals/boost behavior, different power policy), use same-host reruns before attributing deltas to code changes.
+
 | Variant | signed | use_batch | batch_size | applied_ops | apply_ms | ops_per_sec |
 |---|---:|---:|---:|---:|---:|---:|
 | unsigned non-batch | 0 | 0 | n/a | 260000 | 335 | 774955 |

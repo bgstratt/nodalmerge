@@ -218,6 +218,14 @@
       </ol>
     </div>
     <div>
+      <label>Room ID</label>
+      <input type="text" id="room-id-in" placeholder="default" style="font-family:monospace;font-size:0.8rem" />
+    </div>
+    <div class="btn-row">
+      <button onclick="setRoomId()" style="background:#2563eb">Use Room</button>
+      <button onclick="clearRoomId()" style="background:#475569">Reset Room</button>
+    </div>
+    <div>
       <label>Room seed (32 bytes hex)</label>
       <input type="text" id="room-seed-in" placeholder="(empty = open room)" style="font-family:monospace;font-size:0.75rem" />
     </div>
@@ -352,7 +360,8 @@
 
 <p id="status">Loading WASM…</p>
 
-<script type="module" src="./demo.js?v=7"></script>
+<script src="/__activesync_config.js"></script>
+        <script type="module" src="./demo.js?v=9"></script>
 </body>
 </html>
 

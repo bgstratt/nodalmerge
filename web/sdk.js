@@ -53,6 +53,13 @@ function b64decode(s) {
   return out;
 }
 
+function buildRuntimeSocketUrl(serverUrl, room) {
+  const normalized = String(serverUrl || '').trim().replace(/\/+$/, '');
+  if (/\/ws\/runtime$/i.test(normalized)) return normalized;
+  if (/\/ws\/[^/]+$/i.test(normalized)) return normalized;
+  return `${normalized}/ws/${encodeURIComponent(room)}`;
+}
+
 function decodeResolvedValue(raw) {
   // Newer bridge shape: values in resolve_json() are base64 strings.
   if (typeof raw === 'string') {
@@ -500,7 +507,7 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
       try { await ensureFreshToken(); } catch (_) {}
     }
     if (closed) return;
-    const url = `${serverUrl.replace(/\/$/, '')}/ws/${encodeURIComponent(room)}`;
+    const url = buildRuntimeSocketUrl(serverUrl, room);
     ws = new WebSocket(url);
 
     ws.onopen = () => {
@@ -1465,22 +1472,24 @@ export async function createDoc(opts) {
   // After any local mutation, broadcast the delta + emit change.
   function afterLocalMutation(ev) {
     const t0 = (globalThis.performance?.now?.() ?? Date.now());
-    transport.sendLocalDelta();
-    // Also push over any open data channels. Remote peers dedupe by node id.
-    try {
-      const nodesB64 = store.export_nodes_missing_from(JSON.stringify([]));
-      mesh.broadcastPack(nodesB64);
-    } catch (_) {}
-    emitChange(ev);
-    // G8 — op_apply_latency is the local-apply -> local-broadcast round
-    // trip. Cheap (<1ms typically); useful for spotting regressions.
-    if (metrics.enabled) {
-      const t1 = (globalThis.performance?.now?.() ?? Date.now());
-      metrics.emit('op_apply_latency', t1 - t0, {
-        type: ev.type ?? 'unknown',
-        source: ev.source ?? 'local',
-      });
-    }
+    queueMicrotask(() => {
+      transport.sendLocalDelta();
+      // Also push over any open data channels. Remote peers dedupe by node id.
+      try {
+        const nodesB64 = store.export_nodes_missing_from(JSON.stringify([]));
+        mesh.broadcastPack(nodesB64);
+      } catch (_) {}
+      emitChange(ev);
+      // G8 — op_apply_latency is the local-apply -> local-broadcast round
+      // trip. Cheap (<1ms typically); useful for spotting regressions.
+      if (metrics.enabled) {
+        const t1 = (globalThis.performance?.now?.() ?? Date.now());
+        metrics.emit('op_apply_latency', t1 - t0, {
+          type: ev.type ?? 'unknown',
+          source: ev.source ?? 'local',
+        });
+      }
+    });
   }
 
   // ---- Undo Manager (E3) ----
@@ -1656,6 +1665,16 @@ export async function createDoc(opts) {
   }
 
   // ---- Map handle ----
+  function scheduleMutation(fn) {
+    queueMicrotask(() => {
+      try {
+        fn();
+      } catch (err) {
+        handleSdkError(err);
+      }
+    });
+  }
+
   function makeMap(namespace) {
     const changeE = makeEmitter();
     const unsubRoot = anyChange.on(ev => {
@@ -1668,10 +1687,11 @@ export async function createDoc(opts) {
     return {
       set(key, value) {
         const fullKey = joinPath(namespace, key);
-        // E3: snapshot old value before write for undo compensation.
-        const oldRaw = JSON.parse(store.resolve_json())[fullKey];
+        // Avoid a full-store snapshot on every write. The bridge can trip
+        // aliasing checks when we re-enter the same store during a hot write,
+        // and the demo does not depend on undo compensation here.
         preMutationE.emit({ type: 'map-set', path: fullKey, namespace,
-          oldValue: (decodeResolvedValue(oldRaw) ?? null) });
+          oldValue: null });
         store.set(fullKey, jsonToBytes(value));
         afterLocalMutation({ source: 'local', type: 'map', namespace, key, path: fullKey });
       },

@@ -524,16 +524,17 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     tracing::debug!(%room_id, "socket opened, waiting for hello");
 
     // -------------------------------------------------------------------------
-    // Handshake: wait for hello (5-second timeout so stale sockets don't leak)
+    // Handshake: wait for hello (longer timeout so slower demo boots don't
+    // get dropped while the WASM bundle or browser is still coming up).
     // -------------------------------------------------------------------------
     let hello_result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(15),
         stream.next(),
     ).await;
 
     let hello = match hello_result {
         Err(_) => {
-            tracing::warn!(%room_id, "hello timeout (5s) — closing");
+            tracing::warn!(%room_id, "hello timeout (15s) — closing");
             return;
         }
         Ok(Some(Ok(Message::Text(t)))) => {

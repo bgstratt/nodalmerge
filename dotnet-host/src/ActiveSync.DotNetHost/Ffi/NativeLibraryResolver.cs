@@ -81,6 +81,27 @@ public static class NativeLibraryResolver
         // Fallback for standalone crate target layout.
         yield return Path.Combine(cwd, "host-ffi", "target", "debug", fileName);
         yield return Path.Combine(cwd, "host-ffi", "target", "release", fileName);
+
+        // Common relative paths when running from dotnet-host/src/*.
+        yield return Path.Combine(cwd, "..", "..", "target", "debug", fileName);
+        yield return Path.Combine(cwd, "..", "..", "target", "release", fileName);
+        yield return Path.Combine(cwd, "..", "..", "..", "target", "debug", fileName);
+        yield return Path.Combine(cwd, "..", "..", "..", "target", "release", fileName);
+        yield return Path.Combine(cwd, "..", "..", "..", "..", "target", "debug", fileName);
+        yield return Path.Combine(cwd, "..", "..", "..", "..", "target", "release", fileName);
+
+        // Sibling workspace fallback for multi-repo local dev.
+        foreach (var siblingRepoName in new[] { "activeSync", "activesync" })
+        {
+            yield return Path.Combine(cwd, "..", siblingRepoName, "target", "debug", fileName);
+            yield return Path.Combine(cwd, "..", siblingRepoName, "target", "release", fileName);
+            yield return Path.Combine(cwd, "..", "..", siblingRepoName, "target", "debug", fileName);
+            yield return Path.Combine(cwd, "..", "..", siblingRepoName, "target", "release", fileName);
+            yield return Path.Combine(cwd, "..", "..", "..", siblingRepoName, "target", "debug", fileName);
+            yield return Path.Combine(cwd, "..", "..", "..", siblingRepoName, "target", "release", fileName);
+            yield return Path.Combine(cwd, "..", "..", "..", "..", siblingRepoName, "target", "debug", fileName);
+            yield return Path.Combine(cwd, "..", "..", "..", "..", siblingRepoName, "target", "release", fileName);
+        }
     }
 
     private static string GetPlatformLibraryFileName()

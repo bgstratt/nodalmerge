@@ -15,6 +15,8 @@ Run from repo root:
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -34,6 +36,30 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
         super().end_headers()
+
+    def do_GET(self) -> None:  # noqa: D401 - stdlib override
+        if self.path.startswith("/__activesync_config.js"):
+            env_server = (
+                os.environ.get("ACTIVESYNC_SERVER_URL")
+                or os.environ.get("ACTIVESYNC_DEMO_SERVER_URL")
+                or ""
+            ).strip()
+            payload = {
+                "serverUrl": env_server,
+            }
+            body = (
+                "window.ACTIVESYNC_CONFIG = "
+                + json.dumps(payload, separators=(",", ":"))
+                + ";\n"
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        super().do_GET()
 
 
 def main() -> None:

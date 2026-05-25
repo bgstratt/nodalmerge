@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, BTreeMap};
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(feature = "text_projection")]
+#[cfg(all(feature = "text_projection", not(target_arch = "wasm32")))]
 use std::time::Instant;
 use crate::{
     compaction::is_snapshot_node,
@@ -913,6 +913,7 @@ impl<N: NodeStore> StateGraph<N> {
 
     #[cfg(feature = "text_projection")]
     fn update_text_projection_from_node(&mut self, node: &SyncNode) {
+        #[cfg(not(target_arch = "wasm32"))]
         let started = Instant::now();
         let mut touched: HashSet<String> = HashSet::new();
         for op in &node.transaction.ops {
@@ -957,7 +958,10 @@ impl<N: NodeStore> StateGraph<N> {
         }
         self.enforce_text_projection_residency_policy();
 
+        #[cfg(not(target_arch = "wasm32"))]
         let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        #[cfg(target_arch = "wasm32")]
+        let elapsed_ns = 0;
         self.text_apply_projection_update_calls
             .fetch_add(1, Ordering::Relaxed);
         self.text_apply_projection_update_ns
@@ -973,6 +977,7 @@ impl<N: NodeStore> StateGraph<N> {
             return;
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         let started = Instant::now();
         let mut touched: HashSet<String> = HashSet::new();
         let mut touched_node_count = 0u64;
@@ -1067,7 +1072,10 @@ impl<N: NodeStore> StateGraph<N> {
         }
         self.enforce_text_projection_residency_policy();
 
+        #[cfg(not(target_arch = "wasm32"))]
         let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        #[cfg(target_arch = "wasm32")]
+        let elapsed_ns = 0;
         self.text_apply_projection_update_calls
             .fetch_add(touched_node_count, Ordering::Relaxed);
         self.text_apply_projection_update_ns

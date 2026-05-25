@@ -6,7 +6,8 @@
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
-    "test": "node --test index.test.js"
+    "test": "node --test index.test.js",
+    "smoke:demo": "npm --prefix ../web/smoke run smoke"
   },
   "files": [
     "index.js",

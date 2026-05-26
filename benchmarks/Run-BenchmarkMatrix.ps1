@@ -43,6 +43,8 @@ function Resolve-FfiDll {
     }
 
     $candidates = @(
+        ".\target\debug\nodalmerge_host_ffi.dll",
+        ".\target\release\nodalmerge_host_ffi.dll",
         ".\target\debug\activesync_host_ffi.dll",
         ".\target\release\activesync_host_ffi.dll"
     )
@@ -54,7 +56,7 @@ function Resolve-FfiDll {
         }
     }
 
-    throw "NODALMERGE_HOST_FFI_DLL/ACTIVESYNC_HOST_FFI_DLL could not be resolved. Build host-ffi first (cargo build -p activesync-host-ffi) or pass -FfiDllPath."
+    throw "NODALMERGE_HOST_FFI_DLL could not be resolved. Build host-ffi first (cargo build -p activesync-host-ffi) or pass -FfiDllPath."
 }
 
 function Merge-Env {
@@ -103,7 +105,6 @@ function Start-RowTargets {
     $dotnetEnvBase = @{
         ASPNETCORE_URLS = $DotnetUrl
         NODALMERGE_HOST_FFI_DLL = $FfiDll
-        ACTIVESYNC_HOST_FFI_DLL = $FfiDll
     }
 
     $rustEnv = Merge-Env -Base $rustEnvBase -Overlay $RustEnv

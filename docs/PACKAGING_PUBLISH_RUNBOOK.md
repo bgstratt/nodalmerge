@@ -1,4 +1,4 @@
-# ActiveSync Packaging Publish Runbook
+# NodalMerge Packaging Publish Runbook
 
 Status: Ready for execution
 Updated: 2026-05-20
@@ -66,9 +66,13 @@ Create or update a `NuGet.config` in the consuming app:
 
 Then add package references in the consumer project:
 
-1. `ActiveSync.Host.Abstractions` version `0.1.0-local`
-2. `ActiveSync.Host.Composition` version `0.1.0-local`
+1. `NodalMerge.Host.Abstractions` version `0.1.0-local` (primary)
+2. `NodalMerge.Host.Composition` version `0.1.0-local` (primary)
 3. optional native RID packages when needed by deployment mode
+
+Compatibility note:
+
+1. Legacy `ActiveSync.*` package IDs remain available during migration window.
 
 ### Step C: Consume Rust crates in another app without workspace project refs
 
@@ -82,12 +86,16 @@ pwsh -File ./expand-local-crates.ps1
 
 ```toml
 [dependencies]
-activesync-core = { path = "C:/path/to/nodalmerge/artifacts/package-local/crates/unpacked/activesync-core-0.1.0" }
-activesync-host-core = { path = "C:/path/to/nodalmerge/artifacts/package-local/crates/unpacked/activesync-host-core-0.1.0" }
-activesync-host-ffi = { path = "C:/path/to/nodalmerge/artifacts/package-local/crates/unpacked/activesync-host-ffi-0.1.0" }
+nodalmerge-core = { path = "C:/path/to/nodalmerge/artifacts/package-local/crates/unpacked/nodalmerge-core-0.1.0" }
+nodalmerge-host-core = { path = "C:/path/to/nodalmerge/artifacts/package-local/crates/unpacked/nodalmerge-host-core-0.1.0" }
+nodalmerge-host-ffi = { path = "C:/path/to/nodalmerge/artifacts/package-local/crates/unpacked/nodalmerge-host-ffi-0.1.0" }
 ```
 
 This keeps the consumer independent from workspace project references while still using package snapshots generated from this repo.
+
+Compatibility note:
+
+1. Legacy `activesync-*` crate paths remain supported during migration window.
 
 ### Step D: Optional npm local consume
 
@@ -122,6 +130,13 @@ Required outcome:
 ## 2. NuGet Publish Flow
 
 Primary package IDs:
+
+1. `NodalMerge.Host.Abstractions` (primary)
+2. `NodalMerge.Host.Composition` (primary)
+3. `NodalMerge.DotNetHost.Native.win-x64` (primary)
+4. `NodalMerge.DotNetHost.Native.linux-x64` (primary)
+
+Compatibility package IDs:
 
 1. `ActiveSync.Host.Abstractions`
 2. `ActiveSync.Host.Composition`
@@ -217,15 +232,26 @@ Publish order (dependency-safe):
 3. `activesync-host-ffi`
 4. `activesync-host-axum`
 5. `activesync-bridge`
+6. `activesync-s3-blobs`
 6. `nodalmerge-core` (wrapper)
+7. `nodalmerge-gc` (wrapper)
 7. `nodalmerge-host-core` (wrapper)
+8. `nodalmerge-host-axum` (wrapper)
 8. `nodalmerge-host-ffi` (wrapper)
+9. `nodalmerge-server` (wrapper)
+10. `nodalmerge-jwt-bridge` (wrapper)
+11. `nodalmerge-s3-blobs` (wrapper)
 
 NodalMerge-first command examples after legacy base crates are available:
 
 1. `cargo publish -p nodalmerge-core --dry-run`
-2. `cargo publish -p nodalmerge-host-core --dry-run`
-3. `cargo publish -p nodalmerge-host-ffi --dry-run`
+2. `cargo publish -p nodalmerge-gc --dry-run`
+3. `cargo publish -p nodalmerge-host-core --dry-run`
+4. `cargo publish -p nodalmerge-host-axum --dry-run`
+5. `cargo publish -p nodalmerge-host-ffi --dry-run`
+6. `cargo publish -p nodalmerge-server --dry-run`
+7. `cargo publish -p nodalmerge-jwt-bridge --dry-run`
+8. `cargo publish -p nodalmerge-s3-blobs --dry-run`
 
 Dry-run first for each crate:
 
@@ -249,6 +275,7 @@ After publishing `activesync-host-core`, run:
 ```bash
 cargo publish -p activesync-host-ffi --dry-run
 cargo publish -p activesync-host-axum --dry-run
+cargo publish -p activesync-s3-blobs --dry-run
 ```
 
 After `activesync-core` is available on crates.io, run:
@@ -265,9 +292,15 @@ cargo publish -p activesync-host-core
 cargo publish -p activesync-host-ffi
 cargo publish -p activesync-host-axum
 cargo publish -p activesync-bridge
+cargo publish -p activesync-s3-blobs
 cargo publish -p nodalmerge-core
+cargo publish -p nodalmerge-gc
 cargo publish -p nodalmerge-host-core
+cargo publish -p nodalmerge-host-axum
 cargo publish -p nodalmerge-host-ffi
+cargo publish -p nodalmerge-server
+cargo publish -p nodalmerge-jwt-bridge
+cargo publish -p nodalmerge-s3-blobs
 ```
 
 ## 5. Release Sign-Off Checklist

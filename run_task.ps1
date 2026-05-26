@@ -1,11 +1,22 @@
 try {
+    function Start-MongoContainer {
+        foreach ($name in @("nodalmerge-mongo", "activesync-mongo")) {
+            docker start $name *> $null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Using Mongo container: $name"
+                return
+            }
+        }
+        throw "Could not start Mongo container (tried nodalmerge-mongo, activesync-mongo)."
+    }
+
     Write-Host "Starting Docker container..."
-    docker start activesync-mongo
+    Start-MongoContainer
 
     $rustEnv = @{
         "AS_BIND_ADDR" = "127.0.0.1:7979"
         "MONGO_URI" = "mongodb://127.0.0.1:27017"
-        "MONGO_DATABASE" = "activesync_bench"
+        "MONGO_DATABASE" = "nodalmerge_bench"
     }
     Write-Host "Starting Rust server..."
     $rustJob = Start-Process cargo -ArgumentList "run -p activesync-dev-server --bin nodalmerge-dev-server" -Environment $rustEnv -PassThru -NoNewWindow
@@ -14,13 +25,9 @@ try {
         "ASPNETCORE_URLS" = "http://127.0.0.1:8787"
         "ASPNETCORE_ENVIRONMENT" = "Development"
         "NodalMerge__Providers__NodeStorage" = "Mongo"
-        "ActiveSync__Providers__NodeStorage" = "Mongo"
         "NodalMerge__Providers__BlobStorage" = "WsOnly"
-        "ActiveSync__Providers__BlobStorage" = "WsOnly"
         "NodalMerge__Storage__Mongo__ConnectionString" = "mongodb://127.0.0.1:27017"
-        "ActiveSync__Storage__Mongo__ConnectionString" = "mongodb://127.0.0.1:27017"
-        "NodalMerge__Storage__Mongo__DatabaseName" = "activesync_bench"
-        "ActiveSync__Storage__Mongo__DatabaseName" = "activesync_bench"
+        "NodalMerge__Storage__Mongo__DatabaseName" = "nodalmerge_bench"
     }
     Write-Host "Starting DotNet host..."
     $dotnetJob = Start-Process dotnet -ArgumentList "run --project nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj --no-launch-profile" -Environment $dotnetEnv -PassThru -NoNewWindow

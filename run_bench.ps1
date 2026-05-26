@@ -4,17 +4,29 @@ function Cleanup-Ports {
         if ($id) { Stop-Process -Id $id -Force }
     }
 }
+
+function Start-MongoContainer {
+    foreach ($name in @("nodalmerge-mongo", "activesync-mongo")) {
+        docker start $name *> $null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Using Mongo container: $name"
+            return
+        }
+    }
+    throw "Could not start Mongo container (tried nodalmerge-mongo, activesync-mongo)."
+}
+
 Cleanup-Ports
 New-Item -ItemType Directory -Force -Path ".\benchmarks\results\logs"
-docker start activesync-mongo
-$ffiPath = (Get-ChildItem -Recurse -Filter "activesync_host_ffi.dll" | Where-Object { $_.FullName -like "*target\debug*" } | Select-Object -First 1).FullName
-if (-not $ffiPath) { $ffiPath = (Get-ChildItem -Recurse -Filter "activesync_host_ffi.dll" | Where-Object { $_.FullName -like "*target\release*" } | Select-Object -First 1).FullName }
+Start-MongoContainer
+$ffiPath = (Get-ChildItem -Recurse -Filter "*host_ffi.dll" | Where-Object { $_.FullName -like "*target\debug*" } | Select-Object -First 1).FullName
+if (-not $ffiPath) { $ffiPath = (Get-ChildItem -Recurse -Filter "*host_ffi.dll" | Where-Object { $_.FullName -like "*target\release*" } | Select-Object -First 1).FullName }
 
-$env:AS_BIND_ADDR='127.0.0.1:7979'; $env:MONGO_URI='mongodb://127.0.0.1:27017'; $env:MONGO_DATABASE='activesync_bench'
+$env:AS_BIND_ADDR='127.0.0.1:7979'; $env:MONGO_URI='mongodb://127.0.0.1:27017'; $env:MONGO_DATABASE='nodalmerge_bench'
 $rP = Start-Process -FilePath "cargo" -ArgumentList "run -p activesync-dev-server --bin nodalmerge-dev-server" -NoNewWindow -PassThru -RedirectStandardOutput ".\benchmarks\results\logs\rust-integrated-mongo-clean.log" -RedirectStandardError ".\benchmarks\results\logs\rust-integrated-mongo-clean.err"
 
-$env:ASPNETCORE_URLS='http://127.0.0.1:8787'; $env:ASPNETCORE_ENVIRONMENT='Development'; $env:NodalMerge__Providers__NodeStorage='Mongo'; $env:ActiveSync__Providers__NodeStorage='Mongo'
-$env:NodalMerge__Providers__BlobStorage='WsOnly'; $env:ActiveSync__Providers__BlobStorage='WsOnly'; $env:NodalMerge__Storage__Mongo__ConnectionString='mongodb://127.0.0.1:27017'; $env:ActiveSync__Storage__Mongo__ConnectionString='mongodb://127.0.0.1:27017'; $env:NodalMerge__Storage__Mongo__DatabaseName='activesync_bench'; $env:ActiveSync__Storage__Mongo__DatabaseName='activesync_bench'; $env:NODALMERGE_HOST_FFI_DLL=$ffiPath; $env:ACTIVESYNC_HOST_FFI_DLL=$ffiPath
+$env:ASPNETCORE_URLS='http://127.0.0.1:8787'; $env:ASPNETCORE_ENVIRONMENT='Development'; $env:NodalMerge__Providers__NodeStorage='Mongo'
+$env:NodalMerge__Providers__BlobStorage='WsOnly'; $env:NodalMerge__Storage__Mongo__ConnectionString='mongodb://127.0.0.1:27017'; $env:NodalMerge__Storage__Mongo__DatabaseName='nodalmerge_bench'; $env:NODALMERGE_HOST_FFI_DLL=$ffiPath
 $dP = Start-Process -FilePath "dotnet" -ArgumentList "run --project nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj --no-launch-profile" -NoNewWindow -PassThru -RedirectStandardOutput ".\benchmarks\results\logs\dotnet-mongo-clean.log" -RedirectStandardError ".\benchmarks\results\logs\dotnet-mongo-clean.err"
 
 try {
@@ -36,7 +48,7 @@ try {
         node .\benchmarks\Run-SdkScenarioBenchmarks.mjs --targets rust-integrated-hosted-server,dotnet-host-runtime-alias --iterations 3 --peers 6 --mapOps $ops --listOps $ops --blobOps $ops --blobSizeBytes 1024 --warmupOps 4 --timeoutMs 45000 --opDelayMs 2 --transport ws-only --outputJsonPath ".\benchmarks\results\sdk-scenarios-peers6-ops$ops-integrated-vs-dotnet-mongo-clean.json"
     }
 
-    $md = "## ActiveSync Performance Sweep (Peers 6, Mongo Backend)`n`n"
+    $md = "## NodalMerge Performance Sweep (Peers 6, Mongo Backend)`n`n"
     foreach ($type in @('map', 'list', 'blob')) {
         $md += "### $($type.ToUpper()) Scenario`n| Ops | Rust Integrated avg ms | Rust Integrated ops/s | Dotnet Mongo avg ms | Dotnet Mongo ops/s |`n| --- | --- | --- | --- | --- |`n"
         foreach ($ops in @(6, 12, 30)) {

@@ -1,4 +1,4 @@
-# .NET Hosted Service Provider Migration Plan
+# .NET Hosted Service Provider Migration Plan (NodalMerge-first)
 
 Status: Draft for implementation planning
 Owner: Hosted runtime stream
@@ -11,7 +11,7 @@ Current phase: P2 (in progress)
 Completed so far:
 
 1. P0 complete:
-- `ActiveSync.Host.Abstractions` and `ActiveSync.Host.Composition` scaffolded and wired.
+- `NodalMerge.Host.Abstractions` and `NodalMerge.Host.Composition` scaffolded and wired.
 - Provider contracts and base options/validation in place.
 2. P1 complete:
 - Runtime host composed through provider abstractions.
@@ -34,8 +34,8 @@ Latest validation evidence:
 
 1. Focused provider suites green.
 2. Non-FFI regression suite green.
-3. Full FFI-enabled suite green when `ACTIVESYNC_HOST_FFI_DLL` is set.
-4. Live host run/connect verifier (`nodalmerge-host/verify.ps1`) confirms runtime startup, delegated `/sync/blob-url` presign resolution, and websocket `hello`/`noop-ack` flow under explicit SpeechSlate-shape blob profile args when `ACTIVESYNC_HOST_FFI_DLL` points to a built host-ffi DLL.
+3. Full FFI-enabled suite green when `NODALMERGE_HOST_FFI_DLL` is set (legacy `ACTIVESYNC_HOST_FFI_DLL` remains fallback).
+4. Live host run/connect verifier (`nodalmerge-host/verify.ps1`) confirms runtime startup, delegated `/sync/blob-url` presign resolution, and websocket `hello`/`noop-ack` flow under explicit SpeechSlate-shape blob profile args when `NODALMERGE_HOST_FFI_DLL` points to a built host-ffi DLL.
 
 Remaining P2 checklist items:
 
@@ -47,7 +47,7 @@ Next P3 checklist items:
 2. Execute SpeechSlate-shape delegated mode acceptance scenarios (`R19-SS-001`, `R19-SS-002`) and record direct vs proxy boundary notes. (completed via automated `speechslate-proxy`; `speechslate-direct` remains Blocked-External)
 3. Execute SpeechSlate-shape auth/policy acceptance scenario (`R19-SS-003`) and record proxy evidence. (completed via automated `speechslate-proxy`; `speechslate-direct` remains Blocked-External)
 4. Execute SpeechSlate-shape transport policy scenario (`R19-SS-004`) or capture deterministic proxy equivalent boundary evidence. (completed via automated `speechslate-proxy` WS-first + optional signaling relay; `speechslate-direct` remains Blocked-External)
-5. Keep direct-run verifier precondition explicit in runbooks (`ACTIVESYNC_HOST_FFI_DLL` set or local host-ffi build present) and continue capturing live delegated evidence on each provider/profile update.
+5. Keep direct-run verifier precondition explicit in runbooks (`NODALMERGE_HOST_FFI_DLL` set or local host-ffi build present) and continue capturing live delegated evidence on each provider/profile update.
 
 ## 1. Goals
 
@@ -107,29 +107,32 @@ Implication: your intuition is correct. We should add provider projects around s
 
 ## 4. Recommended Solution/Package Layout
 
+Compatibility note: legacy `ActiveSync.*` package IDs are preserved during migration,
+but this plan uses `NodalMerge.*` as the primary naming baseline.
+
 ## 4.1 Contracts and runtime
 
-1. ActiveSync.DotNetHost
+1. NodalMerge.DotNetHost
 - ASP.NET runtime host, websocket loops, mapping
 - depends only on abstractions + selected provider packages
-2. ActiveSync.Host.Abstractions
+2. NodalMerge.Host.Abstractions
 - contracts for node persistence, blob URL resolver, blob read/write, auth hooks
 - options and health-check interfaces
-3. ActiveSync.Host.Composition
+3. NodalMerge.Host.Composition
 - DI extension methods
 - provider binding from appsettings/env
 
 ## 4.2 Provider packages (small extenders)
 
-1. ActiveSync.Host.Persistence.InMemory
-2. ActiveSync.Host.Persistence.Sqlite
-3. ActiveSync.Host.Persistence.Mongo
-4. ActiveSync.Host.Persistence.Postgres
-5. ActiveSync.Host.Blobs.WsOnly
-6. ActiveSync.Host.Blobs.File
-7. ActiveSync.Host.Blobs.S3Direct
-8. ActiveSync.Host.Blobs.S3Delegated
-9. ActiveSync.Host.Auth.JwtBridge
+1. NodalMerge.Host.Persistence.InMemory
+2. NodalMerge.Host.Persistence.Sqlite
+3. NodalMerge.Host.Persistence.Mongo
+4. NodalMerge.Host.Persistence.Postgres
+5. NodalMerge.Host.Blobs.WsOnly
+6. NodalMerge.Host.Blobs.File
+7. NodalMerge.Host.Blobs.S3Direct
+8. NodalMerge.Host.Blobs.S3Delegated
+9. NodalMerge.Host.Auth.JwtBridge
 
 This matches your preference: small optional extenders with stable contracts and config-driven activation.
 
@@ -176,10 +179,14 @@ Required capabilities:
 
 Single host with provider selection:
 
-1. ActiveSync:Storage:Nodes:Provider = InMemory | Sqlite | Mongo | Postgres
-2. ActiveSync:Storage:Blobs:Provider = WsOnly | File | S3Direct | S3Delegated
-3. ActiveSync:Auth:Provider = Default | JwtBridge
+1. NodalMerge:Storage:Nodes:Provider = InMemory | Sqlite | Mongo | Postgres
+2. NodalMerge:Storage:Blobs:Provider = WsOnly | File | S3Direct | S3Delegated
+3. NodalMerge:Auth:Provider = Default | JwtBridge
 4. Provider-specific nested sections for connection strings, bucket/region, delegate endpoint, retries, TTLs.
+
+Compatibility note:
+
+1. Legacy `ActiveSync:*` config keys remain as fallback aliases during migration window.
 
 Startup behavior:
 
@@ -191,7 +198,7 @@ Startup behavior:
 
 ## Phase P0: Architecture freeze
 
-1. Freeze provider contracts in ActiveSync.Host.Abstractions.
+1. Freeze provider contracts in NodalMerge.Host.Abstractions.
 2. Freeze config schema and provider selection rules.
 3. Define compatibility policy for future provider additions.
 
@@ -202,7 +209,7 @@ Exit criteria:
 
 ## Phase P1: Runtime composition refactor
 
-1. Introduce ActiveSync.Host.Composition.
+1. Introduce NodalMerge.Host.Composition.
 2. Move current hardcoded behavior to abstraction-backed services.
 3. Keep behavior identical to today (in-memory + existing WS fallback).
 
@@ -277,7 +284,7 @@ Add provider-specific rows to row-19 evidence stream:
 
 ## 10. Recommended First Implementation Slice
 
-1. Create ActiveSync.Host.Abstractions and ActiveSync.Host.Composition.
+1. Create NodalMerge.Host.Abstractions and NodalMerge.Host.Composition.
 2. Refactor current runtime to depend on abstractions only.
 3. Add InMemory + Sqlite/File providers.
 4. Add one profile-driven sample appsettings for each mode.

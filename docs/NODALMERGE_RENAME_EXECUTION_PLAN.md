@@ -79,6 +79,11 @@ Targets:
 9. nodalmerge-postgres-store
 10. nodalmerge-dev-server
 
+Current status note:
+
+1. Additive wrapper crates now cover core/server/host/gc/jwt/s3 and node-store surfaces.
+2. `activesync-bridge` remains npm-first for wrapper identity because the Rust crate is `cdylib`-only.
+
 CLI target:
 
 1. nodalmerge (primary)
@@ -199,6 +204,7 @@ Minimum compatibility mechanisms to implement:
 1. Rust:
    - legacy crate wrappers or transitional re-export crates
    - legacy binary alias command that delegates to nodalmerge
+   - bridge crate caveat documented (`activesync-bridge` cdylib-only, npm wrapper path primary)
 2. .NET:
    - compatibility NuGet package ids that depend on new ids
    - dual key read for ActiveSync:* and NodalMerge:* config prefixes

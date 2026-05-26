@@ -84,14 +84,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for the server.
-RUN useradd --system --home /data --shell /usr/sbin/nologin activesync \
+RUN useradd --system --home /data --shell /usr/sbin/nologin nodalmerge \
     && mkdir -p /data \
-    && chown activesync:activesync /data
+    && chown nodalmerge:nodalmerge /data
 
 COPY --from=builder /src/target/release/activesync-server /usr/local/bin/activesync-server
-RUN ln -sf /usr/local/bin/activesync-server /usr/local/bin/nodalmerge-server
+RUN cp /usr/local/bin/activesync-server /usr/local/bin/nodalmerge-server \
+    && ln -sf /usr/local/bin/nodalmerge-server /usr/local/bin/activesync-server
 
-USER activesync
+USER nodalmerge
 WORKDIR /data
 VOLUME ["/data"]
 EXPOSE 7878

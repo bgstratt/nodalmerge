@@ -14,6 +14,21 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Resolve-DotnetHostProjectPath {
+    $candidates = @(
+        (Join-Path $PSScriptRoot "..\nodalmerge-host\src\NodalMerge.DotNetHost\NodalMerge.DotNetHost.csproj"),
+        (Join-Path $PSScriptRoot "..\nodalmerge-host\src\ActiveSync.DotNetHost\ActiveSync.DotNetHost.csproj")
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return [System.IO.Path]::GetFullPath($candidate)
+        }
+    }
+
+    throw "Unable to locate DotNet host project. Checked NodalMerge and ActiveSync project paths."
+}
+
 function Resolve-FfiDllPath {
     param([string]$Explicit)
 
@@ -64,6 +79,7 @@ try {
     }
 
     if ($StartDotnet) {
+        $dotnetHostProject = Resolve-DotnetHostProjectPath
         $ffiPath = Resolve-FfiDllPath -Explicit $FfiDllPath
         if (-not $ffiPath) {
             Write-Warning "No NODALMERGE_HOST_FFI_DLL found. Build host-ffi first: cargo build -p activesync-host-ffi"
@@ -75,7 +91,7 @@ try {
             $envMap["NODALMERGE_HOST_FFI_DLL"] = $ffiPath
         }
 
-        $proc = Start-Process dotnet -ArgumentList @("run", "--project", "nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj", "--no-launch-profile") -PassThru -NoNewWindow -Env $envMap
+        $proc = Start-Process dotnet -ArgumentList @("run", "--project", $dotnetHostProject, "--no-launch-profile") -PassThru -NoNewWindow -Env $envMap
         $started.Add([pscustomobject]@{ Name = "dotnet-host-runtime"; Process = $proc })
     }
 

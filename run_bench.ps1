@@ -16,6 +16,21 @@ function Start-MongoContainer {
     throw "Could not start Mongo container (tried nodalmerge-mongo, activesync-mongo)."
 }
 
+function Resolve-DotnetHostProjectPath {
+    $candidates = @(
+        "nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj",
+        "nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj"
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    throw "Unable to locate DotNet host project. Checked NodalMerge and ActiveSync project paths."
+}
+
 Cleanup-Ports
 New-Item -ItemType Directory -Force -Path ".\benchmarks\results\logs"
 Start-MongoContainer
@@ -25,9 +40,10 @@ if (-not $ffiPath) { $ffiPath = (Get-ChildItem -Recurse -Filter "*host_ffi.dll" 
 $env:AS_BIND_ADDR='127.0.0.1:7979'; $env:MONGO_URI='mongodb://127.0.0.1:27017'; $env:MONGO_DATABASE='nodalmerge_bench'
 $rP = Start-Process -FilePath "cargo" -ArgumentList "run -p activesync-dev-server --bin nodalmerge-dev-server" -NoNewWindow -PassThru -RedirectStandardOutput ".\benchmarks\results\logs\rust-integrated-mongo-clean.log" -RedirectStandardError ".\benchmarks\results\logs\rust-integrated-mongo-clean.err"
 
+$dotnetHostProject = Resolve-DotnetHostProjectPath
 $env:ASPNETCORE_URLS='http://127.0.0.1:8787'; $env:ASPNETCORE_ENVIRONMENT='Development'; $env:NodalMerge__Providers__NodeStorage='Mongo'
 $env:NodalMerge__Providers__BlobStorage='WsOnly'; $env:NodalMerge__Storage__Mongo__ConnectionString='mongodb://127.0.0.1:27017'; $env:NodalMerge__Storage__Mongo__DatabaseName='nodalmerge_bench'; $env:NODALMERGE_HOST_FFI_DLL=$ffiPath
-$dP = Start-Process -FilePath "dotnet" -ArgumentList "run --project nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj --no-launch-profile" -NoNewWindow -PassThru -RedirectStandardOutput ".\benchmarks\results\logs\dotnet-mongo-clean.log" -RedirectStandardError ".\benchmarks\results\logs\dotnet-mongo-clean.err"
+$dP = Start-Process -FilePath "dotnet" -ArgumentList "run --project $dotnetHostProject --no-launch-profile" -NoNewWindow -PassThru -RedirectStandardOutput ".\benchmarks\results\logs\dotnet-mongo-clean.log" -RedirectStandardError ".\benchmarks\results\logs\dotnet-mongo-clean.err"
 
 try {
     $r79=0; $r87=0; $s=Get-Date

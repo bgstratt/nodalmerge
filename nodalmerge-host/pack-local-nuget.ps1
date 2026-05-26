@@ -44,15 +44,15 @@ try {
     New-Item -ItemType Directory -Force -Path $resolvedOutput | Out-Null
 
     Write-Host "Building native runtime (release)..."
-    Invoke-Checked -Name "cargo build activesync-host-ffi" -Command {
+    Invoke-Checked -Name "cargo build host ffi runtime (activesync-host-ffi legacy crate id)" -Command {
         cargo build -p activesync-host-ffi --release
     }
 
     Write-Host "Packing managed packages to $resolvedOutput ..."
-    Invoke-Checked -Name "dotnet pack ActiveSync.Host.Abstractions" -Command {
+    Invoke-Checked -Name "dotnet pack ActiveSync.Host.Abstractions (legacy compat)" -Command {
         dotnet pack ./src/ActiveSync.Host.Abstractions/ActiveSync.Host.Abstractions.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
-    Invoke-Checked -Name "dotnet pack ActiveSync.Host.Composition" -Command {
+    Invoke-Checked -Name "dotnet pack ActiveSync.Host.Composition (legacy compat)" -Command {
         dotnet pack ./src/ActiveSync.Host.Composition/ActiveSync.Host.Composition.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
     Invoke-Checked -Name "dotnet pack NodalMerge.Host.Abstractions" -Command {
@@ -63,7 +63,7 @@ try {
     }
 
     Write-Host "Packing native runtime packages to $resolvedOutput ..."
-    Invoke-Checked -Name "dotnet pack ActiveSync.DotNetHost.Native.win-x64" -Command {
+    Invoke-Checked -Name "dotnet pack ActiveSync.DotNetHost.Native.win-x64 (legacy compat)" -Command {
         dotnet pack ./src/ActiveSync.DotNetHost.Native.win-x64/ActiveSync.DotNetHost.Native.win-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
     Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost.Native.win-x64" -Command {
@@ -84,7 +84,7 @@ try {
         }
     }
 
-    Invoke-Checked -Name "dotnet pack ActiveSync.DotNetHost.Native.linux-x64" -Command {
+    Invoke-Checked -Name "dotnet pack ActiveSync.DotNetHost.Native.linux-x64 (legacy compat)" -Command {
         dotnet pack ./src/ActiveSync.DotNetHost.Native.linux-x64/ActiveSync.DotNetHost.Native.linux-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
     Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost.Native.linux-x64" -Command {

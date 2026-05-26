@@ -10,6 +10,21 @@ try {
         throw "Could not start Mongo container (tried nodalmerge-mongo, activesync-mongo)."
     }
 
+    function Resolve-DotnetHostProjectPath {
+        $candidates = @(
+            "nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj",
+            "nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj"
+        )
+
+        foreach ($candidate in $candidates) {
+            if (Test-Path $candidate) {
+                return $candidate
+            }
+        }
+
+        throw "Unable to locate DotNet host project. Checked NodalMerge and ActiveSync project paths."
+    }
+
     Write-Host "Starting Docker container..."
     Start-MongoContainer
 
@@ -29,8 +44,9 @@ try {
         "NodalMerge__Storage__Mongo__ConnectionString" = "mongodb://127.0.0.1:27017"
         "NodalMerge__Storage__Mongo__DatabaseName" = "nodalmerge_bench"
     }
+    $dotnetHostProject = Resolve-DotnetHostProjectPath
     Write-Host "Starting DotNet host..."
-    $dotnetJob = Start-Process dotnet -ArgumentList "run --project nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj --no-launch-profile" -Environment $dotnetEnv -PassThru -NoNewWindow
+    $dotnetJob = Start-Process dotnet -ArgumentList "run --project $dotnetHostProject --no-launch-profile" -Environment $dotnetEnv -PassThru -NoNewWindow
 
     Write-Host "Waiting 10 seconds for servers to start..."
     Start-Sleep -Seconds 10

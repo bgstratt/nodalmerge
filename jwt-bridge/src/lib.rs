@@ -175,7 +175,7 @@ pub fn mint_room_token(cfg: &BridgeConfig, jwt: &str) -> Result<RoomToken, Bridg
     let data = decode::<BridgeClaims>(jwt, &cfg.verifier.key, &validation)?;
     let claims = data.claims;
 
-    // 3. Pull out the ActiveSync-specific bits.
+    // 3. Pull out the NodalMerge-specific bits.
     let pubkey = hex_to_32(&claims.pubkey)
         .ok_or(BridgeError::BadClaim("pubkey (expected 64 hex chars)"))?;
 

@@ -10,7 +10,7 @@ public sealed record SqliteNodeStorageOptions(string DbPath)
     public static SqliteNodeStorageOptions FromConfiguration(IConfiguration? configuration)
     {
         var section = ConfigurationKeyFallback.GetSection(configuration, SectionName, LegacySectionName);
-        var dbPath = section?["DbPath"] ?? "data/activesync-nodes.db";
+        var dbPath = section?["DbPath"] ?? "data/nodalmerge-nodes.db";
         return new SqliteNodeStorageOptions(dbPath);
     }
 

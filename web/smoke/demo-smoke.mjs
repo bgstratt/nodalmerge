@@ -169,7 +169,7 @@ async function run() {
         host: "127.0.0.1",
         port: 7878,
         command: "cargo",
-        args: ["run", "--bin", "activesync-server"],
+        args: ["run", "--bin", "nodalmerge-server"],
         cwd: repoRoot,
         label: "server",
       })

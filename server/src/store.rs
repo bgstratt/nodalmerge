@@ -589,7 +589,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let p = std::env::temp_dir().join(format!("activesync-test-{nanos}"));
+        let p = std::env::temp_dir().join(format!("nodalmerge-test-{nanos}"));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

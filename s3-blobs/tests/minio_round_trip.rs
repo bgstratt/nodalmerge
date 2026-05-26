@@ -24,7 +24,7 @@ use testcontainers::{
 
 const ACCESS_KEY: &str = "minioadmin";
 const SECRET_KEY: &str = "minioadmin";
-const BUCKET: &str = "activesync-test";
+const BUCKET: &str = "nodalmerge-test";
 
 fn start_minio() -> Option<testcontainers::Container<GenericImage>> {
     let result = GenericImage::new("minio/minio", "latest")

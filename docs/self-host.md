@@ -1,19 +1,22 @@
-# Self-host ActiveSync in 5 minutes
+# Self-host NodalMerge in 5 minutes
 
-This doc shows the shortest path from zero to a production-ish ActiveSync
+This doc shows the shortest path from zero to a production-ish NodalMerge
 deployment with your existing auth provider (Clerk, Supabase, Auth0, or a
 homegrown JWT issuer) in front.
+
+Compatibility note: legacy `activesync-*` crate/package IDs and selected
+logger/config identifiers remain valid during the migration window.
 
 ## 1. Build & run the server
 
 ```sh
-git clone <your-fork-or-mirror> activesync
-cd activesync
-docker build -t activesync-server .
+git clone <your-fork-or-mirror> nodalmerge
+cd nodalmerge
+docker build -t nodalmerge-server .
 docker run --rm -p 7878:7878 \
     -v "$PWD/data:/data" \
     -e RUST_LOG=info \
-    activesync-server
+    nodalmerge-server
 ```
 
 The container listens on `0.0.0.0:7878` and persists rooms + blobs to
@@ -22,7 +25,7 @@ backups, and operational notes).
 
 ## 2. Decide who signs room tokens
 
-ActiveSync rooms are gated by a per-room Ed25519 key. Capabilities for a
+NodalMerge rooms are gated by a per-room Ed25519 key. Capabilities for a
 connecting peer are encoded in a short-lived `RoomToken` signed by that
 key. You have two options for where the signing happens:
 
@@ -34,7 +37,7 @@ key. You have two options for where the signing happens:
 For the bridge flow — which is what this doc covers — your auth provider
 signs a **JWT** describing a peer's room + capabilities, and the
 [`activesync-jwt-bridge`](../jwt-bridge) crate converts that into a
-`RoomToken` the ActiveSync server will accept.
+`RoomToken` the NodalMerge server will accept.
 
 ## 3. Stand up the JWT bridge
 
@@ -82,7 +85,7 @@ async fn main() {
         verifier:          JwtVerifier::hs256(b"replace-me-with-your-secret"),
         room_key:          SigningKey::from_bytes(&load_room_key()),
         allowed_issuers:   vec!["https://your-auth.example.com".into()],
-        allowed_audiences: vec!["activesync".into()],
+        allowed_audiences: vec!["nodalmerge".into()],
     });
     let app = Router::new().route("/mint", post(mint)).with_state(cfg);
     axum::serve(tokio::net::TcpListener::bind("0.0.0.0:8088").await.unwrap(), app)
@@ -101,7 +104,7 @@ For RS256 / ES256 (Clerk, Auth0, Supabase), swap
 ```json
 {
     "iss":    "https://your-auth.example.com",
-    "aud":    "activesync",
+    "aud":    "nodalmerge",
     "exp":    1999999999,
     "room":   "game-42",
     "pubkey": "<64 hex chars of the peer's Ed25519 public key>",
@@ -115,9 +118,9 @@ clock, one truth. `caps` is optional (omit or `[]` for an unscoped token).
 ## 5. Wire the client
 
 The client generates its Ed25519 keypair on first launch, POSTs
-`{ jwt }` to `/mint`, and feeds the response fields into the ActiveSync
+`{ jwt }` to `/mint`, and feeds the response fields into the NodalMerge
 SDK's `hello` message (`tokenCaps` / `roomSeed` / signature fields — see
-the SDK README). From this point the ActiveSync server treats the
+the SDK README). From this point the NodalMerge server treats the
 connection identically to a self-minted token; it has no knowledge of
 JWTs.
 
@@ -130,7 +133,8 @@ JWTs.
     change needed.
 - Back up `/data` (see [deployment.md](./deployment.md)) — that's the
     entire durable state.
-- Tune logs via `RUST_LOG` (e.g. `RUST_LOG=activesync_server=debug,info`).
+- Tune logs via `RUST_LOG` (migration window still uses targets like
+    `RUST_LOG=activesync_server=debug,info`).
 
 That's it. Five minutes of YAML/Terraform and you have a self-hosted
-ActiveSync that plugs into whatever auth you already own.
+NodalMerge deployment that plugs into whatever auth you already own.

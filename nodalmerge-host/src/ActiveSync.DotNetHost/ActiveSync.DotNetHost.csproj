@@ -7,6 +7,7 @@
     <UserSecretsId>7575e404-45c6-42e8-9cba-3a37140683ce</UserSecretsId>
     <ActiveSyncUseNuGetPackages Condition="'$(ActiveSyncUseNuGetPackages)' == ''">false</ActiveSyncUseNuGetPackages>
     <ActiveSyncPackageVersion Condition="'$(ActiveSyncPackageVersion)' == ''">0.1.0-local</ActiveSyncPackageVersion>
+    <NodalMergeUseNuGetWrappers Condition="'$(NodalMergeUseNuGetWrappers)' == ''">false</NodalMergeUseNuGetWrappers>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(ActiveSyncUseNuGetPackages)' != 'true'">
@@ -19,6 +20,20 @@
     <PackageReference Include="ActiveSync.Host.Composition" Version="$(ActiveSyncPackageVersion)" />
     <PackageReference Include="ActiveSync.DotNetHost.Native.win-x64" Version="$(ActiveSyncPackageVersion)" />
     <PackageReference Include="ActiveSync.DotNetHost.Native.linux-x64" Version="$(ActiveSyncPackageVersion)" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(ActiveSyncUseNuGetPackages)' == 'true' and '$(NodalMergeUseNuGetWrappers)' == 'true'">
+    <PackageReference Include="NodalMerge.Host.Abstractions" Version="$(ActiveSyncPackageVersion)" />
+    <PackageReference Include="NodalMerge.Host.Composition" Version="$(ActiveSyncPackageVersion)" />
+    <PackageReference Include="NodalMerge.DotNetHost.Native.win-x64" Version="$(ActiveSyncPackageVersion)" />
+    <PackageReference Include="NodalMerge.DotNetHost.Native.linux-x64" Version="$(ActiveSyncPackageVersion)" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(ActiveSyncUseNuGetPackages)' == 'true' and '$(NodalMergeUseNuGetWrappers)' == 'true'">
+    <PackageReference Remove="ActiveSync.Host.Abstractions" />
+    <PackageReference Remove="ActiveSync.Host.Composition" />
+    <PackageReference Remove="ActiveSync.DotNetHost.Native.win-x64" />
+    <PackageReference Remove="ActiveSync.DotNetHost.Native.linux-x64" />
   </ItemGroup>
 
   <ItemGroup>

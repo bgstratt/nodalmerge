@@ -499,6 +499,7 @@ This is feasible but requires custom orchestration and careful policy/token hand
 9. Manager/worker topology playbook: `docs/MANAGER_WORKER_TOPOLOGY_PLAYBOOK.md`
 10. Combined roadmap: `docs/roadmap.md`
 11. Future-state enhancements tracker: `docs/future-state-enhancements.md`
+12. Crate identity transition plan: `docs/NODALMERGE_CRATE_IDENTITY_TRANSITION_PLAN.md`
 
 Recommended implementation order:
 
@@ -521,6 +522,8 @@ Current Wave R execution status (2026-05-26):
 6. RNM-010 focused server metrics test is now passing: `cargo test -p activesync-server --test metrics_endpoint` (3/3).
 7. RNM-011 Docker validation is passing: `docker build -t nodalmerge .` succeeds and both `nodalmerge-server` and `activesync-server` binary aliases are present/usable in both primary and compatibility image-tag paths.
 8. Origin rename path is active: new repo `bgstratt/nodalmerge` created, with local remotes set to `origin` (nodalmerge) and `origin-legacy` (activeSync).
+9. RNM-006 .NET package identity transition first pass added additive NuGet wrappers (`NodalMerge.Host.Abstractions`, `NodalMerge.Host.Composition`, `NodalMerge.DotNetHost.Native.win-x64`, `NodalMerge.DotNetHost.Native.linux-x64`) with local pack + CI coverage.
+10. RNM-004 crate identity transition first pass expanded wrapper coverage (`nodalmerge-server`, `nodalmerge-gc`, `nodalmerge-jwt-bridge`) and wired pack/publish flows for wrapper artifacts.
 
 ## 12) Post-core enhancement tracking
 

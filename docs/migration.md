@@ -1,9 +1,13 @@
 # Migration guide
 
-Phase-boundary deltas for consumers upgrading an existing ActiveSync
+Phase-boundary deltas for consumers upgrading an existing NodalMerge
 deployment. Each section is scoped narrowly: schema changes, new config
 knobs, wire-level back-compat, and whether any code changes are
 required. Skip sections you've already crossed.
+
+Compatibility note: this guide is nodalmerge-first. During migration,
+legacy `activesync-*` crate/package IDs and `activesync_*` operational
+identifiers remain supported aliases.
 
 > This doc is for *upgrading*. If you're integrating for the first time,
 > start at [quickstart.md](./quickstart.md) and
@@ -156,14 +160,15 @@ or wire changes.
   `doc.recentConflicts(sinceMs)`. Observability, not policy — merge
   behavior is unchanged.
 - **G11 (hot-room bound).** Observability slice only: new gauge
-  `activesync_room_bytes_resident{room}` (see
+  `nodalmerge_room_bytes_resident{room}` (legacy `activesync_room_bytes_resident`
+  remains during migration; see
   [operator.md](./operator.md)). No enforcement yet.
 
 ---
 
 ## Notes for mixed-version fleets
 
-ActiveSync's `A7` capability negotiation covers every wire addition
+NodalMerge's `A7` capability negotiation covers every wire addition
 since F6. A peer that doesn't speak a capability simply doesn't see
 its wire messages; the server falls back to the legacy path.
 

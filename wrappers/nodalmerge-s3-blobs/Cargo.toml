@@ -1,0 +1,9 @@
+[package]
+name = "nodalmerge-s3-blobs"
+version = "0.1.0"
+edition = "2021"
+description = "Compatibility wrapper crate re-exporting activesync-s3-blobs during rename migration"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+activesync-s3-blobs = { version = "0.1.0", path = "../../s3-blobs" }

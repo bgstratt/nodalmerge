@@ -1,8 +1,11 @@
 # Integration guide
 
-How to embed `activesync-server` in your product. One worked example
+How to embed NodalMerge sync runtime in your product. One worked example
 per deployment shape. All examples wire real, currently-shipping
 crates.
+
+Migration note: binaries and operations are nodalmerge-first (`nodalmerge-server`),
+while many crate IDs in Rust remain `activesync-*` during the compatibility window.
 
 > For upgrade paths from older versions see
 > [migration.md](./migration.md). For day-2 operations see
@@ -49,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Or just run the prebuilt binary:
 
 ```sh
-activesync-server --store /var/lib/activesync
+nodalmerge-server --store /var/lib/activesync
 ```
 
 ---
@@ -205,7 +208,7 @@ let cfg = BridgeConfig {
     verifier:          JwtVerifier::hs256(std::env::var("JWT_SECRET")?.as_bytes()),
     room_key:          room_signing_key,
     allowed_issuers:   vec!["https://accounts.speechslate.app".into()],
-    allowed_audiences: vec!["activesync".into()],
+    allowed_audiences: vec!["nodalmerge".into()],
 };
 
 // In your HTTP handler:

@@ -1,0 +1,10 @@
+[package]
+name = "nodalmerge-nodestore-conformance"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Compatibility wrapper crate re-exporting activesync-nodestore-conformance during rename migration"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+activesync-nodestore-conformance = { path = "../../node-stores/conformance" }

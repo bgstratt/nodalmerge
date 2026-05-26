@@ -45,6 +45,32 @@ env:
   NUGET_OUTPUT_DIR: ${{ github.workspace }}/artifacts/nuget
 
 jobs:
+  wrapper-smoke:
+    name: wrapper smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo check all nodalmerge wrappers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check -p nodalmerge-core \
+            -p nodalmerge-gc \
+            -p nodalmerge-host-core \
+            -p nodalmerge-host-axum \
+            -p nodalmerge-host-ffi \
+            -p nodalmerge-server \
+            -p nodalmerge-jwt-bridge \
+            -p nodalmerge-s3-blobs \
+            -p nodalmerge-mongo-store \
+            -p nodalmerge-postgres-store \
+            -p nodalmerge-nodestore-conformance
+
   pack-npm-wrappers:
     name: pack npm wrappers
     runs-on: ubuntu-latest
@@ -82,6 +108,8 @@ jobs:
 
   pack-crate-wrappers:
     name: pack crate wrappers
+    needs:
+      - wrapper-smoke
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -95,8 +123,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo package --package nodalmerge-core --no-verify
+          cargo package --package nodalmerge-gc --no-verify
           cargo package --package nodalmerge-host-core --no-verify
+          cargo package --package nodalmerge-host-axum --no-verify
           cargo package --package nodalmerge-host-ffi --no-verify
+          cargo package --package nodalmerge-server --no-verify
+          cargo package --package nodalmerge-jwt-bridge --no-verify
+          cargo package --package nodalmerge-s3-blobs --no-verify
           mkdir -p "$GITHUB_WORKSPACE/artifacts/crates"
           cp target/package/nodalmerge-*.crate "$GITHUB_WORKSPACE/artifacts/crates/"
 
@@ -163,8 +196,13 @@ jobs:
             exit 1
           fi
           cargo publish -p nodalmerge-core
+          cargo publish -p nodalmerge-gc
           cargo publish -p nodalmerge-host-core
+          cargo publish -p nodalmerge-host-axum
           cargo publish -p nodalmerge-host-ffi
+          cargo publish -p nodalmerge-server
+          cargo publish -p nodalmerge-jwt-bridge
+          cargo publish -p nodalmerge-s3-blobs
   pack-managed:
     name: pack managed
     runs-on: ubuntu-latest
@@ -195,6 +233,12 @@ jobs:
 
       - name: Pack ActiveSync.Host.Composition
         run: dotnet pack nodalmerge-host/src/ActiveSync.Host.Composition/ActiveSync.Host.Composition.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
+
+      - name: Pack NodalMerge.Host.Abstractions
+        run: dotnet pack nodalmerge-host/src/NodalMerge.Host.Abstractions/NodalMerge.Host.Abstractions.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
+
+      - name: Pack NodalMerge.Host.Composition
+        run: dotnet pack nodalmerge-host/src/NodalMerge.Host.Composition/NodalMerge.Host.Composition.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
 
       - name: Upload managed artifacts
         uses: actions/upload-artifact@v4
@@ -234,6 +278,9 @@ jobs:
       - name: Pack ActiveSync.DotNetHost.Native.linux-x64
         run: dotnet pack nodalmerge-host/src/ActiveSync.DotNetHost.Native.linux-x64/ActiveSync.DotNetHost.Native.linux-x64.csproj -c Release -o "$NUGET_OUTPUT_DIR" /p:Version=${{ steps.version.outputs.value }}
 
+      - name: Pack NodalMerge.DotNetHost.Native.linux-x64
+        run: dotnet pack nodalmerge-host/src/NodalMerge.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
+
       - name: Upload linux native artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -272,6 +319,9 @@ jobs:
 
       - name: Pack ActiveSync.DotNetHost.Native.win-x64
         run: dotnet pack nodalmerge-host/src/ActiveSync.DotNetHost.Native.win-x64/ActiveSync.DotNetHost.Native.win-x64.csproj -c Release -o "$env:NUGET_OUTPUT_DIR" /p:Version=${{ steps.version.outputs.value }}
+
+      - name: Pack NodalMerge.DotNetHost.Native.win-x64
+        run: dotnet pack nodalmerge-host/src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj -c Release -o "$env:NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
 
       - name: Upload windows native artifacts
         uses: actions/upload-artifact@v4

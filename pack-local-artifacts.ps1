@@ -214,8 +214,16 @@ try {
             "activesync-host-axum" = "host-axum"
             "activesync-bridge" = "bridge"
             "nodalmerge-core" = "wrappers/nodalmerge-core"
+            "nodalmerge-gc" = "wrappers/nodalmerge-gc"
             "nodalmerge-host-core" = "wrappers/nodalmerge-host-core"
+            "nodalmerge-host-axum" = "wrappers/nodalmerge-host-axum"
             "nodalmerge-host-ffi" = "wrappers/nodalmerge-host-ffi"
+            "nodalmerge-server" = "wrappers/nodalmerge-server"
+            "nodalmerge-jwt-bridge" = "wrappers/nodalmerge-jwt-bridge"
+            "nodalmerge-s3-blobs" = "wrappers/nodalmerge-s3-blobs"
+            "nodalmerge-mongo-store" = "wrappers/nodalmerge-mongo-store"
+            "nodalmerge-postgres-store" = "wrappers/nodalmerge-postgres-store"
+            "nodalmerge-nodestore-conformance" = "wrappers/nodalmerge-nodestore-conformance"
         }
         $crateIds = @(
             "activesync-core",
@@ -224,8 +232,16 @@ try {
             "activesync-host-axum",
             "activesync-bridge",
             "nodalmerge-core",
+            "nodalmerge-gc",
             "nodalmerge-host-core",
-            "nodalmerge-host-ffi"
+            "nodalmerge-host-axum",
+            "nodalmerge-host-ffi",
+            "nodalmerge-server",
+            "nodalmerge-jwt-bridge",
+            "nodalmerge-s3-blobs",
+            "nodalmerge-mongo-store",
+            "nodalmerge-postgres-store",
+            "nodalmerge-nodestore-conformance"
         )
 
         # Ensure crate output from this run is fresh and not contaminated by stale files.

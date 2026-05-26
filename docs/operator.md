@@ -4,6 +4,10 @@ Steady-state operation of a deployed `activesync-server`. Covers every
 CLI flag, every metric, backup/restore for each supported persistence
 backend, and the rolling-restart procedure.
 
+Migration note: this runbook is nodalmerge-first. During the compatibility
+window, `activesync-server` command forms and `activesync_*` identifiers remain
+supported aliases.
+
 > First-time readers: see [quickstart.md](./quickstart.md) and
 > [self-host.md](./self-host.md). For integration shapes, see
 > [integration.md](./integration.md). For version upgrades, see
@@ -14,7 +18,7 @@ backend, and the rolling-restart procedure.
 
 ## Config reference
 
-All configuration is via CLI flags on `activesync-server`. There is no
+All configuration is via CLI flags on `nodalmerge-server`. There is no
 config file. Flags accept both `--flag value` and `--flag=value` form.
 
 | Flag | Default | Meaning |
@@ -30,8 +34,8 @@ config file. Flags accept both `--flag value` and `--flag=value` form.
 
 **Environment.**
 
-- `RUST_LOG` — tracing filter. Default
-  `info,activesync_server=info,activesync_core=info`.
+- `RUST_LOG` — tracing filter. During migration, logger targets remain
+  `activesync_*` (for example `info,activesync_server=info,activesync_core=info`).
 - Server keypair: auto-generated at `~/.activesync/server.key` on
   first run; reused across restarts.
 
@@ -46,25 +50,28 @@ churn can't explode the series count.
 
 | Metric | Kind | Labels | Alert shape |
 |---|---|---|---|
-| `activesync_rooms_total` | gauge | — | capacity trend, not alerting |
-| `activesync_peers_total` | gauge | `room` | capacity; sudden drop = mass disconnect |
-| `activesync_nodes_accepted_total` | counter | `room` | rate trend; low-signal alone |
-| `activesync_merge_batch_seconds` | histogram | — | `p99 > 100 ms` for 5 min → verify CPU / ed25519 batch size |
-| `activesync_persistence_write_seconds` | histogram | `kind` (`node`/`nodes_batch`/`blob`) | `p99 > 50 ms` sustained → disk saturation, DB slowdown |
-| `activesync_eviction_total` | counter | — | trend; high rate in production = peer churn |
-| `activesync_broadcast_lagged_total` | counter | `room` | `rate > 0` = slow clients; chronic = bump `--broadcast-capacity` or investigate peer |
-| `activesync_ws_send_timeout_total` | counter | `room` | any non-zero = TCP or client stalled; investigate network |
-| `activesync_rate_limit_drops_total` | counter | `peer` | any non-zero = misbehaving (or misconfigured) client |
-| `activesync_blob_gc_deleted_total` | counter | `room` | steady rate confirms GC is running |
-| `activesync_lamport_rejected_total` | counter | `reason` (`ceiling` / `wall_skew`) | any non-zero = client clock broken or malicious |
-| `activesync_token_expired_disconnects_total` | counter | `room` | trend; rate should correlate with token TTL |
-| `activesync_room_bytes_resident` | gauge | `room` | capacity; approximate — per-node estimate is flat 512 B, under-counts large transactions |
+| `nodalmerge_rooms_total` | gauge | — | capacity trend, not alerting |
+| `nodalmerge_peers_total` | gauge | `room` | capacity; sudden drop = mass disconnect |
+| `nodalmerge_nodes_accepted_total` | counter | `room` | rate trend; low-signal alone |
+| `nodalmerge_merge_batch_seconds` | histogram | — | `p99 > 100 ms` for 5 min → verify CPU / ed25519 batch size |
+| `nodalmerge_persistence_write_seconds` | histogram | `kind` (`node`/`nodes_batch`/`blob`) | `p99 > 50 ms` sustained → disk saturation, DB slowdown |
+| `nodalmerge_eviction_total` | counter | — | trend; high rate in production = peer churn |
+| `nodalmerge_broadcast_lagged_total` | counter | `room` | `rate > 0` = slow clients; chronic = bump `--broadcast-capacity` or investigate peer |
+| `nodalmerge_ws_send_timeout_total` | counter | `room` | any non-zero = TCP or client stalled; investigate network |
+| `nodalmerge_rate_limit_drops_total` | counter | `peer` | any non-zero = misbehaving (or misconfigured) client |
+| `nodalmerge_blob_gc_deleted_total` | counter | `room` | steady rate confirms GC is running |
+| `nodalmerge_lamport_rejected_total` | counter | `reason` (`ceiling` / `wall_skew`) | any non-zero = client clock broken or malicious |
+| `nodalmerge_token_expired_disconnects_total` | counter | `room` | trend; rate should correlate with token TTL |
+| `nodalmerge_room_bytes_resident` | gauge | `room` | capacity; approximate — per-node estimate is flat 512 B, under-counts large transactions |
+
+Compatibility note: legacy `activesync_*` metric names are still emitted while
+dashboards migrate.
 
 Histogram buckets are hand-tuned for the hot path:
 
-- `activesync_merge_batch_seconds`: 50µs … 2.5s (covers single-node
+- `nodalmerge_merge_batch_seconds`: 50µs … 2.5s (covers single-node
   packs through 10k-node catchup).
-- `activesync_persistence_write_seconds`: 100µs … 500ms (typical node
+- `nodalmerge_persistence_write_seconds`: 100µs … 500ms (typical node
   INSERT is <1 ms; >100 ms is an alerting signal).
 
 **Admission.** `metrics::init` installs a *process-global* recorder; a
@@ -81,7 +88,7 @@ Layout (see [deployment.md](./deployment.md) for full detail):
 
 ```
 <path>/
-  activesync.db              SQLite
+  activesync.db              SQLite (legacy file name retained during migration)
   blobs/<sanitized_room>/<blake3_hex>
   blob-tombstones/<sanitized_room>/<blake3_hex>
 ```
@@ -139,7 +146,7 @@ activesync-core`, reference machine = Ryzen 9 5900X, 12 cores):
 - **Merge throughput.** ~31 ms for a 10k-node batched pack
   (`merge_10k_batch`). Bottleneck is ed25519 `verify_batch`; ~95% of
   wall time.
-- **Node bytes.** `activesync_room_bytes_resident` assumes 512 bytes
+- **Node bytes.** `nodalmerge_room_bytes_resident` assumes 512 bytes
   per node; real numbers on the wire are 100-300 B for small ops,
   much more for large `SetBlob` payloads (payload ≠ blob bytes).
 - **Blob bytes.** No theoretical limit per room; budget per product.
@@ -147,14 +154,14 @@ activesync-core`, reference machine = Ryzen 9 5900X, 12 cores):
 - **Peers per replica.** One `tokio::task` per peer WS; one broadcast
   receiver per peer per room. CPU bound by merge path; network bound
   by broadcast fan-out. No hard cap — size based on `p99` of
-  `activesync_merge_batch_seconds`.
+  `nodalmerge_merge_batch_seconds`.
 - **Handshake size.** IBF hello is 2.9 KB regardless of graph size;
   MST handshake ≤3 round trips for a 1000-node diff in a 2000-node
   graph.
 
-**When to shard rooms across replicas.** Once `activesync_peers_total`
+**When to shard rooms across replicas.** Once `nodalmerge_peers_total`
 for a single room crosses 100 or `p99` of
-`activesync_merge_batch_seconds` exceeds 100 ms. Shard by room id
+`nodalmerge_merge_batch_seconds` exceeds 100 ms. Shard by room id
 with consistent hashing at the load balancer; rooms are independent.
 
 ---
@@ -192,13 +199,13 @@ replica-set / logical-replication / cross-region-replication.
 
 | Symptom | First check |
 |---|---|
-| Mass disconnects with `4001 resync required` | `activesync_broadcast_lagged_total` per room; investigate one slow peer, or bump `--broadcast-capacity`. |
-| Mass disconnects with `4008 rate limit exceeded` | Per-peer `activesync_rate_limit_drops_total`; investigate the offending pubkey. |
+| Mass disconnects with `4001 resync required` | `nodalmerge_broadcast_lagged_total` per room; investigate one slow peer, or bump `--broadcast-capacity`. |
+| Mass disconnects with `4008 rate limit exceeded` | Per-peer `nodalmerge_rate_limit_drops_total`; investigate the offending pubkey. |
 | Disconnects with `4002 token expired` | Normal if token TTL is short; confirm SDK is refetching tokens on reconnect. |
-| `activesync_lamport_rejected_total` climbing | Client clock skew or malicious peer. Cross-check with server logs (peer pubkey prefix is logged). |
-| `activesync_merge_batch_seconds` p99 rising | CPU saturation; scale horizontally (shard by room) or verify ed25519 simd backend is active. |
-| `activesync_persistence_write_seconds{kind="blob"}` p99 rising | Disk I/O or S3 latency; check the blob backend. |
-| Disk fills | `activesync_blob_gc_deleted_total` not ticking; verify `--blob-gc-interval` is set. |
+| `nodalmerge_lamport_rejected_total` climbing | Client clock skew or malicious peer. Cross-check with server logs (peer pubkey prefix is logged). |
+| `nodalmerge_merge_batch_seconds` p99 rising | CPU saturation; scale horizontally (shard by room) or verify ed25519 simd backend is active. |
+| `nodalmerge_persistence_write_seconds{kind="blob"}` p99 rising | Disk I/O or S3 latency; check the blob backend. |
+| Disk fills | `nodalmerge_blob_gc_deleted_total` not ticking; verify `--blob-gc-interval` is set. |
 
 ---
 

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <PackageId>NodalMerge.DotNetHost.Native.win-x64</PackageId>
+    <Description>Compatibility wrapper package that forwards to ActiveSync.DotNetHost.Native.win-x64 during migration.</Description>
+    <PackageTags>nodalmerge;sync;crdt;native;ffi;windows;wrapper;compatibility</PackageTags>
+    <PackageReadmeFile>NUGET_README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\NUGET_README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ActiveSync.DotNetHost.Native.win-x64\ActiveSync.DotNetHost.Native.win-x64.csproj" />
+  </ItemGroup>
+
+</Project>

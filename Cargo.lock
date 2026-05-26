@@ -3054,6 +3054,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodalmerge-gc"
+version = "0.1.0"
+dependencies = [
+ "activesync-gc",
+]
+
+[[package]]
+name = "nodalmerge-host-axum"
+version = "0.1.0"
+dependencies = [
+ "activesync-host-axum",
+]
+
+[[package]]
 name = "nodalmerge-host-core"
 version = "0.1.0"
 dependencies = [
@@ -3065,6 +3079,48 @@ name = "nodalmerge-host-ffi"
 version = "0.1.0"
 dependencies = [
  "activesync-host-ffi",
+]
+
+[[package]]
+name = "nodalmerge-jwt-bridge"
+version = "0.1.0"
+dependencies = [
+ "activesync-jwt-bridge",
+]
+
+[[package]]
+name = "nodalmerge-mongo-store"
+version = "0.1.0"
+dependencies = [
+ "activesync-mongo-store",
+]
+
+[[package]]
+name = "nodalmerge-nodestore-conformance"
+version = "0.1.0"
+dependencies = [
+ "activesync-nodestore-conformance",
+]
+
+[[package]]
+name = "nodalmerge-postgres-store"
+version = "0.1.0"
+dependencies = [
+ "activesync-postgres-store",
+]
+
+[[package]]
+name = "nodalmerge-s3-blobs"
+version = "0.1.0"
+dependencies = [
+ "activesync-s3-blobs",
+]
+
+[[package]]
+name = "nodalmerge-server"
+version = "0.1.0"
+dependencies = [
+ "activesync-server",
 ]
 
 [[package]]

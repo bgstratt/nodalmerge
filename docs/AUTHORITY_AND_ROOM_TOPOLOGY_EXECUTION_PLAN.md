@@ -1,4 +1,4 @@
-# Authority and Room Topology Execution Plan
+# Authority and Room Topology Execution Plan 
 
 Owner: Runtime + host + operator streams
 Status: Planned

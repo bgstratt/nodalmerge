@@ -1,12 +1,16 @@
-# ActiveSync Server — Deployment
+# NodalMerge Server — Deployment
 
 Authorization execution references:
 - [AUTHORIZATION_CORE_HOST_SEPARATION_PLAN.md](AUTHORIZATION_CORE_HOST_SEPARATION_PLAN.md)
 - [AUTHORIZATION_CORE_HOST_EXECUTION_TRACKER.md](AUTHORIZATION_CORE_HOST_EXECUTION_TRACKER.md)
 
-The `activesync-server` binary is a websocket reflector: it multiplexes peers
+The `nodalmerge-server` binary is a websocket reflector: it multiplexes peers
 by room, merges and relays packs, and (optionally) persists room state to
 disk. This document covers the operational basics.
+
+Compatibility note: during the migration window, `activesync-server` remains a
+supported alias and many internal crate/logger identifiers still use
+`activesync_*` naming.
 
 > For a 5-minute Docker + JWT walkthrough, see [self-host.md](./self-host.md).
 
@@ -14,10 +18,10 @@ disk. This document covers the operational basics.
 
 ```powershell
 # In-memory only (default) — room state vanishes when the process stops.
-cargo run -p activesync-server
+cargo run -p nodalmerge-server
 
 # With on-disk persistence rooted at ./data
-cargo run -p activesync-server -- --store ./data
+cargo run -p nodalmerge-server -- --store ./data
 ```
 
 Default listen address: `ws://127.0.0.1:7878/ws/<room_id>`.
@@ -71,8 +75,9 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
 
 ## Environment
 
-- `RUST_LOG` — overrides the default filter
-  (`info,activesync_server=info,activesync_core=info`).
+- `RUST_LOG` — overrides the default filter.
+  During migration, use legacy logger targets (for example
+  `info,activesync_server=info,activesync_core=info`).
 - Server keypair: auto-generated at `~/.activesync/server.key` on first run;
   reused on subsequent starts (E1).
 
@@ -210,7 +215,7 @@ port** and serves `/metrics` there. The public WS port is unchanged. Default
 off — absent the flag, no recorder is installed.
 
 ```
-activesync-server --store ./data --metrics-addr 127.0.0.1:9090
+nodalmerge-server --store ./data --metrics-addr 127.0.0.1:9090
 curl http://127.0.0.1:9090/metrics
 ```
 
@@ -218,22 +223,25 @@ Bind to loopback or a private subnet; the endpoint has no auth. If the
 install fails (port taken, already installed in-process) the server logs a
 warning and continues without observability.
 
-Baseline series:
+Baseline series (primary):
 
 | Metric | Kind | Labels |
 |---|---|---|
-| `activesync_rooms_total` | gauge | — |
-| `activesync_peers_total` | gauge | `room` |
-| `activesync_nodes_accepted_total` | counter | `room` |
-| `activesync_merge_batch_seconds` | histogram | — |
-| `activesync_persistence_write_seconds` | histogram | `kind=node\|nodes_batch\|blob` |
-| `activesync_eviction_total` | counter | — |
-| `activesync_broadcast_lagged_total` | counter | `room` |
-| `activesync_ws_send_timeout_total` | counter | `room` |
-| `activesync_rate_limit_drops_total` | counter | `peer` |
-| `activesync_blob_gc_deleted_total` | counter | `room` |
-| `activesync_lamport_rejected_total` | counter | `reason` |
-| `activesync_token_expired_disconnects_total` | counter | `room` |
+| `nodalmerge_rooms_total` | gauge | — |
+| `nodalmerge_peers_total` | gauge | `room` |
+| `nodalmerge_nodes_accepted_total` | counter | `room` |
+| `nodalmerge_merge_batch_seconds` | histogram | — |
+| `nodalmerge_persistence_write_seconds` | histogram | `kind=node\|nodes_batch\|blob` |
+| `nodalmerge_eviction_total` | counter | — |
+| `nodalmerge_broadcast_lagged_total` | counter | `room` |
+| `nodalmerge_ws_send_timeout_total` | counter | `room` |
+| `nodalmerge_rate_limit_drops_total` | counter | `peer` |
+| `nodalmerge_blob_gc_deleted_total` | counter | `room` |
+| `nodalmerge_lamport_rejected_total` | counter | `reason` |
+| `nodalmerge_token_expired_disconnects_total` | counter | `room` |
+
+Compatibility note: legacy `activesync_*` metric names are still emitted during
+the migration window.
 
 Histograms ship with hand-tuned buckets (µs-scale for merges and persistence
 writes) so Prometheus `histogram_quantile(0.99, …)` works without extra

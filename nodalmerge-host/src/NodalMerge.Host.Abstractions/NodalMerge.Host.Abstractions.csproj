@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <PackageId>NodalMerge.Host.Abstractions</PackageId>
+    <Description>Compatibility wrapper package that forwards to ActiveSync.Host.Abstractions during migration.</Description>
+    <PackageTags>nodalmerge;sync;crdt;host;wrapper;compatibility</PackageTags>
+    <PackageReadmeFile>NUGET_README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\NUGET_README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ActiveSync.Host.Abstractions\ActiveSync.Host.Abstractions.csproj" />
+  </ItemGroup>
+
+</Project>

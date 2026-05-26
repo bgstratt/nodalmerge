@@ -39,7 +39,7 @@ async fn main() {
     // If MONGO_URI is present, wire MongoNodeStore for nodes and NoPersistence for blobs.
     let persistence: store::SharedPersistence = match std::env::var("MONGO_URI") {
         Ok(uri) if !uri.is_empty() => {
-            let db = std::env::var("MONGO_DATABASE").unwrap_or_else(|_| "activesync".to_string());
+            let db = std::env::var("MONGO_DATABASE").unwrap_or_else(|_| "nodalmerge".to_string());
             tracing::info!(%uri, %db, "MONGO_URI present; wiring MongoNodeStore for nodes");
             let cfg = MongoNodeStoreConfig::new(uri, db);
             match MongoNodeStore::connect(cfg).await {
@@ -82,7 +82,7 @@ async fn main() {
     let app = Router::new().route("/ws/:room_id", get(ws_handler::handler)).layer(cors).with_state(rooms);
 
     let addr = std::env::var("AS_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:7878".to_string());
-    tracing::info!(%addr, "Dev ActiveSync server listening on ws://{addr}/ws/<room>");
+    tracing::info!(%addr, "Dev NodalMerge server listening on ws://{addr}/ws/<room>");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }

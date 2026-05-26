@@ -9,11 +9,16 @@ function Start-MongoContainer {
     foreach ($name in @("nodalmerge-mongo", "activesync-mongo")) {
         docker start $name *> $null
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "Using Mongo container: $name"
+            if ($name -eq "activesync-mongo") {
+                Write-Host "Using Mongo container: $name (legacy compatibility alias)"
+            }
+            else {
+                Write-Host "Using Mongo container: $name"
+            }
             return
         }
     }
-    throw "Could not start Mongo container (tried nodalmerge-mongo, activesync-mongo)."
+    throw "Could not start Mongo container (tried nodalmerge-mongo first, then activesync-mongo legacy alias)."
 }
 
 function Resolve-DotnetHostProjectPath {
@@ -28,7 +33,7 @@ function Resolve-DotnetHostProjectPath {
         }
     }
 
-    throw "Unable to locate DotNet host project. Checked NodalMerge and ActiveSync project paths."
+    throw "Unable to locate DotNet host project. Checked NodalMerge path first, then legacy ActiveSync compatibility path."
 }
 
 Cleanup-Ports

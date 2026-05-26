@@ -1,5 +1,5 @@
 param(
-    [string]$Project = "tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj",
+    [string]$Project = "",
     [string]$ResultsDirectory = "../docs/acceptance",
     [string]$LogFileName = "authz-dotnet-conformance-targeted.trx",
     [switch]$NoBuild
@@ -8,8 +8,32 @@ param(
 $ErrorActionPreference = "Stop"
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+function Resolve-TestProjectPath {
+    param([string]$Explicit)
+
+    if (-not [string]::IsNullOrWhiteSpace($Explicit)) {
+        return $Explicit
+    }
+
+    $candidates = @(
+        "tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj",
+        "tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj"
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    throw "Unable to locate DotNet host test project. Checked NodalMerge path first, then legacy ActiveSync compatibility path."
+}
+
 Push-Location $scriptRoot
 try {
+    $resolvedProject = Resolve-TestProjectPath -Explicit $Project
+
     $filter = @(
         "FullyQualifiedName~RuntimeMessageProcessorTests.Set_policy_without_capability_returns_control_plane_forbidden_error_envelope"
         "FullyQualifiedName~RuntimeMessageProcessorTests.Start_tick_without_capability_returns_control_plane_forbidden_error_envelope"
@@ -27,7 +51,7 @@ try {
 
     $args = @(
         "test"
-        $Project
+        $resolvedProject
         "--filter", $filter
         "--logger", "trx;LogFileName=$LogFileName"
         "--results-directory", $ResultsDirectory

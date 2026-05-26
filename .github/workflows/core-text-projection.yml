@@ -30,7 +30,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run activesync-core tests (default features)
+      - name: "Run NodalMerge core tests (crate id: activesync-core)"
         run: cargo test -p activesync-core
 
       - name: Emit large-doc acceptance metrics
@@ -58,7 +58,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run activesync-core tests (no default features)
+      - name: "Run NodalMerge core tests (no default features; crate id: activesync-core)"
         run: cargo test -p activesync-core --no-default-features
 
   core-parity-profile:
@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 "${ACTIVESYNC_PARITY_SOAK_RUNS}"); do
-            echo "[parity-soak] iteration ${i}/${ACTIVESYNC_PARITY_SOAK_RUNS}"
+            echo "[nodalmerge-parity-soak] iteration ${i}/${ACTIVESYNC_PARITY_SOAK_RUNS}"
             cargo test -p activesync-core text_projection_parity_deterministic_corpus_has_zero_mismatches -- --exact --nocapture
           done
 

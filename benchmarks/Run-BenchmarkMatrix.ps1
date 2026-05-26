@@ -47,7 +47,7 @@ function Resolve-DotnetHostProjectPath {
         }
     }
 
-    throw "Unable to locate DotNet host project. Checked NodalMerge and ActiveSync project paths."
+    throw "Unable to locate DotNet host project. Checked NodalMerge path first, then legacy ActiveSync compatibility path."
 }
 
 function Resolve-FfiDll {
@@ -71,7 +71,7 @@ function Resolve-FfiDll {
         }
     }
 
-    throw "NODALMERGE_HOST_FFI_DLL could not be resolved. Build host-ffi first (cargo build -p activesync-host-ffi) or pass -FfiDllPath."
+    throw "NODALMERGE_HOST_FFI_DLL could not be resolved. Build host-ffi first (cargo build -p activesync-host-ffi, legacy crate id) or pass -FfiDllPath."
 }
 
 function Merge-Env {

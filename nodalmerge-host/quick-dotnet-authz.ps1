@@ -1,5 +1,5 @@
 param(
-    [string]$Project = "tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj",
+    [string]$Project = "",
     [string]$Configuration = "Debug",
     [switch]$NoBuild,
     [string]$AdditionalFilter = ""
@@ -8,8 +8,32 @@ param(
 $ErrorActionPreference = "Stop"
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+function Resolve-TestProjectPath {
+    param([string]$Explicit)
+
+    if (-not [string]::IsNullOrWhiteSpace($Explicit)) {
+        return $Explicit
+    }
+
+    $candidates = @(
+        "tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj",
+        "tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj"
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    throw "Unable to locate DotNet host test project. Checked NodalMerge path first, then legacy ActiveSync compatibility path."
+}
+
 Push-Location $scriptRoot
 try {
+    $resolvedProject = Resolve-TestProjectPath -Explicit $Project
+
     # Keep quick loop deterministic and short:
     # - include core runtime adapter unit tests
     # - exclude websocket FFI loop suites that can run long in quick loops
@@ -41,7 +65,7 @@ try {
 
     $args = @(
         "test"
-        $Project
+        $resolvedProject
         "--configuration", $Configuration
         "--filter", $effectiveFilter
         "-v", "minimal"

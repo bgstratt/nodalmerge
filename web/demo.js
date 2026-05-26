@@ -36,19 +36,15 @@ window.addEventListener('unhandledrejection', ev => {
 const DEFAULT_ROOM_ID = 'default';
 const DEFAULT_SERVER_URL = 'ws://127.0.0.1:5271';
 const COLORS     = ['#60a5fa','#4ade80','#f472b6','#fb923c','#a78bfa','#34d399','#fbbf24','#f87171'];
-const IDB_NAME    = 'activesync-v7';
+const IDB_NAME    = 'nodalmerge-v7';
 const IDB_VERSION = 1;
 const COLLAB_KEY  = 'collab/doc';
 const LIST_KEY    = 'demo/list';
 const STORAGE_KEYS = {
   serverUrl: 'nodalmerge-server-url',
-  serverUrlLegacy: 'activesync-server-url',
   roomId: 'nodalmerge-room-id',
-  roomIdLegacy: 'activesync-room-id',
   identity: 'nodalmerge-identity-v3',
-  identityLegacy: 'activesync-identity-v3',
-  roomSeed: 'nodalmerge-room-seed',
-  roomSeedLegacy: 'activesync-room-seed'
+  roomSeed: 'nodalmerge-room-seed'
 };
 let uiRefreshTimer = null;
 const ENV_SERVER_URL = (globalThis.ACTIVESYNC_CONFIG && globalThis.ACTIVESYNC_CONFIG.serverUrl)
@@ -70,8 +66,7 @@ function scheduleUiRefresh() {
 function resolveServerUrl() {
   const params = new URLSearchParams(window.location.search);
   const fromQuery = params.get('server') || params.get('serverUrl') || params.get('ws');
-  const fromSession = sessionStorage.getItem(STORAGE_KEYS.serverUrl)
-    || sessionStorage.getItem(STORAGE_KEYS.serverUrlLegacy);
+  const fromSession = sessionStorage.getItem(STORAGE_KEYS.serverUrl);
   const candidate = (fromQuery || fromSession || ENV_SERVER_URL || DEFAULT_SERVER_URL).trim();
 
   try {
@@ -102,8 +97,7 @@ function normalizeRoomId(raw) {
 function resolveRoomId() {
   const params = new URLSearchParams(window.location.search);
   const fromQuery = params.get('room');
-  const fromSession = sessionStorage.getItem(STORAGE_KEYS.roomId)
-    || sessionStorage.getItem(STORAGE_KEYS.roomIdLegacy);
+  const fromSession = sessionStorage.getItem(STORAGE_KEYS.roomId);
   const normalized = normalizeRoomId(fromQuery || fromSession || DEFAULT_ROOM_ID);
   sessionStorage.setItem(STORAGE_KEYS.roomId, normalized);
   return normalized;
@@ -116,12 +110,8 @@ const ROOM_ID = resolveRoomId();
 // Identity — Ed25519 seed in sessionStorage (survives refresh, not close)
 // ---------------------------------------------------------------------------
 function getOrCreateIdentity() {
-  const stored = sessionStorage.getItem(STORAGE_KEYS.identity)
-    || sessionStorage.getItem(STORAGE_KEYS.identityLegacy);
-  if (stored) {
-    sessionStorage.setItem(STORAGE_KEYS.identity, stored);
-    return JSON.parse(stored);
-  }
+  const stored = sessionStorage.getItem(STORAGE_KEYS.identity);
+  if (stored) return JSON.parse(stored);
   const seed  = crypto.getRandomValues(new Uint8Array(32));
   const color = COLORS[Math.floor(Math.random() * COLORS.length)];
   const id    = Array.from(seed.slice(0, 4)).map(b => b.toString(16).padStart(2,'0')).join('');
@@ -137,15 +127,9 @@ const authorSeed = new Uint8Array(seedArr);
 // Room-auth seed (C3) — sessionStorage; null = open room
 // ---------------------------------------------------------------------------
 function loadRoomSeed() {
-  const stored = sessionStorage.getItem(STORAGE_KEYS.roomSeed)
-    || sessionStorage.getItem(STORAGE_KEYS.roomSeedLegacy);
+  const stored = sessionStorage.getItem(STORAGE_KEYS.roomSeed);
   if (!stored) return null;
-  try {
-    sessionStorage.setItem(STORAGE_KEYS.roomSeed, stored);
-    return new Uint8Array(JSON.parse(stored));
-  } catch (_) {
-    return null;
-  }
+  try { return new Uint8Array(JSON.parse(stored)); } catch (_) { return null; }
 }
 
 function saveRoomSeed(seed32) {

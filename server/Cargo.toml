@@ -6,10 +6,6 @@ autobins = false
 description = "ActiveSync reflector server: authenticates peers and broadcasts state packs"
 
 [[bin]]
-name = "activesync-server"
-path = "src/main.rs"
-
-[[bin]]
 name = "nodalmerge-server"
 path = "src/nodalmerge_server_main.rs"
 

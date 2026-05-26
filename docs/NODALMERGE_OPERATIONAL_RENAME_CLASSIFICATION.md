@@ -4,6 +4,17 @@ Updated: 2026-05-25
 
 Scope: remaining `activesync-` hits in non-doc, non-wrapper operational files.
 
+## Compatibility Retirement Status
+
+Wave A (completed 2026-05-26):
+
+1. Removed Docker runtime symlink alias (`activesync-server`).
+2. Removed legacy Mongo container fallback alias (`activesync-mongo`) from root run scripts.
+3. Removed legacy Rust bin aliases (`activesync-server`, `activesync-dev-server`) from crate manifests.
+4. Removed legacy web storage-key fallback reads and switched browser demo IndexedDB default to `nodalmerge-v7`.
+
+Post-Wave-A residual source-level operational hits (excluding docs/wrappers/target artifacts): `22`.
+
 ## Classification Legend
 
 - `intentional-compatibility`: keep for compatibility, protocol stability, package identity bridge, or legacy alias support.
@@ -41,17 +52,19 @@ Scope: remaining `activesync-` hits in non-doc, non-wrapper operational files.
 | `core/src/mst.rs` | 2 | intentional-compatibility | MST hash domain constants are protocol compatibility constants. |
 | `core/src/token.rs` | 1 | intentional-compatibility | Token signing domain separator impacts token wire compatibility. |
 
-## Last-Pass Safe Cutover Set
+## Remaining Post-Wave-A Inventory (Source-Level)
 
-Planned for immediate edit pass:
-
-1. `web/smoke/demo-smoke.mjs`
-2. `web/smoke/package.json`
-3. `web/smoke/package-lock.json`
-4. `nodalmerge-host/src/ActiveSync.Host.Composition/SqliteNodeStorageOptions.cs`
-5. `server/src/store.rs`
-6. `server/tests/blob_gc.rs`
-7. `server/tests/idle_eviction.rs`
-8. `server/tests/persistence.rs`
-9. `s3-blobs/tests/minio_round_trip.rs`
-10. `jwt-bridge/src/lib.rs`
+| File | Hits | Classification | Notes |
+| --- | ---: | --- | --- |
+| `pack-local-artifacts.ps1` | 4 | intentional-compatibility | Still packages legacy npm compatibility artifacts (`activesync-bridge`, `activesync-sdk-js`). |
+| `core/src/ibf.rs` | 3 | intentional-compatibility | Hash-domain constants; protocol compatibility sensitive. |
+| `core/src/crypto.rs` | 2 | intentional-compatibility | KDF/info labels; wire compatibility sensitive. |
+| `core/src/mst.rs` | 2 | intentional-compatibility | Hash-domain constants; protocol compatibility sensitive. |
+| `core/src/token.rs` | 1 | intentional-compatibility | Token domain separator; wire compatibility sensitive. |
+| `bridge/Cargo.toml` | 1 | intentional-compatibility | Bridge Rust crate still publishes legacy package ID. |
+| `sdk-js/package.json` | 2 | intentional-compatibility | Legacy npm package identity/dependency retained. |
+| `sdk-js/index.js` | 1 | intentional-compatibility | Imports legacy bridge package name. |
+| `sdk-js/index.test.js` | 1 | intentional-compatibility | Test import mirrors legacy bridge package identity. |
+| `bridge/pkg/package.json` | 2 | intentional-compatibility | wasm-pack output package currently legacy-named. |
+| `web/pkg/package.json` | 2 | intentional-compatibility | Generated bundle metadata currently legacy-named. |
+| `benchmarks/results/text_trace_rustcode.bench.txt` | 1 | hard-cutover-candidate | Generated artifact can be regenerated/cleaned. |

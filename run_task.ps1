@@ -1,18 +1,12 @@
 try {
     function Start-MongoContainer {
-        foreach ($name in @("nodalmerge-mongo", "activesync-mongo")) {
-            docker start $name *> $null
-            if ($LASTEXITCODE -eq 0) {
-                if ($name -eq "activesync-mongo") {
-                    Write-Host "Using Mongo container: $name (legacy compatibility alias)"
-                }
-                else {
-                    Write-Host "Using Mongo container: $name"
-                }
-                return
-            }
+        $name = "nodalmerge-mongo"
+        docker start $name *> $null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Using Mongo container: $name"
+            return
         }
-        throw "Could not start Mongo container (tried nodalmerge-mongo first, then activesync-mongo legacy alias)."
+        throw "Could not start Mongo container '$name'."
     }
 
     function Resolve-DotnetHostProjectPath {

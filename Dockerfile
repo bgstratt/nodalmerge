@@ -89,7 +89,6 @@ RUN useradd --system --home /data --shell /usr/sbin/nologin nodalmerge \
     && chown nodalmerge:nodalmerge /data
 
 COPY --from=builder /src/target/release/nodalmerge-server /usr/local/bin/nodalmerge-server
-RUN ln -sf /usr/local/bin/nodalmerge-server /usr/local/bin/activesync-server
 
 USER nodalmerge
 WORKDIR /data

@@ -5,10 +5,6 @@ edition = "2021"
 autobins = false
 
 [[bin]]
-name = "activesync-dev-server"
-path = "src/activesync_dev_server_main.rs"
-
-[[bin]]
 name = "nodalmerge-dev-server"
 path = "src/nodalmerge_dev_server_main.rs"
 

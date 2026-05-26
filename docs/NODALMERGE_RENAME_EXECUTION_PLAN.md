@@ -7,6 +7,7 @@ Last updated: 2026-05-25
 Phase A execution artifact:
 
 1. `docs/NODALMERGE_RENAME_INVENTORY_CHECKLIST.md`
+2. `docs/NODALMERGE_PACKAGE_MIGRATION_QUICK_REFERENCE.md`
 
 ## 1. Objective
 
@@ -202,7 +203,7 @@ Minimum compatibility mechanisms to implement:
    - compatibility NuGet package ids that depend on new ids
    - dual key read for ActiveSync:* and NodalMerge:* config prefixes
 3. npm:
-   - deprecated activesync-sdk-js wrapper that re-exports nodalmerge-sdk-js
+   - nodalmerge npm wrappers as primary names (`nodalmerge-sdk-js`, `nodalmerge-bridge`) that re-export legacy activesync packages during migration
 4. Docker:
    - dual image tags and entrypoint alias
 5. Ops:
@@ -237,7 +238,7 @@ Required checks before each phase promotion:
 2. Rust bin names and cargo run scripts
 3. FFI artifact names and probing logic
 4. .NET csproj package ids, project names, namespaces
-5. dotnet-host scripts and NuGet packing pipelines
+5. nodalmerge-host scripts and NuGet packing pipelines
 6. npm package names and bridge import paths
 7. Dockerfile, compose snippets, and deployment docs
 8. env vars and config key bindings

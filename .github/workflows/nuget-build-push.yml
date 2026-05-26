@@ -7,11 +7,32 @@ on:
       - 'nodalmerge-host/src/**'
       - 'nodalmerge-host/ActiveSync.DotNetHost.slnx'
       - 'host-ffi/**'
+      - 'wrappers/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/nuget-build-push.yml'
   workflow_dispatch:
     inputs:
       packageVersion:
         description: Optional package version override
+        required: false
+        type: string
+      publishNpmWrappers:
+        description: Publish nodalmerge npm wrappers (requires npmPublishToken input)
+        required: false
+        default: false
+        type: boolean
+      npmPublishToken:
+        description: npm publish token for wrapper publish jobs
+        required: false
+        type: string
+      publishCrateWrappers:
+        description: Publish nodalmerge wrapper crates (requires cargoRegistryToken input)
+        required: false
+        default: false
+        type: boolean
+      cargoRegistryToken:
+        description: crates.io token for wrapper publish jobs
         required: false
         type: string
 
@@ -20,9 +41,130 @@ permissions:
 
 env:
   DOTNET_VERSION: 10.0.x
+  NODE_VERSION: 20
   NUGET_OUTPUT_DIR: ${{ github.workspace }}/artifacts/nuget
 
 jobs:
+  pack-npm-wrappers:
+    name: pack npm wrappers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Pack nodalmerge npm wrappers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/npm"
+
+          pushd wrappers/npm/nodalmerge-bridge >/dev/null
+          npm pack --dry-run
+          npm pack --pack-destination "$GITHUB_WORKSPACE/artifacts/npm"
+          popd >/dev/null
+
+          pushd wrappers/npm/nodalmerge-sdk-js >/dev/null
+          npm pack --dry-run
+          npm pack --pack-destination "$GITHUB_WORKSPACE/artifacts/npm"
+          popd >/dev/null
+
+      - name: Upload npm wrapper artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-wrappers
+          path: ${{ github.workspace }}/artifacts/npm/*.tgz
+          if-no-files-found: error
+
+  pack-crate-wrappers:
+    name: pack crate wrappers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Package nodalmerge wrapper crates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo package --package nodalmerge-core --no-verify
+          cargo package --package nodalmerge-host-core --no-verify
+          cargo package --package nodalmerge-host-ffi --no-verify
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/crates"
+          cp target/package/nodalmerge-*.crate "$GITHUB_WORKSPACE/artifacts/crates/"
+
+      - name: Upload crate wrapper artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: crate-wrappers
+          path: ${{ github.workspace }}/artifacts/crates/*.crate
+          if-no-files-found: error
+
+  publish-npm-wrappers:
+    name: publish npm wrappers
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publishNpmWrappers == 'true'
+    needs:
+      - pack-npm-wrappers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download npm wrapper artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-wrappers
+          path: ${{ github.workspace }}/artifacts/npm
+
+      - name: Publish nodalmerge npm wrappers
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ github.event.inputs.npmPublishToken }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN is required for publishNpmWrappers=true"
+            exit 1
+          fi
+          npm publish "$GITHUB_WORKSPACE/artifacts/npm/nodalmerge-bridge-"*.tgz --access public
+          npm publish "$GITHUB_WORKSPACE/artifacts/npm/nodalmerge-sdk-js-"*.tgz --access public
+
+  publish-crate-wrappers:
+    name: publish crate wrappers
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publishCrateWrappers == 'true'
+    needs:
+      - pack-crate-wrappers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish nodalmerge wrapper crates
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ github.event.inputs.cargoRegistryToken }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "CARGO_REGISTRY_TOKEN is required for publishCrateWrappers=true"
+            exit 1
+          fi
+          cargo publish -p nodalmerge-core
+          cargo publish -p nodalmerge-host-core
+          cargo publish -p nodalmerge-host-ffi
   pack-managed:
     name: pack managed
     runs-on: ubuntu-latest

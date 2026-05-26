@@ -132,8 +132,13 @@ Local validation already uses `nodalmerge-host/NUGET_README.md` as package readm
 
 Publish options:
 
-1. GitHub Actions workflow: `.github/workflows/nuget-build-push.yml`
+1. GitHub Actions workflow: `.github/workflows/nuget-build-push.yml` (NuGet publish + npm/crate wrapper dry-run packaging, with optional wrapper publish on workflow_dispatch)
 2. Manual `dotnet nuget push` from prepared artifacts directory
+
+Workflow-dispatch publish inputs:
+
+1. `publishNpmWrappers=true` requires `npmPublishToken`
+2. `publishCrateWrappers=true` requires `cargoRegistryToken`
 
 Manual push shape:
 
@@ -162,7 +167,13 @@ wasm-pack build --target web
 ### 3.2 Validate package contents
 
 ```bash
-cd bridge/pkg
+cd wrappers/npm/nodalmerge-bridge
+npm pack --dry-run
+
+cd ../nodalmerge-sdk-js
+npm pack --dry-run
+
+cd ../../../bridge/pkg
 npm pack --dry-run
 
 cd ../../sdk-js
@@ -171,24 +182,29 @@ npm pack --dry-run
 
 Check that expected files are included:
 
-1. Bridge: wasm/js/d.ts/readme
-2. SDK: index.js/index.d.ts/readme
+1. NodalMerge wrappers: index.js/index.d.ts/readme
+2. Legacy bridge package: wasm/js/d.ts/readme
+3. Legacy SDK package: index.js/index.d.ts/readme
 
 ### 3.3 Publish
 
 ```bash
-cd bridge/pkg
-npm publish --access public
-
-cd ../../wrappers/npm/nodalmerge-bridge
+cd wrappers/npm/nodalmerge-bridge
 npm publish --access public
 
 cd ../nodalmerge-sdk-js
 npm publish --access public
 
+cd ../../../bridge/pkg
+npm publish --access public
+
 cd ../../sdk-js
 npm publish --access public
 ```
+
+Compatibility note:
+
+1. Keep publishing legacy packages (`activesync-bridge`, `activesync-sdk-js`) during the migration window so existing consumers do not break.
 
 If publishing to private registry, use registry-specific auth and omit `--access public` as needed.
 
@@ -204,6 +220,12 @@ Publish order (dependency-safe):
 6. `nodalmerge-core` (wrapper)
 7. `nodalmerge-host-core` (wrapper)
 8. `nodalmerge-host-ffi` (wrapper)
+
+NodalMerge-first command examples after legacy base crates are available:
+
+1. `cargo publish -p nodalmerge-core --dry-run`
+2. `cargo publish -p nodalmerge-host-core --dry-run`
+3. `cargo publish -p nodalmerge-host-ffi --dry-run`
 
 Dry-run first for each crate:
 

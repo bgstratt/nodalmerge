@@ -35,8 +35,8 @@ fn redact_uri(u: &str) -> String {
     u.to_string()
 }
 
-use activesync_core::{pack_nodes, unpack_nodes, SyncNode};
-use activesync_server::store::NodePersistence;
+use nodalmerge_core::{pack_nodes, unpack_nodes, SyncNode};
+use nodalmerge_server::store::NodePersistence;
 use mongodb::bson::{self, doc, Binary, DateTime as BsonDateTime, Document};
 use mongodb::error::ErrorKind;
 use mongodb::options::{ClientOptions, FindOneAndUpdateOptions, FindOptions, IndexOptions, ReturnDocument};

@@ -1,4 +1,4 @@
-use activesync_core::{
+use nodalmerge_core::{
     Hash, Op, OpId, StateGraph, SyncNode, TextOp, TextProjectionMode, TextProjectionResidencyPolicy,
     TextRangeAnchor, TextRuntimeTemperatureThresholds, Transaction,
 };

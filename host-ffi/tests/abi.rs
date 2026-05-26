@@ -1,7 +1,7 @@
-use activesync_core::{MapOp, Op, StateGraph};
-use activesync_host_core::api::{CapabilitySet, ClientHelloPayload, HostCommand, HostEvent};
-use activesync_host_core::engine::shape_catchup_pack_payload_b64;
-use activesync_host_ffi::{
+use nodalmerge_core::{MapOp, Op, StateGraph};
+use nodalmerge_host_core::api::{CapabilitySet, ClientHelloPayload, HostCommand, HostEvent};
+use nodalmerge_host_core::engine::shape_catchup_pack_payload_b64;
+use nodalmerge_host_ffi::{
     as_bytes_owned, as_bytes_owned_free, as_bytes_view, as_host_abi_version, as_host_engine,
     as_host_engine_free, as_host_engine_new, as_host_submit_command, as_host_submit_command_ex,
     as_host_submit_command_json, as_host_submit_command_json_ex, as_status,
@@ -1389,7 +1389,7 @@ fn submit_json_supports_blob_commands() {
         vec![HostEvent::BlobValuesRead {
             room_id: "room-blob-json".to_string(),
             namespace: "assets".to_string(),
-            entries: vec![activesync_host_core::api::BlobEntry {
+            entries: vec![nodalmerge_host_core::api::BlobEntry {
                 hash: "sha256:abc".to_string(),
                 data_b64: "QUJD".to_string(),
             }],
@@ -1478,7 +1478,7 @@ fn submit_json_supports_blob_commands() {
         vec![HostEvent::BlobPackPrepared {
             room_id: "room-blob-json".to_string(),
             namespace: "assets".to_string(),
-            blobs: vec![activesync_host_core::api::BlobEntry {
+            blobs: vec![nodalmerge_host_core::api::BlobEntry {
                 hash: "sha256:abc".to_string(),
                 data_b64: "QUJD".to_string(),
             }],

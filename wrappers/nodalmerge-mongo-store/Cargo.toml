@@ -1,10 +1,10 @@
 [package]
-name = "nodalmerge-mongo-store"
+name = "activesync-mongo-store"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Compatibility wrapper crate re-exporting activesync-mongo-store during rename migration"
+description = "Compatibility wrapper crate re-exporting nodalmerge-mongo-store during rename migration"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-activesync-mongo-store = { path = "../../node-stores/mongo" }
+nodalmerge-mongo-store = { path = "../../node-stores/mongo" }

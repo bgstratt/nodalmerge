@@ -1,9 +1,9 @@
 [package]
-name = "nodalmerge-host-ffi"
+name = "activesync-host-ffi"
 version = "0.1.0"
 edition = "2021"
-description = "Compatibility wrapper crate re-exporting activesync-host-ffi during rename migration"
+description = "Compatibility wrapper crate re-exporting nodalmerge-host-ffi during rename migration"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-activesync-host-ffi = { version = "0.1.0", path = "../../host-ffi" }
+nodalmerge-host-ffi = { version = "0.1.0", path = "../../host-ffi" }

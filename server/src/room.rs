@@ -5,8 +5,8 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use activesync_core::{MemoryBlobStore, BlobStore, Op, MapOp, Policy, StateGraph, SyncNode, pack_nodes};
-use activesync_host_core::engine::{
+use nodalmerge_core::{MemoryBlobStore, BlobStore, Op, MapOp, Policy, StateGraph, SyncNode, pack_nodes};
+use nodalmerge_host_core::engine::{
     PeerCountGaugeUpdate,
     plan_deregister_peer_membership,
     plan_register_peer_membership,
@@ -428,8 +428,8 @@ impl Rooms {
 
 /// G4 helper — union of every `SetBlob.blob_hash` across all nodes in the
 /// room's DAG. Called with a read lock on the graph; does no I/O.
-async fn collect_live_blob_hashes(room: &Arc<Room>) -> std::collections::HashSet<activesync_core::Hash> {
-    use activesync_core::{Op, MapOp};
+async fn collect_live_blob_hashes(room: &Arc<Room>) -> std::collections::HashSet<nodalmerge_core::Hash> {
+    use nodalmerge_core::{Op, MapOp};
     let mut live = std::collections::HashSet::new();
     let graph = room.graph.read().await;
     let ids = graph.all_node_ids();
@@ -568,11 +568,11 @@ pub fn spawn_tick_loop(
 pub async fn import_nodes(
     room: &Room,
     nodes: Vec<SyncNode>,
-) -> (usize, Vec<activesync_core::NodeId>, Vec<String>) {
+) -> (usize, Vec<nodalmerge_core::NodeId>, Vec<String>) {
     let t0 = Instant::now();
     let mut pending = nodes;
     let mut accepted = 0usize;
-    let mut accepted_ids: Vec<activesync_core::NodeId> = Vec::new();
+    let mut accepted_ids: Vec<nodalmerge_core::NodeId> = Vec::new();
     let mut errors = Vec::new();
     let mut graph = room.graph.write().await;
 
@@ -592,7 +592,7 @@ pub async fn import_nodes(
 
         // Index pending by id so we can resurrect MissingParent rejects for
         // the next pass without re-cloning the originals up front.
-        let mut by_id: std::collections::HashMap<activesync_core::NodeId, SyncNode> =
+        let mut by_id: std::collections::HashMap<nodalmerge_core::NodeId, SyncNode> =
             pending.drain(..).map(|n| (n.id, n)).collect();
         let batch: Vec<SyncNode> = by_id.values().cloned().collect();
 
@@ -603,16 +603,16 @@ pub async fn import_nodes(
         let mut still_pending = Vec::new();
         for (id, err) in result.rejected {
             match err {
-                activesync_core::SyncError::MissingParent(_) => {
+                nodalmerge_core::SyncError::MissingParent(_) => {
                     if let Some(n) = by_id.remove(&id) {
                         still_pending.push(n);
                     }
                 }
-                activesync_core::SyncError::DuplicateNode(_) => {}
+                nodalmerge_core::SyncError::DuplicateNode(_) => {}
                 // G5: bucket sanity-check rejects into a labeled counter
                 // so operators can spot misbehaving clients (or their own
                 // clock drift) without scraping logs.
-                e @ activesync_core::SyncError::LamportCeiling { .. } => {
+                e @ nodalmerge_core::SyncError::LamportCeiling { .. } => {
                     metrics::counter!(
                         "nodalmerge_lamport_rejected_total",
                         "reason" => "ceiling"
@@ -623,7 +623,7 @@ pub async fn import_nodes(
                     ).increment(1);
                     errors.push(e.to_string());
                 }
-                e @ activesync_core::SyncError::WallClockSkew { .. } => {
+                e @ nodalmerge_core::SyncError::WallClockSkew { .. } => {
                     metrics::counter!(
                         "nodalmerge_lamport_rejected_total",
                         "reason" => "wall_skew"
@@ -749,7 +749,7 @@ pub fn spawn_snapshot_sweeper(
     max_chain_depth: usize,
     check_interval: Duration,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    use activesync_core::compaction::{compact, compact_incremental, pack_snapshot_pack};
+    use nodalmerge_core::compaction::{compact, compact_incremental, pack_snapshot_pack};
 
     if node_interval == 0 {
         return None;
@@ -757,7 +757,7 @@ pub fn spawn_snapshot_sweeper(
 
     Some(tokio::spawn(async move {
         // Per-room snapshot state: (last_node_count, chain_depth, last_snapshot_id).
-        let mut room_state: HashMap<String, (usize, usize, Option<activesync_core::NodeId>)> = HashMap::new();
+        let mut room_state: HashMap<String, (usize, usize, Option<nodalmerge_core::NodeId>)> = HashMap::new();
 
         let mut ticker = tokio::time::interval(check_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

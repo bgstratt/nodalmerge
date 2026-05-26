@@ -81,8 +81,8 @@ activesync-s3-blobs = "0.1.0"
 
 | Legacy command | NodalMerge-first command | Current compatibility status |
 |---|---|---|
-| `cargo run -p activesync-server --bin activesync-server` | `cargo run -p activesync-server --bin nodalmerge-server` | Both bins are available |
-| `cargo run -p activesync-dev-server --bin activesync-dev-server` | `cargo run -p activesync-dev-server --bin nodalmerge-dev-server` | Both bins are available |
+| `cargo run -p nodalmerge-server --bin activesync-server` | `cargo run -p nodalmerge-server --bin nodalmerge-server` | Both bins are available |
+| `cargo run -p nodalmerge-dev-server --bin activesync-dev-server` | `cargo run -p nodalmerge-dev-server --bin nodalmerge-dev-server` | Both bins are available |
 
 ## CI/Release Workflow Coverage
 

@@ -1,4 +1,4 @@
-use activesync_core::{Op, StateGraph, TextOp, TextProjectionMode, TextRangeAnchor, TextRangeOp};
+use nodalmerge_core::{Op, StateGraph, TextOp, TextProjectionMode, TextRangeAnchor, TextRangeOp};
 use ed25519_dalek::SigningKey;
 
 fn key_a() -> SigningKey {

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use activesync_core::{
+use nodalmerge_core::{
     MapOp, Op, Policy, PolicyDefault, PolicyRule, PolicyTimelineEntry, SyncError, SyncNode,
     Transaction, replay_with_policy_timeline,
 };

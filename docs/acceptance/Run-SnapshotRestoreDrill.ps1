@@ -49,7 +49,7 @@ Push-Location $repoRoot
 try {
     foreach ($check in $checks) {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $output = & $cargoCmd test -p activesync-core $check.test_filter -- --exact --nocapture 2>&1 | Out-String
+        $output = & $cargoCmd test -p nodalmerge-core $check.test_filter -- --exact --nocapture 2>&1 | Out-String
         $exit = $LASTEXITCODE
         $sw.Stop()
 

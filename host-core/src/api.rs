@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use activesync_core::conflicts::ConflictEvent;
+use nodalmerge_core::conflicts::ConflictEvent;
 
 pub type SessionId = u64;
 

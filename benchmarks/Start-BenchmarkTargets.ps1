@@ -39,8 +39,8 @@ function Resolve-FfiDllPath {
     $candidates = @(
         (Join-Path $PSScriptRoot "..\target\debug\nodalmerge_host_ffi.dll"),
         (Join-Path $PSScriptRoot "..\target\release\nodalmerge_host_ffi.dll"),
-        (Join-Path $PSScriptRoot "..\target\debug\activesync_host_ffi.dll"),
-        (Join-Path $PSScriptRoot "..\target\release\activesync_host_ffi.dll")
+        (Join-Path $PSScriptRoot "..\target\debug\nodalmerge_host_ffi.dll"),
+        (Join-Path $PSScriptRoot "..\target\release\nodalmerge_host_ffi.dll")
     )
 
     foreach ($candidate in $candidates) {
@@ -59,7 +59,7 @@ try {
     if ($StartRustCombined) {
         Write-Host "Starting rust-combined-server on $RustCombinedBind"
         $envMap = @{ AS_BIND_ADDR = $RustCombinedBind }
-        $proc = Start-Process cargo -ArgumentList @("run", "-p", "activesync-server", "--bin", "nodalmerge-server") -PassThru -NoNewWindow -Env $envMap
+        $proc = Start-Process cargo -ArgumentList @("run", "-p", "nodalmerge-server", "--bin", "nodalmerge-server") -PassThru -NoNewWindow -Env $envMap
         $started.Add([pscustomobject]@{ Name = "rust-combined-server"; Process = $proc })
     }
 
@@ -74,7 +74,7 @@ try {
             MONGO_URI = $MongoUri
             MONGO_DATABASE = $MongoDatabase
         }
-        $proc = Start-Process cargo -ArgumentList @("run", "-p", "activesync-dev-server", "--bin", "nodalmerge-dev-server") -PassThru -NoNewWindow -Env $envMap
+        $proc = Start-Process cargo -ArgumentList @("run", "-p", "nodalmerge-dev-server", "--bin", "nodalmerge-dev-server") -PassThru -NoNewWindow -Env $envMap
         $started.Add([pscustomobject]@{ Name = "rust-integrated-hosted-server"; Process = $proc })
     }
 
@@ -82,7 +82,7 @@ try {
         $dotnetHostProject = Resolve-DotnetHostProjectPath
         $ffiPath = Resolve-FfiDllPath -Explicit $FfiDllPath
         if (-not $ffiPath) {
-            Write-Warning "No NODALMERGE_HOST_FFI_DLL found. Build host-ffi first: cargo build -p activesync-host-ffi (legacy crate id)"
+            Write-Warning "No NODALMERGE_HOST_FFI_DLL found. Build host-ffi first: cargo build -p nodalmerge-host-ffi (legacy crate id)"
         }
 
         Write-Host "Starting dotnet-host-runtime at $DotnetBaseUrl"

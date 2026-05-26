@@ -114,9 +114,9 @@ npm install C:\path\to\nodalmerge\artifacts\package-local\npm\activesync-sdk-js-
 
 Run from repo root unless noted.
 
-1. `cargo test -p activesync-core`
-2. `cargo test -p activesync-host-core`
-3. `cargo test -p activesync-host-ffi`
+1. `cargo test -p nodalmerge-core`
+2. `cargo test -p nodalmerge-host-core`
+3. `cargo test -p nodalmerge-host-ffi`
 4. `dotnet test nodalmerge-host/NodalMerge.DotNetHost.slnx`
 5. `cd nodalmerge-host; pwsh -File ./pack-local-nuget.ps1 -Version 0.1.0-local`
 6. `cd nodalmerge-host; dotnet restore ./NodalMerge.DotNetHost.slnx --configfile ./NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
@@ -227,20 +227,25 @@ If publishing to private registry, use registry-specific auth and omit `--access
 
 Publish order (dependency-safe):
 
-1. `activesync-core`
-2. `activesync-host-core`
-3. `activesync-host-ffi`
-4. `activesync-host-axum`
-5. `activesync-bridge`
-6. `activesync-s3-blobs`
-6. `nodalmerge-core` (wrapper)
-7. `nodalmerge-gc` (wrapper)
-7. `nodalmerge-host-core` (wrapper)
-8. `nodalmerge-host-axum` (wrapper)
-8. `nodalmerge-host-ffi` (wrapper)
-9. `nodalmerge-server` (wrapper)
-10. `nodalmerge-jwt-bridge` (wrapper)
-11. `nodalmerge-s3-blobs` (wrapper)
+1. `nodalmerge-core`
+2. `nodalmerge-gc`
+3. `nodalmerge-host-core`
+4. `nodalmerge-host-ffi`
+5. `nodalmerge-host-axum`
+6. `nodalmerge-server`
+7. `nodalmerge-jwt-bridge`
+8. `nodalmerge-s3-blobs`
+9. `nodalmerge-mongo-store` (internal / publish=false)
+10. `nodalmerge-postgres-store` (internal / publish=false)
+11. `nodalmerge-nodestore-conformance` (internal / publish=false)
+12. `activesync-core` (compat wrapper)
+13. `activesync-gc` (compat wrapper)
+14. `activesync-host-core` (compat wrapper)
+15. `activesync-host-ffi` (compat wrapper)
+16. `activesync-host-axum` (compat wrapper)
+17. `activesync-server` (compat wrapper)
+18. `activesync-jwt-bridge` (compat wrapper)
+19. `activesync-s3-blobs` (compat wrapper)
 
 NodalMerge-first command examples after legacy base crates are available:
 
@@ -256,29 +261,29 @@ NodalMerge-first command examples after legacy base crates are available:
 Dry-run first for each crate:
 
 ```bash
-cargo publish -p activesync-core --dry-run
+cargo publish -p nodalmerge-core --dry-run
 ```
 
 Important staging note:
 
-1. `activesync-host-core`, `activesync-host-ffi`, and `activesync-bridge` depend on crates that must already exist on crates.io.
-2. Before the first public release, dry-run for those dependent crates will fail until upstream crates are published.
+1. `nodalmerge-host-core`, `nodalmerge-host-ffi`, and `activesync-bridge` depend on crates that must already exist on crates.io.
+2. Before the first public release, dry-run for those dependent crates can fail until upstream crates are published.
 
-After publishing `activesync-core`, run:
-
-```bash
-cargo publish -p activesync-host-core --dry-run
-```
-
-After publishing `activesync-host-core`, run:
+After publishing `nodalmerge-core`, run:
 
 ```bash
-cargo publish -p activesync-host-ffi --dry-run
-cargo publish -p activesync-host-axum --dry-run
-cargo publish -p activesync-s3-blobs --dry-run
+cargo publish -p nodalmerge-host-core --dry-run
 ```
 
-After `activesync-core` is available on crates.io, run:
+After publishing `nodalmerge-host-core`, run:
+
+```bash
+cargo publish -p nodalmerge-host-ffi --dry-run
+cargo publish -p nodalmerge-host-axum --dry-run
+cargo publish -p nodalmerge-s3-blobs --dry-run
+```
+
+After `nodalmerge-core` is available on crates.io, run:
 
 ```bash
 cargo publish -p activesync-bridge --dry-run
@@ -287,20 +292,23 @@ cargo publish -p activesync-bridge --dry-run
 Then publish in the same order:
 
 ```bash
-cargo publish -p activesync-core
-cargo publish -p activesync-host-core
-cargo publish -p activesync-host-ffi
-cargo publish -p activesync-host-axum
-cargo publish -p activesync-bridge
-cargo publish -p activesync-s3-blobs
 cargo publish -p nodalmerge-core
 cargo publish -p nodalmerge-gc
 cargo publish -p nodalmerge-host-core
-cargo publish -p nodalmerge-host-axum
 cargo publish -p nodalmerge-host-ffi
+cargo publish -p nodalmerge-host-axum
 cargo publish -p nodalmerge-server
 cargo publish -p nodalmerge-jwt-bridge
 cargo publish -p nodalmerge-s3-blobs
+cargo publish -p activesync-core
+cargo publish -p activesync-gc
+cargo publish -p activesync-host-core
+cargo publish -p activesync-host-ffi
+cargo publish -p activesync-host-axum
+cargo publish -p activesync-server
+cargo publish -p activesync-jwt-bridge
+cargo publish -p activesync-s3-blobs
+cargo publish -p activesync-bridge
 ```
 
 ## 5. Release Sign-Off Checklist

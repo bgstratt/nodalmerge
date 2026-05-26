@@ -1,6 +1,6 @@
-//! `activesync-server` library surface — exposes the room registry, the
+//! `nodalmerge-server` library surface — exposes the room registry, the
 //! persistence layer, and the websocket handler for integration tests and
-//! external embedders. The `activesync-server` binary (see `main.rs`) is the
+//! external embedders. The `nodalmerge-server` binary (see `main.rs`) is the
 //! canonical consumer.
 
 pub mod keypair;

@@ -1,4 +1,4 @@
-use activesync_core::SyncNode;
+use nodalmerge_core::SyncNode;
 
 pub trait HostPersistence: Send + Sync {
     fn persist_nodes(&self, room_id: &str, nodes: &[SyncNode]) -> Result<(), String>;

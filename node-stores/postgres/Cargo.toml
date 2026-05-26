@@ -1,13 +1,13 @@
 [package]
-name = "activesync-postgres-store"
+name = "nodalmerge-postgres-store"
 version = "0.1.0"
 edition = "2021"
 publish = false
 description = "PostgreSQL NodePersistence adapter for ActiveSync (F7)"
 
 [dependencies]
-activesync-core   = { path = "../../core" }
-activesync-server = { path = "../../server" }
+nodalmerge-core   = { path = "../../core" }
+nodalmerge-server = { path = "../../server" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "migrate"] }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -20,5 +20,5 @@ futures-util = "0.3"
 tokio = { workspace = true }
 testcontainers = { version = "0.23", features = ["blocking"] }
 tracing-subscriber = "0.3"
-activesync-nodestore-conformance = { path = "../conformance" }
-activesync-core = { path = "../../core" }
+nodalmerge-nodestore-conformance = { path = "../conformance" }
+nodalmerge-core = { path = "../../core" }

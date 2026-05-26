@@ -1,15 +1,20 @@
 [package]
-name = "activesync-dev-server"
+name = "nodalmerge-dev-server"
 version = "0.1.0"
 edition = "2021"
+autobins = false
+
+[[bin]]
+name = "activesync-dev-server"
+path = "src/activesync_dev_server_main.rs"
 
 [[bin]]
 name = "nodalmerge-dev-server"
 path = "src/nodalmerge_dev_server_main.rs"
 
 [dependencies]
-activesync-server = { path = "../server" }
-activesync-mongo-store = { path = "../node-stores/mongo" }
+nodalmerge-server = { path = "../server" }
+nodalmerge-mongo-store = { path = "../node-stores/mongo" }
 tokio = { workspace = true }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }

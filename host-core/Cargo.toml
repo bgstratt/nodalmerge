@@ -1,5 +1,5 @@
 [package]
-name = "activesync-host-core"
+name = "nodalmerge-host-core"
 version = "0.1.0"
 edition = "2021"
 description = "Host-neutral orchestration surface for ActiveSync"
@@ -8,7 +8,7 @@ keywords = ["crdt", "sync", "host", "orchestration"]
 categories = ["network-programming", "api-bindings"]
 
 [dependencies]
-activesync-core = { version = "0.1.0", path = "../core" }
+nodalmerge-core = { version = "0.1.0", path = "../core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -10,10 +10,10 @@
 
 use std::sync::Arc;
 
-use activesync_core::{LAMPORT_SLACK, MapOp, Op, SyncNode, Transaction, WALL_SKEW_MAX_MS};
-use activesync_core::node::Signature;
-use activesync_server::room::{import_nodes, Rooms};
-use activesync_server::store::{NoPersistence, SharedPersistence};
+use nodalmerge_core::{LAMPORT_SLACK, MapOp, Op, SyncNode, Transaction, WALL_SKEW_MAX_MS};
+use nodalmerge_core::node::Signature;
+use nodalmerge_server::room::{import_nodes, Rooms};
+use nodalmerge_server::store::{NoPersistence, SharedPersistence};
 use ed25519_dalek::{Signer, SigningKey};
 
 fn sign(tx: Transaction, sk: &SigningKey) -> SyncNode {

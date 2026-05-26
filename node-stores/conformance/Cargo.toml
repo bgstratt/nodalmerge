@@ -1,13 +1,13 @@
 [package]
-name = "activesync-nodestore-conformance"
+name = "nodalmerge-nodestore-conformance"
 version = "0.1.0"
 edition = "2021"
 publish = false
 description = "Shared conformance suite for NodePersistence adapters (F7)"
 
 [dependencies]
-activesync-core   = { path = "../../core" }
-activesync-server = { path = "../../server" }
+nodalmerge-core   = { path = "../../core" }
+nodalmerge-server = { path = "../../server" }
 ed25519-dalek = { workspace = true }
 
 [dev-dependencies]

@@ -1,5 +1,5 @@
 [package]
-name = "activesync-core"
+name = "nodalmerge-core"
 version = "0.1.0"
 edition = "2021"
 description = "Core CRDT sync engine for ActiveSync"

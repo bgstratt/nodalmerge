@@ -6,7 +6,7 @@
 /// This measures the map-scan cost on the hot path of every UI render.
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use ed25519_dalek::SigningKey;
-use activesync_core::{Op, MapOp, StateGraph};
+use nodalmerge_core::{Op, MapOp, StateGraph};
 
 fn build_1k_graph() -> StateGraph {
     let key = SigningKey::from_bytes(&[1u8; 32]);

@@ -11,9 +11,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use activesync_core::{MapOp, Op, StateGraph};
-use activesync_server::room::{import_nodes, Rooms};
-use activesync_server::store::{DirPersistence, NoPersistence, SharedPersistence};
+use nodalmerge_core::{MapOp, Op, StateGraph};
+use nodalmerge_server::room::{import_nodes, Rooms};
+use nodalmerge_server::store::{DirPersistence, NoPersistence, SharedPersistence};
 use ed25519_dalek::SigningKey;
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
@@ -24,7 +24,7 @@ fn tmpdir(tag: &str) -> std::path::PathBuf {
     p
 }
 
-fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> activesync_core::SyncNode {
+fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> nodalmerge_core::SyncNode {
     let mut g = StateGraph::new();
     let id = g.apply_local(sk, 0, vec![Op::Map(MapOp::Set {
         key: key.into(), value: val.to_vec(),

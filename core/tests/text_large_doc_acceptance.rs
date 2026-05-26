@@ -1,6 +1,6 @@
 #![cfg(feature = "text_projection")]
 
-use activesync_core::{Op, OpId, StateGraph, TextOp, TextProjectionMode};
+use nodalmerge_core::{Op, OpId, StateGraph, TextOp, TextProjectionMode};
 use ed25519_dalek::SigningKey;
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -29,7 +29,7 @@ fn env_f64(name: &str, default: f64) -> f64 {
 }
 
 fn estimate_projection_memory(
-    stats: &activesync_core::TextProjectionDebugStats,
+    stats: &nodalmerge_core::TextProjectionDebugStats,
 ) -> (usize, usize, usize, f64, f64) {
     // Phase 5 densification stores visible ids separately from UTF-8 payload,
     // not as duplicated `(OpId, char)` tuples.

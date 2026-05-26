@@ -17,8 +17,8 @@ $ErrorActionPreference = "Stop"
 
 function Resolve-FfiDllPath {
     $candidates = @(
-        (Join-Path $PSScriptRoot "..\target\debug\activesync_host_ffi.dll"),
-        (Join-Path $PSScriptRoot "..\target\release\activesync_host_ffi.dll")
+        (Join-Path $PSScriptRoot "..\target\debug\nodalmerge_host_ffi.dll"),
+        (Join-Path $PSScriptRoot "..\target\release\nodalmerge_host_ffi.dll")
     )
 
     foreach ($candidate in $candidates) {
@@ -144,7 +144,7 @@ try {
         }
         else {
             Write-Host "Warning: NODALMERGE_HOST_FFI_DLL/ACTIVESYNC_HOST_FFI_DLL is not set and no local host-ffi DLL was found."
-            Write-Host "Build with: cargo build -p activesync-host-ffi"
+            Write-Host "Build with: cargo build -p nodalmerge-host-ffi"
         }
     }
     elseif (-not [string]::IsNullOrWhiteSpace($env:NODALMERGE_HOST_FFI_DLL)) {

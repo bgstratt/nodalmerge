@@ -1,4 +1,4 @@
-//! F6 — S3-compatible blob backend for `activesync-server`.
+//! F6 — S3-compatible blob backend for `nodalmerge-server`.
 //!
 //! Implements [`BlobPersistence`] against any S3 API (AWS, Cloudflare R2,
 //! MinIO, Google Cloud Storage's S3-compat layer, Azure via S3 gateway, …).
@@ -23,11 +23,11 @@
 //! ## Composition
 //!
 //! `S3BlobStore` implements only `BlobPersistence`; pair it with any
-//! `NodePersistence` via [`activesync_server::store::Composite`]:
+//! `NodePersistence` via [`nodalmerge_server::store::Composite`]:
 //!
 //! ```ignore
-//! use activesync_server::store::{Composite, DirPersistence};
-//! use activesync_s3_blobs::{S3BlobStore, S3BlobStoreConfig, S3Auth};
+//! use nodalmerge_server::store::{Composite, DirPersistence};
+//! use nodalmerge_s3_blobs::{S3BlobStore, S3BlobStoreConfig, S3Auth};
 //! use std::sync::Arc;
 //!
 //! let nodes = DirPersistence::open("/var/lib/activesync")?;
@@ -37,7 +37,7 @@
 //!     auth: S3Auth::direct_from_env(),
 //!     ..Default::default()
 //! })?;
-//! let rooms = activesync_server::Rooms::with_persistence(
+//! let rooms = nodalmerge_server::Rooms::with_persistence(
 //!     Arc::new(Composite::new(nodes, blobs))
 //! );
 //! ```
@@ -45,8 +45,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use activesync_core::Hash;
-use activesync_server::store::{BlobPersistence, PresignedUrl};
+use nodalmerge_core::Hash;
+use nodalmerge_server::store::{BlobPersistence, PresignedUrl};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use object_store::{

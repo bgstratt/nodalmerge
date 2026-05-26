@@ -208,10 +208,10 @@ try {
     if (-not $SkipCrates) {
         Write-Host "[crates] Packaging crate artifacts (.crate) ..."
         $crateDirs = @{
-            "activesync-core" = "core"
-            "activesync-host-core" = "host-core"
-            "activesync-host-ffi" = "host-ffi"
-            "activesync-host-axum" = "host-axum"
+            "nodalmerge-core" = "core"
+            "nodalmerge-host-core" = "host-core"
+            "nodalmerge-host-ffi" = "host-ffi"
+            "nodalmerge-host-axum" = "host-axum"
             "activesync-bridge" = "bridge"
             "nodalmerge-core" = "wrappers/nodalmerge-core"
             "nodalmerge-gc" = "wrappers/nodalmerge-gc"
@@ -226,10 +226,10 @@ try {
             "nodalmerge-nodestore-conformance" = "wrappers/nodalmerge-nodestore-conformance"
         }
         $crateIds = @(
-            "activesync-core",
-            "activesync-host-core",
-            "activesync-host-ffi",
-            "activesync-host-axum",
+            "nodalmerge-core",
+            "nodalmerge-host-core",
+            "nodalmerge-host-ffi",
+            "nodalmerge-host-axum",
             "activesync-bridge",
             "nodalmerge-core",
             "nodalmerge-gc",

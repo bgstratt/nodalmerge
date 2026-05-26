@@ -2,7 +2,7 @@
 //! testcontainers, then runs the full conformance suite.
 //! Skips gracefully if Docker is unavailable.
 
-use activesync_mongo_store::{MongoNodeStore, MongoNodeStoreConfig};
+use nodalmerge_mongo_store::{MongoNodeStore, MongoNodeStoreConfig};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
@@ -48,6 +48,6 @@ async fn mongo_passes_full_conformance() {
         }
     }
     let store = store.expect("mongo connect");
-    activesync_nodestore_conformance::run_all(&store, "mongo-conformance");
+    nodalmerge_nodestore_conformance::run_all(&store, "mongo-conformance");
     drop(container);
 }

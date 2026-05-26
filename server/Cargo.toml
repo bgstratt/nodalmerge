@@ -1,7 +1,8 @@
 [package]
-name = "activesync-server"
+name = "nodalmerge-server"
 version = "0.1.0"
 edition = "2021"
+autobins = false
 description = "ActiveSync reflector server: authenticates peers and broadcasts state packs"
 
 [[bin]]
@@ -17,9 +18,9 @@ name = "authz-conformance-runner"
 path = "src/bin/authz_conformance_runner.rs"
 
 [dependencies]
-activesync-core = { version = "0.1.0", path = "../core" }
-activesync-gc = { version = "0.1.0", path = "../gc" }
-activesync-host-core = { version = "0.1.0", path = "../host-core" }
+nodalmerge-core = { version = "0.1.0", path = "../core" }
+nodalmerge-gc = { version = "0.1.0", path = "../gc" }
+nodalmerge-host-core = { version = "0.1.0", path = "../host-core" }
 ed25519-dalek = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { workspace = true }

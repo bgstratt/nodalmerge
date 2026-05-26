@@ -6,9 +6,9 @@ version = 4
 name = "activesync-bridge"
 version = "0.1.0"
 dependencies = [
- "activesync-core",
  "ed25519-dalek",
  "js-sys",
+ "nodalmerge-core",
  "serde",
  "serde_json",
  "wasm-bindgen",
@@ -18,185 +18,77 @@ dependencies = [
 name = "activesync-core"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
- "blake3",
- "criterion",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "hkdf",
- "postcard",
- "rayon",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "activesync-dev-server"
-version = "0.1.0"
-dependencies = [
- "activesync-mongo-store",
- "activesync-server",
- "axum",
- "env_logger",
- "log",
- "tokio",
- "tower-http 0.5.2",
- "tracing",
- "tracing-log 0.1.4",
- "tracing-subscriber",
+ "nodalmerge-core",
 ]
 
 [[package]]
 name = "activesync-gc"
 version = "0.1.0"
 dependencies = [
- "serde",
- "thiserror 1.0.69",
+ "nodalmerge-gc",
 ]
 
 [[package]]
 name = "activesync-host-axum"
 version = "0.1.0"
 dependencies = [
- "activesync-server",
- "axum",
- "ed25519-dalek",
- "tower-http 0.5.2",
+ "nodalmerge-host-axum",
 ]
 
 [[package]]
 name = "activesync-host-core"
 version = "0.1.0"
 dependencies = [
- "activesync-core",
- "ed25519-dalek",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
+ "nodalmerge-host-core",
 ]
 
 [[package]]
 name = "activesync-host-ffi"
 version = "0.1.0"
 dependencies = [
- "activesync-core",
- "activesync-host-core",
- "base64 0.22.1",
- "criterion",
- "ed25519-dalek",
- "postcard",
- "serde",
- "serde_json",
+ "nodalmerge-host-ffi",
 ]
 
 [[package]]
 name = "activesync-jwt-bridge"
 version = "0.1.0"
 dependencies = [
- "activesync-core",
- "ed25519-dalek",
- "jsonwebtoken",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
+ "nodalmerge-jwt-bridge",
 ]
 
 [[package]]
 name = "activesync-mongo-store"
 version = "0.1.0"
 dependencies = [
- "activesync-core",
- "activesync-nodestore-conformance",
- "activesync-server",
- "futures-util",
- "metrics",
- "mongodb",
- "serde",
- "testcontainers",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
+ "nodalmerge-mongo-store",
 ]
 
 [[package]]
 name = "activesync-nodestore-conformance"
 version = "0.1.0"
 dependencies = [
- "activesync-core",
- "activesync-server",
- "ed25519-dalek",
- "tempfile",
+ "nodalmerge-nodestore-conformance",
 ]
 
 [[package]]
 name = "activesync-postgres-store"
 version = "0.1.0"
 dependencies = [
- "activesync-core",
- "activesync-nodestore-conformance",
- "activesync-server",
- "futures-util",
- "metrics",
- "serde",
- "sqlx",
- "testcontainers",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
+ "nodalmerge-postgres-store",
 ]
 
 [[package]]
 name = "activesync-s3-blobs"
 version = "0.1.0"
 dependencies = [
- "activesync-core",
- "activesync-server",
- "aws-config",
- "aws-credential-types",
- "aws-sdk-s3",
- "bytes",
- "futures-util",
- "object_store",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "testcontainers",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
+ "nodalmerge-s3-blobs",
 ]
 
 [[package]]
 name = "activesync-server"
 version = "0.1.0"
 dependencies = [
- "activesync-core",
- "activesync-gc",
- "activesync-host-core",
- "axum",
- "base64 0.22.1",
- "ed25519-dalek",
- "futures-util",
- "governor",
- "metrics",
- "metrics-exporter-prometheus",
- "rand_core 0.6.4",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
+ "nodalmerge-server",
 ]
 
 [[package]]
@@ -3050,77 +2942,185 @@ checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
 name = "nodalmerge-core"
 version = "0.1.0"
 dependencies = [
- "activesync-core",
+ "aes-gcm",
+ "blake3",
+ "criterion",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "hkdf",
+ "postcard",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "nodalmerge-dev-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "env_logger",
+ "log",
+ "nodalmerge-mongo-store",
+ "nodalmerge-server",
+ "tokio",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-log 0.1.4",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "nodalmerge-gc"
 version = "0.1.0"
 dependencies = [
- "activesync-gc",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "nodalmerge-host-axum"
 version = "0.1.0"
 dependencies = [
- "activesync-host-axum",
+ "axum",
+ "ed25519-dalek",
+ "nodalmerge-server",
+ "tower-http 0.5.2",
 ]
 
 [[package]]
 name = "nodalmerge-host-core"
 version = "0.1.0"
 dependencies = [
- "activesync-host-core",
+ "ed25519-dalek",
+ "nodalmerge-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "nodalmerge-host-ffi"
 version = "0.1.0"
 dependencies = [
- "activesync-host-ffi",
+ "base64 0.22.1",
+ "criterion",
+ "ed25519-dalek",
+ "nodalmerge-core",
+ "nodalmerge-host-core",
+ "postcard",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "nodalmerge-jwt-bridge"
 version = "0.1.0"
 dependencies = [
- "activesync-jwt-bridge",
+ "ed25519-dalek",
+ "jsonwebtoken",
+ "nodalmerge-core",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "nodalmerge-mongo-store"
 version = "0.1.0"
 dependencies = [
- "activesync-mongo-store",
+ "futures-util",
+ "metrics",
+ "mongodb",
+ "nodalmerge-core",
+ "nodalmerge-nodestore-conformance",
+ "nodalmerge-server",
+ "serde",
+ "testcontainers",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "nodalmerge-nodestore-conformance"
 version = "0.1.0"
 dependencies = [
- "activesync-nodestore-conformance",
+ "ed25519-dalek",
+ "nodalmerge-core",
+ "nodalmerge-server",
+ "tempfile",
 ]
 
 [[package]]
 name = "nodalmerge-postgres-store"
 version = "0.1.0"
 dependencies = [
- "activesync-postgres-store",
+ "futures-util",
+ "metrics",
+ "nodalmerge-core",
+ "nodalmerge-nodestore-conformance",
+ "nodalmerge-server",
+ "serde",
+ "sqlx",
+ "testcontainers",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "nodalmerge-s3-blobs"
 version = "0.1.0"
 dependencies = [
- "activesync-s3-blobs",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-s3",
+ "bytes",
+ "futures-util",
+ "nodalmerge-core",
+ "nodalmerge-server",
+ "object_store",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "testcontainers",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
 name = "nodalmerge-server"
 version = "0.1.0"
 dependencies = [
- "activesync-server",
+ "axum",
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "futures-util",
+ "governor",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "nodalmerge-core",
+ "nodalmerge-gc",
+ "nodalmerge-host-core",
+ "rand_core 0.6.4",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

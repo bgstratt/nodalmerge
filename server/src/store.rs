@@ -18,14 +18,14 @@
 //!   content-addressed blob dir (`<root>/blobs/<room>/<hash>`). Hydrates on
 //!   room creation; write-through on every accepted node/blob.
 //!
-//! External backends (e.g. `activesync-s3-blobs::S3BlobStore`) implement
+//! External backends (e.g. `nodalmerge-s3-blobs::S3BlobStore`) implement
 //! just `BlobPersistence` and compose with any `NodePersistence`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use activesync_core::{unpack_nodes, pack_nodes, Hash, SyncNode};
+use nodalmerge_core::{unpack_nodes, pack_nodes, Hash, SyncNode};
 use rusqlite::{params, Connection};
 
 /// F6 — a presigned URL plus its absolute Unix-second expiration.
@@ -581,7 +581,7 @@ pub type SharedPersistence = Arc<dyn ServerPersistence>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use activesync_core::{Op, MapOp, StateGraph};
+    use nodalmerge_core::{Op, MapOp, StateGraph};
     use ed25519_dalek::SigningKey;
 
     fn tmpdir() -> PathBuf {

@@ -1,4 +1,4 @@
-//! # activesync-jwt-bridge
+//! # nodalmerge-jwt-bridge
 //!
 //! Trusted-issuer JWT → `RoomToken` minting. Plug your app's existing auth
 //! provider (Clerk, Supabase, Auth0, a homegrown issuer — anything that signs
@@ -10,7 +10,7 @@
 //!    connecting peer's Ed25519 public key (hex), the ActiveSync token
 //!    expiry, and optional capability strings. It signs the JWT with a secret
 //!    (HS256) or private key (RS256 / ES256) *you* own.
-//! 2. A small service (usually colocated with `activesync-server`) receives
+//! 2. A small service (usually colocated with `nodalmerge-server`) receives
 //!    the JWT from the client, calls [`mint_room_token`], and returns the
 //!    resulting `RoomToken` wire fields to the client.
 //! 3. The client puts those fields into its `hello` message exactly like a
@@ -25,7 +25,7 @@
 //! ## Example
 //!
 //! ```
-//! use activesync_jwt_bridge::{mint_room_token, BridgeConfig, JwtVerifier};
+//! use nodalmerge_jwt_bridge::{mint_room_token, BridgeConfig, JwtVerifier};
 //! use ed25519_dalek::SigningKey;
 //! use jsonwebtoken::{encode, EncodingKey, Header};
 //! use serde_json::json;
@@ -59,7 +59,7 @@
 //! assert_eq!(token.capabilities.len(), 2);
 //! ```
 
-use activesync_core::{RoomToken, TokenError};
+use nodalmerge_core::{RoomToken, TokenError};
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;

@@ -1,4 +1,4 @@
-use activesync_core::{
+use nodalmerge_core::{
     BlobStore, Ibf, MerkleSearchTree, MemoryBlobStore, MapOp, Op, TextOp, StateGraph, SyncCapabilities,
     TextRangeAnchor, TextRangeOp,
     TickConfig,
@@ -8,7 +8,7 @@ use activesync_core::{
     replay, canonical_hash,
     compact, rebuild_from_snapshot, unpack_snapshot_pack, verify_snapshot,
 };
-use activesync_core::conflicts::{ConflictEvent, ConflictFingerprint};
+use nodalmerge_core::conflicts::{ConflictEvent, ConflictFingerprint};
 use ed25519_dalek::SigningKey;
 use std::collections::{HashSet, VecDeque};
 use wasm_bindgen::prelude::*;
@@ -110,7 +110,7 @@ impl SyncStore {
         &mut self,
         ops: Vec<Op>,
         wall_ms: u64,
-    ) -> Result<activesync_core::NodeId, JsValue> {
+    ) -> Result<nodalmerge_core::NodeId, JsValue> {
         let final_ops = if let Some(ref key) = self.room_key {
             // Pre-compute the lamport clock the graph will assign so the
             // nonce derivation matches the transaction's actual value.
@@ -191,7 +191,7 @@ impl SyncStore {
             let entry = if is_blob && value.len() == 32 {
                 let mut hash_bytes = [0u8; 32];
                 hash_bytes.copy_from_slice(&value);
-                let blob_hash = activesync_core::Hash(hash_bytes);
+                let blob_hash = nodalmerge_core::Hash(hash_bytes);
                 let hash_hex = blob_hash.to_hex();
                 if let Some(blob_data) = self.blobs.get(&blob_hash) {
                     serde_json::json!({
@@ -252,7 +252,7 @@ impl SyncStore {
     /// `{ kind, key, winner_author, winner_lamport, winner_op, loser_author, loser_lamport, loser_op }`
     ///
     /// Authors are hex strings; ops are tagged objects matching
-    /// [`activesync_core::conflicts::ConflictOp`] (`{kind:"set",value:base64}`,
+    /// [`nodalmerge_core::conflicts::ConflictOp`] (`{kind:"set",value:base64}`,
     /// `{kind:"delete"}`, `{kind:"set_blob",blob_hash:"hex"}`, etc.).
     ///
     /// Idempotent: two back-to-back calls with no intervening graph
@@ -614,7 +614,7 @@ impl SyncStore {
         let item_id = parse_item_id(item_id_hex)?;
         let seq = self.graph.resolve_list(key);
         let position = position_for_index(&seq, index as usize, None);
-        let op = Op::List(activesync_core::ListOp::Insert {
+        let op = Op::List(nodalmerge_core::ListOp::Insert {
             list_key: key.to_string(),
             item_id,
             position,
@@ -639,7 +639,7 @@ impl SyncStore {
             return Err(JsValue::from_str("list_move_to: item not in list"));
         }
         let position = position_for_index(&seq, index as usize, Some(item_id));
-        let op = Op::List(activesync_core::ListOp::Move {
+        let op = Op::List(nodalmerge_core::ListOp::Move {
             list_key: key.to_string(),
             item_id,
             position,
@@ -654,7 +654,7 @@ impl SyncStore {
         -> Result<(), JsValue>
     {
         let item_id = parse_item_id(item_id_hex)?;
-        let op = Op::List(activesync_core::ListOp::Delete {
+        let op = Op::List(nodalmerge_core::ListOp::Delete {
             list_key: key.to_string(),
             item_id,
         });
@@ -808,7 +808,7 @@ impl SyncStore {
     pub fn store_blob_bytes(&mut self, hash_hex: &str, data: &[u8]) -> Result<(), JsValue> {
         let expected = parse_hex_hash(hash_hex)
             .ok_or_else(|| JsValue::from_str("invalid hash hex"))?;
-        let actual = activesync_core::Hash::of(data);
+        let actual = nodalmerge_core::Hash::of(data);
         if actual != expected {
             return Err(JsValue::from_str("blob integrity check failed — hash mismatch"));
         }
@@ -884,7 +884,7 @@ impl SyncStore {
             nodes.into_iter()
                 .map(|node| decrypt_node_if_needed(node, key))
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|e: activesync_core::SyncError| JsValue::from_str(&e.to_string()))?
+                .map_err(|e: nodalmerge_core::SyncError| JsValue::from_str(&e.to_string()))?
         } else {
             nodes
         };
@@ -899,8 +899,8 @@ impl SyncStore {
             for node in pending {
                 match self.graph.apply_remote(node.clone()) {
                     Ok(_) => {}
-                    Err(activesync_core::SyncError::DuplicateNode(_)) => {}
-                    Err(activesync_core::SyncError::MissingParent(_)) => {
+                    Err(nodalmerge_core::SyncError::DuplicateNode(_)) => {}
+                    Err(nodalmerge_core::SyncError::MissingParent(_)) => {
                         still_pending.push(node); // retry after parents arrive
                     }
                     Err(e) => return Err(JsValue::from_str(&e.to_string())),
@@ -985,7 +985,7 @@ impl SyncStore {
     /// is the list of missing node IDs to request from the server and
     /// `only_mine` is the list of node IDs to upload to the server.
     pub fn mst_process_response_json(&self, server_nodes_json: &str, my_root_hex: &str, their_root_hex: &str) -> String {
-        use activesync_core::mst::MstNodeWire;
+        use nodalmerge_core::mst::MstNodeWire;
         // Build client-side MST (same for every call during descent).
         let ids = self.graph.all_node_ids();
         let my_mst = MerkleSearchTree::from_ids(&ids);
@@ -1075,7 +1075,7 @@ impl SyncStore {
     pub fn export_nodes_missing_from(&self, known_ids_json: &str) -> Result<String, JsValue> {
         let known_hex: Vec<String> = serde_json::from_str(known_ids_json)
             .unwrap_or_default();
-        let known: std::collections::HashSet<activesync_core::NodeId> = known_hex
+        let known: std::collections::HashSet<nodalmerge_core::NodeId> = known_hex
             .iter()
             .filter_map(|h| parse_hex_hash(h))
             .collect();
@@ -1085,7 +1085,7 @@ impl SyncStore {
     }
 }
 
-fn parse_hex_hash(hex: &str) -> Option<activesync_core::Hash> {
+fn parse_hex_hash(hex: &str) -> Option<nodalmerge_core::Hash> {
     if hex.len() != 64 { return None; }
     let mut bytes = [0u8; 32];
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
@@ -1093,7 +1093,7 @@ fn parse_hex_hash(hex: &str) -> Option<activesync_core::Hash> {
         let lo = hex_nibble(chunk[1])?;
         bytes[i] = (hi << 4) | lo;
     }
-    Some(activesync_core::Hash(bytes))
+    Some(nodalmerge_core::Hash(bytes))
 }
 
 fn hex_nibble(b: u8) -> Option<u8> {
@@ -1106,7 +1106,7 @@ fn hex_nibble(b: u8) -> Option<u8> {
 }
 
 /// Parse a 32-char hex string into an `ItemId` (16 raw bytes).
-fn parse_item_id(hex: &str) -> Result<activesync_core::ItemId, JsValue> {
+fn parse_item_id(hex: &str) -> Result<nodalmerge_core::ItemId, JsValue> {
     if hex.len() != 32 {
         return Err(JsValue::from_str("item_id must be 32 hex chars"));
     }
@@ -1118,13 +1118,13 @@ fn parse_item_id(hex: &str) -> Result<activesync_core::ItemId, JsValue> {
             .ok_or_else(|| JsValue::from_str("item_id: invalid hex"))?;
         bytes[i] = (hi << 4) | lo;
     }
-    Ok(activesync_core::ItemId(bytes))
+    Ok(nodalmerge_core::ItemId(bytes))
 }
 
-fn parse_op_id(lamport: u64, author_hex32: &str) -> Result<activesync_core::OpId, JsValue> {
+fn parse_op_id(lamport: u64, author_hex32: &str) -> Result<nodalmerge_core::OpId, JsValue> {
     let author = hex_to_array_32(author_hex32)
         .ok_or_else(|| JsValue::from_str("author must be 64 hex chars"))?;
-    Ok(activesync_core::OpId { lamport, author })
+    Ok(nodalmerge_core::OpId { lamport, author })
 }
 
 /// Compute the fractional position to drop a (possibly-moving) item at logical
@@ -1137,11 +1137,11 @@ fn parse_op_id(lamport: u64, author_hex32: &str) -> Result<activesync_core::OpId
 ///
 /// The index is clamped: any value `>= filtered_len` becomes "append".
 fn position_for_index(
-    seq: &[(activesync_core::ItemId, activesync_core::FracIdx)],
+    seq: &[(nodalmerge_core::ItemId, nodalmerge_core::FracIdx)],
     index: usize,
-    exclude_id: Option<activesync_core::ItemId>,
-) -> activesync_core::FracIdx {
-    let filtered: Vec<&activesync_core::FracIdx> = seq
+    exclude_id: Option<nodalmerge_core::ItemId>,
+) -> nodalmerge_core::FracIdx {
+    let filtered: Vec<&nodalmerge_core::FracIdx> = seq
         .iter()
         .filter(|(id, _)| Some(*id) != exclude_id)
         .map(|(_, p)| p)
@@ -1149,7 +1149,7 @@ fn position_for_index(
     let i = index.min(filtered.len());
     let left  = if i == 0              { None } else { Some(filtered[i - 1]) };
     let right = if i >= filtered.len() { None } else { Some(filtered[i])     };
-    activesync_core::between(left, right)
+    nodalmerge_core::between(left, right)
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, ()> {
@@ -1284,7 +1284,7 @@ pub fn sign_room_token(
     };
 
     let token =
-        activesync_core::RoomToken::sign(room_id, &peer_bytes, expiry_secs, &capabilities, &sk);
+        nodalmerge_core::RoomToken::sign(room_id, &peer_bytes, expiry_secs, &capabilities, &sk);
     let json = serde_json::json!({
         "peer_pubkey": token.peer_pubkey_hex(),
         "expiry":      token.expiry_secs,
@@ -1323,9 +1323,9 @@ pub fn derive_e2ee_key(room_seed: &[u8]) -> Result<js_sys::Uint8Array, JsValue> 
 /// is returned unchanged (so the graph stores the ciphertext and `resolve`
 /// will see the sentinel key instead of plaintext — a safe fallback).
 fn decrypt_node_if_needed(
-    mut node: activesync_core::SyncNode,
+    mut node: nodalmerge_core::SyncNode,
     room_key: &[u8; 32],
-) -> Result<activesync_core::SyncNode, activesync_core::SyncError> {
+) -> Result<nodalmerge_core::SyncNode, nodalmerge_core::SyncError> {
     if !is_encrypted_node(&node.transaction.ops) {
         return Ok(node);
     }

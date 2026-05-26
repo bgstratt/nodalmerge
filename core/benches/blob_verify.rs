@@ -6,7 +6,7 @@
 /// peer and must verify it before storing. The blob's hash was transmitted
 /// out-of-band (in a `SetBlob` op) and we confirm the received bytes match.
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use activesync_core::Hash;
+use nodalmerge_core::Hash;
 
 const BLOB_SIZE: usize = 50 * 1024; // 50 KB
 

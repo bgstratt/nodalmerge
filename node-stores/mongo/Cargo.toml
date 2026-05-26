@@ -1,13 +1,13 @@
 [package]
-name = "activesync-mongo-store"
+name = "nodalmerge-mongo-store"
 version = "0.1.0"
 edition = "2021"
 publish = false
 description = "MongoDB NodePersistence adapter for ActiveSync (F7)"
 
 [dependencies]
-activesync-core   = { path = "../../core" }
-activesync-server = { path = "../../server" }
+nodalmerge-core   = { path = "../../core" }
+nodalmerge-server = { path = "../../server" }
 mongodb = { version = "3.6.0", default-features = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -19,5 +19,5 @@ futures-util = "0.3"
 tokio = { workspace = true }
 testcontainers = { version = "0.23", features = ["blocking"] }
 tracing-subscriber = "0.3"
-activesync-nodestore-conformance = { path = "../conformance" }
-activesync-core = { path = "../../core" }
+nodalmerge-nodestore-conformance = { path = "../conformance" }
+nodalmerge-core = { path = "../../core" }

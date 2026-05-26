@@ -1,2 +1,2 @@
 // Re-export legacy crate surface under nodalmerge-* identity during migration.
-pub use activesync_host_axum::*;
+pub use nodalmerge_host_axum::*;

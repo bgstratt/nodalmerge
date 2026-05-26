@@ -1,5 +1,5 @@
 [package]
-name = "activesync-gc"
+name = "nodalmerge-gc"
 version = "0.1.0"
 edition = "2021"
 description = "Host-neutral GC contracts and coordinator primitives for ActiveSync CAS blobs"

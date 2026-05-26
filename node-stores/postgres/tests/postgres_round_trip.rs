@@ -2,7 +2,7 @@
 //! testcontainers, runs migrations, then runs the full conformance suite.
 //! Skips gracefully if Docker is unavailable.
 
-use activesync_postgres_store::{PostgresNodeStore, PostgresNodeStoreConfig};
+use nodalmerge_postgres_store::{PostgresNodeStore, PostgresNodeStoreConfig};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
@@ -57,6 +57,6 @@ fn postgres_passes_full_conformance() {
         }
     }
     let store = store.expect("postgres connect");
-    activesync_nodestore_conformance::run_all(&store, "pg-conformance");
+    nodalmerge_nodestore_conformance::run_all(&store, "pg-conformance");
     drop(container);
 }

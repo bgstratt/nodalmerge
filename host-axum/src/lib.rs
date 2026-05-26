@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use activesync_server::{
+use nodalmerge_server::{
     keypair,
     room::Rooms,
     store::{NoPersistence, SharedPersistence},

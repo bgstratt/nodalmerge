@@ -15,9 +15,9 @@
 ///   - We measure IBF encode time and wire size.
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use ed25519_dalek::SigningKey;
-use activesync_core::{Ibf, MerkleSearchTree, Op, MapOp, StateGraph, pack_nodes};
+use nodalmerge_core::{Ibf, MerkleSearchTree, Op, MapOp, StateGraph, pack_nodes};
 
-fn build_split_graphs() -> (Vec<activesync_core::SyncNode>, Vec<activesync_core::NodeId>, Vec<activesync_core::NodeId>) {
+fn build_split_graphs() -> (Vec<nodalmerge_core::SyncNode>, Vec<nodalmerge_core::NodeId>, Vec<nodalmerge_core::NodeId>) {
     let key = SigningKey::from_bytes(&[7u8; 32]);
     let mut graph = StateGraph::new();
     let mut all_ids = Vec::with_capacity(2_000);
@@ -33,7 +33,7 @@ fn build_split_graphs() -> (Vec<activesync_core::SyncNode>, Vec<activesync_core:
         if i < 1_000 { first_1k_ids.push(id); }
     }
 
-    let all_nodes: Vec<activesync_core::SyncNode> = graph.get_nodes(&all_ids).into_iter().cloned().collect();
+    let all_nodes: Vec<nodalmerge_core::SyncNode> = graph.get_nodes(&all_ids).into_iter().cloned().collect();
     (all_nodes, all_ids, first_1k_ids)
 }
 
@@ -42,7 +42,7 @@ fn bench_sync_handshake(c: &mut Criterion) {
     let known_set: std::collections::HashSet<_> = first_1k_ids.iter().copied().collect();
 
     // Pre-collect the missing nodes (what Peer A would send Peer B).
-    let missing: Vec<&activesync_core::SyncNode> = all_nodes
+    let missing: Vec<&nodalmerge_core::SyncNode> = all_nodes
         .iter()
         .filter(|n| !known_set.contains(&n.id))
         .collect();

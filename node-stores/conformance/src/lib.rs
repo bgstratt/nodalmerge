@@ -9,14 +9,14 @@
 //!
 //! ```ignore
 //! let store = MyAdapter::connect(...)?;
-//! activesync_nodestore_conformance::run_all(&store, "test-room-1");
+//! nodalmerge_nodestore_conformance::run_all(&store, "test-room-1");
 //! ```
 //!
 //! All scenarios use a single `room_id` namespace passed by the caller, so
 //! tests can isolate themselves by naming (e.g. `format!("conf-{nanos}")`).
 
-use activesync_core::{MapOp, Op, StateGraph, SyncNode};
-use activesync_server::store::NodePersistence;
+use nodalmerge_core::{MapOp, Op, StateGraph, SyncNode};
+use nodalmerge_server::store::NodePersistence;
 use ed25519_dalek::SigningKey;
 
 fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> SyncNode {

@@ -2,7 +2,7 @@ use crate::api::{CapabilitySet, ClientHelloPayload, CommandEnvelope, HostCommand
 use crate::engine::{HostEngine, shape_catchup_pack_payload_b64};
 use crate::errors::HostCoreError;
 use crate::traits::{HostBlobUrlResolver, PresignedBlobUrl};
-use activesync_core::{MapOp, Op, RoomToken, StateGraph};
+use nodalmerge_core::{MapOp, Op, RoomToken, StateGraph};
 use ed25519_dalek::SigningKey;
 use serde_json::json;
 use std::sync::Arc;

@@ -39,7 +39,7 @@ try {
         "MONGO_DATABASE" = "nodalmerge_bench"
     }
     Write-Host "Starting Rust server..."
-    $rustJob = Start-Process cargo -ArgumentList "run -p activesync-dev-server --bin nodalmerge-dev-server" -Environment $rustEnv -PassThru -NoNewWindow
+    $rustJob = Start-Process cargo -ArgumentList "run -p nodalmerge-dev-server --bin nodalmerge-dev-server" -Environment $rustEnv -PassThru -NoNewWindow
 
     $dotnetEnv = @{
         "ASPNETCORE_URLS" = "http://127.0.0.1:8787"

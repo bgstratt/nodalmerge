@@ -1,8 +1,8 @@
-use activesync_server::{keypair, metrics, room, store, ws_handler};
+use nodalmerge_server::{keypair, metrics, room, store, ws_handler};
 
 use std::sync::Arc;
 use axum::{Router, routing::get};
-use activesync_core::PolicyTimelineEntry;
+use nodalmerge_core::PolicyTimelineEntry;
 use serde::Deserialize;
 use tower_http::cors::{CorsLayer, Any};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -11,7 +11,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 async fn main() {
     // Log filter: honor RUST_LOG, default to info for our crates.
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,activesync_server=info,activesync_core=info"));
+        .unwrap_or_else(|_| EnvFilter::new("info,nodalmerge_server=info,nodalmerge_core=info"));
     fmt().with_env_filter(filter).with_target(false).init();
 
     tracing::info!(
@@ -20,7 +20,7 @@ async fn main() {
     );
     let args: Vec<String> = std::env::args().collect();
 
-    // D4: `activesync-server replay <pack-file>` subcommand.
+    // D4: `nodalmerge-server replay <pack-file>` subcommand.
     // Reads a base64-encoded postcard node pack from a file (or stdin if "-"),
     // replays it, and prints the resolved state + canonical hash to stdout.
     if args.get(1).map(|s| s.as_str()) == Some("replay") {
@@ -358,7 +358,7 @@ fn parse_usize_flag(args: &[String], flag: &str, default_for_msg: usize) -> Opti
 /// - `--policy-timeline <json-file>`
 /// - `--policy-timeline-json '<json-array-or-object>'`
 fn run_replay(source: &str, timeline: Option<&[PolicyTimelineEntry]>) {
-    use activesync_core::{replay, replay_with_policy_timeline, unpack_nodes};
+    use nodalmerge_core::{replay, replay_with_policy_timeline, unpack_nodes};
 
     // Read raw bytes from file or stdin.
     let raw_bytes: Vec<u8> = if source == "-" {
@@ -554,7 +554,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use activesync_core::{Policy, PolicyDefault, PolicyRule};
+    use nodalmerge_core::{Policy, PolicyDefault, PolicyRule};
 
     fn sample_timeline_json() -> String {
         let entry = PolicyTimelineEntry {
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn parse_replay_policy_timeline_arg_prefers_file_flag() {
         let args = vec![
-            "activesync-server".to_string(),
+            "nodalmerge-server".to_string(),
             "replay".to_string(),
             "pack.b64".to_string(),
             "--policy-timeline".to_string(),
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn parse_replay_policy_timeline_arg_rejects_conflicting_flags() {
         let args = vec![
-            "activesync-server".to_string(),
+            "nodalmerge-server".to_string(),
             "replay".to_string(),
             "pack.b64".to_string(),
             "--policy-timeline=timeline.json".to_string(),
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn load_replay_policy_timeline_from_inline_json() {
         let args = vec![
-            "activesync-server".to_string(),
+            "nodalmerge-server".to_string(),
             "replay".to_string(),
             "pack.b64".to_string(),
             format!("--policy-timeline-json={}", sample_timeline_json()),

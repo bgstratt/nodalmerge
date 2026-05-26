@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use activesync_core::{
+use nodalmerge_core::{
     Hash, Op, OpId, StateGraph, SyncNode, TextOp, TextProjectionMode, Transaction,
 };
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};

@@ -4,9 +4,9 @@
 
 use std::sync::Arc;
 
-use activesync_core::{Hash, MapOp, Op, StateGraph};
-use activesync_server::room::{import_nodes, Room};
-use activesync_server::store::{DirPersistence, SharedPersistence};
+use nodalmerge_core::{Hash, MapOp, Op, StateGraph};
+use nodalmerge_server::room::{import_nodes, Room};
+use nodalmerge_server::store::{DirPersistence, SharedPersistence};
 use ed25519_dalek::SigningKey;
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
@@ -17,7 +17,7 @@ fn tmpdir(tag: &str) -> std::path::PathBuf {
     p
 }
 
-fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> activesync_core::SyncNode {
+fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> nodalmerge_core::SyncNode {
     let mut g = StateGraph::new();
     let id = g.apply_local(sk, 0, vec![Op::Map(MapOp::Set {
         key: key.into(), value: val.to_vec(),
@@ -62,7 +62,7 @@ async fn room_survives_restart_with_nodes_and_blobs() {
 
         // Blob should be hydrated too.
         let blobs = room.blobs.read().await;
-        use activesync_core::BlobStore;
+        use nodalmerge_core::BlobStore;
         let blob_hash = Hash::of(b"opaque payload");
         assert!(blobs.contains(&blob_hash));
         assert_eq!(blobs.get(&blob_hash).unwrap(), b"opaque payload");

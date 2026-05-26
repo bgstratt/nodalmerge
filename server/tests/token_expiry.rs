@@ -18,10 +18,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use activesync_core::RoomToken;
-use activesync_server::room::Rooms;
-use activesync_server::store::{NoPersistence, SharedPersistence};
-use activesync_server::ws_handler;
+use nodalmerge_core::RoomToken;
+use nodalmerge_server::room::Rooms;
+use nodalmerge_server::store::{NoPersistence, SharedPersistence};
+use nodalmerge_server::ws_handler;
 use axum::{routing::get, Router};
 use ed25519_dalek::SigningKey;
 use futures_util::{SinkExt, StreamExt};

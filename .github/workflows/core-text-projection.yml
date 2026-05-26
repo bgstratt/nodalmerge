@@ -30,8 +30,8 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: "Run NodalMerge core tests (crate id: activesync-core)"
-        run: cargo test -p activesync-core
+      - name: "Run NodalMerge core tests (crate id: nodalmerge-core)"
+        run: cargo test -p nodalmerge-core
 
       - name: Emit large-doc acceptance metrics
         env:
@@ -39,7 +39,7 @@ jobs:
           ACTIVESYNC_TEXT_LARGE_DOC_MAX_FULL_REBUILDS: "16"
           ACTIVESYNC_TEXT_LARGE_DOC_MAX_CAPACITY_RATIO: "5.0"
           ACTIVESYNC_TEXT_LARGE_DOC_MAX_DURATION_MS: "20000"
-        run: cargo test -p activesync-core large_doc_windowed_reads_and_allocation_behavior -- --nocapture
+        run: cargo test -p nodalmerge-core large_doc_windowed_reads_and_allocation_behavior -- --nocapture
 
       - name: Upload large-doc acceptance metrics artifact
         uses: actions/upload-artifact@v4
@@ -58,8 +58,8 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: "Run NodalMerge core tests (no default features; crate id: activesync-core)"
-        run: cargo test -p activesync-core --no-default-features
+      - name: "Run NodalMerge core tests (no default features; crate id: nodalmerge-core)"
+        run: cargo test -p nodalmerge-core --no-default-features
 
   core-parity-profile:
     name: core parity profile
@@ -84,11 +84,11 @@ jobs:
           set -euo pipefail
           for i in $(seq 1 "${ACTIVESYNC_PARITY_SOAK_RUNS}"); do
             echo "[nodalmerge-parity-soak] iteration ${i}/${ACTIVESYNC_PARITY_SOAK_RUNS}"
-            cargo test -p activesync-core text_projection_parity_deterministic_corpus_has_zero_mismatches -- --exact --nocapture
+            cargo test -p nodalmerge-core text_projection_parity_deterministic_corpus_has_zero_mismatches -- --exact --nocapture
           done
 
       - name: Build parity benchmark profile
-        run: cargo bench -p activesync-core --bench text_trace_rustcode --no-run
+        run: cargo bench -p nodalmerge-core --bench text_trace_rustcode --no-run
 
   core-cursor-mapping-roi:
     name: core cursor mapping ROI gate
@@ -108,7 +108,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run cursor mapping benchmark probe
-        run: cargo bench -p activesync-core --bench text_trace_rustcode -- text_trace_rustcode_cursor_mapping_unsigned_enabled --sample-size 10 --measurement-time 1 --warm-up-time 1
+        run: cargo bench -p nodalmerge-core --bench text_trace_rustcode -- text_trace_rustcode_cursor_mapping_unsigned_enabled --sample-size 10 --measurement-time 1 --warm-up-time 1
 
       - name: Enforce cursor mapping ROI gate
         run: |

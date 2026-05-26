@@ -1,9 +1,9 @@
 [package]
-name = "nodalmerge-gc"
+name = "activesync-gc"
 version = "0.1.0"
 edition = "2021"
-description = "Compatibility wrapper crate re-exporting activesync-gc during rename migration"
+description = "Compatibility wrapper crate re-exporting nodalmerge-gc during rename migration"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-activesync-gc = { version = "0.1.0", path = "../../gc" }
+nodalmerge-gc = { version = "0.1.0", path = "../../gc" }

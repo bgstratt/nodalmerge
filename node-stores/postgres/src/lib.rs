@@ -10,8 +10,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use activesync_core::{pack_nodes, unpack_nodes, SyncNode};
-use activesync_server::store::NodePersistence;
+use nodalmerge_core::{pack_nodes, unpack_nodes, SyncNode};
+use nodalmerge_server::store::NodePersistence;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
 use tokio::runtime::Runtime;

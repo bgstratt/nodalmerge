@@ -60,8 +60,8 @@ function Resolve-FfiDll {
     $candidates = @(
         ".\target\debug\nodalmerge_host_ffi.dll",
         ".\target\release\nodalmerge_host_ffi.dll",
-        ".\target\debug\activesync_host_ffi.dll",
-        ".\target\release\activesync_host_ffi.dll"
+        ".\target\debug\nodalmerge_host_ffi.dll",
+        ".\target\release\nodalmerge_host_ffi.dll"
     )
 
     foreach ($candidate in $candidates) {
@@ -71,7 +71,7 @@ function Resolve-FfiDll {
         }
     }
 
-    throw "NODALMERGE_HOST_FFI_DLL could not be resolved. Build host-ffi first (cargo build -p activesync-host-ffi, legacy crate id) or pass -FfiDllPath."
+    throw "NODALMERGE_HOST_FFI_DLL could not be resolved. Build host-ffi first (cargo build -p nodalmerge-host-ffi, legacy crate id) or pass -FfiDllPath."
 }
 
 function Merge-Env {
@@ -126,7 +126,7 @@ function Start-RowTargets {
     $dotnetEnv = Merge-Env -Base $dotnetEnvBase -Overlay $DotnetEnv
     $dotnetHostProject = Resolve-DotnetHostProjectPath
 
-    $rustProc = Start-Process -FilePath $CargoPath -ArgumentList @("run", "-p", "activesync-server", "--bin", "nodalmerge-server") -PassThru -NoNewWindow -Env $rustEnv
+    $rustProc = Start-Process -FilePath $CargoPath -ArgumentList @("run", "-p", "nodalmerge-server", "--bin", "nodalmerge-server") -PassThru -NoNewWindow -Env $rustEnv
     $dotnetProc = Start-Process -FilePath $DotnetPath -ArgumentList @("run", "--project", $dotnetHostProject, "--no-launch-profile") -PassThru -NoNewWindow -Env $dotnetEnv
 
     # Give endpoints time to bind before scenario runner starts probing.

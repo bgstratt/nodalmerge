@@ -32,10 +32,10 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde_json::Value;
-use activesync_core::{BlobStore, MerkleSearchTree, Policy, PolicyDefault, PolicyRule,
+use nodalmerge_core::{BlobStore, MerkleSearchTree, Policy, PolicyDefault, PolicyRule,
                       RoomToken, SyncCapabilities, SyncNode, pack_nodes, unpack_nodes,
                       compact, rebuild_from_snapshot, pack_snapshot_pack, verify_snapshot};
-use activesync_host_core::protocol::{
+use nodalmerge_host_core::protocol::{
     BlobPackEntry,
     BlobRedirectEntry,
     assemble_blob_available_envelope,
@@ -72,7 +72,7 @@ use activesync_host_core::protocol::{
     CloseFrameSpec,
     SyncDiffInput,
 };
-use activesync_host_core::engine::{
+use nodalmerge_host_core::engine::{
     assemble_welcome_catchup_package,
     classify_hello_payload,
     parse_client_capabilities,
@@ -1064,7 +1064,7 @@ async fn handle_client_message(
                 if let (Some(expected), Ok(bytes)) =
                     (parse_hex_hash(&hash_hex), base64_decode(&data_b64))
                 {
-                    let actual = activesync_core::Hash::of(&bytes);
+                    let actual = nodalmerge_core::Hash::of(&bytes);
                     if actual == expected {
                         // F4: write-through persistence for accepted blobs.
                         room.persistence.persist_blob(&room.room_id, &actual, &bytes);
@@ -1876,7 +1876,7 @@ fn parse_hex_32(hex: &str) -> Option<[u8; 32]> {
     Some(bytes)
 }
 
-fn parse_hex_hash(hex: &str) -> Option<activesync_core::Hash> {
+fn parse_hex_hash(hex: &str) -> Option<nodalmerge_core::Hash> {
     if hex.len() != 64 { return None; }
     let mut bytes = [0u8; 32];
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
@@ -1884,7 +1884,7 @@ fn parse_hex_hash(hex: &str) -> Option<activesync_core::Hash> {
         let lo = hex_nibble(chunk[1])?;
         bytes[i] = (hi << 4) | lo;
     }
-    Some(activesync_core::Hash(bytes))
+    Some(nodalmerge_core::Hash(bytes))
 }
 
 fn hex_nibble(b: u8) -> Option<u8> {

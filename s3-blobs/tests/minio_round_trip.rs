@@ -13,9 +13,9 @@
 
 use std::time::Duration;
 
-use activesync_core::Hash;
-use activesync_s3_blobs::{S3Auth, S3BlobStore, S3BlobStoreConfig};
-use activesync_server::store::BlobPersistence;
+use nodalmerge_core::Hash;
+use nodalmerge_s3_blobs::{S3Auth, S3BlobStore, S3BlobStoreConfig};
+use nodalmerge_server::store::BlobPersistence;
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,

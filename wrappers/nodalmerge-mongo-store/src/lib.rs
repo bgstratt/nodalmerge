@@ -1,2 +1,2 @@
 // Re-export legacy crate surface under nodalmerge-* identity during migration.
-pub use activesync_mongo_store::*;
+pub use nodalmerge_mongo_store::*;

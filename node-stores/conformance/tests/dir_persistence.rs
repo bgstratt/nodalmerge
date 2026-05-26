@@ -4,11 +4,11 @@
 
 use std::sync::Arc;
 
-use activesync_server::store::DirPersistence;
+use nodalmerge_server::store::DirPersistence;
 
 #[test]
 fn dir_persistence_passes_full_conformance() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(DirPersistence::open(dir.path()).expect("open"));
-    activesync_nodestore_conformance::run_all(&*store, "dir-conformance");
+    nodalmerge_nodestore_conformance::run_all(&*store, "dir-conformance");
 }

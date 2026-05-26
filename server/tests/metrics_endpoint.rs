@@ -13,13 +13,13 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use activesync_core::{MapOp, Op, StateGraph};
-use activesync_server::metrics as server_metrics;
-use activesync_server::room::{import_nodes, Rooms};
-use activesync_server::store::{NoPersistence, SharedPersistence};
+use nodalmerge_core::{MapOp, Op, StateGraph};
+use nodalmerge_server::metrics as server_metrics;
+use nodalmerge_server::room::{import_nodes, Rooms};
+use nodalmerge_server::store::{NoPersistence, SharedPersistence};
 use ed25519_dalek::SigningKey;
 
-fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> activesync_core::SyncNode {
+fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> nodalmerge_core::SyncNode {
     let mut g = StateGraph::new();
     let id = g
         .apply_local(sk, 0, vec![Op::Map(MapOp::Set { key: key.into(), value: val.to_vec() })])
@@ -120,7 +120,7 @@ async fn metrics_endpoint_exposes_baseline_series() {
 #[test]
 fn parse_arg_accepts_flag_and_equals_form() {
     let long = vec![
-        "activesync-server".into(),
+        "nodalmerge-server".into(),
         "--metrics-addr".into(),
         "127.0.0.1:9091".into(),
     ];
@@ -130,7 +130,7 @@ fn parse_arg_accepts_flag_and_equals_form() {
     );
 
     let eq = vec![
-        "activesync-server".into(),
+        "nodalmerge-server".into(),
         "--metrics-addr=127.0.0.1:9092".into(),
     ];
     assert_eq!(
@@ -138,11 +138,11 @@ fn parse_arg_accepts_flag_and_equals_form() {
         Some("127.0.0.1:9092".parse().unwrap())
     );
 
-    let missing: Vec<String> = vec!["activesync-server".into()];
+    let missing: Vec<String> = vec!["nodalmerge-server".into()];
     assert_eq!(server_metrics::parse_arg(&missing), None);
 
     let bogus = vec![
-        "activesync-server".into(),
+        "nodalmerge-server".into(),
         "--metrics-addr=not-an-addr".into(),
     ];
     assert_eq!(server_metrics::parse_arg(&bogus), None);

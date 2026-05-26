@@ -12,8 +12,8 @@
 //!   3. output size in bytes (printed once as context)
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use activesync_core::{Op, MapOp, Transaction};
-use activesync_core::hash::Hash;
+use nodalmerge_core::{Op, MapOp, Transaction};
+use nodalmerge_core::hash::Hash;
 
 fn sample_tx() -> Transaction {
     Transaction {

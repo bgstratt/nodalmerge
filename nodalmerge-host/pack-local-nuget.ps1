@@ -44,8 +44,8 @@ try {
     New-Item -ItemType Directory -Force -Path $resolvedOutput | Out-Null
 
     Write-Host "Building native runtime (release)..."
-    Invoke-Checked -Name "cargo build host ffi runtime (activesync-host-ffi legacy crate id)" -Command {
-        cargo build -p activesync-host-ffi --release
+    Invoke-Checked -Name "cargo build host ffi runtime (nodalmerge-host-ffi legacy crate id)" -Command {
+        cargo build -p nodalmerge-host-ffi --release
     }
 
     Write-Host "Packing managed packages to $resolvedOutput ..."

@@ -69,7 +69,7 @@ if (-not $SkipRust) {
         }
 
         $rustCmd = @(
-            "run", "-p", "activesync-server", "--bin", "authz-conformance-runner", "--",
+            "run", "-p", "nodalmerge-server", "--bin", "authz-conformance-runner", "--",
             "--vectors", "docs/acceptance/authz-conformance-vectors.json",
             "--out", ("docs/acceptance/authz-conformance-rust{0}.json" -f $tagSuffix),
             "--policy-channel-mode", $PolicyChannelMode

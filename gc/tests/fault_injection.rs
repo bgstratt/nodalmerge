@@ -2,11 +2,11 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use activesync_gc::contracts::{
+use nodalmerge_gc::contracts::{
     AdminPinStore, AssetInventoryStore, BlobObjectStore, GcRunStore, LiveHashSource,
 };
-use activesync_gc::types::{AssetRecord, GcRunDelta, GcRunFinish, GcRunMode, GcRunStart, GcRunStatus};
-use activesync_gc::{GcCoordinator, GcCoordinatorConfig, GcError, GcResult};
+use nodalmerge_gc::types::{AssetRecord, GcRunDelta, GcRunFinish, GcRunMode, GcRunStart, GcRunStatus};
+use nodalmerge_gc::{GcCoordinator, GcCoordinatorConfig, GcError, GcResult};
 
 struct FailingLive;
 impl LiveHashSource for FailingLive {

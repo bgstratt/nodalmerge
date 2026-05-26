@@ -1,9 +1,9 @@
 [package]
-name = "nodalmerge-server"
+name = "activesync-server"
 version = "0.1.0"
 edition = "2021"
-description = "Compatibility wrapper crate re-exporting activesync-server during rename migration"
+description = "Compatibility wrapper crate re-exporting nodalmerge-server during rename migration"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-activesync-server = { version = "0.1.0", path = "../../server" }
+nodalmerge-server = { version = "0.1.0", path = "../../server" }

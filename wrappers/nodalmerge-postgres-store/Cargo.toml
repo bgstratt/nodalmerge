@@ -1,10 +1,10 @@
 [package]
-name = "nodalmerge-postgres-store"
+name = "activesync-postgres-store"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Compatibility wrapper crate re-exporting activesync-postgres-store during rename migration"
+description = "Compatibility wrapper crate re-exporting nodalmerge-postgres-store during rename migration"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-activesync-postgres-store = { path = "../../node-stores/postgres" }
+nodalmerge-postgres-store = { path = "../../node-stores/postgres" }

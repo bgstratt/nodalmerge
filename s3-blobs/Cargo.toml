@@ -1,12 +1,12 @@
 [package]
-name = "activesync-s3-blobs"
+name = "nodalmerge-s3-blobs"
 version = "0.1.0"
 edition = "2021"
-description = "S3-compatible BlobPersistence backend for activesync-server (AWS, R2, MinIO, GCS, Azure)."
+description = "S3-compatible BlobPersistence backend for nodalmerge-server (AWS, R2, MinIO, GCS, Azure)."
 
 [dependencies]
-activesync-core = { path = "../core" }
-activesync-server = { path = "../server" }
+nodalmerge-core = { path = "../core" }
+nodalmerge-server = { path = "../server" }
 object_store = { version = "0.11", features = ["aws"] }
 tokio = { workspace = true }
 serde = { workspace = true }

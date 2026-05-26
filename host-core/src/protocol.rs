@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use activesync_core::{Ibf, MerkleSearchTree, NodeId, SyncCapabilities};
+use nodalmerge_core::{Ibf, MerkleSearchTree, NodeId, SyncCapabilities};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -566,7 +566,7 @@ pub fn decide_sync_diff(input: SyncDiffInput) -> (Vec<NodeId>, Vec<NodeId>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use activesync_core::Hash;
+    use nodalmerge_core::Hash;
 
     #[test]
     fn negotiate_caps_intersection() {

@@ -1,2 +1,2 @@
 // Re-export legacy crate surface under nodalmerge-* identity during migration.
-pub use activesync_jwt_bridge::*;
+pub use nodalmerge_jwt_bridge::*;

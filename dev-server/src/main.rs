@@ -1,5 +1,5 @@
-use activesync_server::{keypair, metrics, room, store, ws_handler};
-use activesync_mongo_store::{MongoNodeStore, MongoNodeStoreConfig};
+use nodalmerge_server::{keypair, metrics, room, store, ws_handler};
+use nodalmerge_mongo_store::{MongoNodeStore, MongoNodeStoreConfig};
 
 use axum::{Router, routing::get};
 use tower_http::cors::{CorsLayer, Any};
@@ -9,7 +9,7 @@ use tracing_log::LogTracer;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,activesync_server=info,activesync_core=info"));
+        .unwrap_or_else(|_| EnvFilter::new("info,nodalmerge_server=info,nodalmerge_core=info"));
     // Initialize tracing subscriber first so it can receive events. If that
     // succeeds, install `LogTracer` to forward `log` crate messages (used by
     // the Mongo driver) into `tracing`. If subscriber init fails (e.g. a

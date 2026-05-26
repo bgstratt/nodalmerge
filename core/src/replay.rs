@@ -6,7 +6,7 @@
 //!
 //! - The `snapshot_hash` stored in D3 compaction checkpoint nodes.
 //! - The server-side validation value before signing a snapshot.
-//! - The debug/audit output from `activesync-server replay <file>`.
+//! - The debug/audit output from `nodalmerge-server replay <file>`.
 //!
 //! # Determinism guarantees
 //! - `BTreeMap` ensures keys are iterated in lexicographic order.

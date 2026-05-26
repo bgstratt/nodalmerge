@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use activesync_core::{Frontier, Hash, MerkleSearchTree, NodeId, Policy, PolicyDefault, PolicyRule, RoomToken, StateGraph, SyncCapabilities, SyncNode, pack_nodes, unpack_nodes};
-use activesync_core::conflicts::ConflictFingerprint;
+use nodalmerge_core::{Frontier, Hash, MerkleSearchTree, NodeId, Policy, PolicyDefault, PolicyRule, RoomToken, StateGraph, SyncCapabilities, SyncNode, pack_nodes, unpack_nodes};
+use nodalmerge_core::conflicts::ConflictFingerprint;
 use crate::api::{
     BlobEntry, BlobRedirectEntry, CapabilitySet, CommandEnvelope, CommandResult, ConflictEntry,
     HostCommand,
@@ -1681,7 +1681,7 @@ pub fn parse_client_ibf_input(hello: &Value) -> ClientIbfInput {
     if let Some(ibf_b64) = hello["ibf"].as_str() {
         match base64_decode(ibf_b64)
             .ok()
-            .and_then(|b| activesync_core::Ibf::decode_bytes(&b).ok())
+            .and_then(|b| nodalmerge_core::Ibf::decode_bytes(&b).ok())
         {
             Some(ibf) => ClientIbfInput::Present(ibf),
             None => ClientIbfInput::InvalidOrUndecodable,
@@ -2422,7 +2422,7 @@ fn parse_hex_hash(hex: &str) -> Option<NodeId> {
         bytes[i] = (hi << 4) | lo;
     }
 
-    Some(activesync_core::Hash(bytes))
+    Some(nodalmerge_core::Hash(bytes))
 }
 
 fn parse_hex_32(hex: &str) -> Option<[u8; 32]> {
@@ -2707,7 +2707,7 @@ mod tests {
 
     #[test]
     fn parse_client_ibf_input_present_when_payload_decodes() {
-        let ibf_bytes = activesync_core::Ibf::new().encode();
+        let ibf_bytes = nodalmerge_core::Ibf::new().encode();
         let ibf_b64 = base64_encode_for_test(&ibf_bytes);
         let hello = serde_json::json!({
             "type": "hello",
@@ -2759,8 +2759,8 @@ mod tests {
     #[test]
     fn shape_welcome_missing_hex_converts_ids_to_hex() {
         let ids = vec![
-            activesync_core::Hash([0x01; 32]),
-            activesync_core::Hash([0xab; 32]),
+            nodalmerge_core::Hash([0x01; 32]),
+            nodalmerge_core::Hash([0xab; 32]),
         ];
 
         let missing = shape_welcome_missing_hex(&ids);
@@ -2777,9 +2777,9 @@ mod tests {
 
     #[test]
     fn shape_welcome_server_frontier_hex_converts_frontier_heads() {
-        let frontier = activesync_core::Frontier::from_heads(vec![
-            activesync_core::Hash([0x11; 32]),
-            activesync_core::Hash([0x22; 32]),
+        let frontier = nodalmerge_core::Frontier::from_heads(vec![
+            nodalmerge_core::Hash([0x11; 32]),
+            nodalmerge_core::Hash([0x22; 32]),
         ]);
 
         let hexes = shape_welcome_server_frontier_hex(&frontier);
@@ -2790,46 +2790,46 @@ mod tests {
 
     #[test]
     fn shape_welcome_server_frontier_hex_handles_empty_frontier() {
-        let frontier = activesync_core::Frontier::default();
+        let frontier = nodalmerge_core::Frontier::default();
         let hexes = shape_welcome_server_frontier_hex(&frontier);
         assert!(hexes.is_empty());
     }
 
     #[test]
     fn shape_welcome_root_hex_converts_hash_to_hex() {
-        let root = activesync_core::Hash([0xcd; 32]);
+        let root = nodalmerge_core::Hash([0xcd; 32]);
         let hex = shape_welcome_root_hex(&root);
         assert_eq!(hex, "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
     }
 
     #[test]
     fn shape_catchup_pack_payload_b64_empty_nodes_encodes_empty_pack() {
-        let nodes: Vec<&activesync_core::SyncNode> = Vec::new();
+        let nodes: Vec<&nodalmerge_core::SyncNode> = Vec::new();
         let payload = shape_catchup_pack_payload_b64(&nodes);
         let decoded = base64_decode(&payload).expect("catchup payload should base64 decode");
-        let unpacked = activesync_core::unpack_nodes(&decoded)
+        let unpacked = nodalmerge_core::unpack_nodes(&decoded)
             .expect("decoded catchup payload should unpack into nodes");
         assert!(unpacked.is_empty());
     }
 
     #[test]
     fn shape_catchup_pack_payload_b64_roundtrips_via_decode_and_unpack() {
-        let tx = activesync_core::Transaction {
+        let tx = nodalmerge_core::Transaction {
             author: [0u8; 32],
             lamport: 1,
             wall_ms: 1,
-            ops: vec![activesync_core::Op::Map(activesync_core::MapOp::Set {
+            ops: vec![nodalmerge_core::Op::Map(nodalmerge_core::MapOp::Set {
                 key: "k".to_string(),
                 value: b"v".to_vec(),
             })],
             parents: vec![],
         };
-        let node = activesync_core::SyncNode::new(tx);
+        let node = nodalmerge_core::SyncNode::new(tx);
         let nodes = vec![&node];
 
         let payload = shape_catchup_pack_payload_b64(&nodes);
         let decoded = base64_decode(&payload).expect("catchup payload should base64 decode");
-        let unpacked = activesync_core::unpack_nodes(&decoded)
+        let unpacked = nodalmerge_core::unpack_nodes(&decoded)
             .expect("decoded catchup payload should unpack into nodes");
         assert_eq!(unpacked.len(), 1);
         assert_eq!(unpacked[0].id, node.id);
@@ -2878,17 +2878,17 @@ mod tests {
 
     #[test]
     fn filter_pack_envelope_by_subscription_drops_pack_when_no_nodes_match() {
-        let tx = activesync_core::Transaction {
+        let tx = nodalmerge_core::Transaction {
             author: [0u8; 32],
             lamport: 1,
             wall_ms: 1,
-            ops: vec![activesync_core::Op::Map(activesync_core::MapOp::Set {
+            ops: vec![nodalmerge_core::Op::Map(nodalmerge_core::MapOp::Set {
                 key: "other/path".to_string(),
                 value: b"v".to_vec(),
             })],
             parents: vec![],
         };
-        let node = activesync_core::SyncNode::new(tx);
+        let node = nodalmerge_core::SyncNode::new(tx);
         let nodes_b64 = base64_encode(&pack_nodes(&[&node]));
         let env = serde_json::json!({
             "type": "pack",
@@ -2906,40 +2906,40 @@ mod tests {
 
     #[test]
     fn filter_pack_envelope_by_subscription_keeps_matching_and_sentinel_nodes() {
-        let world_tx = activesync_core::Transaction {
+        let world_tx = nodalmerge_core::Transaction {
             author: [0u8; 32],
             lamport: 1,
             wall_ms: 1,
-            ops: vec![activesync_core::Op::Map(activesync_core::MapOp::Set {
+            ops: vec![nodalmerge_core::Op::Map(nodalmerge_core::MapOp::Set {
                 key: "world/player1".to_string(),
                 value: b"v1".to_vec(),
             })],
             parents: vec![],
         };
-        let sentinel_tx = activesync_core::Transaction {
+        let sentinel_tx = nodalmerge_core::Transaction {
             author: [0u8; 32],
             lamport: 2,
             wall_ms: 2,
-            ops: vec![activesync_core::Op::Map(activesync_core::MapOp::Set {
+            ops: vec![nodalmerge_core::Op::Map(nodalmerge_core::MapOp::Set {
                 key: "\u{0000}meta".to_string(),
                 value: b"s".to_vec(),
             })],
             parents: vec![],
         };
-        let other_tx = activesync_core::Transaction {
+        let other_tx = nodalmerge_core::Transaction {
             author: [0u8; 32],
             lamport: 3,
             wall_ms: 3,
-            ops: vec![activesync_core::Op::Map(activesync_core::MapOp::Set {
+            ops: vec![nodalmerge_core::Op::Map(nodalmerge_core::MapOp::Set {
                 key: "chat/general".to_string(),
                 value: b"x".to_vec(),
             })],
             parents: vec![],
         };
 
-        let world_node = activesync_core::SyncNode::new(world_tx);
-        let sentinel_node = activesync_core::SyncNode::new(sentinel_tx);
-        let other_node = activesync_core::SyncNode::new(other_tx);
+        let world_node = nodalmerge_core::SyncNode::new(world_tx);
+        let sentinel_node = nodalmerge_core::SyncNode::new(sentinel_tx);
+        let other_node = nodalmerge_core::SyncNode::new(other_tx);
         let nodes_b64 = base64_encode(&pack_nodes(&[&world_node, &sentinel_node, &other_node]));
 
         let env = serde_json::json!({
@@ -2960,7 +2960,7 @@ mod tests {
         let filtered_nodes_b64 = filtered_json["nodes"]
             .as_str()
             .expect("filtered pack must contain nodes b64");
-        let filtered_nodes = activesync_core::unpack_nodes(
+        let filtered_nodes = nodalmerge_core::unpack_nodes(
             &base64_decode(filtered_nodes_b64).expect("nodes should base64 decode"),
         )
         .expect("nodes should unpack");

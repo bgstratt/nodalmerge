@@ -1,8 +1,8 @@
 use std::ffi::c_void;
 
-use activesync_host_core::api::HostCommand;
-use activesync_host_core::engine::HostEngine;
-use activesync_host_core::errors::HostCoreError;
+use nodalmerge_host_core::api::HostCommand;
+use nodalmerge_host_core::engine::HostEngine;
+use nodalmerge_host_core::errors::HostCoreError;
 use serde::{Deserialize, Serialize};
 
 const ABI_VERSION: u32 = 1;
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn as_host_submit_command(
         unsafe { &mut (*engine).inner }
     };
 
-    let result = match engine_ref.apply(activesync_host_core::api::CommandEnvelope::new(
+    let result = match engine_ref.apply(nodalmerge_host_core::api::CommandEnvelope::new(
         envelope.room_id,
         envelope.command,
     )) {
@@ -295,7 +295,7 @@ pub unsafe extern "C" fn as_host_submit_command_ex(
         unsafe { &mut (*engine).inner }
     };
 
-    let result = match engine_ref.apply(activesync_host_core::api::CommandEnvelope::new(
+    let result = match engine_ref.apply(nodalmerge_host_core::api::CommandEnvelope::new(
         envelope.room_id,
         envelope.command.clone(),
     )) {
@@ -364,7 +364,7 @@ pub unsafe extern "C" fn as_host_submit_command_json(
         unsafe { &mut (*engine).inner }
     };
 
-    let result = match engine_ref.apply(activesync_host_core::api::CommandEnvelope::new(
+    let result = match engine_ref.apply(nodalmerge_host_core::api::CommandEnvelope::new(
         envelope.room_id,
         envelope.command,
     )) {
@@ -426,7 +426,7 @@ pub unsafe extern "C" fn as_host_submit_command_json_ex(
         unsafe { &mut (*engine).inner }
     };
 
-    let result = match engine_ref.apply(activesync_host_core::api::CommandEnvelope::new(
+    let result = match engine_ref.apply(nodalmerge_host_core::api::CommandEnvelope::new(
         envelope.room_id,
         envelope.command.clone(),
     )) {

@@ -7,9 +7,9 @@
 /// seen during a catchup sync after a long offline period.
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use ed25519_dalek::SigningKey;
-use activesync_core::{Op, MapOp, StateGraph};
+use nodalmerge_core::{Op, MapOp, StateGraph};
 
-fn build_nodes(n: usize) -> Vec<activesync_core::SyncNode> {
+fn build_nodes(n: usize) -> Vec<nodalmerge_core::SyncNode> {
     // Use a single signing key; every node is a leaf so there are no parent
     // constraints — we can insert them in any order.
     let key = SigningKey::from_bytes(&[42u8; 32]);

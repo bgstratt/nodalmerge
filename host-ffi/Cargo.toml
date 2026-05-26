@@ -1,5 +1,5 @@
 [package]
-name = "activesync-host-ffi"
+name = "nodalmerge-host-ffi"
 version = "0.1.0"
 edition = "2021"
 description = "C ABI wrapper for activesync host-core"
@@ -11,14 +11,14 @@ categories = ["api-bindings", "network-programming"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-activesync-host-core = { version = "0.1.0", path = "../host-core" }
+nodalmerge-host-core = { version = "0.1.0", path = "../host-core" }
 postcard = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-activesync-core = { version = "0.1.0", path = "../core" }
-activesync-host-core = { version = "0.1.0", path = "../host-core" }
+nodalmerge-core = { version = "0.1.0", path = "../core" }
+nodalmerge-host-core = { version = "0.1.0", path = "../host-core" }
 base64 = "0.22"
 criterion = { workspace = true }
 ed25519-dalek = { workspace = true }

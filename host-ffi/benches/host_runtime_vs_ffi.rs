@@ -1,6 +1,6 @@
-use activesync_host_core::api::{CommandEnvelope, HostCommand};
-use activesync_host_core::engine::HostEngine;
-use activesync_host_ffi::{
+use nodalmerge_host_core::api::{CommandEnvelope, HostCommand};
+use nodalmerge_host_core::engine::HostEngine;
+use nodalmerge_host_ffi::{
     as_bytes_owned, as_bytes_owned_free, as_bytes_view, as_host_engine, as_host_engine_free,
     as_host_engine_new, as_host_submit_command_json, as_status,
 };

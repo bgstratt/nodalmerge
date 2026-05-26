@@ -16,9 +16,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use activesync_core::{BlobStore, Hash, MapOp, Op, StateGraph};
-use activesync_server::room::{import_nodes, Rooms};
-use activesync_server::store::{DirPersistence, SharedPersistence};
+use nodalmerge_core::{BlobStore, Hash, MapOp, Op, StateGraph};
+use nodalmerge_server::room::{import_nodes, Rooms};
+use nodalmerge_server::store::{DirPersistence, SharedPersistence};
 use ed25519_dalek::SigningKey;
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
@@ -32,7 +32,7 @@ fn tmpdir(tag: &str) -> std::path::PathBuf {
 /// Build a signed node that carries a single `SetBlob` op pointing at
 /// `blob_hash`. Uses a throwaway graph so the caller owns nothing but
 /// the node.
-fn make_setblob_node(sk: &SigningKey, key: &str, blob_hash: Hash) -> activesync_core::SyncNode {
+fn make_setblob_node(sk: &SigningKey, key: &str, blob_hash: Hash) -> nodalmerge_core::SyncNode {
     let mut g = StateGraph::new();
     let id = g.apply_local(sk, 0, vec![Op::Map(MapOp::SetBlob {
         key: key.into(),
@@ -153,7 +153,7 @@ async fn blob_gc_clears_tombstone_when_blob_becomes_live_again() {
 
 #[tokio::test]
 async fn blob_gc_is_noop_on_in_memory_persistence() {
-    use activesync_server::store::NoPersistence;
+    use nodalmerge_server::store::NoPersistence;
     let rooms = Rooms::new(
         SigningKey::from_bytes(&[0x03u8; 32]),
         Arc::new(NoPersistence),

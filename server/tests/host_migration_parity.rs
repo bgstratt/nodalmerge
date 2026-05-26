@@ -10,10 +10,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use activesync_core::{BlobStore, MapOp, Op, RoomToken, StateGraph};
-use activesync_server::room::{import_nodes, Rooms};
-use activesync_server::store::{NoPersistence, SharedPersistence};
-use activesync_server::ws_handler;
+use nodalmerge_core::{BlobStore, MapOp, Op, RoomToken, StateGraph};
+use nodalmerge_server::room::{import_nodes, Rooms};
+use nodalmerge_server::store::{NoPersistence, SharedPersistence};
+use nodalmerge_server::ws_handler;
 use axum::{routing::get, Router};
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
@@ -83,7 +83,7 @@ fn load_fixture(name: &str) -> GoldenFixture {
         .unwrap_or_else(|e| panic!("invalid fixture JSON {}: {e}", p.display()))
 }
 
-fn make_map_set_node(sk: &SigningKey, key: &str, value: &[u8]) -> activesync_core::SyncNode {
+fn make_map_set_node(sk: &SigningKey, key: &str, value: &[u8]) -> nodalmerge_core::SyncNode {
     let mut g = StateGraph::new();
     let id = g
         .apply_local(
@@ -163,7 +163,7 @@ async fn run_current_hello_catchup(fx: &GoldenFixture) -> CanonicalTrace {
     });
     if fx.include_client_ibf_empty {
         let ibf_b64 = base64::engine::general_purpose::STANDARD
-            .encode(activesync_core::Ibf::from_ids(&[]).encode());
+            .encode(nodalmerge_core::Ibf::from_ids(&[]).encode());
         hello["ibf"] = serde_json::json!(ibf_b64);
     }
     let hello = hello.to_string();
@@ -307,7 +307,7 @@ async fn run_current_blob_flow(fx: &GoldenFixture) -> CanonicalTrace {
     let room = rooms.get_or_create(&fx.room_id).await;
 
     let seeded_blob = b"parity-blob-bytes".to_vec();
-    let seeded_hash = activesync_core::Hash::of(&seeded_blob);
+    let seeded_hash = nodalmerge_core::Hash::of(&seeded_blob);
     room.blobs.write().await.put(seeded_blob);
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
@@ -578,7 +578,7 @@ fn decode_pack_count(v: &serde_json::Value) -> usize {
     let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(nodes_b64) else {
         return 0;
     };
-    let Ok(nodes) = activesync_core::unpack_nodes(&raw) else {
+    let Ok(nodes) = nodalmerge_core::unpack_nodes(&raw) else {
         return 0;
     };
     nodes.len()

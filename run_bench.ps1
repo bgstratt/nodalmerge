@@ -43,7 +43,7 @@ $ffiPath = (Get-ChildItem -Recurse -Filter "*host_ffi.dll" | Where-Object { $_.F
 if (-not $ffiPath) { $ffiPath = (Get-ChildItem -Recurse -Filter "*host_ffi.dll" | Where-Object { $_.FullName -like "*target\release*" } | Select-Object -First 1).FullName }
 
 $env:AS_BIND_ADDR='127.0.0.1:7979'; $env:MONGO_URI='mongodb://127.0.0.1:27017'; $env:MONGO_DATABASE='nodalmerge_bench'
-$rP = Start-Process -FilePath "cargo" -ArgumentList "run -p activesync-dev-server --bin nodalmerge-dev-server" -NoNewWindow -PassThru -RedirectStandardOutput ".\benchmarks\results\logs\rust-integrated-mongo-clean.log" -RedirectStandardError ".\benchmarks\results\logs\rust-integrated-mongo-clean.err"
+$rP = Start-Process -FilePath "cargo" -ArgumentList "run -p nodalmerge-dev-server --bin nodalmerge-dev-server" -NoNewWindow -PassThru -RedirectStandardOutput ".\benchmarks\results\logs\rust-integrated-mongo-clean.log" -RedirectStandardError ".\benchmarks\results\logs\rust-integrated-mongo-clean.err"
 
 $dotnetHostProject = Resolve-DotnetHostProjectPath
 $env:ASPNETCORE_URLS='http://127.0.0.1:8787'; $env:ASPNETCORE_ENVIRONMENT='Development'; $env:NodalMerge__Providers__NodeStorage='Mongo'

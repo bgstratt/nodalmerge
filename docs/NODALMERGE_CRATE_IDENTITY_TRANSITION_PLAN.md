@@ -11,20 +11,20 @@ identities to `nodalmerge-*` identities without breaking existing downstreams.
 
 ## Strategy
 
-1. Keep all existing `activesync-*` crates publishable and supported.
-2. Add additive `nodalmerge-*` wrapper crates that re-export legacy crates.
+1. Use `nodalmerge-*` as canonical implementation crate identities.
+2. Keep `activesync-*` publishable via compatibility wrappers that re-export canonical crates.
 3. Update docs/CI/artifact tooling to pack/publish both identities.
 4. Migrate first-party examples/docs to nodalmerge-first imports.
-5. Defer hard renaming/removal of legacy crate IDs until post-window cutover.
+5. Defer hard removal of legacy crate IDs until post-window cutover.
 
 ## Compatibility Window Rules
 
-1. `activesync-*` remains source-of-truth implementation crates.
-2. `nodalmerge-*` wrappers expose the same API surface via re-export.
+1. `nodalmerge-*` remains source-of-truth implementation crates.
+2. `activesync-*` wrappers expose the same API surface via re-export.
 3. CI must package and publish wrappers in the same pipeline as legacy crates.
 4. Tooling must explicitly note legacy fallback behavior.
 
-## First Implementation Pass (Completed in this wave)
+## Initial Wrapper Pass (Completed)
 
 Existing wrappers retained:
 
@@ -57,8 +57,45 @@ Operational wiring added:
 3. CI crate wrapper pack/publish support in `.github/workflows/nuget-build-push.yml`.
 4. CI wrapper smoke validation via `cargo check -p nodalmerge-*` coverage in `.github/workflows/nuget-build-push.yml`.
 
+## Dedicated Crate-ID Migration Wave (Completed in this wave)
+
+Implementation crates renamed to canonical `nodalmerge-*` package IDs:
+
+1. `activesync-core` -> `nodalmerge-core`
+2. `activesync-gc` -> `nodalmerge-gc`
+3. `activesync-host-core` -> `nodalmerge-host-core`
+4. `activesync-host-ffi` -> `nodalmerge-host-ffi`
+5. `activesync-host-axum` -> `nodalmerge-host-axum`
+6. `activesync-server` -> `nodalmerge-server`
+7. `activesync-dev-server` -> `nodalmerge-dev-server`
+8. `activesync-jwt-bridge` -> `nodalmerge-jwt-bridge`
+9. `activesync-s3-blobs` -> `nodalmerge-s3-blobs`
+10. `activesync-mongo-store` -> `nodalmerge-mongo-store`
+11. `activesync-postgres-store` -> `nodalmerge-postgres-store`
+12. `activesync-nodestore-conformance` -> `nodalmerge-nodestore-conformance`
+
+Compatibility wrappers inverted to legacy `activesync-*` package IDs that re-export canonical crates:
+
+1. `activesync-core` -> `nodalmerge-core`
+2. `activesync-gc` -> `nodalmerge-gc`
+3. `activesync-host-core` -> `nodalmerge-host-core`
+4. `activesync-host-ffi` -> `nodalmerge-host-ffi`
+5. `activesync-host-axum` -> `nodalmerge-host-axum`
+6. `activesync-server` -> `nodalmerge-server`
+7. `activesync-jwt-bridge` -> `nodalmerge-jwt-bridge`
+8. `activesync-s3-blobs` -> `nodalmerge-s3-blobs`
+9. `activesync-mongo-store` -> `nodalmerge-mongo-store`
+10. `activesync-postgres-store` -> `nodalmerge-postgres-store`
+11. `activesync-nodestore-conformance` -> `nodalmerge-nodestore-conformance`
+
+Validation evidence:
+
+1. `cargo check --workspace` succeeded.
+2. `cargo test --workspace --no-run -j 1` succeeded.
+3. `Cargo.lock` regenerated with canonical + compatibility package graph.
+
 ## Next Pass Candidates
 
-1. Add wrappers for remaining high-use crates (`gc`, `host-axum`, `s3-blobs`, `node-stores/*`).
-2. Shift first-party integration docs to nodalmerge crate imports with explicit legacy snippets.
-3. Add a focused wrapper smoke-test job (`cargo check -p nodalmerge-*`) for all wrappers.
+1. Sweep docs/runbooks from `cargo -p activesync-*` to nodalmerge-first commands with explicit compatibility notes.
+2. Decide bridge Rust crate strategy (`activesync-bridge` remains cdylib-only exception).
+3. Add CI gates that fail new `cargo -p activesync-*` usage outside compatibility wrappers/docs.

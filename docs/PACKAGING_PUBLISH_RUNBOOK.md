@@ -58,7 +58,7 @@ Create or update a `NuGet.config` in the consuming app:
 <configuration>
 	<packageSources>
 		<clear />
-		<add key="local-activesync" value="C:\\path\\to\\activesync\\artifacts\\package-local\\nuget" />
+		<add key="local-nodalmerge" value="C:\\path\\to\\nodalmerge\\artifacts\\package-local\\nuget" />
 		<add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
 	</packageSources>
 </configuration>
@@ -82,9 +82,9 @@ pwsh -File ./expand-local-crates.ps1
 
 ```toml
 [dependencies]
-activesync-core = { path = "C:/path/to/activesync/artifacts/package-local/crates/unpacked/activesync-core-0.1.0" }
-activesync-host-core = { path = "C:/path/to/activesync/artifacts/package-local/crates/unpacked/activesync-host-core-0.1.0" }
-activesync-host-ffi = { path = "C:/path/to/activesync/artifacts/package-local/crates/unpacked/activesync-host-ffi-0.1.0" }
+activesync-core = { path = "C:/path/to/nodalmerge/artifacts/package-local/crates/unpacked/activesync-core-0.1.0" }
+activesync-host-core = { path = "C:/path/to/nodalmerge/artifacts/package-local/crates/unpacked/activesync-host-core-0.1.0" }
+activesync-host-ffi = { path = "C:/path/to/nodalmerge/artifacts/package-local/crates/unpacked/activesync-host-ffi-0.1.0" }
 ```
 
 This keeps the consumer independent from workspace project references while still using package snapshots generated from this repo.
@@ -94,8 +94,8 @@ This keeps the consumer independent from workspace project references while stil
 In a consuming JS app:
 
 ```powershell
-npm install C:\path\to\activesync\artifacts\package-local\npm\activesync-bridge-0.1.0.tgz
-npm install C:\path\to\activesync\artifacts\package-local\npm\activesync-sdk-js-0.1.0.tgz
+npm install C:\path\to\nodalmerge\artifacts\package-local\npm\activesync-bridge-0.1.0.tgz
+npm install C:\path\to\nodalmerge\artifacts\package-local\npm\activesync-sdk-js-0.1.0.tgz
 ```
 
 ## 1. Preflight Gates
@@ -105,9 +105,9 @@ Run from repo root unless noted.
 1. `cargo test -p activesync-core`
 2. `cargo test -p activesync-host-core`
 3. `cargo test -p activesync-host-ffi`
-4. `dotnet test dotnet-host/ActiveSync.DotNetHost.slnx`
-5. `cd dotnet-host; pwsh -File ./pack-local-nuget.ps1 -Version 0.1.0-local`
-6. `cd dotnet-host; dotnet restore ./ActiveSync.DotNetHost.slnx --configfile ./NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
+4. `dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx`
+5. `cd nodalmerge-host; pwsh -File ./pack-local-nuget.ps1 -Version 0.1.0-local`
+6. `cd nodalmerge-host; dotnet restore ./ActiveSync.DotNetHost.slnx --configfile ./NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
 7. `cd dotnet-host; pwsh -File ./verify.ps1 -UseNuGetPackages -ActiveSyncPackageVersion 0.1.0-local`
 
 Required outcome:

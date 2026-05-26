@@ -20,7 +20,7 @@ cargo run -p activesync-server -- \
 Or via Docker:
 
 ```bash
-docker run -p 7878:7878 -v $PWD/data:/data activesync/server
+docker run -p 7878:7878 -v $PWD/data:/data nodalmerge/server
 ```
 
 What each flag does:

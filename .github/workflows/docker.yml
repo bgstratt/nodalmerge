@@ -47,7 +47,7 @@ jobs:
           file: ./Dockerfile
           push: false
           load: true
-          tags: activesync/server:ci
+          tags: nodalmerge/server:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -56,17 +56,17 @@ jobs:
           # Boot the server in the background with an in-memory store, wait for
           # the "listening" log line, then shut it down. Fails the build if the
           # binary segfaults, panics on startup, or never binds.
-          docker run -d --name activesync-ci -p 7878:7878 activesync/server:ci
+          docker run -d --name nodalmerge-ci -p 7878:7878 nodalmerge/server:ci
           for i in $(seq 1 30); do
-            if docker logs activesync-ci 2>&1 | grep -qi 'listening'; then
+            if docker logs nodalmerge-ci 2>&1 | grep -qi 'listening'; then
               echo "server started"
-              docker logs activesync-ci
-              docker rm -f activesync-ci
+              docker logs nodalmerge-ci
+              docker rm -f nodalmerge-ci
               exit 0
             fi
             sleep 1
           done
           echo "server did not start within 30s"
-          docker logs activesync-ci
-          docker rm -f activesync-ci
+          docker logs nodalmerge-ci
+          docker rm -f nodalmerge-ci
           exit 1

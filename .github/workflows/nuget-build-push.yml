@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - 'dotnet-host/src/**'
-      - 'dotnet-host/ActiveSync.DotNetHost.slnx'
+      - 'nodalmerge-host/src/**'
+      - 'nodalmerge-host/ActiveSync.DotNetHost.slnx'
       - 'host-ffi/**'
       - '.github/workflows/nuget-build-push.yml'
   workflow_dispatch:
@@ -46,13 +46,13 @@ jobs:
           fi
 
       - name: Restore solution
-        run: dotnet restore dotnet-host/ActiveSync.DotNetHost.slnx
+        run: dotnet restore nodalmerge-host/ActiveSync.DotNetHost.slnx
 
       - name: Pack ActiveSync.Host.Abstractions
-        run: dotnet pack dotnet-host/src/ActiveSync.Host.Abstractions/ActiveSync.Host.Abstractions.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
+        run: dotnet pack nodalmerge-host/src/ActiveSync.Host.Abstractions/ActiveSync.Host.Abstractions.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
 
       - name: Pack ActiveSync.Host.Composition
-        run: dotnet pack dotnet-host/src/ActiveSync.Host.Composition/ActiveSync.Host.Composition.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
+        run: dotnet pack nodalmerge-host/src/ActiveSync.Host.Composition/ActiveSync.Host.Composition.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
 
       - name: Upload managed artifacts
         uses: actions/upload-artifact@v4
@@ -90,7 +90,7 @@ jobs:
         run: cargo build -p activesync-host-ffi --release
 
       - name: Pack ActiveSync.DotNetHost.Native.linux-x64
-        run: dotnet pack dotnet-host/src/ActiveSync.DotNetHost.Native.linux-x64/ActiveSync.DotNetHost.Native.linux-x64.csproj -c Release -o "$NUGET_OUTPUT_DIR" /p:Version=${{ steps.version.outputs.value }}
+        run: dotnet pack nodalmerge-host/src/ActiveSync.DotNetHost.Native.linux-x64/ActiveSync.DotNetHost.Native.linux-x64.csproj -c Release -o "$NUGET_OUTPUT_DIR" /p:Version=${{ steps.version.outputs.value }}
 
       - name: Upload linux native artifacts
         uses: actions/upload-artifact@v4
@@ -129,7 +129,7 @@ jobs:
         run: cargo build -p activesync-host-ffi --release
 
       - name: Pack ActiveSync.DotNetHost.Native.win-x64
-        run: dotnet pack dotnet-host/src/ActiveSync.DotNetHost.Native.win-x64/ActiveSync.DotNetHost.Native.win-x64.csproj -c Release -o "$env:NUGET_OUTPUT_DIR" /p:Version=${{ steps.version.outputs.value }}
+        run: dotnet pack nodalmerge-host/src/ActiveSync.DotNetHost.Native.win-x64/ActiveSync.DotNetHost.Native.win-x64.csproj -c Release -o "$env:NUGET_OUTPUT_DIR" /p:Version=${{ steps.version.outputs.value }}
 
       - name: Upload windows native artifacts
         uses: actions/upload-artifact@v4

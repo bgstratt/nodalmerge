@@ -75,8 +75,8 @@ Current checks before merge:
 ## 3.4 DotNetHost runtime ingress
 
 Primary locations:
-1. [dotnet-host/src/ActiveSync.DotNetHost/Runtime](dotnet-host/src/ActiveSync.DotNetHost/Runtime)
-2. [dotnet-host/src/ActiveSync.DotNetHost/HostApplication.cs](dotnet-host/src/ActiveSync.DotNetHost/HostApplication.cs)
+1. [nodalmerge-host/src/ActiveSync.DotNetHost/Runtime](nodalmerge-host/src/ActiveSync.DotNetHost/Runtime)
+2. [nodalmerge-host/src/ActiveSync.DotNetHost/HostApplication.cs](nodalmerge-host/src/ActiveSync.DotNetHost/HostApplication.cs)
 
 Mutation-bearing surfaces:
 1. /ws/runtime message dispatch to host command bridge.
@@ -113,9 +113,9 @@ Required parity rule:
 2. [core/src/graph.rs](core/src/graph.rs)
 3. [server/src/ws_handler.rs](server/src/ws_handler.rs)
 4. [server/src/room.rs](server/src/room.rs)
-5. [dotnet-host/src/ActiveSync.Host.Composition/ServiceCollectionExtensions.cs](dotnet-host/src/ActiveSync.Host.Composition/ServiceCollectionExtensions.cs)
-6. [dotnet-host/src/ActiveSync.DotNetHost/Ffi/FfiWebSocketLoopRunner.cs](dotnet-host/src/ActiveSync.DotNetHost/Ffi/FfiWebSocketLoopRunner.cs)
-7. [dotnet-host/tests/ActiveSync.DotNetHost.Tests/FfiWebSocketLoopRunnerTests.cs](dotnet-host/tests/ActiveSync.DotNetHost.Tests/FfiWebSocketLoopRunnerTests.cs)
+5. [nodalmerge-host/src/ActiveSync.Host.Composition/ServiceCollectionExtensions.cs](nodalmerge-host/src/ActiveSync.Host.Composition/ServiceCollectionExtensions.cs)
+6. [nodalmerge-host/src/ActiveSync.DotNetHost/Ffi/FfiWebSocketLoopRunner.cs](nodalmerge-host/src/ActiveSync.DotNetHost/Ffi/FfiWebSocketLoopRunner.cs)
+7. [nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/FfiWebSocketLoopRunnerTests.cs](nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/FfiWebSocketLoopRunnerTests.cs)
 
 ## 6.1 P1 Test-Case Mapping
 

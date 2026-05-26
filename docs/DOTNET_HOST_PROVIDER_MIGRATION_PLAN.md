@@ -35,7 +35,7 @@ Latest validation evidence:
 1. Focused provider suites green.
 2. Non-FFI regression suite green.
 3. Full FFI-enabled suite green when `ACTIVESYNC_HOST_FFI_DLL` is set.
-4. Live host run/connect verifier (`dotnet-host/verify.ps1`) confirms runtime startup, delegated `/sync/blob-url` presign resolution, and websocket `hello`/`noop-ack` flow under explicit SpeechSlate-shape blob profile args when `ACTIVESYNC_HOST_FFI_DLL` points to a built host-ffi DLL.
+4. Live host run/connect verifier (`nodalmerge-host/verify.ps1`) confirms runtime startup, delegated `/sync/blob-url` presign resolution, and websocket `hello`/`noop-ack` flow under explicit SpeechSlate-shape blob profile args when `ACTIVESYNC_HOST_FFI_DLL` points to a built host-ffi DLL.
 
 Remaining P2 checklist items:
 
@@ -329,9 +329,9 @@ Implementation decision for P1:
 
 ## P0.1 Project scaffolding
 
-1. Create dotnet-host/src/ActiveSync.Host.Abstractions project.
-2. Create dotnet-host/src/ActiveSync.Host.Composition project.
-3. Reference both from dotnet-host/src/ActiveSync.DotNetHost.
+1. Create nodalmerge-host/src/ActiveSync.Host.Abstractions project.
+2. Create nodalmerge-host/src/ActiveSync.Host.Composition project.
+3. Reference both from nodalmerge-host/src/ActiveSync.DotNetHost.
 4. Add solution entries and build wiring.
 
 Deliverables:
@@ -458,7 +458,7 @@ Exit criteria:
 
 Validation command set for each PR:
 
-1. dotnet build dotnet-host/ActiveSync.DotNetHost.slnx
-2. dotnet test dotnet-host/ActiveSync.DotNetHost.slnx
+1. dotnet build nodalmerge-host/ActiveSync.DotNetHost.slnx
+2. dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx
 3. cargo test -p activesync-host-core
 4. cargo test -p activesync-host-ffi

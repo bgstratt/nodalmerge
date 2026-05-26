@@ -12,7 +12,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\ActiveSync.DotNetHost\ActiveSync.DotNetHost.csproj" />
+    <ProjectReference Include="..\..\src\ActiveSync.DotNetHost\NodalMerge.DotNetHost.csproj" />
   </ItemGroup>
 
 </Project>

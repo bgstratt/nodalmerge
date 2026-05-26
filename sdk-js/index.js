@@ -200,7 +200,7 @@ export function parseRuntimeMessage(data) {
   return parsed;
 }
 
-export class ActiveSyncSdk {
+export class NodalMergeSdk {
   constructor(options) {
     this.options = options;
     this.store = null;
@@ -226,8 +226,6 @@ export class ActiveSyncSdk {
     this.offlinePersistenceKey = options.offline?.persistenceKey ?? null;
     this.transportPolicy = normalizeTransportMode(options.transport?.mode);
     this.activeTransportMode = "ws-only";
-
-    this.compat = createSdkMigrationShim(this);
   }
 
   async initialize() {
@@ -691,24 +689,9 @@ export class ActiveSyncSdk {
   }
 }
 
-export async function createActiveSyncSdk(options) {
-  const client = new ActiveSyncSdk(options);
+export async function createNodalMergeSdk(options) {
+  const client = new NodalMergeSdk(options);
   await client.initialize();
   return client;
 }
 
-export function createSdkMigrationShim(sdk) {
-  return {
-    sendPack: () => sdk.sync.push(),
-    requestServerPack: () => sdk.sync.pull(),
-    setPresence: (data, options) => sdk.presence.set(data, options),
-    sendWebRtcOffer: (to, sdp) => sdk.signaling.offer(to, sdp),
-    sendWebRtcAnswer: (to, sdp) => sdk.signaling.answer(to, sdp),
-    sendWebRtcIce: (to, candidate, sdpMid, sdpMLineIndex) => sdk.signaling.ice(to, candidate, sdpMid, sdpMLineIndex),
-    onRuntimeEvent: (type, handler) => sdk.on("runtime-message", (message) => {
-      if (message && message.type === type) {
-        handler(message);
-      }
-    })
-  };
-}

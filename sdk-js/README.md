@@ -1,6 +1,6 @@
-# activesync-sdk-js
+# nodalmerge-sdk-js
 
-High-level JavaScript SDK wrapper for ActiveSync using the `activesync-bridge` WASM runtime.
+High-level JavaScript SDK wrapper for NodalMerge using the `nodalmerge-bridge` WASM runtime.
 
 ## Dead-Simple API
 
@@ -15,20 +15,20 @@ The wrapper groups operations into:
 7. presence
 8. signaling
 9. transport policy and runtime-message typing
-10. migration shim (`sdk.compat`)
+10. transport policy and runtime-message typing
 
 ## Install
 
 ```bash
-npm install activesync-sdk-js
+npm install nodalmerge-sdk-js
 ```
 
 ## Quick Start
 
 ```ts
-import { createActiveSyncSdk } from "activesync-sdk-js";
+import { createNodalMergeSdk } from "nodalmerge-sdk-js";
 
-const sdk = await createActiveSyncSdk({
+const sdk = await createNodalMergeSdk({
   wsUrl: "ws://127.0.0.1:8787/ws/runtime",
   roomId: "demo-room",
   transport: {
@@ -40,7 +40,7 @@ const sdk = await createActiveSyncSdk({
     maxDelayMs: 8000
   },
   offline: {
-    persistenceKey: "activesync:demo-room:outbox"
+    persistenceKey: "nodalmerge:demo-room:outbox"
   }
 });
 
@@ -54,9 +54,7 @@ const hash = sdk.replay.canonicalHash();
 
 sdk.presence.set({ cursor: { x: 120, y: 220 } }, { ttlMs: 5_000 });
 sdk.signaling.offer("peer-b", "v=0...");
-sdk.compat.requestServerPack();
-
-const stop = sdk.compat.onRuntimeEvent("pack", (msg) => {
+const stop = sdk.on("runtime-message", (msg) => {
   console.log("pack received", msg);
 });
 
@@ -109,4 +107,4 @@ These helpers apply locally; call `sdk.sync.push()` to send changes.
 - Reconnect policy is configurable through `reconnect` options.
 - Transport policy (`ws-only` or `auto`) is configurable through `transport.mode`.
 - Runtime message parsing is exposed via `parseRuntimeMessage` and `runtime-message` events.
-- For advanced protocol control, use `activesync-bridge` directly.
+- For advanced protocol control, use `nodalmerge-bridge` directly.

@@ -20,7 +20,7 @@ public class FfiBindingTests
     [Fact]
     public void NativeLibraryName_is_stable()
     {
-        Assert.Equal("activesync_host_ffi", NativeMethods.LibraryName);
+        Assert.Equal("nodalmerge_host_ffi", NativeMethods.LibraryName);
     }
 
     [Fact]

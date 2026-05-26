@@ -103,10 +103,10 @@ async fn metrics_endpoint_exposes_baseline_series() {
         "nodalmerge_peers_total",
         "nodalmerge_nodes_accepted_total",
         "nodalmerge_merge_batch_seconds",
-        "activesync_rooms_total",
-        "activesync_peers_total",
-        "activesync_nodes_accepted_total",
-        "activesync_merge_batch_seconds",
+        "nodalmerge_rooms_total",
+        "nodalmerge_peers_total",
+        "nodalmerge_nodes_accepted_total",
+        "nodalmerge_merge_batch_seconds",
     ] {
         assert!(
             body.contains(name),

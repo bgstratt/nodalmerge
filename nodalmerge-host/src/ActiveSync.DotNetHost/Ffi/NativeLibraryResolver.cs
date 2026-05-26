@@ -112,14 +112,14 @@ public static class NativeLibraryResolver
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            return "activesync_host_ffi.dll";
+            return "nodalmerge_host_ffi.dll";
         }
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
         {
-            return "libactivesync_host_ffi.dylib";
+            return "libnodalmerge_host_ffi.dylib";
         }
 
-        return "libactivesync_host_ffi.so";
+        return "libnodalmerge_host_ffi.so";
     }
 }

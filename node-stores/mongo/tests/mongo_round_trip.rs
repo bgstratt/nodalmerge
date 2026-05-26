@@ -9,7 +9,7 @@ use testcontainers::{
     GenericImage,
 };
 
-const DB_NAME: &str = "activesync_test";
+const DB_NAME: &str = "nodalmerge_test";
 
 fn start_mongo() -> Option<testcontainers::Container<GenericImage>> {
     let res = GenericImage::new("mongo", "7")

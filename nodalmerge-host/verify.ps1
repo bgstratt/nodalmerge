@@ -8,8 +8,8 @@ param(
     [string]$MongoDatabaseName = "",
     [switch]$UseNuGetPackages,
     [string]$NodalMergePackageVersion = "0.1.0-local",
-    [Alias("ActiveSyncPackageVersion")]
-    [string]$LegacyActiveSyncPackageVersion = ""
+    [Alias("NodalMergePackageVersion")]
+    [string]$LegacyNodalMergePackageVersion = ""
 )
 
 Set-StrictMode -Version Latest
@@ -156,8 +156,8 @@ try {
         Write-Host "Using ACTIVESYNC_HOST_FFI_DLL from current environment"
     }
 
-    $resolvedPackageVersion = if (-not [string]::IsNullOrWhiteSpace($LegacyActiveSyncPackageVersion)) {
-        $LegacyActiveSyncPackageVersion
+    $resolvedPackageVersion = if (-not [string]::IsNullOrWhiteSpace($LegacyNodalMergePackageVersion)) {
+        $LegacyNodalMergePackageVersion
     }
     else {
         $NodalMergePackageVersion
@@ -168,8 +168,8 @@ try {
             "restore",
             "./NodalMerge.DotNetHost.slnx",
             "--configfile", "./NuGet.Local.config",
-            "-p:ActiveSyncUseNuGetPackages=true",
-            "-p:ActiveSyncPackageVersion=$resolvedPackageVersion"
+            "-p:NodalMergeUseNuGetPackages=true",
+            "-p:NodalMergePackageVersion=$resolvedPackageVersion"
         )
 
         Write-Host "Restoring in package mode with NuGet.Local.config ..."
@@ -205,14 +205,14 @@ try {
 
     $hostArgs = @(
         "run",
-        "--project", "src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj",
+        "--project", "src/ActiveSync.DotNetHost/NodalMerge.DotNetHost.csproj",
         "--no-launch-profile"
     )
 
     if ($UseNuGetPackages.IsPresent) {
         $hostArgs += @(
-            "-p:ActiveSyncUseNuGetPackages=true",
-            "-p:ActiveSyncPackageVersion=$resolvedPackageVersion"
+            "-p:NodalMergeUseNuGetPackages=true",
+            "-p:NodalMergePackageVersion=$resolvedPackageVersion"
         )
     }
 
@@ -342,4 +342,5 @@ finally {
         Remove-Job -Id $delegateStub.Id -Force -ErrorAction SilentlyContinue
     }
 }
+
 

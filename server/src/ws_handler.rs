@@ -492,7 +492,7 @@ fn record_scope_filter_metrics(room_id: &str, stage: &str, outcome: &ScopeFilter
         )
         .increment(filtered_nodes as u64);
         metrics::counter!(
-            "activesync_filtered_nodes_total",
+            "nodalmerge_filtered_nodes_total",
             "room" => room_id.to_string(),
             "stage" => stage.to_string(),
         )
@@ -506,7 +506,7 @@ fn record_scope_filter_metrics(room_id: &str, stage: &str, outcome: &ScopeFilter
         )
         .increment(filtered_bytes as u64);
         metrics::counter!(
-            "activesync_filtered_bytes_total",
+            "nodalmerge_filtered_bytes_total",
             "room" => room_id.to_string(),
             "stage" => stage.to_string(),
         )
@@ -523,7 +523,7 @@ fn record_scope_filter_drop(room_id: &str, stage: &str, reason: &str) {
     )
     .increment(1);
     metrics::counter!(
-        "activesync_filtered_pack_dropped_total",
+        "nodalmerge_filtered_pack_dropped_total",
         "room" => room_id.to_string(),
         "stage" => stage.to_string(),
         "reason" => reason.to_string(),
@@ -802,7 +802,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
                     "room" => room_id.clone(),
                 ).increment(1);
                 metrics::counter!(
-                    "activesync_token_expired_disconnects_total",
+                    "nodalmerge_token_expired_disconnects_total",
                     "room" => room_id.clone(),
                 ).increment(1);
                 tracing::info!(peer = %short, room = %room_id, "token expired — closing with 4002");
@@ -875,7 +875,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
                             "room" => room_id.clone(),
                         ).increment(1);
                         metrics::counter!(
-                            "activesync_broadcast_lagged_total",
+                            "nodalmerge_broadcast_lagged_total",
                             "room" => room_id.clone(),
                         ).increment(1);
                         tracing::warn!(
@@ -1569,7 +1569,7 @@ async fn ws_send(
                 "room" => room_id.to_string(),
             ).increment(1);
             metrics::counter!(
-                "activesync_ws_send_timeout_total",
+                "nodalmerge_ws_send_timeout_total",
                 "room" => room_id.to_string(),
             ).increment(1);
             tracing::warn!(room = %room_id, "ws send timed out — closing with 1011 server overload");
@@ -1648,7 +1648,7 @@ async fn deny_peer_rate(
         "peer" => peer_label.clone(),
     ).increment(1);
     metrics::counter!(
-        "activesync_rate_limit_drops_total",
+        "nodalmerge_rate_limit_drops_total",
         "peer" => peer_label.clone(),
     ).increment(1);
     tracing::warn!(

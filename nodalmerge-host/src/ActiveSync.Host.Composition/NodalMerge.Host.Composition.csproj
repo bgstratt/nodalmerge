@@ -5,9 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
-    <PackageId>ActiveSync.Host.Composition</PackageId>
-    <Description>Dependency injection composition and provider wiring for ActiveSync host integrations.</Description>
-    <PackageTags>activesync;sync;crdt;host;composition</PackageTags>
+    <PackageId>NodalMerge.Host.Composition</PackageId>
+    <Description>Dependency injection composition and provider wiring for NodalMerge host integrations.</Description>
+    <PackageTags>nodalmerge;sync;crdt;host;composition</PackageTags>
     <PackageReadmeFile>NUGET_README.md</PackageReadmeFile>
   </PropertyGroup>
 
@@ -28,7 +28,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\ActiveSync.Host.Abstractions\ActiveSync.Host.Abstractions.csproj" />
+    <ProjectReference Include="..\ActiveSync.Host.Abstractions\NodalMerge.Host.Abstractions.csproj" />
   </ItemGroup>
 
 </Project>

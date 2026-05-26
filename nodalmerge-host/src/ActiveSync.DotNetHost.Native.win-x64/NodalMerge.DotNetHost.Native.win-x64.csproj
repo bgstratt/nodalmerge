@@ -2,22 +2,22 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
     <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
     <PackageId>NodalMerge.DotNetHost.Native.win-x64</PackageId>
-    <Description>Compatibility wrapper package that forwards to ActiveSync.DotNetHost.Native.win-x64 during migration.</Description>
-    <PackageTags>nodalmerge;sync;crdt;native;ffi;windows;wrapper;compatibility</PackageTags>
+    <Description>Native host FFI runtime for NodalMerge .NET host on win-x64.</Description>
+    <PackageTags>nodalmerge;sync;crdt;native;ffi;windows</PackageTags>
     <PackageReadmeFile>NUGET_README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="..\..\NUGET_README.md" Pack="true" PackagePath="\" Visible="false" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\ActiveSync.DotNetHost.Native.win-x64\ActiveSync.DotNetHost.Native.win-x64.csproj" />
+    <None Include="..\..\..\target\release\nodalmerge_host_ffi.dll"
+          Pack="true"
+          PackagePath="runtimes/win-x64/native/"
+          Visible="false" />
   </ItemGroup>
 
 </Project>

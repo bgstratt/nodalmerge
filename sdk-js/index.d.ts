@@ -1,4 +1,4 @@
-export interface ActiveSyncSdkOptions {
+export interface NodalMergeSdkOptions {
   wsUrl: string;
   roomId: string;
   authorKey?: Uint8Array;
@@ -31,7 +31,7 @@ export interface TopologySnapshot {
   activeTransport: "ws-only" | "ws+webrtc";
 }
 
-export type ActiveSyncRuntimeMessageType =
+export type NodalMergeRuntimeMessageType =
   | "welcome"
   | "pack"
   | "blob-pack"
@@ -50,12 +50,12 @@ export type ActiveSyncRuntimeMessageType =
   | "session-opened"
   | "session-closed";
 
-export interface ActiveSyncRuntimeMessage {
-  type: ActiveSyncRuntimeMessageType;
+export interface NodalMergeRuntimeMessage {
+  type: NodalMergeRuntimeMessageType;
   [key: string]: unknown;
 }
 
-export type ActiveSyncSdkEvent =
+export type NodalMergeSdkEvent =
   | "message"
   | "error"
   | "state"
@@ -78,11 +78,9 @@ export type TextDeleteAnchor =
   | { kind: "start" }
   | { kind: "after"; lamport: number | bigint; author: string };
 
-export declare class ActiveSyncSdk {
-  constructor(options: ActiveSyncSdkOptions);
+export declare class NodalMergeSdk {
+  constructor(options: NodalMergeSdkOptions);
   initialize(): Promise<void>;
-
-  compat: ReturnType<typeof createSdkMigrationShim>;
 
   room: {
     connect: () => Promise<void>;
@@ -138,19 +136,9 @@ export declare class ActiveSyncSdk {
     snapshot: () => TopologySnapshot;
   };
 
-  on(event: ActiveSyncSdkEvent, handler: (payload: unknown) => void): () => void;
+  on(event: NodalMergeSdkEvent, handler: (payload: unknown) => void): () => void;
 }
 
-export declare function parseRuntimeMessage(data: string): ActiveSyncRuntimeMessage | null;
+export declare function parseRuntimeMessage(data: string): NodalMergeRuntimeMessage | null;
 
-export declare function createSdkMigrationShim(sdk: ActiveSyncSdk): {
-  sendPack: () => void;
-  requestServerPack: () => void;
-  setPresence: (data: unknown, options?: { sessionId?: string; ttlMs?: number; nowUnixMs?: number }) => void;
-  sendWebRtcOffer: (to: string, sdp: string) => void;
-  sendWebRtcAnswer: (to: string, sdp: string) => void;
-  sendWebRtcIce: (to: string, candidate: string, sdpMid?: string, sdpMLineIndex?: number) => void;
-  onRuntimeEvent: (type: ActiveSyncRuntimeMessageType, handler: (message: ActiveSyncRuntimeMessage) => void) => () => void;
-};
-
-export declare function createActiveSyncSdk(options: ActiveSyncSdkOptions): Promise<ActiveSyncSdk>;
+export declare function createNodalMergeSdk(options: NodalMergeSdkOptions): Promise<NodalMergeSdk>;

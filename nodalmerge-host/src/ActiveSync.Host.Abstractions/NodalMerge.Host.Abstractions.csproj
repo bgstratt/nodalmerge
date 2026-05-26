@@ -5,9 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
-    <PackageId>ActiveSync.Host.Abstractions</PackageId>
-    <Description>Provider contracts and abstractions for ActiveSync host integrations.</Description>
-    <PackageTags>activesync;sync;crdt;host</PackageTags>
+    <PackageId>NodalMerge.Host.Abstractions</PackageId>
+    <Description>Provider contracts and abstractions for NodalMerge host integrations.</Description>
+    <PackageTags>nodalmerge;sync;crdt;host</PackageTags>
     <PackageReadmeFile>NUGET_README.md</PackageReadmeFile>
   </PropertyGroup>
 

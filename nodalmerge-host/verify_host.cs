@@ -15,7 +15,7 @@ class Program {
         Console.WriteLine("Starting Host...");
         var processStartInfo = new ProcessStartInfo {
             FileName = "dotnet",
-            Arguments = "run --project src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj",
+            Arguments = "run --project src/ActiveSync.DotNetHost/NodalMerge.DotNetHost.csproj",
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
@@ -77,3 +77,4 @@ class Program {
         }
     }
 }
+

@@ -1,7 +1,7 @@
 //! F7 — `MongoNodeStore`: a `NodePersistence` adapter backed by MongoDB
 //! (mongodb 3.x async driver).
 //!
-//! Document shape (collection `activesync_nodes`):
+//! Document shape (collection `nodalmerge_nodes`):
 //!
 //! ```jsonc
 //! {
@@ -14,7 +14,7 @@
 //! }
 //! ```
 //!
-//! Per-batch sequence allocation uses a counter collection (`activesync_seq`)
+//! Per-batch sequence allocation uses a counter collection (`nodalmerge_seq`)
 //! with `findOneAndUpdate $inc` — one round trip per `persist_nodes` call,
 //! not per node.
 
@@ -59,9 +59,9 @@ pub enum MongoStoreError {
 pub struct MongoNodeStoreConfig {
     pub connection_uri: String,
     pub database: String,
-    /// Default `"activesync_nodes"`.
+    /// Default `"nodalmerge_nodes"`.
     pub collection: String,
-    /// Default `"activesync_seq"`.
+    /// Default `"nodalmerge_seq"`.
     pub seq_collection: String,
 }
 
@@ -70,8 +70,8 @@ impl MongoNodeStoreConfig {
         Self {
             connection_uri: connection_uri.into(),
             database: database.into(),
-            collection: "activesync_nodes".into(),
-            seq_collection: "activesync_seq".into(),
+            collection: "nodalmerge_nodes".into(),
+            seq_collection: "nodalmerge_seq".into(),
         }
     }
 }
@@ -141,7 +141,7 @@ impl MongoNodeStore {
             // Force primary readiness using a lightweight write; clean up
             // afterwards. This gives the client a chance to observe the
             // primary topology and establish the pool.
-            let init_coll = client.database(&database_for_thread).collection::<Document>("activesync_init_test");
+            let init_coll = client.database(&database_for_thread).collection::<Document>("nodalmerge_init_test");
             match init_coll.insert_one(doc! { "init": true }).await {
                 Ok(_) => {
                     tracing::info!("Mongo init write succeeded");
@@ -176,7 +176,7 @@ impl MongoNodeStore {
     pub async fn test_write(&self) -> Result<(), MongoStoreError> {
         let client = self.client.clone();
         let db_name = self.db_name.clone();
-        let coll = client.database(&db_name).collection::<Document>("activesync_dev_startup_test");
+        let coll = client.database(&db_name).collection::<Document>("nodalmerge_dev_startup_test");
         match coll.insert_one(doc! { "startup": true, "ts": bson::DateTime::now() }).await {
             Ok(_) => {
                 let _ = coll.delete_many(doc! { "startup": true }).await;
@@ -338,7 +338,7 @@ impl NodePersistence for MongoNodeStore {
             tracing::warn!(?e, "mongo persist_node failed");
         }
         metrics::histogram!(
-            "activesync_persistence_write_seconds",
+            "nodalmerge_persistence_write_seconds",
             "kind" => "node",
             "backend" => "mongo",
         )
@@ -404,7 +404,7 @@ impl NodePersistence for MongoNodeStore {
             tracing::warn!(?e, "mongo persist_nodes failed");
         }
         metrics::histogram!(
-            "activesync_persistence_write_seconds",
+            "nodalmerge_persistence_write_seconds",
             "kind" => "nodes_batch",
             "backend" => "mongo",
         )
@@ -441,8 +441,8 @@ mod tests {
     #[test]
     fn config_defaults() {
         let cfg = MongoNodeStoreConfig::new("mongodb://x", "db");
-        assert_eq!(cfg.collection, "activesync_nodes");
-        assert_eq!(cfg.seq_collection, "activesync_seq");
+        assert_eq!(cfg.collection, "nodalmerge_nodes");
+        assert_eq!(cfg.seq_collection, "nodalmerge_seq");
     }
 
     #[test]

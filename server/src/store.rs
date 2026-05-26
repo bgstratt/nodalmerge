@@ -14,7 +14,7 @@
 //! Two bundled implementations ship:
 //!
 //! * [`NoPersistence`] — in-memory only; matches pre-F4 behavior.
-//! * [`DirPersistence`] — SQLite for nodes (`<root>/activesync.db`) plus a
+//! * [`DirPersistence`] — SQLite for nodes (`<root>/nodalmerge.db`) plus a
 //!   content-addressed blob dir (`<root>/blobs/<room>/<hash>`). Hydrates on
 //!   room creation; write-through on every accepted node/blob.
 //!
@@ -257,7 +257,7 @@ impl BlobPersistence for NoPersistence {
 ///
 /// ```text
 /// <root>/
-///   activesync.db                      ← SQLite: one row per (room, node)
+///   nodalmerge.db                      ← SQLite: one row per (room, node)
 ///   blobs/
 ///     <sanitized_room_id>/
 ///       <hash_hex>                     ← one file per blob (content-addressed)
@@ -278,7 +278,7 @@ impl DirPersistence {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
         std::fs::create_dir_all(root.join("blobs"))?;
-        let db_path = root.join("activesync.db");
+        let db_path = root.join("nodalmerge.db");
         let conn = Connection::open(&db_path)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         // WAL keeps writers from blocking readers and survives crashes.
@@ -345,7 +345,7 @@ impl NodePersistence for DirPersistence {
         let elapsed = t0.elapsed().as_secs_f64();
         metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "node")
             .record(elapsed);
-        metrics::histogram!("activesync_persistence_write_seconds", "kind" => "node")
+        metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "node")
             .record(elapsed);
     }
 
@@ -409,7 +409,7 @@ impl NodePersistence for DirPersistence {
         let elapsed = t0.elapsed().as_secs_f64();
         metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "nodes_batch")
             .record(elapsed);
-        metrics::histogram!("activesync_persistence_write_seconds", "kind" => "nodes_batch")
+        metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "nodes_batch")
             .record(elapsed);
     }
 }
@@ -461,7 +461,7 @@ impl BlobPersistence for DirPersistence {
         let elapsed = t0.elapsed().as_secs_f64();
         metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "blob")
             .record(elapsed);
-        metrics::histogram!("activesync_persistence_write_seconds", "kind" => "blob")
+        metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "blob")
             .record(elapsed);
     }
 

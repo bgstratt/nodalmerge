@@ -11,7 +11,7 @@ use testcontainers::{
 
 const PG_USER: &str = "activesync";
 const PG_PASS: &str = "activesync";
-const PG_DB: &str = "activesync_test";
+const PG_DB: &str = "nodalmerge_test";
 
 fn start_postgres() -> Option<testcontainers::Container<GenericImage>> {
     let res = GenericImage::new("postgres", "16")

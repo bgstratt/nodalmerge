@@ -17,8 +17,8 @@ function Resolve-TestProjectPath {
     }
 
     $candidates = @(
-        "tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj",
-        "tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj"
+        "tests/ActiveSync.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj",
+        "tests/ActiveSync.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj"
     )
 
     foreach ($candidate in $candidates) {
@@ -84,3 +84,4 @@ try {
 finally {
     Pop-Location
 }
+

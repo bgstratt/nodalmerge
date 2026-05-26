@@ -1,5 +1,5 @@
 -- F7: PostgresNodeStore schema.
-CREATE TABLE IF NOT EXISTS activesync_nodes (
+CREATE TABLE IF NOT EXISTS nodalmerge_nodes (
     room_id    TEXT        NOT NULL,
     node_id    BYTEA       NOT NULL,
     seq        BIGSERIAL   PRIMARY KEY,
@@ -8,5 +8,5 @@ CREATE TABLE IF NOT EXISTS activesync_nodes (
     UNIQUE (room_id, node_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_activesync_nodes_room_seq
-    ON activesync_nodes (room_id, seq);
+CREATE INDEX IF NOT EXISTS idx_nodalmerge_nodes_room_seq
+    ON nodalmerge_nodes (room_id, seq);

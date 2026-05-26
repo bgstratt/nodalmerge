@@ -1,16 +1,13 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/ActiveSync.Host.Abstractions/ActiveSync.Host.Abstractions.csproj" />
-    <Project Path="src/ActiveSync.Host.Composition/ActiveSync.Host.Composition.csproj" />
-    <Project Path="src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj" />
-    <Project Path="src/ActiveSync.DotNetHost.Native.linux-x64/ActiveSync.DotNetHost.Native.linux-x64.csproj" />
-    <Project Path="src/ActiveSync.DotNetHost.Native.win-x64/ActiveSync.DotNetHost.Native.win-x64.csproj" />
-    <Project Path="src/NodalMerge.Host.Abstractions/NodalMerge.Host.Abstractions.csproj" />
-    <Project Path="src/NodalMerge.Host.Composition/NodalMerge.Host.Composition.csproj" />
-    <Project Path="src/NodalMerge.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj" />
-    <Project Path="src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj" />
+    <Project Path="src/ActiveSync.Host.Abstractions/NodalMerge.Host.Abstractions.csproj" />
+    <Project Path="src/ActiveSync.Host.Composition/NodalMerge.Host.Composition.csproj" />
+    <Project Path="src/ActiveSync.DotNetHost/NodalMerge.DotNetHost.csproj" />
+    <Project Path="src/ActiveSync.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj" />
+    <Project Path="src/ActiveSync.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj" />
+    <Project Path="tests/ActiveSync.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj" />
   </Folder>
 </Solution>
+

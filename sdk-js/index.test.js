@@ -55,8 +55,8 @@ test("sync.getText and sync.getTextCanonical route to bridge text resolvers", as
 });
 
 async function createSdkWithMockStore() {
-  const { ActiveSyncSdk } = await loadSdkModuleWithBridgeStub();
-  const sdk = new ActiveSyncSdk({ wsUrl: "ws://localhost", roomId: "room" });
+  const { NodalMergeSdk } = await loadSdkModuleWithBridgeStub();
+  const sdk = new NodalMergeSdk({ wsUrl: "ws://localhost", roomId: "room" });
   const mockStore = createMockStore();
   sdk.store = mockStore;
   return { sdk, mockStore };

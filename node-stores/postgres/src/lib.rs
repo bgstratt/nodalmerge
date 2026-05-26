@@ -98,7 +98,7 @@ impl NodePersistence for PostgresNodeStore {
         let rid = room_id.to_string();
         let rows: Result<Vec<Vec<u8>>, sqlx::Error> = self.rt.block_on(async move {
             let rows = sqlx::query(
-                "SELECT bytes FROM activesync_nodes \
+                "SELECT bytes FROM nodalmerge_nodes \
                  WHERE room_id = $1 ORDER BY seq ASC",
             )
             .bind(&rid)
@@ -132,7 +132,7 @@ impl NodePersistence for PostgresNodeStore {
         let bytes = pack_nodes(&[node]);
         let res: Result<(), sqlx::Error> = self.rt.block_on(async move {
             sqlx::query(
-                "INSERT INTO activesync_nodes (room_id, node_id, bytes) \
+                "INSERT INTO nodalmerge_nodes (room_id, node_id, bytes) \
                  VALUES ($1, $2, $3) \
                  ON CONFLICT (room_id, node_id) DO NOTHING",
             )
@@ -147,7 +147,7 @@ impl NodePersistence for PostgresNodeStore {
             tracing::warn!(?e, "postgres persist_node failed");
         }
         metrics::histogram!(
-            "activesync_persistence_write_seconds",
+            "nodalmerge_persistence_write_seconds",
             "kind" => "node",
             "backend" => "postgres",
         )
@@ -173,7 +173,7 @@ impl NodePersistence for PostgresNodeStore {
             // transaction, ON CONFLICT preserves at-least-once safety.
             let room_ids: Vec<String> = std::iter::repeat(rid).take(node_ids.len()).collect();
             sqlx::query(
-                "INSERT INTO activesync_nodes (room_id, node_id, bytes) \
+                "INSERT INTO nodalmerge_nodes (room_id, node_id, bytes) \
                  SELECT * FROM UNNEST($1::text[], $2::bytea[], $3::bytea[]) \
                  ON CONFLICT (room_id, node_id) DO NOTHING",
             )
@@ -188,7 +188,7 @@ impl NodePersistence for PostgresNodeStore {
             tracing::warn!(?e, "postgres persist_nodes failed");
         }
         metrics::histogram!(
-            "activesync_persistence_write_seconds",
+            "nodalmerge_persistence_write_seconds",
             "kind" => "nodes_batch",
             "backend" => "postgres",
         )

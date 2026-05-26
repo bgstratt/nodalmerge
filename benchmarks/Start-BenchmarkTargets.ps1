@@ -16,7 +16,7 @@ $ErrorActionPreference = "Stop"
 
 function Resolve-DotnetHostProjectPath {
     $candidates = @(
-        (Join-Path $PSScriptRoot "..\nodalmerge-host\src\ActiveSync.DotNetHost\ActiveSync.DotNetHost.csproj")
+        (Join-Path $PSScriptRoot "..\nodalmerge-host\src\\ActiveSync.DotNetHost\\NodalMerge.DotNetHost.csproj")
     )
 
     foreach ($candidate in $candidates) {
@@ -25,7 +25,7 @@ function Resolve-DotnetHostProjectPath {
         }
     }
 
-    throw "Unable to locate DotNet host project at nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj."
+    throw "Unable to locate DotNet host project at nodalmerge-host/src/ActiveSync.DotNetHost/NodalMerge.DotNetHost.csproj."
 }
 
 function Resolve-FfiDllPath {
@@ -120,3 +120,4 @@ finally {
         }
     }
 }
+

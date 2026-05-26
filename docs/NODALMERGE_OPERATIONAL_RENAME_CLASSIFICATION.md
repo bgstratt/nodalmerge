@@ -15,6 +15,17 @@ Wave A (completed 2026-05-26):
 
 Post-Wave-A residual source-level operational hits (excluding docs/wrappers/target artifacts): `22`.
 
+Wave B (completed 2026-05-26):
+
+1. Renamed bridge crate/package identity to `nodalmerge-bridge` (`bridge/Cargo.toml`).
+2. Renamed SDK npm identity/dependency/imports to `nodalmerge-*` (`sdk-js/package.json`, `sdk-js/index.js`, `sdk-js/index.test.js`).
+3. Renamed protocol/domain constants from `activesync-*` to `nodalmerge-*` in core crypto/IBF/MST/token modules.
+4. Renamed generated wasm package metadata to `nodalmerge-bridge` (`bridge/pkg/package.json`, `web/pkg/package.json`).
+5. Removed remaining legacy package IDs in artifact packaging script (`pack-local-artifacts.ps1`).
+6. Refreshed benchmark artifact crate-name reference to `nodalmerge-core`.
+
+Post-Wave-B residual source-level operational hits (excluding docs/wrappers/target artifacts): `0`.
+
 ## Classification Legend
 
 - `intentional-compatibility`: keep for compatibility, protocol stability, package identity bridge, or legacy alias support.
@@ -52,19 +63,6 @@ Post-Wave-A residual source-level operational hits (excluding docs/wrappers/targ
 | `core/src/mst.rs` | 2 | intentional-compatibility | MST hash domain constants are protocol compatibility constants. |
 | `core/src/token.rs` | 1 | intentional-compatibility | Token signing domain separator impacts token wire compatibility. |
 
-## Remaining Post-Wave-A Inventory (Source-Level)
+## Remaining Post-Wave-B Inventory (Source-Level)
 
-| File | Hits | Classification | Notes |
-| --- | ---: | --- | --- |
-| `pack-local-artifacts.ps1` | 4 | intentional-compatibility | Still packages legacy npm compatibility artifacts (`activesync-bridge`, `activesync-sdk-js`). |
-| `core/src/ibf.rs` | 3 | intentional-compatibility | Hash-domain constants; protocol compatibility sensitive. |
-| `core/src/crypto.rs` | 2 | intentional-compatibility | KDF/info labels; wire compatibility sensitive. |
-| `core/src/mst.rs` | 2 | intentional-compatibility | Hash-domain constants; protocol compatibility sensitive. |
-| `core/src/token.rs` | 1 | intentional-compatibility | Token domain separator; wire compatibility sensitive. |
-| `bridge/Cargo.toml` | 1 | intentional-compatibility | Bridge Rust crate still publishes legacy package ID. |
-| `sdk-js/package.json` | 2 | intentional-compatibility | Legacy npm package identity/dependency retained. |
-| `sdk-js/index.js` | 1 | intentional-compatibility | Imports legacy bridge package name. |
-| `sdk-js/index.test.js` | 1 | intentional-compatibility | Test import mirrors legacy bridge package identity. |
-| `bridge/pkg/package.json` | 2 | intentional-compatibility | wasm-pack output package currently legacy-named. |
-| `web/pkg/package.json` | 2 | intentional-compatibility | Generated bundle metadata currently legacy-named. |
-| `benchmarks/results/text_trace_rustcode.bench.txt` | 1 | hard-cutover-candidate | Generated artifact can be regenerated/cleaned. |
+No remaining `activesync-` hits in source-level operational scope after exclusions.

@@ -1,5 +1,5 @@
 [package]
-name = "activesync-bridge"
+name = "nodalmerge-bridge"
 version = "0.1.0"
 edition = "2021"
 description = "WASM bridge: exposes nodalmerge-core to JavaScript"

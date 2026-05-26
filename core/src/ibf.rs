@@ -39,9 +39,9 @@ pub const IBF_K: usize = 3;
 
 // Domain-separated 32-byte keys for Blake3 keyed hash.
 // Each key is exactly 32 bytes so it satisfies blake3::keyed_hash's contract.
-static IBF_KEY0: &[u8; 32] = b"activesync-ibf-h0-00000000000000";
-static IBF_KEY1: &[u8; 32] = b"activesync-ibf-h1-00000000000000";
-static IBF_KEY2: &[u8; 32] = b"activesync-ibf-h2-00000000000000";
+static IBF_KEY0: &[u8; 32] = b"nodalmerge-ibf-h0-00000000000000";
+static IBF_KEY1: &[u8; 32] = b"nodalmerge-ibf-h1-00000000000000";
+static IBF_KEY2: &[u8; 32] = b"nodalmerge-ibf-h2-00000000000000";
 
 /// One cell in the IBF.
 ///

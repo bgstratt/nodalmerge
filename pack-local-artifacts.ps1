@@ -133,7 +133,7 @@ try {
             Pop-Location
         }
 
-        Write-Host "[npm] Packing activesync-bridge (legacy compatibility) ..."
+        Write-Host "[npm] Packing nodalmerge-bridge ..."
         Push-Location (Join-Path $repoRoot "bridge\pkg")
         try {
             npm pack
@@ -148,7 +148,7 @@ try {
             Pop-Location
         }
 
-        Write-Host "[npm] Packing activesync-sdk-js (legacy compatibility) ..."
+        Write-Host "[npm] Packing nodalmerge-sdk-js ..."
         Push-Location (Join-Path $repoRoot "sdk-js")
         try {
             npm pack
@@ -212,7 +212,7 @@ try {
             "nodalmerge-host-core" = "host-core"
             "nodalmerge-host-ffi" = "host-ffi"
             "nodalmerge-host-axum" = "host-axum"
-            "activesync-bridge" = "bridge"
+            "nodalmerge-bridge" = "bridge"
             "nodalmerge-core" = "wrappers/nodalmerge-core"
             "nodalmerge-gc" = "wrappers/nodalmerge-gc"
             "nodalmerge-host-core" = "wrappers/nodalmerge-host-core"
@@ -230,7 +230,7 @@ try {
             "nodalmerge-host-core",
             "nodalmerge-host-ffi",
             "nodalmerge-host-axum",
-            "activesync-bridge",
+            "nodalmerge-bridge",
             "nodalmerge-core",
             "nodalmerge-gc",
             "nodalmerge-host-core",

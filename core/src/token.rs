@@ -34,7 +34,7 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use thiserror::Error;
 
-const DOMAIN: &[u8] = b"activesync-room-token-v1";
+const DOMAIN: &[u8] = b"nodalmerge-room-token-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TokenError {

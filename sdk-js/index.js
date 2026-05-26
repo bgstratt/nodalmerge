@@ -1,4 +1,4 @@
-import initBridge, { SyncStore } from "activesync-bridge";
+import initBridge, { SyncStore } from "nodalmerge-bridge";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();

@@ -7,7 +7,7 @@ async function loadSdkModuleWithBridgeStub() {
   let source = await readFile(path, "utf8");
 
   source = source.replace(
-    'import initBridge, { SyncStore } from "activesync-bridge";',
+    'import initBridge, { SyncStore } from "nodalmerge-bridge";',
     [
       "const initBridge = async () => {};",
       "class SyncStore {}"

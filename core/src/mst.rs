@@ -38,8 +38,8 @@ use crate::node::NodeId;
 // Domain-separated Blake3 keys
 // ---------------------------------------------------------------------------
 
-static MST_LEAF_KEY: &[u8; 32] = b"activesync-mst-leaf-000000000000";
-static MST_INTERNAL_KEY: &[u8; 32] = b"activesync-mst-internal-00000000";
+static MST_LEAF_KEY: &[u8; 32] = b"nodalmerge-mst-leaf-000000000000";
+static MST_INTERNAL_KEY: &[u8; 32] = b"nodalmerge-mst-internal-00000000";
 
 // ---------------------------------------------------------------------------
 // Internal node (not serde — only the wire type is)

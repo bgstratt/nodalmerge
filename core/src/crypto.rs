@@ -45,7 +45,7 @@ pub const E2EE_KEY: &str = "\x00e2ee";
 pub fn derive_room_key(room_seed: &[u8; 32]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, room_seed);
     let mut key = [0u8; 32];
-    hk.expand(b"activesync-e2ee-v1", &mut key)
+    hk.expand(b"nodalmerge-e2ee-v1", &mut key)
         .expect("32-byte output is always valid for HKDF-SHA256");
     key
 }
@@ -65,7 +65,7 @@ pub fn derive_room_key(room_seed: &[u8; 32]) -> [u8; 32] {
 fn derive_nonce(room_key: &[u8; 32], author: &[u8; 32], lamport: u64) -> [u8; 12] {
     let hk = Hkdf::<Sha256>::new(None, room_key);
     let mut info = Vec::with_capacity(32 + 8 + 14);
-    info.extend_from_slice(b"activesync-nonce-v1");
+    info.extend_from_slice(b"nodalmerge-nonce-v1");
     info.extend_from_slice(author);
     info.extend_from_slice(&lamport.to_le_bytes());
     let mut nonce = [0u8; 12];

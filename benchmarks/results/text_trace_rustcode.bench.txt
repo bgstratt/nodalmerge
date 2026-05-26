@@ -12,7 +12,7 @@ warning: structure field `endContent` should have a snake case name
 18 |     endContent: String,
    |     ^^^^^^^^^^ help: convert the identifier to snake case: `end_content`
 
-warning: `activesync-core` (bench "text_trace_rustcode") generated 2 warnings
+warning: `nodalmerge-core` (bench "text_trace_rustcode") generated 2 warnings
     Finished `bench` profile [optimized + debuginfo] target(s) in 0.25s
      Running benches\text_trace_rustcode.rs (target\release\deps\text_trace_rustcode-2f6a8b5a0e43a2ee.exe)
 Gnuplot not found, using plotters backend

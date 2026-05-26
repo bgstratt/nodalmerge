@@ -1,3 +1,0 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s
-     Running `target\debug\authz-conformance-runner.exe --vectors docs/acceptance/authz-conformance-vectors.json --out docs/acceptance/authz-conformance-rust-phasea-check.json --policy-channel-mode admin_command_only`
-authz conformance run complete: vectors=30, hosts=2, records=32, passed=32, failed=0, out=docs/acceptance/authz-conformance-rust-phasea-check.json

@@ -342,8 +342,11 @@ impl NodePersistence for DirPersistence {
             tracing::warn!(?e, "persist_node failed");
         }
         drop(conn);
+        let elapsed = t0.elapsed().as_secs_f64();
+        metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "node")
+            .record(elapsed);
         metrics::histogram!("activesync_persistence_write_seconds", "kind" => "node")
-            .record(t0.elapsed().as_secs_f64());
+            .record(elapsed);
     }
 
     fn persist_nodes(&self, room_id: &str, nodes: &[&SyncNode]) {
@@ -403,8 +406,11 @@ impl NodePersistence for DirPersistence {
                 }
             }
         }
+        let elapsed = t0.elapsed().as_secs_f64();
+        metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "nodes_batch")
+            .record(elapsed);
         metrics::histogram!("activesync_persistence_write_seconds", "kind" => "nodes_batch")
-            .record(t0.elapsed().as_secs_f64());
+            .record(elapsed);
     }
 }
 
@@ -452,8 +458,11 @@ impl BlobPersistence for DirPersistence {
             tracing::warn!(?e, "persist_blob: rename failed");
             let _ = std::fs::remove_file(&tmp);
         }
+        let elapsed = t0.elapsed().as_secs_f64();
+        metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "blob")
+            .record(elapsed);
         metrics::histogram!("activesync_persistence_write_seconds", "kind" => "blob")
-            .record(t0.elapsed().as_secs_f64());
+            .record(elapsed);
     }
 
     fn blob_gc_sweep(

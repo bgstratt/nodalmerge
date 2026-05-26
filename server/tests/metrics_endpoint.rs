@@ -99,6 +99,10 @@ async fn metrics_endpoint_exposes_baseline_series() {
     // Baseline metrics must appear. We check for metric *names* rather than
     // specific values to stay robust to exporter formatting changes.
     for name in [
+        "nodalmerge_rooms_total",
+        "nodalmerge_peers_total",
+        "nodalmerge_nodes_accepted_total",
+        "nodalmerge_merge_batch_seconds",
         "activesync_rooms_total",
         "activesync_peers_total",
         "activesync_nodes_accepted_total",

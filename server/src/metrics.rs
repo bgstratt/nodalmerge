@@ -12,18 +12,21 @@
 //!
 //! | Metric | Kind | Labels | Source gap |
 //! |---|---|---|---|
-//! | `activesync_rooms_total` | gauge | — | baseline |
-//! | `activesync_peers_total` | gauge | `room` | baseline |
-//! | `activesync_nodes_accepted_total` | counter | `room` | baseline |
-//! | `activesync_merge_batch_seconds` | histogram | — | baseline |
-//! | `activesync_persistence_write_seconds` | histogram | `kind` | baseline |
-//! | `activesync_eviction_total` | counter | — | F4-followup |
-//! | `activesync_broadcast_lagged_total` | counter | `room` | G1 |
-//! | `activesync_ws_send_timeout_total` | counter | `room` | G1 |
-//! | `activesync_rate_limit_drops_total` | counter | `peer` | G3 |
-//! | `activesync_blob_gc_deleted_total` | counter | `room` | G4 |
-//! | `activesync_lamport_rejected_total` | counter | `reason` | G5 |
-//! | `activesync_token_expired_disconnects_total` | counter | `room` | G6 |
+//! | `nodalmerge_rooms_total` | gauge | — | baseline |
+//! | `nodalmerge_peers_total` | gauge | `room` | baseline |
+//! | `nodalmerge_nodes_accepted_total` | counter | `room` | baseline |
+//! | `nodalmerge_merge_batch_seconds` | histogram | — | baseline |
+//! | `nodalmerge_persistence_write_seconds` | histogram | `kind` | baseline |
+//! | `nodalmerge_eviction_total` | counter | — | F4-followup |
+//! | `nodalmerge_broadcast_lagged_total` | counter | `room` | G1 |
+//! | `nodalmerge_ws_send_timeout_total` | counter | `room` | G1 |
+//! | `nodalmerge_rate_limit_drops_total` | counter | `peer` | G3 |
+//! | `nodalmerge_blob_gc_deleted_total` | counter | `room` | G4 |
+//! | `nodalmerge_lamport_rejected_total` | counter | `reason` | G5 |
+//! | `nodalmerge_token_expired_disconnects_total` | counter | `room` | G6 |
+//!
+//! Legacy `activesync_*` metric names are still emitted and described during
+//! the compatibility window.
 //!
 //! All Phase G gaps now have metrics instrumentation registered at their
 //! instrumentation sites; describing the whole list here keeps the doc in
@@ -33,6 +36,31 @@ use std::net::SocketAddr;
 
 use metrics::{describe_counter, describe_gauge, describe_histogram, Unit};
 use metrics_exporter_prometheus::PrometheusBuilder;
+
+macro_rules! describe_counter_compat {
+    ($primary:literal, $legacy:literal, $description:literal) => {
+        describe_counter!($primary, $description);
+        describe_counter!($legacy, $description);
+    };
+}
+
+macro_rules! describe_gauge_compat {
+    ($primary:literal, $legacy:literal, $description:literal) => {
+        describe_gauge!($primary, $description);
+        describe_gauge!($legacy, $description);
+    };
+    ($primary:literal, $legacy:literal, $unit:expr, $description:literal) => {
+        describe_gauge!($primary, $unit, $description);
+        describe_gauge!($legacy, $unit, $description);
+    };
+}
+
+macro_rules! describe_histogram_compat {
+    ($primary:literal, $legacy:literal, $unit:expr, $description:literal) => {
+        describe_histogram!($primary, $unit, $description);
+        describe_histogram!($legacy, $unit, $description);
+    };
+}
 
 /// Install the global recorder and start the `/metrics` HTTP listener on
 /// `addr`. Call exactly once, early in `main`.
@@ -60,9 +88,21 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
         .with_http_listener(addr)
         .set_buckets_for_metric(
             metrics_exporter_prometheus::Matcher::Full(
+                "nodalmerge_merge_batch_seconds".to_string(),
+            ),
+            &merge_buckets,
+        )?
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Full(
                 "activesync_merge_batch_seconds".to_string(),
             ),
             &merge_buckets,
+        )?
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Full(
+                "nodalmerge_persistence_write_seconds".to_string(),
+            ),
+            &persist_buckets,
         )?
         .set_buckets_for_metric(
             metrics_exporter_prometheus::Matcher::Full(
@@ -75,76 +115,92 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
     // Describe the baseline set up front so they appear in `/metrics` before
     // the first sample is recorded. Gap-specific metrics (G1/G3/…) describe
     // themselves at their instrumentation sites.
-    describe_gauge!(
+    describe_gauge_compat!(
+        "nodalmerge_rooms_total",
         "activesync_rooms_total",
         "Number of rooms currently held in the registry (including idle)."
     );
-    describe_gauge!(
+    describe_gauge_compat!(
+        "nodalmerge_peers_total",
         "activesync_peers_total",
         "Connected WS peers per room."
     );
-    describe_counter!(
+    describe_counter_compat!(
+        "nodalmerge_nodes_accepted_total",
         "activesync_nodes_accepted_total",
         "Total nodes accepted by `import_nodes` (post-verify, post-policy)."
     );
-    describe_histogram!(
+    describe_histogram_compat!(
+        "nodalmerge_merge_batch_seconds",
         "activesync_merge_batch_seconds",
         Unit::Seconds,
         "Wall time spent inside `import_nodes` per call (one call = one pack)."
     );
-    describe_histogram!(
+    describe_histogram_compat!(
+        "nodalmerge_persistence_write_seconds",
         "activesync_persistence_write_seconds",
         Unit::Seconds,
         "Wall time spent in `ServerPersistence::persist_*`. Labeled by `kind` (`node`/`nodes_batch`/`blob`)."
     );
-    describe_counter!(
+    describe_counter_compat!(
+        "nodalmerge_eviction_total",
         "activesync_eviction_total",
         "Rooms evicted by the idle sweeper (F4 follow-up)."
     );
     // G1 — backpressure & slow-client policy.
-    describe_counter!(
+    describe_counter_compat!(
+        "nodalmerge_broadcast_lagged_total",
         "activesync_broadcast_lagged_total",
         "Peers disconnected with close code 4001 after falling behind the per-room broadcast ring buffer."
     );
-    describe_counter!(
+    describe_counter_compat!(
+        "nodalmerge_ws_send_timeout_total",
         "activesync_ws_send_timeout_total",
         "Peers disconnected with close code 1011 after a WS send exceeded the 5-second timeout."
     );
     // G3 — per-peer rate limiting.
-    describe_counter!(
+    describe_counter_compat!(
+        "nodalmerge_rate_limit_drops_total",
         "activesync_rate_limit_drops_total",
         "Peers disconnected with close code 4008 after tripping the per-peer nodes/sec or bytes/sec rate limit."
     );
     // G4 — blob GC.
-    describe_counter!(
+    describe_counter_compat!(
+        "nodalmerge_blob_gc_deleted_total",
         "activesync_blob_gc_deleted_total",
         "On-disk blobs deleted by the two-phase blob GC sweeper after falling out of the per-room live set."
     );
     // G5 — Lamport ceiling & wall-clock sanity.
-    describe_counter!(
+    describe_counter_compat!(
+        "nodalmerge_lamport_rejected_total",
         "activesync_lamport_rejected_total",
         "Nodes rejected by the G5 sanity checks; label `reason` = `ceiling` (lamport > local + LAMPORT_SLACK) or `wall_skew` (wall_ms > now + 24h)."
     );
     // G6 — capability token expiry.
-    describe_counter!(
+    describe_counter_compat!(
+        "nodalmerge_token_expired_disconnects_total",
         "activesync_token_expired_disconnects_total",
         "Peers disconnected with WS close code 4002 after their capability token's `expiry` lapsed mid-session."
     );
     // Scoped replication (Phase A): filtering/catch-up observability.
-    describe_counter!(
+    describe_counter_compat!(
+        "nodalmerge_filtered_nodes_total",
         "activesync_filtered_nodes_total",
         "Total nodes removed by subscription filtering before relay/catch-up send. Labels: `room`, `stage` (`catchup`|`broadcast`)."
     );
-    describe_counter!(
+    describe_counter_compat!(
+        "nodalmerge_filtered_bytes_total",
         "activesync_filtered_bytes_total",
         "Total node-payload bytes removed by subscription filtering before relay/catch-up send. Labels: `room`, `stage` (`catchup`|`broadcast`)."
     );
-    describe_counter!(
+    describe_counter_compat!(
+        "nodalmerge_filtered_pack_dropped_total",
         "activesync_filtered_pack_dropped_total",
         "Filtered packs dropped before send. Labels: `room`, `stage` (`catchup`|`broadcast`), `reason` (`empty_after_filter`|`budget_exceeded`)."
     );
     // G11 — hot-room memory observability.
-    describe_gauge!(
+    describe_gauge_compat!(
+        "nodalmerge_room_bytes_resident",
         "activesync_room_bytes_resident",
         Unit::Bytes,
         "Rough estimate of per-room resident memory: `node_count * NODE_EST_BYTES + sum(blob.len())`. \

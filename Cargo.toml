@@ -1,10 +1,13 @@
 [workspace]
 members = [
     "core",
+    "wrappers/nodalmerge-core",
     "gc",
     "host-core",
+    "wrappers/nodalmerge-host-core",
     "host-axum",
     "host-ffi",
+    "wrappers/nodalmerge-host-ffi",
     "server",
     "bridge",
     "jwt-bridge",

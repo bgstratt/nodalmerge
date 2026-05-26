@@ -133,7 +133,7 @@ try {
             Pop-Location
         }
 
-        Write-Host "[npm] Packing activesync-bridge ..."
+        Write-Host "[npm] Packing activesync-bridge (legacy compatibility) ..."
         Push-Location (Join-Path $repoRoot "bridge\pkg")
         try {
             npm pack
@@ -148,7 +148,7 @@ try {
             Pop-Location
         }
 
-        Write-Host "[npm] Packing activesync-sdk-js ..."
+        Write-Host "[npm] Packing activesync-sdk-js (legacy compatibility) ..."
         Push-Location (Join-Path $repoRoot "sdk-js")
         try {
             npm pack
@@ -162,12 +162,42 @@ try {
         finally {
             Pop-Location
         }
+
+        Write-Host "[npm] Packing nodalmerge-bridge (primary wrapper) ..."
+        Push-Location (Join-Path $repoRoot "wrappers\npm\nodalmerge-bridge")
+        try {
+            npm pack
+            if ($LASTEXITCODE -ne 0) {
+                throw "npm pack (wrappers/npm/nodalmerge-bridge) failed with exit code $LASTEXITCODE"
+            }
+            Get-ChildItem -Path . -Filter "*.tgz" | ForEach-Object {
+                Copy-Item -Path $_.FullName -Destination (Join-Path $npmOutput $_.Name) -Force
+            }
+        }
+        finally {
+            Pop-Location
+        }
+
+        Write-Host "[npm] Packing nodalmerge-sdk-js (primary wrapper) ..."
+        Push-Location (Join-Path $repoRoot "wrappers\npm\nodalmerge-sdk-js")
+        try {
+            npm pack
+            if ($LASTEXITCODE -ne 0) {
+                throw "npm pack (wrappers/npm/nodalmerge-sdk-js) failed with exit code $LASTEXITCODE"
+            }
+            Get-ChildItem -Path . -Filter "*.tgz" | ForEach-Object {
+                Copy-Item -Path $_.FullName -Destination (Join-Path $npmOutput $_.Name) -Force
+            }
+        }
+        finally {
+            Pop-Location
+        }
     }
 
     if (-not $SkipNuGet) {
         Write-Host "[nuget] Packing managed/native local packages ..."
-        $packScript = Join-Path $repoRoot "dotnet-host\pack-local-nuget.ps1"
-        $dotnetHostDir = Join-Path $repoRoot "dotnet-host"
+        $packScript = Join-Path $repoRoot "nodalmerge-host\pack-local-nuget.ps1"
+        $dotnetHostDir = Join-Path $repoRoot "nodalmerge-host"
         $nugetOutputRelative = [System.IO.Path]::GetRelativePath($dotnetHostDir, $nugetOutput)
         & $packScript -Version $Version -OutputDir $nugetOutputRelative
         if ($LASTEXITCODE -ne 0) {
@@ -183,13 +213,19 @@ try {
             "activesync-host-ffi" = "host-ffi"
             "activesync-host-axum" = "host-axum"
             "activesync-bridge" = "bridge"
+            "nodalmerge-core" = "wrappers/nodalmerge-core"
+            "nodalmerge-host-core" = "wrappers/nodalmerge-host-core"
+            "nodalmerge-host-ffi" = "wrappers/nodalmerge-host-ffi"
         }
         $crateIds = @(
             "activesync-core",
             "activesync-host-core",
             "activesync-host-ffi",
             "activesync-host-axum",
-            "activesync-bridge"
+            "activesync-bridge",
+            "nodalmerge-core",
+            "nodalmerge-host-core",
+            "nodalmerge-host-ffi"
         )
 
         # Ensure crate output from this run is fresh and not contaminated by stale files.

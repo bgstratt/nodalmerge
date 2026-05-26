@@ -94,6 +94,10 @@ This keeps the consumer independent from workspace project references while stil
 In a consuming JS app:
 
 ```powershell
+npm install C:\path\to\nodalmerge\artifacts\package-local\npm\nodalmerge-bridge-0.1.0.tgz
+npm install C:\path\to\nodalmerge\artifacts\package-local\npm\nodalmerge-sdk-js-0.1.0.tgz
+
+# Legacy compatibility package names remain available during migration window:
 npm install C:\path\to\nodalmerge\artifacts\package-local\npm\activesync-bridge-0.1.0.tgz
 npm install C:\path\to\nodalmerge\artifacts\package-local\npm\activesync-sdk-js-0.1.0.tgz
 ```
@@ -108,7 +112,7 @@ Run from repo root unless noted.
 4. `dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx`
 5. `cd nodalmerge-host; pwsh -File ./pack-local-nuget.ps1 -Version 0.1.0-local`
 6. `cd nodalmerge-host; dotnet restore ./ActiveSync.DotNetHost.slnx --configfile ./NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
-7. `cd dotnet-host; pwsh -File ./verify.ps1 -UseNuGetPackages -ActiveSyncPackageVersion 0.1.0-local`
+7. `cd nodalmerge-host; pwsh -File ./verify.ps1 -UseNuGetPackages -ActiveSyncPackageVersion 0.1.0-local`
 
 Required outcome:
 
@@ -141,8 +145,10 @@ dotnet nuget push <path-to-nupkg> --source <source-name-or-url> --api-key <token
 
 Packages:
 
-1. `activesync-bridge` from `bridge/pkg`
-2. `activesync-sdk-js` from `sdk-js`
+1. `nodalmerge-bridge` from `wrappers/npm/nodalmerge-bridge` (primary)
+2. `nodalmerge-sdk-js` from `wrappers/npm/nodalmerge-sdk-js` (primary)
+3. `activesync-bridge` from `bridge/pkg` (legacy compatibility)
+4. `activesync-sdk-js` from `sdk-js` (legacy compatibility)
 
 ### 3.1 Build bridge package assets
 
@@ -174,6 +180,12 @@ Check that expected files are included:
 cd bridge/pkg
 npm publish --access public
 
+cd ../../wrappers/npm/nodalmerge-bridge
+npm publish --access public
+
+cd ../nodalmerge-sdk-js
+npm publish --access public
+
 cd ../../sdk-js
 npm publish --access public
 ```
@@ -189,6 +201,9 @@ Publish order (dependency-safe):
 3. `activesync-host-ffi`
 4. `activesync-host-axum`
 5. `activesync-bridge`
+6. `nodalmerge-core` (wrapper)
+7. `nodalmerge-host-core` (wrapper)
+8. `nodalmerge-host-ffi` (wrapper)
 
 Dry-run first for each crate:
 
@@ -228,6 +243,9 @@ cargo publish -p activesync-host-core
 cargo publish -p activesync-host-ffi
 cargo publish -p activesync-host-axum
 cargo publish -p activesync-bridge
+cargo publish -p nodalmerge-core
+cargo publish -p nodalmerge-host-core
+cargo publish -p nodalmerge-host-ffi
 ```
 
 ## 5. Release Sign-Off Checklist

@@ -1,0 +1,9 @@
+[package]
+name = "nodalmerge-host-core"
+version = "0.1.0"
+edition = "2021"
+description = "Compatibility wrapper crate re-exporting activesync-host-core during rename migration"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+activesync-host-core = { version = "0.1.0", path = "../../host-core" }

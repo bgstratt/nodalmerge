@@ -48,10 +48,10 @@ Ship package-grade artifacts with a dead-simple surface:
 6. topology
 
 Artifacts:
-1. npm package from WASM bridge (`activesync-bridge`)
-2. high-level JavaScript wrapper (`activesync-sdk-js`) over the bridge for dead-simple room/sync/replay/offline/CAS/topology usage
+1. npm package wrappers (`nodalmerge-bridge`, `nodalmerge-sdk-js`) as primary identities
+2. legacy npm package names (`activesync-bridge`, `activesync-sdk-js`) retained during migration window
 3. NuGet managed + native packages (`ActiveSync.Host.*`, `ActiveSync.DotNetHost.Native.*`)
-4. Rust crates (`activesync-core`, `activesync-host-core`, `activesync-host-ffi`, `activesync-host-axum`, `activesync-bridge`)
+4. Rust crates (`activesync-core`, `activesync-host-core`, `activesync-host-ffi`, `activesync-host-axum`, `activesync-bridge`) plus wrapper crates (`nodalmerge-core`, `nodalmerge-host-core`, `nodalmerge-host-ffi`)
 
 Pre-publish validation rule:
 1. Always validate package consumption from a local feed (`artifacts/nuget-local`) before pushing to public/private remote feeds.
@@ -80,7 +80,8 @@ Definition of done:
 ## 4.1 npm
 
 Package:
-1. `activesync-bridge`
+1. `nodalmerge-bridge` (primary wrapper package)
+2. `activesync-bridge` (legacy compatibility package)
 
 Minimal API profile:
 1. initialize runtime/store
@@ -110,6 +111,9 @@ Crates to publish:
 1. `activesync-core`
 2. `activesync-host-core`
 3. `activesync-host-ffi`
+4. `nodalmerge-core` (wrapper)
+5. `nodalmerge-host-core` (wrapper)
+6. `nodalmerge-host-ffi` (wrapper)
 
 Notes:
 1. Remove path-only assumptions before publish.

@@ -1,0 +1,23 @@
+{
+  "name": "nodalmerge-bridge",
+  "version": "0.1.0",
+  "description": "Compatibility wrapper over activesync-bridge during rename migration",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "keywords": [
+    "nodalmerge",
+    "activesync",
+    "crdt",
+    "sync",
+    "wasm"
+  ],
+  "dependencies": {
+    "activesync-bridge": "^0.1.0"
+  }
+}

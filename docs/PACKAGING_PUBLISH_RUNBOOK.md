@@ -124,7 +124,7 @@ Primary package IDs:
 3. `ActiveSync.DotNetHost.Native.win-x64`
 4. `ActiveSync.DotNetHost.Native.linux-x64`
 
-Local validation already uses `dotnet-host/NUGET_README.md` as package readme metadata.
+Local validation already uses `nodalmerge-host/NUGET_README.md` as package readme metadata.
 
 Publish options:
 

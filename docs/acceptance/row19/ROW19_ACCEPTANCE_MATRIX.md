@@ -85,7 +85,7 @@ These results advance row 19 readiness but do not by themselves close scenario r
 7. SpeechSlate proxy transport boundary slice:
    - `dotnet test ... --filter "FullyQualifiedName~SpeechSlateProxyAcceptanceTests"` passed (6 tests).
    - `dotnet test ... --filter "FullyQualifiedName!~FfiBindingTests"` passed (237 tests).
-8. Config-first live verifier slice (`dotnet-host/verify.ps1`):
+8. Config-first live verifier slice (`nodalmerge-host/verify.ps1`):
    - Runtime startup + websocket `hello`/`noop-ack` passed under explicit delegated profile args.
    - Delegated `/sync/blob-url` get probe returned delegated presigned URL (200) and delegated stub observed room-scoped request payload.
    - Precondition: `ACTIVESYNC_HOST_FFI_DLL` must resolve to a built host-ffi DLL (or local host-ffi artifact must exist for verifier auto-resolution).
@@ -96,25 +96,25 @@ These results advance row 19 readiness but do not by themselves close scenario r
    - Runtime observability slice validation totals updated to 31/31 targeted and 48/48 broader parity filter.
 10. 9.8 automated parity harness kickoff:
    - Contract + scenario inventory: `docs/acceptance/row19/ROW19_9_8_AUTOMATED_SCENARIO_CONTRACT.md`.
-   - Harness implementation: `dotnet-host/tests/ActiveSync.DotNetHost.Tests/Row19AutomatedScenarioHarnessTests.cs`.
+   - Harness implementation: `nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/Row19AutomatedScenarioHarnessTests.cs`.
    - Implemented scenarios now cover multi-device save/delete/restart, offline edit/reconnect, fixed+flexible layout integrity, asset propagation/retrieval, and duplicate replay churn guard.
    - Implemented churn soak extension covers 10k duplicate replay budget guard.
    - Validation totals in this stream: 6/6 scenario-harness tests; 54/54 broader parity filter tests.
 
 Evidence pointers (code/tests):
 
-1. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/RuntimeWebSocketEndpointTests.cs` (relay and peer lifecycle coverage).
-2. `dotnet-host/src/ActiveSync.DotNetHost/Runtime/RuntimeRoomBroker.cs` (room membership + broadcast broker).
-3. `dotnet-host/src/ActiveSync.DotNetHost/Runtime/RuntimeWebSocketLoopRunner.cs` (room-aware registration/relay logic).
-4. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderHostRestartDurabilityIntegrationTests.cs` (host restart preserves `Sqlite` nodes + `File` blobs).
-5. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderDurabilityTests.cs` (provider-level durability across DI container restarts).
-6. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderCompositionTests.cs` (profile selection and validation for `Sqlite` + `File`).
-7. `dotnet-host/src/ActiveSync.Host.Composition/SqliteNodeStoreProvider.cs` (durable node persistence provider).
-8. `dotnet-host/src/ActiveSync.Host.Composition/FileBlobStoreProvider.cs` (durable local blob provider).
-9. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderS3DelegatedBlobResolverIntegrationTests.cs` (delegated success path, timeout retry fallback, 5xx circuit-open fallback).
-10. `dotnet-host/src/ActiveSync.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs` (retry + circuit-breaker fallback policy implementation).
-11. `dotnet-host/src/ActiveSync.Host.Composition/S3DelegatedBlobOptions.cs` (resilience policy knobs and validation).
-12. `dotnet-host/tests/ActiveSync.DotNetHost.Tests/SpeechSlateProxyAcceptanceTests.cs` (automated `speechslate-proxy` acceptance scenarios for delegated mode).
+1. `nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/RuntimeWebSocketEndpointTests.cs` (relay and peer lifecycle coverage).
+2. `nodalmerge-host/src/ActiveSync.DotNetHost/Runtime/RuntimeRoomBroker.cs` (room membership + broadcast broker).
+3. `nodalmerge-host/src/ActiveSync.DotNetHost/Runtime/RuntimeWebSocketLoopRunner.cs` (room-aware registration/relay logic).
+4. `nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ProviderHostRestartDurabilityIntegrationTests.cs` (host restart preserves `Sqlite` nodes + `File` blobs).
+5. `nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ProviderDurabilityTests.cs` (provider-level durability across DI container restarts).
+6. `nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ProviderCompositionTests.cs` (profile selection and validation for `Sqlite` + `File`).
+7. `nodalmerge-host/src/ActiveSync.Host.Composition/SqliteNodeStoreProvider.cs` (durable node persistence provider).
+8. `nodalmerge-host/src/ActiveSync.Host.Composition/FileBlobStoreProvider.cs` (durable local blob provider).
+9. `nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ProviderS3DelegatedBlobResolverIntegrationTests.cs` (delegated success path, timeout retry fallback, 5xx circuit-open fallback).
+10. `nodalmerge-host/src/ActiveSync.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs` (retry + circuit-breaker fallback policy implementation).
+11. `nodalmerge-host/src/ActiveSync.Host.Composition/S3DelegatedBlobOptions.cs` (resilience policy knobs and validation).
+12. `nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/SpeechSlateProxyAcceptanceTests.cs` (automated `speechslate-proxy` acceptance scenarios for delegated mode).
 
 ## Provider migration evidence mapping (P2)
 

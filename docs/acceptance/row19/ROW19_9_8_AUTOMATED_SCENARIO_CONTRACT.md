@@ -11,7 +11,7 @@ Define deterministic acceptance scenarios for row-19 parity and make them execut
 ## 2. Harness shape (current)
 
 Implementation file:
-1. dotnet-host/tests/ActiveSync.DotNetHost.Tests/Row19AutomatedScenarioHarnessTests.cs
+1. nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/Row19AutomatedScenarioHarnessTests.cs
 
 Determinism controls:
 1. Scenario seed per test case.
@@ -64,7 +64,7 @@ Determinism controls:
 
 ## 5. Validation command
 
-1. dotnet test dotnet-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --filter "FullyQualifiedName~Row19AutomatedScenarioHarnessTests"
+1. dotnet test nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --filter "FullyQualifiedName~Row19AutomatedScenarioHarnessTests"
 
 Observed result in this stream:
 1. 6 passed, 0 failed.

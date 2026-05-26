@@ -122,9 +122,9 @@ Slice B:
 
 Implementation evidence for Slice B:
 
-1. Runtime hydration tests: dotnet-host/tests/ActiveSync.DotNetHost.Tests/RuntimeDagPersistenceServiceTests.cs
-2. Provider durability tests: dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderDurabilityTests.cs
-3. Restart durability tests: dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderHostRestartDurabilityIntegrationTests.cs
+1. Runtime hydration tests: nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/RuntimeDagPersistenceServiceTests.cs
+2. Provider durability tests: nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ProviderDurabilityTests.cs
+3. Restart durability tests: nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ProviderHostRestartDurabilityIntegrationTests.cs
 
 Slice C:
 
@@ -135,17 +135,17 @@ Slice C:
 Implementation evidence for Slice C:
 
 1. Compaction executor + metrics:
-- dotnet-host/src/ActiveSync.DotNetHost/Runtime/RuntimeDagPersistenceService.cs
+- nodalmerge-host/src/ActiveSync.DotNetHost/Runtime/RuntimeDagPersistenceService.cs
 2. Node pruning contract support:
-- dotnet-host/src/ActiveSync.Host.Abstractions/Providers/INodeStoreProvider.cs
-- dotnet-host/src/ActiveSync.Host.Composition/MongoNodeStoreProvider.cs
-- dotnet-host/src/ActiveSync.Host.Composition/SqliteNodeStoreProvider.cs
+- nodalmerge-host/src/ActiveSync.Host.Abstractions/Providers/INodeStoreProvider.cs
+- nodalmerge-host/src/ActiveSync.Host.Composition/MongoNodeStoreProvider.cs
+- nodalmerge-host/src/ActiveSync.Host.Composition/SqliteNodeStoreProvider.cs
 3. Runtime compaction tests:
-- dotnet-host/tests/ActiveSync.DotNetHost.Tests/RuntimeDagPersistenceServiceTests.cs
+- nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/RuntimeDagPersistenceServiceTests.cs
 4. Provider restart metadata durability test:
-- dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderDurabilityTests.cs
+- nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ProviderDurabilityTests.cs
 5. Restart root-hash equivalence + pruning convergence acceptance tests:
-- dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderHostRestartDurabilityIntegrationTests.cs
+- nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ProviderHostRestartDurabilityIntegrationTests.cs
 
 Conservative safety mode (current):
 
@@ -169,11 +169,11 @@ Conservative safety mode (current):
 9.2 evidence (initial):
 
 1. Recovery marker + reconcile-count logging:
-- dotnet-host/src/ActiveSync.DotNetHost/Runtime/RuntimeDagPersistenceService.cs
+- nodalmerge-host/src/ActiveSync.DotNetHost/Runtime/RuntimeDagPersistenceService.cs
 2. Hydration dedupe guard test:
-- dotnet-host/tests/ActiveSync.DotNetHost.Tests/RuntimeDagPersistenceServiceTests.cs
+- nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/RuntimeDagPersistenceServiceTests.cs
 3. Restart reconciliation count parity test:
-- dotnet-host/tests/ActiveSync.DotNetHost.Tests/ProviderHostRestartDurabilityIntegrationTests.cs
+- nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ProviderHostRestartDurabilityIntegrationTests.cs
 4. Replay lifecycle markers:
 - `replay-start` and `replay-complete` markers emitted during hydration in RuntimeDagPersistenceService.
 5. Multi-stage restart scenarios:

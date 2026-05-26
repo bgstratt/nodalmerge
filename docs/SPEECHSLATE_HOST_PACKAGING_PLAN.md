@@ -239,10 +239,10 @@ Evidence:
 Baseline gates (where applicable):
 1. `cargo test -p activesync-host-core`
 2. `cargo test -p activesync-host-ffi`
-3. `dotnet test dotnet-host/ActiveSync.DotNetHost.slnx`
+3. `dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx`
 
 Additional gates:
-1. Sidecar smoke verifier (`dotnet-host/verify.ps1`) for sidecar slices.
+1. Sidecar smoke verifier (`nodalmerge-host/verify.ps1`) for sidecar slices.
 2. Embedded in-process startup + WS flow smoke for embedded slices.
 3. Endpoint exposure assertions for production profile.
 
@@ -320,7 +320,7 @@ Slice status board:
 8. S7 Production Cutover and Runbooks: `Not Started`
 
 S2 implementation artifacts:
-1. Sidecar sample runtime profile: `dotnet-host/src/ActiveSync.DotNetHost/appsettings.SpeechSlate.Sidecar.sample.json`
+1. Sidecar sample runtime profile: `nodalmerge-host/src/ActiveSync.DotNetHost/appsettings.SpeechSlate.Sidecar.sample.json`
 2. Sidecar execution checklist: `docs/acceptance/speechslate-host/S2_SIDECAR_IMPLEMENTATION_CHECKLIST.md`
 3. Parity tracking matrix: `docs/acceptance/speechslate-host/OPERATIONAL_PARITY_MATRIX.md`
 

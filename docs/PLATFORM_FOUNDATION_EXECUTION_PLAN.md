@@ -151,7 +151,7 @@ Execution evidence (2026-05-22, slice 1):
    - `IDENTITY-CONTINUITY-003`
 4. Slice 2 migration flow docs published:
    - SDK flow in `docs/sdk.md` (device switch + key rotation with continuity token provider examples)
-   - DotNet host flow in `dotnet-host/README.md` (runtime continuity validation and migration rollout steps)
+   - DotNet host flow in `nodalmerge-host/README.md` (runtime continuity validation and migration rollout steps)
 5. DotNet targeted conformance mappings wired in `docs/acceptance/Run-AuthzConformance.ps1`:
    - continuity vectors now map to explicit `RuntimeProtocolTests.Identity_continuity_proof_*` tests
    - canonical dotnet mapped record count now includes continuity vectors (`mapped_record_count=14`)

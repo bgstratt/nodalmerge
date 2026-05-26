@@ -37,13 +37,13 @@ Internal-only or blocked endpoints in production:
 ## 4. Required Provider Configuration
 
 Use sample profile as baseline:
-1. dotnet-host/src/ActiveSync.DotNetHost/appsettings.SpeechSlate.Sidecar.sample.json
+1. nodalmerge-host/src/ActiveSync.DotNetHost/appsettings.SpeechSlate.Sidecar.sample.json
 
 Local secrets bootstrap options:
 1. Set keys directly:
-	- `dotnet user-secrets set --project dotnet-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj <key> <value>`
+	- `dotnet user-secrets set --project nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj <key> <value>`
 2. Inspect active keys:
-	- `dotnet user-secrets list --project dotnet-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj`
+	- `dotnet user-secrets list --project nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj`
 
 Required provider selections:
 1. ActiveSync:Providers:NodeStorage=Mongo
@@ -66,7 +66,7 @@ Required delegated auth semantics:
 
 1. Configure sidecar with sample profile values adjusted for environment.
 2. Start sidecar and confirm startup readiness.
-3. Verify delegated blob-url route by running dotnet-host/verify.ps1 with BaseUrl and DelegateBaseUrl adjusted for environment.
+3. Verify delegated blob-url route by running nodalmerge-host/verify.ps1 with BaseUrl and DelegateBaseUrl adjusted for environment.
 4. Verify runtime websocket hello and noop flow.
 5. Execute parity matrix rows SH-001 through SH-028 in sidecar column.
 

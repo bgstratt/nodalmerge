@@ -48,7 +48,7 @@ This plan defines a single execution path, clear gates, and evidence requirement
 4. Standard non-regression gates are green:
    - cargo test -p activesync-host-core
    - cargo test -p activesync-host-ffi
-   - dotnet test dotnet-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --blame-hang --blame-hang-timeout 60s
+   - dotnet test nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --blame-hang --blame-hang-timeout 60s
 
 ## 3. Out of scope
 
@@ -650,7 +650,7 @@ Evidence:
 1. Scenario test outputs, logs, and summary matrix in docs/acceptance/row19.
 2. 9.8 contract + implemented slice evidence:
    - docs/acceptance/row19/ROW19_9_8_AUTOMATED_SCENARIO_CONTRACT.md
-   - dotnet-host/tests/ActiveSync.DotNetHost.Tests/Row19AutomatedScenarioHarnessTests.cs
+   - nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/Row19AutomatedScenarioHarnessTests.cs
 3. Current validation totals:
    - `dotnet test ... --filter "FullyQualifiedName~Row19AutomatedScenarioHarnessTests"` passed (6 tests).
    - `dotnet test ... --filter "FullyQualifiedName~Row19AutomatedScenarioHarnessTests|FullyQualifiedName~ProviderProfileTokenEndpointIntegrationTests|FullyQualifiedName~RuntimeTokenValidationServiceTests|FullyQualifiedName~RuntimeWebSocketLoopRunnerTests|FullyQualifiedName~ProviderDurabilityTests"` passed (54 tests).

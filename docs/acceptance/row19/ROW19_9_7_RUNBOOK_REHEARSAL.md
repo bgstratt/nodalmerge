@@ -106,9 +106,9 @@ Steps executed:
 5. Executed auth-spike simulation asserting denied-reason metric breakdown (`expired`, `capability mismatch`).
 
 Validation commands and outcomes:
-1. dotnet test dotnet-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeWebSocketLoopRunnerTests|FullyQualifiedName~RuntimeTokenValidationServiceTests"
+1. dotnet test nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeWebSocketLoopRunnerTests|FullyQualifiedName~RuntimeTokenValidationServiceTests"
    - Result: 31 passed, 0 failed.
-2. dotnet test dotnet-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderProfileTokenEndpointIntegrationTests|FullyQualifiedName~RuntimeTokenValidationServiceTests|FullyQualifiedName~RuntimeWebSocketLoopRunnerTests|FullyQualifiedName~ProviderDurabilityTests"
+2. dotnet test nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderProfileTokenEndpointIntegrationTests|FullyQualifiedName~RuntimeTokenValidationServiceTests|FullyQualifiedName~RuntimeWebSocketLoopRunnerTests|FullyQualifiedName~ProviderDurabilityTests"
    - Result: 48 passed, 0 failed.
 
 Rehearsal readiness result:

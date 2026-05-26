@@ -26,8 +26,8 @@ Primary dimensions:
 6. session
 
 Code evidence:
-1. dotnet-host/src/ActiveSync.DotNetHost/Runtime/RuntimeWebSocketLoopRunner.cs
-2. dotnet-host/src/ActiveSync.DotNetHost/Runtime/RuntimeTokenValidationService.cs
+1. nodalmerge-host/src/ActiveSync.DotNetHost/Runtime/RuntimeWebSocketLoopRunner.cs
+2. nodalmerge-host/src/ActiveSync.DotNetHost/Runtime/RuntimeTokenValidationService.cs
 
 Test evidence:
 1. RuntimeWebSocketLoopRunnerTests.Runtime_ws_metrics_emit_connection_and_inbound_counts
@@ -118,8 +118,8 @@ Rule 5: noisy-trace-loop
 
 ## 7. Validation commands
 
-1. dotnet test dotnet-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeWebSocketLoopRunnerTests|FullyQualifiedName~RuntimeTokenValidationServiceTests"
-2. dotnet test dotnet-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderProfileTokenEndpointIntegrationTests|FullyQualifiedName~RuntimeTokenValidationServiceTests|FullyQualifiedName~RuntimeWebSocketLoopRunnerTests|FullyQualifiedName~ProviderDurabilityTests"
+1. dotnet test nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeWebSocketLoopRunnerTests|FullyQualifiedName~RuntimeTokenValidationServiceTests"
+2. dotnet test nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderProfileTokenEndpointIntegrationTests|FullyQualifiedName~RuntimeTokenValidationServiceTests|FullyQualifiedName~RuntimeWebSocketLoopRunnerTests|FullyQualifiedName~ProviderDurabilityTests"
 
 Observed results in this stream:
 1. 31 passed, 0 failed.

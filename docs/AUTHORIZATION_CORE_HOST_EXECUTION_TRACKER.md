@@ -487,13 +487,13 @@ Week of:
    - Added conformance vectors `IDENTITY-CONTINUITY-001..003` in `docs/acceptance/authz-conformance-vectors.json`.
    - Extended Rust conformance runner identity evaluator with deterministic continuity outcomes for overlap/expiry/revocation cases.
 5. Phase C slice 2 completion evidence (2026-05-22):
-   - Added DotNet runtime continuity validation + passthrough for `hello.token.continuity` in `dotnet-host/src/ActiveSync.DotNetHost/Runtime/RuntimeProtocolMapper.cs`.
-   - Added DotNet targeted tests for continuity allow/expiry/revoked cases in `dotnet-host/tests/ActiveSync.DotNetHost.Tests/RuntimeProtocolTests.cs`.
+   - Added DotNet runtime continuity validation + passthrough for `hello.token.continuity` in `nodalmerge-host/src/ActiveSync.DotNetHost/Runtime/RuntimeProtocolMapper.cs`.
+   - Added DotNet targeted tests for continuity allow/expiry/revoked cases in `nodalmerge-host/tests/ActiveSync.DotNetHost.Tests/RuntimeProtocolTests.cs`.
    - Wired explicit continuity vector mappings in `docs/acceptance/Run-AuthzConformance.ps1` for:
      - `IDENTITY-CONTINUITY-001`
      - `IDENTITY-CONTINUITY-002`
      - `IDENTITY-CONTINUITY-003`
-   - Added concrete SDK + host migration flow docs for device switch and key rotation in `docs/sdk.md` and `dotnet-host/README.md`.
+   - Added concrete SDK + host migration flow docs for device switch and key rotation in `docs/sdk.md` and `nodalmerge-host/README.md`.
    - Local nightly-equivalent rerun passed with continuity vectors present in DotNet mapped records (`authz-conformance-dotnet-records.json`) and canonical parity `status=pass`.
 6. Phase B slice 1 completion evidence (2026-05-22):
    - Added deterministic drill script `docs/acceptance/Run-SnapshotRestoreDrill.ps1` producing `snapshot-restore-drill.json`.

@@ -109,7 +109,7 @@ function Start-RowTargets {
     $rustEnv = Merge-Env -Base $rustEnvBase -Overlay $RustEnv
     $dotnetEnv = Merge-Env -Base $dotnetEnvBase -Overlay $DotnetEnv
 
-    $rustProc = Start-Process -FilePath $CargoPath -ArgumentList @("run", "-p", "activesync-server", "--bin", "activesync-server") -PassThru -NoNewWindow -Env $rustEnv
+    $rustProc = Start-Process -FilePath $CargoPath -ArgumentList @("run", "-p", "activesync-server", "--bin", "nodalmerge-server") -PassThru -NoNewWindow -Env $rustEnv
     $dotnetProc = Start-Process -FilePath $DotnetPath -ArgumentList @("run", "--project", "nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj", "--no-launch-profile") -PassThru -NoNewWindow -Env $dotnetEnv
 
     # Give endpoints time to bind before scenario runner starts probing.

@@ -9,6 +9,10 @@ name = "activesync-server"
 path = "src/main.rs"
 
 [[bin]]
+name = "nodalmerge-server"
+path = "src/nodalmerge_server_main.rs"
+
+[[bin]]
 name = "authz-conformance-runner"
 path = "src/bin/authz_conformance_runner.rs"
 

@@ -42,7 +42,7 @@ try {
     if ($StartRustCombined) {
         Write-Host "Starting rust-combined-server on $RustCombinedBind"
         $envMap = @{ AS_BIND_ADDR = $RustCombinedBind }
-        $proc = Start-Process cargo -ArgumentList @("run", "-p", "activesync-server") -PassThru -NoNewWindow -Env $envMap
+        $proc = Start-Process cargo -ArgumentList @("run", "-p", "activesync-server", "--bin", "nodalmerge-server") -PassThru -NoNewWindow -Env $envMap
         $started.Add([pscustomobject]@{ Name = "rust-combined-server"; Process = $proc })
     }
 
@@ -57,7 +57,7 @@ try {
             MONGO_URI = $MongoUri
             MONGO_DATABASE = $MongoDatabase
         }
-        $proc = Start-Process cargo -ArgumentList @("run", "-p", "activesync-dev-server") -PassThru -NoNewWindow -Env $envMap
+        $proc = Start-Process cargo -ArgumentList @("run", "-p", "activesync-dev-server", "--bin", "nodalmerge-dev-server") -PassThru -NoNewWindow -Env $envMap
         $started.Add([pscustomobject]@{ Name = "rust-integrated-hosted-server"; Process = $proc })
     }
 

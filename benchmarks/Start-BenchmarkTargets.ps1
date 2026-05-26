@@ -64,16 +64,17 @@ try {
     if ($StartDotnet) {
         $ffiPath = Resolve-FfiDllPath -Explicit $FfiDllPath
         if (-not $ffiPath) {
-            Write-Warning "No ACTIVESYNC_HOST_FFI_DLL found. Build host-ffi first: cargo build -p activesync-host-ffi"
+            Write-Warning "No NODALMERGE_HOST_FFI_DLL/ACTIVESYNC_HOST_FFI_DLL found. Build host-ffi first: cargo build -p activesync-host-ffi"
         }
 
         Write-Host "Starting dotnet-host-runtime at $DotnetBaseUrl"
         $envMap = @{ ASPNETCORE_URLS = $DotnetBaseUrl }
         if ($ffiPath) {
+            $envMap["NODALMERGE_HOST_FFI_DLL"] = $ffiPath
             $envMap["ACTIVESYNC_HOST_FFI_DLL"] = $ffiPath
         }
 
-        $proc = Start-Process dotnet -ArgumentList @("run", "--project", "dotnet-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj", "--no-launch-profile") -PassThru -NoNewWindow -Env $envMap
+        $proc = Start-Process dotnet -ArgumentList @("run", "--project", "nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj", "--no-launch-profile") -PassThru -NoNewWindow -Env $envMap
         $started.Add([pscustomobject]@{ Name = "dotnet-host-runtime"; Process = $proc })
     }
 

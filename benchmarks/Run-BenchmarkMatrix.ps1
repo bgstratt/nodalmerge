@@ -54,7 +54,7 @@ function Resolve-FfiDll {
         }
     }
 
-    throw "ACTIVESYNC_HOST_FFI_DLL could not be resolved. Build host-ffi first (cargo build -p activesync-host-ffi) or pass -FfiDllPath."
+    throw "NODALMERGE_HOST_FFI_DLL/ACTIVESYNC_HOST_FFI_DLL could not be resolved. Build host-ffi first (cargo build -p activesync-host-ffi) or pass -FfiDllPath."
 }
 
 function Merge-Env {
@@ -102,6 +102,7 @@ function Start-RowTargets {
     $rustEnvBase = @{ AS_BIND_ADDR = $RustBindAddress }
     $dotnetEnvBase = @{
         ASPNETCORE_URLS = $DotnetUrl
+        NODALMERGE_HOST_FFI_DLL = $FfiDll
         ACTIVESYNC_HOST_FFI_DLL = $FfiDll
     }
 
@@ -109,7 +110,7 @@ function Start-RowTargets {
     $dotnetEnv = Merge-Env -Base $dotnetEnvBase -Overlay $DotnetEnv
 
     $rustProc = Start-Process -FilePath $CargoPath -ArgumentList @("run", "-p", "activesync-server", "--bin", "activesync-server") -PassThru -NoNewWindow -Env $rustEnv
-    $dotnetProc = Start-Process -FilePath $DotnetPath -ArgumentList @("run", "--project", "dotnet-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj", "--no-launch-profile") -PassThru -NoNewWindow -Env $dotnetEnv
+    $dotnetProc = Start-Process -FilePath $DotnetPath -ArgumentList @("run", "--project", "nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj", "--no-launch-profile") -PassThru -NoNewWindow -Env $dotnetEnv
 
     # Give endpoints time to bind before scenario runner starts probing.
     Start-Sleep -Seconds 4

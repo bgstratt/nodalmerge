@@ -22,8 +22,8 @@ This project is in stabilization-and-extraction stage, not early architecture st
 | Runtime/server isolation | Pretty good |
 | WASM embedding proof | Excellent |
 | GC architecture | Partially mature |
-| Host-neutral orchestration | Missing |
-| FFI surface | Missing |
+| Host-neutral orchestration | Implemented (host-core), stabilizing |
+| FFI surface | Implemented (host-ffi ABI v1), expanding |
 
 Primary remaining risk is lifecycle ownership semantics (especially blobs/GC), not missing CRDT functionality.
 
@@ -33,7 +33,7 @@ Source: web/sdk.d.ts, docs/sdk.md
 
 ### 1.1 Document lifecycle
 
-- createDoc(options) -> Promise<Doc) (Implemented)
+- createDoc(options) -> Promise<Doc> (Implemented)
 - ready() -> Promise (Implemented)
 - attachServer(doc, serverUrl, options) (Implemented)
 
@@ -41,6 +41,7 @@ Doc instance:
 
 - connect(), disconnect(), close() (Implemented)
 - onConnect(cb), onDisconnect(cb), onError(cb), onChange(cb) (Implemented)
+- onRejection(cb), recentRejections(sinceMs) (Implemented)
 - peers() (Implemented)
 - send(msg) raw escape hatch (Implemented)
 
@@ -89,6 +90,8 @@ Presence:
 
 - transport: auto | ws-only (Implemented)
 - iceServers override (Implemented)
+- onMetric(event) hook (Implemented)
+- onDirectUpload({hash, length}) callback (Implemented)
 
 ## 2) Wire protocol operations (server websocket)
 
@@ -187,7 +190,13 @@ Source: server/src/main.rs, docs/operator.md, docs/quickstart.md
 - --snapshot-interval <N>
 - --snapshot-max-chain <K>
 
-### 3.2 Background workers
+### 3.2 Replay CLI operations
+
+- replay <pack-file|-> (Implemented)
+- --policy-timeline <json-file> (Implemented)
+- --policy-timeline-json <json> (Implemented)
+
+### 3.3 Background workers
 
 - idle room sweeper (Implemented)
 - blob GC sweeper (Implemented)
@@ -241,8 +250,9 @@ Source: core/src/lib.rs
 
 ### 5.2 Determinism/replay/compaction
 
-- replay, canonical_hash
-- compact, compact_incremental
+- replay, replay_with_policy_timeline, canonical_hash
+- compact, compact_with_policy_timeline
+- compact_incremental, compact_incremental_with_policy_timeline
 - verify_snapshot
 - rebuild_from_snapshot
 - pack_snapshot_pack, unpack_snapshot_pack
@@ -353,13 +363,15 @@ This reduces host/runtime coupling and improves embedding consistency.
 - Runtime persistence traits and GC hooks
 - Direct blob IO redirect/grant/verify flow
 - JWT -> RoomToken bridge
+- Host command/event runtime API (`activesync-host-core`)
+- C ABI host runtime bridge (`activesync-host-ffi`, ABI v1)
 
 ### 8.2 Defined but not consolidated as one runtime surface
 
 - Product-neutral GC coordinator package and trait implementations
 - Inventory/run ledger/admin pins as first-class runtime modules
-- Uniform command/event API for host-owned runtime extraction
-- Thin C ABI host runtime surface (planned in hostedMigrationPlan.md)
+- Cross-language SDK parity over the host command/event layer
+- C ABI breadth and compatibility policy hardening (beyond current ABI v1)
 - Canonical reference ownership model for blob liveness and delete domains
 - Explicit blob lifecycle state machine and transition invariants
 - GC policy/orchestration split from storage execution semantics
@@ -368,13 +380,13 @@ This reduces host/runtime coupling and improves embedding consistency.
 
 1. Blob lifecycle state model and transition invariants encoded in executable contracts.
 2. Reference ownership model for shared/admin/template assets validated by tests.
-3. Host command/event API formalization for orchestration extraction.
+3. Host command/event compatibility policy + conformance coverage.
 
 ### 8.4 Strongly recommended next
 
 1. Split GC policy/orchestration from storage execution APIs.
 2. Define room-scoped vs global/domain-scoped asset model explicitly.
-3. Add typed protocol command layer for host-core and FFI usage.
+3. Keep websocket and host-core command/event semantics aligned by conformance tests.
 
 ### 8.5 Can follow after stabilization
 
@@ -430,3 +442,97 @@ Use quickstart for onboarding only, and keep complete operation detail in dedica
 Execution reference:
 
 - PRE_HOST_EXTRACTION_IMPLEMENTATION_PLAN.md: concrete phased implementation plan and extraction kickoff gates
+
+## 11) Replay/fork capability status (DAG/history branch question)
+
+### 11.1 What exists today
+
+1. Deterministic replay from node packs:
+	- core exports `replay(...)` and `replay_with_policy_timeline(...)`
+	- server CLI supports `replay <pack-file|->` with optional policy timeline input
+2. Room-level compaction/snapshot generation via websocket admin operations (`compact-room` -> `snapshot-pack` + `compact-ack`).
+3. Tactical showcase replay is currently queue replay (partition/reconnect), not DAG time-travel branching.
+
+### 11.2 What does not exist yet
+
+1. No first-class runtime operation to fork a room from an arbitrary historical DAG node/frontier.
+2. No built-in "cut at node/time" selector API that emits a branch-ready pack.
+3. No one-step "create new room from replay checkpoint" admin command.
+
+### 11.3 What is possible right now (manual workflow)
+
+1. Reconstruct state at a chosen cut externally (off-runtime) by selecting a node subset and replaying it.
+2. Produce a pack/snapshot-pack for that cut.
+3. Seed a new room by importing the selected pack.
+
+This is feasible but requires custom orchestration and careful policy/token handling.
+
+### 11.4 Recommended plan for first-class fork support
+
+1. Define `ForkRoom` contract in host-core:
+	- inputs: source room, cut selector (frontier/node/time), target room, policy/timeline mode
+	- outputs: target room id, fork root/frontier, canonical hash, audit metadata
+2. Implement a deterministic "history cut" planner that computes an ancestor-closed node set for the selected cut.
+3. Emit portable fork payloads (pack + optional snapshot-pack metadata) with compatibility checks.
+4. Add server/admin operation for "fork room" that creates target room and imports payload atomically.
+5. Add conformance tests:
+	- source-at-cut state hash == target-initial state hash
+	- post-fork writes diverge cleanly without mutating source room history
+	- policy timeline behavior is preserved across the cut
+
+### 11.5 Suggested adjacent missing pieces to review next
+
+1. Protocol-level operation catalog doc (request/response examples, error classes).
+2. Host-core vs websocket semantic parity matrix (including deny metadata and admin operations).
+3. Room export/import contract documentation (full-room clone vs checkpoint fork semantics).
+
+### 11.6 Concrete execution plans
+
+1. NodalMerge rename plan: `docs/NODALMERGE_RENAME_EXECUTION_PLAN.md`
+2. NodalMerge rename inventory checklist: `docs/NODALMERGE_RENAME_INVENTORY_CHECKLIST.md`
+3. Replay branching plan: `docs/REPLAY_BRANCHING_EXECUTION_PLAN.md`
+4. Speculative vs authoritative plan: `docs/SPECULATIVE_AUTHORITATIVE_EXECUTION_PLAN.md`
+5. Query/materialization plan: `docs/QUERY_MATERIALIZATION_EXECUTION_PLAN.md`
+6. Export/import portability plan: `docs/EXPORT_IMPORT_PORTABILITY_EXECUTION_PLAN.md`
+7. Headless runtime/persistence plan: `docs/HEADLESS_RUNTIME_PERSISTENCE_EXECUTION_PLAN.md`
+8. Authority/topology plan: `docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md`
+9. Manager/worker topology playbook: `docs/MANAGER_WORKER_TOPOLOGY_PLAYBOOK.md`
+10. Combined roadmap: `docs/roadmap.md`
+11. Future-state enhancements tracker: `docs/future-state-enhancements.md`
+
+Recommended implementation order:
+
+1. Execute NodalMerge rename Phase A-C first so all subsequent work lands on final naming.
+2. Execute speculative/authoritative Phase A-B first to freeze canonical lane semantics.
+3. Execute replay branching Phase A-C next on canonical lineage.
+4. Execute query/materialization Phase A-C after the two core plans establish canonical contract stability.
+5. Execute export/import portability Phase A-C after query/materialization contract freeze.
+6. Execute SDK/operator phases for core, query, and portability plans in parallel after contracts stabilize.
+7. Execute headless runtime/persistence and authority/topology plans after core contract freeze and before broad pod rollout.
+8. Track remaining post-core workstreams in `docs/future-state-enhancements.md`.
+
+Current Wave R execution status (2026-05-26):
+
+1. RNM-007 namespace migration in host C# surfaces is implemented and validated (`dotnet build` + `dotnet test`).
+2. RNM-008 config migration is implemented in host runtime with `NodalMerge:*` primary and `ActiveSync:*` fallback reads.
+3. RNM-009 env-var migration has started with `NODALMERGE_HOST_FFI_DLL` primary and `ACTIVESYNC_HOST_FFI_DLL` fallback in runtime probe and verify script.
+4. RNM-009 env-var migration now also covers server runtime env parsing for catchup budget and capability profile path (`NODALMERGE_*` primary with `ACTIVESYNC_*` fallback aliases).
+5. RNM-010 metric migration now includes dotnet-host and Rust server dual emission (`nodalmerge_*` primary plus legacy `activesync_*` compatibility aliases).
+6. RNM-010 focused server metrics test is now passing: `cargo test -p activesync-server --test metrics_endpoint` (3/3).
+7. RNM-011 Docker validation is passing: `docker build -t nodalmerge .` succeeds and both `nodalmerge-server` and `activesync-server` binary aliases are present/usable in both primary and compatibility image-tag paths.
+8. Origin rename path is active: new repo `bgstratt/nodalmerge` created, with local remotes set to `origin` (nodalmerge) and `origin-legacy` (activeSync).
+
+## 12) Post-core enhancement tracking
+
+Primary tracker:
+
+1. `docs/future-state-enhancements.md`
+2. `docs/roadmap.md`
+
+Current recommended next focus after Sections 11.6(1-2):
+
+1. Query/materialization (`FSE-01`)
+2. Export/import portability (`FSE-02`)
+3. Runtime scheduler/backpressure semantics (`FSE-03`)
+4. Headless runtime and peer-local persistence adapters (`FSE-09`)
+5. Authority model and parent/child room topology (`FSE-10`)

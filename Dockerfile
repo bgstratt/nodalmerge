@@ -74,7 +74,7 @@ RUN mkdir -p core/src core/benches \
 
 # Now bring in the real sources and build release.
 COPY . .
-RUN cargo build --release -p activesync-server
+RUN cargo build --release -p nodalmerge-server
 
 # ─── Runtime ───────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
@@ -88,9 +88,8 @@ RUN useradd --system --home /data --shell /usr/sbin/nologin nodalmerge \
     && mkdir -p /data \
     && chown nodalmerge:nodalmerge /data
 
-COPY --from=builder /src/target/release/activesync-server /usr/local/bin/activesync-server
-RUN cp /usr/local/bin/activesync-server /usr/local/bin/nodalmerge-server \
-    && ln -sf /usr/local/bin/nodalmerge-server /usr/local/bin/activesync-server
+COPY --from=builder /src/target/release/nodalmerge-server /usr/local/bin/nodalmerge-server
+RUN ln -sf /usr/local/bin/nodalmerge-server /usr/local/bin/activesync-server
 
 USER nodalmerge
 WORKDIR /data

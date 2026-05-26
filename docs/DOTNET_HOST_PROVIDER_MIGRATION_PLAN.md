@@ -465,7 +465,7 @@ Exit criteria:
 
 Validation command set for each PR:
 
-1. dotnet build nodalmerge-host/ActiveSync.DotNetHost.slnx
-2. dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx
+1. dotnet build nodalmerge-host/NodalMerge.DotNetHost.slnx
+2. dotnet test nodalmerge-host/NodalMerge.DotNetHost.slnx
 3. cargo test -p activesync-host-core
 4. cargo test -p activesync-host-ffi

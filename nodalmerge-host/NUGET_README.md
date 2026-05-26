@@ -1,13 +1,17 @@
-# ActiveSync .NET Host Packages
+# NodalMerge .NET Host Packages
 
-ActiveSync host packages provide a package-first path for embedding a deterministic sync runtime in .NET hosts.
+NodalMerge host packages provide a package-first path for embedding a deterministic sync runtime in .NET hosts.
 
 ## Packages
 
-- `ActiveSync.Host.Abstractions`: provider contracts for storage/auth/blob delegation.
-- `ActiveSync.Host.Composition`: dependency injection wiring and host composition helpers.
-- `ActiveSync.DotNetHost.Native.win-x64`: native runtime (`activesync_host_ffi.dll`) for Windows x64.
-- `ActiveSync.DotNetHost.Native.linux-x64`: native runtime (`libactivesync_host_ffi.so`) for Linux x64.
+- `NodalMerge.Host.Abstractions` (wrapper): provider contracts package identity during migration.
+- `NodalMerge.Host.Composition` (wrapper): composition helpers package identity during migration.
+- `NodalMerge.DotNetHost.Native.win-x64` (wrapper): native runtime package identity for Windows x64.
+- `NodalMerge.DotNetHost.Native.linux-x64` (wrapper): native runtime package identity for Linux x64.
+
+Compatibility note:
+
+- Legacy `ActiveSync.*` package IDs are still supported during migration window.
 
 ## Dead-Simple Runtime Surface
 
@@ -27,14 +31,14 @@ For transport, use `GET /ws/runtime` and exchange JSON command/event frames.
 Use local packages before any remote publish:
 
 ```powershell
-cd dotnet-host
+cd nodalmerge-host
 pwsh -File .\pack-local-nuget.ps1 -Version 0.1.0-local
-dotnet restore .\ActiveSync.DotNetHost.slnx --configfile .\NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local
-pwsh -File .\verify.ps1 -UseNuGetPackages -ActiveSyncPackageVersion 0.1.0-local
+dotnet restore .\NodalMerge.DotNetHost.slnx --configfile .\NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local
+pwsh -File .\verify.ps1 -UseNuGetPackages -NodalMergePackageVersion 0.1.0-local
 ```
 
 ## Notes
 
 - Default project build mode uses project references.
 - Package mode is opt-in through `ActiveSyncUseNuGetPackages=true`.
-- Native runtime can still be overridden via `ACTIVESYNC_HOST_FFI_DLL` when needed.
+- Native runtime can be overridden via `NODALMERGE_HOST_FFI_DLL` (legacy `ACTIVESYNC_HOST_FFI_DLL` fallback remains).

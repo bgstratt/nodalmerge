@@ -40,12 +40,12 @@ Each row must have:
 
 | ID | Area | Scope path/glob | Rename class | Current example | Target example | Compatibility requirement | Migration window | Owner | Status | Verification evidence |
 |---|---|---|---|---|---|---|---|---|---|---|
-| RNM-001 | Rust crates | Cargo.toml + */Cargo.toml | ArtifactName | activesync-core | nodalmerge-core | Transitional aliases or dual-publish for external crates | Wave R through next full release | Rust Platform Stream | InProgress | Added workspace wrapper crates `nodalmerge-core`, `nodalmerge-host-core`, `nodalmerge-host-ffi` re-exporting existing activesync crates (2026-05-25) |
+| RNM-001 | Rust crates | Cargo.toml + */Cargo.toml | ArtifactName | activesync-core | nodalmerge-core | Transitional aliases or dual-publish for external crates | Wave R through next full release | Rust Platform Stream | InProgress | Expanded workspace wrapper crates to include `nodalmerge-core`, `nodalmerge-gc`, `nodalmerge-host-core`, `nodalmerge-host-axum`, `nodalmerge-host-ffi`, `nodalmerge-server`, `nodalmerge-jwt-bridge`, `nodalmerge-s3-blobs` plus internal node-store wrappers (2026-05-25) |
 | RNM-002 | Rust binaries | server/Cargo.toml, dev-server/Cargo.toml | ArtifactName | activesync-server | nodalmerge | Legacy command alias required | Wave R through next full release | Rust Runtime Stream | InProgress | Added `nodalmerge-server` + `nodalmerge-dev-server` bin aliases while retaining `activesync-*` binaries (2026-05-25) |
-| RNM-003 | FFI artifacts | host-ffi outputs, probes in scripts | ArtifactName | activesync_host_ffi.dll | nodalmerge_host_ffi.dll | Probe both names during transition | Wave R through next full release | Host Runtime Stream | InProgress | FFI dll references inventoried in benchmark and verify scripts |
+| RNM-003 | FFI artifacts | host-ffi outputs, probes in scripts | ArtifactName | activesync_host_ffi.dll | nodalmerge_host_ffi.dll | Probe both names during transition | Wave R through next full release | Host Runtime Stream | InProgress | Benchmark and verify scripts now probe nodalmerge first with legacy fallback aliases where required (2026-05-25) |
 | RNM-004 | JS package names | sdk-js/package.json, bridge pkg metadata | ArtifactName | activesync-sdk-js | nodalmerge-sdk-js | Deprecated wrapper package retained | Wave R through next full release | JS SDK Stream | InProgress | Added npm wrapper packages `nodalmerge-bridge` and `nodalmerge-sdk-js` that re-export legacy activesync packages (2026-05-25) |
 | RNM-005 | JS bridge imports | web/sdk.js, web/sdk.d.ts, pkg paths | ScriptRef | ./pkg/activesync_bridge.js | ./pkg/nodalmerge_bridge.js | Compatibility import shim | Wave R through next full release | JS SDK Stream | InProgress | Bridge import paths identified in sdk.js and sdk.d.ts |
-| RNM-006 | .NET project/package ids | nodalmerge-host/**/*.csproj | ArtifactName | ActiveSync.Host.Abstractions | NodalMerge.Host.Abstractions | Compatibility package id bridge | Wave R through next full release | DotNet Host Stream | InProgress | csproj PackageId and references inventoried |
+| RNM-006 | .NET project/package ids | nodalmerge-host/**/*.csproj | ArtifactName | ActiveSync.Host.Abstractions | NodalMerge.Host.Abstractions | Compatibility package id bridge | Wave R through next full release | DotNet Host Stream | InProgress | Added additive wrapper package IDs `NodalMerge.Host.*` and `NodalMerge.DotNetHost.Native.*` with CI/local-pack coverage while retaining legacy ActiveSync package IDs (2026-05-25) |
 | RNM-007 | .NET namespaces/types | nodalmerge-host/src/**/*.cs | NamespaceType | ActiveSync.* namespace | NodalMerge.* namespace | Namespace forwarding strategy | Wave R through next full release | DotNet Host Stream | InProgress | Namespace/usings migrated in host C# files on 2026-05-26; dotnet build and dotnet test succeeded |
 | RNM-008 | .NET config prefixes | nodalmerge-host config binding and docs | ConfigKey | ActiveSync:* | NodalMerge:* | Dual-key read with precedence to NodalMerge | Wave R through next full release | DotNet Host Stream | InProgress | NodalMerge primary + ActiveSync fallback implemented in option/config loaders; dotnet build and dotnet test succeeded on 2026-05-26 |
 | RNM-009 | Environment variables | scripts, runtime config, docs | EnvVar | ACTIVESYNC_* | NODALMERGE_* | Parse both during migration window | Wave R through next full release | Runtime + Ops Stream | InProgress | NODALMERGE_HOST_FFI_DLL primary with ACTIVESYNC_HOST_FFI_DLL fallback implemented in runtime resolver and verify script on 2026-05-26 |
@@ -53,10 +53,10 @@ Each row must have:
 | RNM-011 | Docker image and entrypoint | Dockerfile, deployment docs | ArtifactName | activesync-server | nodalmerge | Dual tags and entrypoint alias | Wave R through next full release | DevOps Stream | InProgress | Dockerfile now defaults ENTRYPOINT to nodalmerge-server with activesync-server compatibility alias via symlink (2026-05-26) |
 | RNM-012 | Container user/path defaults | Dockerfile, runtime defaults | PathDefault | user activesync | user nodalmerge | Legacy user/path compatibility where needed | Wave R through next full release | DevOps Stream | NotStarted | pending |
 | RNM-013 | Data file defaults | sqlite/db and key path defaults | PathDefault | activesync.db, ~/.activesync | nodalmerge.db, ~/.nodalmerge | Legacy location autodetect + migration helper | Wave R through next full release | Runtime + Ops Stream | NotStarted | pending |
-| RNM-014 | Bench/run scripts | *.ps1, benchmarks/**/*.ps1 | ScriptRef | cargo run -p activesync-server | cargo run -p activesync-server --bin nodalmerge-server | Legacy command compatibility wrappers | Wave R through next full release | Performance Tooling Stream | InProgress | Root + benchmark launch scripts now use nodalmerge bin aliases while preserving activesync package IDs (2026-05-25) |
+| RNM-014 | Bench/run scripts | *.ps1, benchmarks/**/*.ps1 | ScriptRef | cargo run -p activesync-server | cargo run -p activesync-server --bin nodalmerge-server | Legacy command compatibility wrappers | Wave R through next full release | Performance Tooling Stream | InProgress | Root + benchmark launch scripts are nodalmerge-first for container/env/database naming and host-ffi probing while retaining required compatibility where runtime/package IDs are still legacy (2026-05-25) |
 | RNM-015 | CI/release pipelines | workflow/release scripts | ScriptRef | activesync artifact ids | nodalmerge artifact ids | Dual publish until switch complete | Wave R through next full release | Build/Release Stream | InProgress | `.github/workflows/nuget-build-push.yml` now includes nodalmerge npm/crate wrapper dry-run packaging and optional wrapper publish jobs (2026-05-25) |
 | RNM-016 | Documentation titles/body | docs/**/*.md, README* | BrandText | ActiveSync | NodalMerge | Migration note and timeline section | Wave R through next full release | Docs Stream | InProgress | High-signal packaging/rename docs switched to nodalmerge-first commands with explicit activesync compatibility notes; added `docs/NODALMERGE_PACKAGE_MIGRATION_QUICK_REFERENCE.md` (2026-05-25) |
-| RNM-017 | Integration snippets | docs/integration.md, docs/deployment.md | ScriptRef | use activesync_server | use nodalmerge_server | Include compatibility examples for one cycle | Wave R through next full release | Docs + Rust Runtime Stream | NotStarted | pending |
+| RNM-017 | Integration snippets | docs/integration.md, docs/deployment.md | ScriptRef | use activesync_server | use nodalmerge_server | Include compatibility examples for one cycle | Wave R through next full release | Docs + Rust Runtime Stream | InProgress | High-signal docs are now nodalmerge-first with explicit compatibility notes; remaining snippets still reference legacy crate IDs where wrappers/canonical crate renames are pending |
 | RNM-018 | Tactical showcase refs | activesync-tactical-showcase/**/* | BrandText | activesync refs | nodalmerge refs | Keep interop aliases until showcase migration done | Wave R through next full release | Showcase Stream | NotStarted | pending |
 
 ## 4. Compatibility commitments (must not regress)
@@ -107,14 +107,14 @@ Implementation steps:
 
 Validation commands:
 
-1. dotnet build nodalmerge-host/ActiveSync.DotNetHost.slnx
-2. dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx
+1. dotnet build nodalmerge-host/NodalMerge.DotNetHost.slnx
+2. dotnet test nodalmerge-host/NodalMerge.DotNetHost.slnx
 
 Execution evidence (2026-05-26):
 
-1. Applied mechanical rename `ActiveSync.` -> `NodalMerge.` across dotnet-host C# files (79 files changed).
-2. `dotnet build nodalmerge-host/ActiveSync.DotNetHost.slnx` succeeded.
-3. `dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx` succeeded.
+1. Applied mechanical rename `ActiveSync.` -> `NodalMerge.` across nodalmerge-host C# files (79 files changed).
+2. `dotnet build nodalmerge-host/NodalMerge.DotNetHost.slnx` succeeded.
+3. `dotnet test nodalmerge-host/NodalMerge.DotNetHost.slnx` succeeded.
 
 ### RNM-008 .NET config key prefixes
 
@@ -140,8 +140,8 @@ Execution evidence (2026-05-26):
 1. Added NodalMerge-first section binding with ActiveSync fallback across provider and auth/storage option classes.
 2. Updated runtime config reads to prefer `NodalMerge:Runtime:*` with fallback to `ActiveSync:Runtime:*`.
 3. Updated host debug provider key reads and startup/provider log messaging to NodalMerge naming.
-4. `dotnet build nodalmerge-host/ActiveSync.DotNetHost.slnx` succeeded.
-5. `dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx` succeeded.
+4. `dotnet build nodalmerge-host/NodalMerge.DotNetHost.slnx` succeeded.
+5. `dotnet test nodalmerge-host/NodalMerge.DotNetHost.slnx` succeeded.
 
 ### RNM-009 Environment variable migration
 
@@ -196,8 +196,8 @@ Execution evidence (2026-05-26):
 2. Updated metric publishers in runtime websocket, auth validation, control-plane deny, and DAG persistence/compaction paths.
 3. Added nodalmerge_* primary metric registration and dual-emission compatibility in Rust server runtime (`room.rs`, `ws_handler.rs`, `store.rs`, `metrics.rs`) while retaining activesync_* compatibility names.
 4. Updated Rust metrics endpoint integration assertions to require both nodalmerge_* and activesync_* baseline series.
-5. `dotnet build nodalmerge-host/ActiveSync.DotNetHost.slnx` succeeded.
-6. `dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx` succeeded.
+5. `dotnet build nodalmerge-host/NodalMerge.DotNetHost.slnx` succeeded.
+6. `dotnet test nodalmerge-host/NodalMerge.DotNetHost.slnx` succeeded.
 7. Restored missing server bin target file `server/src/bin/authz_conformance_runner.rs` so workspace bin resolution succeeds.
 8. `cargo test -p activesync-server --test metrics_endpoint` succeeded (3/3 passing).
 

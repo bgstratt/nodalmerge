@@ -117,10 +117,10 @@ Run from repo root unless noted.
 1. `cargo test -p activesync-core`
 2. `cargo test -p activesync-host-core`
 3. `cargo test -p activesync-host-ffi`
-4. `dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx`
+4. `dotnet test nodalmerge-host/NodalMerge.DotNetHost.slnx`
 5. `cd nodalmerge-host; pwsh -File ./pack-local-nuget.ps1 -Version 0.1.0-local`
-6. `cd nodalmerge-host; dotnet restore ./ActiveSync.DotNetHost.slnx --configfile ./NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
-7. `cd nodalmerge-host; pwsh -File ./verify.ps1 -UseNuGetPackages -ActiveSyncPackageVersion 0.1.0-local`
+6. `cd nodalmerge-host; dotnet restore ./NodalMerge.DotNetHost.slnx --configfile ./NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
+7. `cd nodalmerge-host; pwsh -File ./verify.ps1 -UseNuGetPackages -NodalMergePackageVersion 0.1.0-local`
 
 Required outcome:
 

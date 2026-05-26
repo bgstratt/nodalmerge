@@ -1,4 +1,4 @@
-# ActiveSync .NET Host Prototype
+# NodalMerge .NET Host Prototype
 
 This folder contains the PR7 prototype for a host-owned .NET runtime that calls the Rust host FFI library.
 
@@ -69,7 +69,7 @@ This folder contains the PR7 prototype for a host-owned .NET runtime that calls 
 	- Conflict events from host-core map to `conflict` (streamed, one frame per entry) and `recent-conflicts` (snapshot list) for SDK `onConflict` and recent-history parity.
 - `session_id` behavior: if `hello`, `open-session`, `client-hello`, or `close-session` provides `session_id`, the runtime mapper persists that value in connection state and reuses it for subsequent commands when omitted.
 - `hello.token` is forwarded into the host `ClientHello` payload when provided (`peer_pubkey`, `expiry`, `caps[]`, `sig`, optional `continuity`). Missing required token fields are rejected by the mapper.
-- Server-peer control-plane bypass parity is configured via `ActiveSync:Runtime:ServerPeerPubkeyHex`.
+- Server-peer control-plane bypass parity is configured via `NodalMerge:Runtime:ServerPeerPubkeyHex` (legacy `ActiveSync:Runtime:ServerPeerPubkeyHex` fallback supported during migration).
 	- When set, runtime handshake paths (`hello`, `open-session`, `client-hello`) mark a connection as server-peer only when the inbound `pubkey` exactly matches this trusted value (case-insensitive hex compare).
 	- Server-peer sessions can execute control-plane commands without explicit `policy.admin` / `room.admin` / `tick.admin` capability tokens.
 	- Leave unset (or empty) to disable bypass.
@@ -135,24 +135,24 @@ Before running the host, ensure the Rust FFI library is built:
 
 Runtime resolution order:
 
-1. `ACTIVESYNC_HOST_FFI_DLL` environment variable (full path to compiled native library).
+1. `NODALMERGE_HOST_FFI_DLL` environment variable (full path to compiled native library).
 2. Common local build paths (for example `target/debug/activesync_host_ffi.dll` on Windows).
 3. Platform default native loader search via library name.
 
-If loading still fails, set `ACTIVESYNC_HOST_FFI_DLL` explicitly to remove path ambiguity.
+If loading still fails, set `NODALMERGE_HOST_FFI_DLL` explicitly to remove path ambiguity.
 
 ## Local NuGet Packaging (Pre-Publish)
 
 Use this flow to validate managed/native packaging locally before publishing.
 
 1. Build and pack local packages:
-- `cd dotnet-host`
+- `cd nodalmerge-host`
 - `pwsh -File .\pack-local-nuget.ps1 -Version 0.1.0-local`
 
 This writes packages to `artifacts/nuget-local`.
 
 2. Restore host in package-consumer mode:
-- `dotnet restore .\ActiveSync.DotNetHost.slnx --configfile .\NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
+- `dotnet restore .\NodalMerge.DotNetHost.slnx --configfile .\NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
 
 3. Run host against local packages:
 - `dotnet run --project .\src\ActiveSync.DotNetHost\ActiveSync.DotNetHost.csproj --no-launch-profile -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
@@ -171,19 +171,19 @@ NuGet package readme source used in package metadata:
 
 Optional override:
 
-- Set ACTIVESYNC_HOST_FFI_DLL to an absolute path for the native library file.
+- Set NODALMERGE_HOST_FFI_DLL to an absolute path for the native library file.
 
 Examples:
 
-- Windows: ACTIVESYNC_HOST_FFI_DLL=C:\path\to\activesync_host_ffi.dll
-- Linux: ACTIVESYNC_HOST_FFI_DLL=/path/to/libactivesync_host_ffi.so
-- macOS: ACTIVESYNC_HOST_FFI_DLL=/path/to/libactivesync_host_ffi.dylib
+- Windows: NODALMERGE_HOST_FFI_DLL=C:\path\to\nodalmerge_host_ffi.dll
+- Linux: NODALMERGE_HOST_FFI_DLL=/path/to/libnodalmerge_host_ffi.so
+- macOS: NODALMERGE_HOST_FFI_DLL=/path/to/libnodalmerge_host_ffi.dylib
 
 ## Build and Test
 
-- dotnet build nodalmerge-host/ActiveSync.DotNetHost.slnx
-- dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx
-- dotnet test nodalmerge-host/ActiveSync.DotNetHost.slnx --filter "FullyQualifiedName~DemoReadinessSmokeTests"
+- dotnet build nodalmerge-host/NodalMerge.DotNetHost.slnx
+- dotnet test nodalmerge-host/NodalMerge.DotNetHost.slnx
+- dotnet test nodalmerge-host/NodalMerge.DotNetHost.slnx --filter "FullyQualifiedName~DemoReadinessSmokeTests"
 
 ## Device Switch + Key Rotation Migration (Phase C slice 2)
 
@@ -205,7 +205,7 @@ Operational expectation:
 
 ### Fast Authz Loop Helpers
 
-From `dotnet-host`:
+From `nodalmerge-host`:
 
 - Quick local authz/runtime loop (excludes long integration/acceptance suites):
 	- `pwsh -File .\quick-dotnet-authz.ps1`
@@ -225,8 +225,8 @@ Use this to validate hosted AS service readiness before wiring full SpeechSlate 
 
 1. From repo root, build host FFI:
 - `cargo build -p activesync-host-ffi`
-2. Run verifier from `dotnet-host` folder:
-- `cd dotnet-host`
+2. Run verifier from `nodalmerge-host` folder:
+- `cd nodalmerge-host`
 - `pwsh -File .\verify.ps1`
 
 Expected success markers in output:
@@ -236,17 +236,17 @@ Expected success markers in output:
 - `Received: {"type":"noop-ack"}`
 - `Verification SUCCESS (delegated blob-url + runtime websocket).`
 
-If `verify.ps1` is run outside `dotnet-host`, use:
+If `verify.ps1` is run outside `nodalmerge-host`, use:
 
-- `Set-Location <repo>\dotnet-host; .\verify.ps1`
+- `Set-Location <repo>\nodalmerge-host; .\verify.ps1`
 
 Package-mode smoke (local NuGet feed):
 
-- `Set-Location <repo>\dotnet-host; .\verify.ps1 -UseNuGetPackages -ActiveSyncPackageVersion 0.1.0-local`
+- `Set-Location <repo>\nodalmerge-host; .\verify.ps1 -UseNuGetPackages -NodalMergePackageVersion 0.1.0-local`
 
 ## Auth Profile Mode
 
-The host auth provider is selected through `ActiveSync:Providers:Auth`:
+The host auth provider is selected through `NodalMerge:Providers:Auth` (legacy `ActiveSync:Providers:Auth` fallback supported during migration):
 
 - `Default`: pass-through validation semantics, `/sync/token` returns `501` (no mint support).
 - `JwtBridgeEmbedded`: in-host JWT mint + validate (no extra process required).
@@ -254,20 +254,20 @@ The host auth provider is selected through `ActiveSync:Providers:Auth`:
 
 Embedded mode options:
 
-- `ActiveSync:Auth:JwtBridgeEmbedded:Issuer`
-- `ActiveSync:Auth:JwtBridgeEmbedded:Audience`
-- `ActiveSync:Auth:JwtBridgeEmbedded:SigningKey` (minimum 32 chars for HS256)
+- `NodalMerge:Auth:JwtBridgeEmbedded:Issuer`
+- `NodalMerge:Auth:JwtBridgeEmbedded:Audience`
+- `NodalMerge:Auth:JwtBridgeEmbedded:SigningKey` (minimum 32 chars for HS256)
 
 Development defaults in `appsettings.Development.json` are configured for `JwtBridgeEmbedded` so the host can run standalone without requiring a sidecar.
 
 Runtime server-peer bypass example:
 
-- `ActiveSync:Runtime:ServerPeerPubkeyHex = "<trusted-server-peer-pubkey-hex>"`
+- `NodalMerge:Runtime:ServerPeerPubkeyHex = "<trusted-server-peer-pubkey-hex>"`
 - JSON example:
 
 ```json
 {
-	"ActiveSync": {
+	"NodalMerge": {
 		"Runtime": {
 			"ServerPeerPubkeyHex": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 		}

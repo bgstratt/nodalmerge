@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - 'nodalmerge-host/src/**'
-      - 'nodalmerge-host/ActiveSync.DotNetHost.slnx'
+      - 'nodalmerge-host/NodalMerge.DotNetHost.slnx'
       - 'host-ffi/**'
       - 'wrappers/**'
       - 'Cargo.toml'
@@ -226,7 +226,7 @@ jobs:
           fi
 
       - name: Restore solution
-        run: dotnet restore nodalmerge-host/ActiveSync.DotNetHost.slnx
+        run: dotnet restore nodalmerge-host/NodalMerge.DotNetHost.slnx
 
       - name: Pack ActiveSync.Host.Abstractions
         run: dotnet pack nodalmerge-host/src/ActiveSync.Host.Abstractions/ActiveSync.Host.Abstractions.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}

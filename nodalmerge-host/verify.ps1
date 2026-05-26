@@ -7,7 +7,9 @@ param(
     [string]$MongoConnectionString = "",
     [string]$MongoDatabaseName = "",
     [switch]$UseNuGetPackages,
-    [string]$ActiveSyncPackageVersion = "0.1.0-local"
+    [string]$NodalMergePackageVersion = "0.1.0-local",
+    [Alias("ActiveSyncPackageVersion")]
+    [string]$LegacyActiveSyncPackageVersion = ""
 )
 
 Set-StrictMode -Version Latest
@@ -154,13 +156,20 @@ try {
         Write-Host "Using ACTIVESYNC_HOST_FFI_DLL from current environment"
     }
 
+    $resolvedPackageVersion = if (-not [string]::IsNullOrWhiteSpace($LegacyActiveSyncPackageVersion)) {
+        $LegacyActiveSyncPackageVersion
+    }
+    else {
+        $NodalMergePackageVersion
+    }
+
     if ($UseNuGetPackages.IsPresent) {
         $restoreArgs = @(
             "restore",
-            "./ActiveSync.DotNetHost.slnx",
+            "./NodalMerge.DotNetHost.slnx",
             "--configfile", "./NuGet.Local.config",
             "-p:ActiveSyncUseNuGetPackages=true",
-            "-p:ActiveSyncPackageVersion=$ActiveSyncPackageVersion"
+            "-p:ActiveSyncPackageVersion=$resolvedPackageVersion"
         )
 
         Write-Host "Restoring in package mode with NuGet.Local.config ..."
@@ -203,7 +212,7 @@ try {
     if ($UseNuGetPackages.IsPresent) {
         $hostArgs += @(
             "-p:ActiveSyncUseNuGetPackages=true",
-            "-p:ActiveSyncPackageVersion=$ActiveSyncPackageVersion"
+            "-p:ActiveSyncPackageVersion=$resolvedPackageVersion"
         )
     }
 

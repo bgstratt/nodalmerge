@@ -25,7 +25,7 @@ Current phase:
 
 | Area | Primary Owner | Supporting Owner | Notes |
 | ---- | ------------- | ---------------- | ----- |
-| Core policy semantics | Core runtime maintainers | Security reviewer | activesync-core enforcement and replay semantics |
+| Core policy semantics | Core runtime maintainers | Security reviewer | nodalmerge/activesync core enforcement and replay semantics |
 | Rust host control-plane enforcement | Rust host maintainers | Core runtime maintainers | ws_handler and room policy controls |
 | DotNetHost parity | DotNetHost maintainers | API/platform maintainers | provider composition and control-plane guardrails |
 | SDK ergonomics (npm) | SDK maintainers | Host maintainers | intent/state helpers and rejection surfaces |
@@ -69,7 +69,7 @@ Required evidence bundle for milestone-triggered runs:
 
 1. Tick commands are treated as host-runtime control-plane features (commonly used by engine/simulation hosts), not core data-plane policy features.
 2. Canonical capability source is a shared contract doc at [AUTHORIZATION_CONTROL_PLANE_CAPABILITIES.md](AUTHORIZATION_CONTROL_PLANE_CAPABILITIES.md); language-specific code constants may mirror it.
-3. DotNetHost server-peer bypass parity is implemented; runtime mapper now derives `IsServerPeer` from configured trusted server peer pubkey (`ActiveSync:Runtime:ServerPeerPubkeyHex`) on handshake paths (`hello`, `open-session`, `client-hello`).
+3. DotNetHost server-peer bypass parity is implemented; runtime mapper now derives `IsServerPeer` from configured trusted server peer pubkey (`NodalMerge:Runtime:ServerPeerPubkeyHex`, with `ActiveSync:Runtime:ServerPeerPubkeyHex` fallback) on handshake paths (`hello`, `open-session`, `client-hello`).
 4. Denial wire format remains message-string based for now, with deterministic `reject.control_plane_forbidden` prefix.
 5. Initial metrics contract is required in P1 for control-plane denies:
    - metric name: `runtime_control_plane_denied_total`

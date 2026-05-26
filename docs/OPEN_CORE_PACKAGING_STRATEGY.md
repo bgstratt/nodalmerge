@@ -1,4 +1,4 @@
-# ActiveSync Open-Core Packaging Strategy
+# NodalMerge Open-Core Packaging Strategy
 
 Status: Proposed execution plan
 Owner: Runtime + host packaging stream
@@ -51,7 +51,11 @@ Artifacts:
 1. npm package wrappers (`nodalmerge-bridge`, `nodalmerge-sdk-js`) as primary identities
 2. legacy npm package names (`activesync-bridge`, `activesync-sdk-js`) retained during migration window
 3. NuGet managed + native packages (`ActiveSync.Host.*`, `ActiveSync.DotNetHost.Native.*`)
-4. Rust crates (`activesync-core`, `activesync-host-core`, `activesync-host-ffi`, `activesync-host-axum`, `activesync-bridge`) plus wrapper crates (`nodalmerge-core`, `nodalmerge-host-core`, `nodalmerge-host-ffi`)
+4. NuGet wrapper package identities (`NodalMerge.Host.*`, `NodalMerge.DotNetHost.Native.*`) during migration
+5. Rust crates (`activesync-core`, `activesync-host-core`, `activesync-host-ffi`, `activesync-host-axum`, `activesync-bridge`) plus wrapper crates (`nodalmerge-core`, `nodalmerge-gc`, `nodalmerge-host-core`, `nodalmerge-host-axum`, `nodalmerge-host-ffi`, `nodalmerge-server`, `nodalmerge-jwt-bridge`, `nodalmerge-s3-blobs`)
+
+Compatibility note:
+1. Legacy `ActiveSync.*` NuGet IDs and `activesync-*` crate/package names remain supported during migration window.
 
 Pre-publish validation rule:
 1. Always validate package consumption from a local feed (`artifacts/nuget-local`) before pushing to public/private remote feeds.
@@ -94,12 +98,18 @@ Minimal API profile:
 ## 4.2 NuGet
 
 Managed packages:
-1. `ActiveSync.Host.Abstractions`
-2. `ActiveSync.Host.Composition`
+1. `NodalMerge.Host.Abstractions` (primary wrapper package identity)
+2. `NodalMerge.Host.Composition` (primary wrapper package identity)
 
 Native packages:
-1. `ActiveSync.DotNetHost.Native.win-x64`
-2. `ActiveSync.DotNetHost.Native.linux-x64`
+1. `NodalMerge.DotNetHost.Native.win-x64` (primary wrapper package identity)
+2. `NodalMerge.DotNetHost.Native.linux-x64` (primary wrapper package identity)
+
+Compatibility package IDs:
+1. `ActiveSync.Host.Abstractions`
+2. `ActiveSync.Host.Composition`
+3. `ActiveSync.DotNetHost.Native.win-x64`
+4. `ActiveSync.DotNetHost.Native.linux-x64`
 
 Notes:
 1. Keep package IDs stable and aligned with existing CI workflow.
@@ -111,9 +121,16 @@ Crates to publish:
 1. `activesync-core`
 2. `activesync-host-core`
 3. `activesync-host-ffi`
-4. `nodalmerge-core` (wrapper)
-5. `nodalmerge-host-core` (wrapper)
-6. `nodalmerge-host-ffi` (wrapper)
+4. `activesync-host-axum`
+5. `activesync-s3-blobs`
+6. `nodalmerge-core` (wrapper)
+7. `nodalmerge-gc` (wrapper)
+8. `nodalmerge-host-core` (wrapper)
+9. `nodalmerge-host-axum` (wrapper)
+10. `nodalmerge-host-ffi` (wrapper)
+11. `nodalmerge-server` (wrapper)
+12. `nodalmerge-jwt-bridge` (wrapper)
+13. `nodalmerge-s3-blobs` (wrapper)
 
 Notes:
 1. Remove path-only assumptions before publish.

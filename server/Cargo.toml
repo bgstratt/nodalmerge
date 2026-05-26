@@ -3,7 +3,7 @@ name = "nodalmerge-server"
 version = "0.1.0"
 edition = "2021"
 autobins = false
-description = "ActiveSync reflector server: authenticates peers and broadcasts state packs"
+description = "NodalMerge reflector server: authenticates peers and broadcasts state packs"
 
 [[bin]]
 name = "nodalmerge-server"

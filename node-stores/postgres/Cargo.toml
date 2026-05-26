@@ -3,7 +3,7 @@ name = "nodalmerge-postgres-store"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "PostgreSQL NodePersistence adapter for ActiveSync (F7)"
+description = "PostgreSQL NodePersistence adapter for NodalMerge (F7)"
 
 [dependencies]
 nodalmerge-core   = { path = "../../core" }

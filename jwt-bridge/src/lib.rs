@@ -2,12 +2,12 @@
 //!
 //! Trusted-issuer JWT → `RoomToken` minting. Plug your app's existing auth
 //! provider (Clerk, Supabase, Auth0, a homegrown issuer — anything that signs
-//! JWTs) in front of ActiveSync without teaching ActiveSync about identity.
+//! JWTs) in front of NodalMerge without teaching NodalMerge about identity.
 //!
 //! ## Flow
 //!
 //! 1. Your auth server issues a JWT whose claims embed the room id, the
-//!    connecting peer's Ed25519 public key (hex), the ActiveSync token
+//!    connecting peer's Ed25519 public key (hex), the NodalMerge token
 //!    expiry, and optional capability strings. It signs the JWT with a secret
 //!    (HS256) or private key (RS256 / ES256) *you* own.
 //! 2. A small service (usually colocated with `nodalmerge-server`) receives
@@ -138,7 +138,7 @@ pub struct BridgeConfig {
 /// the `jsonwebtoken` crate itself based on the configured `Validation`.
 #[derive(Debug, Deserialize)]
 struct BridgeClaims {
-    /// Required. The ActiveSync room id.
+    /// Required. The NodalMerge room id.
     room: String,
     /// Required. The connecting peer's Ed25519 pubkey, 64 hex chars.
     pubkey: String,
@@ -155,7 +155,7 @@ struct BridgeClaims {
 
 // ─── Minting ───────────────────────────────────────────────────────────────
 
-/// Verify a JWT and mint an ActiveSync `RoomToken`.
+/// Verify a JWT and mint a NodalMerge `RoomToken`.
 ///
 /// On success, the returned `RoomToken` can be put directly into a `hello`
 /// message by the client (serialize fields to the expected JSON shape —

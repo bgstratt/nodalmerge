@@ -30,7 +30,7 @@
 //! use nodalmerge_s3_blobs::{S3BlobStore, S3BlobStoreConfig, S3Auth};
 //! use std::sync::Arc;
 //!
-//! let nodes = DirPersistence::open("/var/lib/activesync")?;
+//! let nodes = DirPersistence::open("/var/lib/nodalmerge")?;
 //! let blobs = S3BlobStore::new(S3BlobStoreConfig {
 //!     bucket: "my-app-blobs".into(),
 //!     region: "us-east-1".into(),

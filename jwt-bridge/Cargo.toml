@@ -2,7 +2,7 @@
 name = "nodalmerge-jwt-bridge"
 version = "0.1.0"
 edition = "2021"
-description = "Trusted-issuer JWT → ActiveSync RoomToken minting bridge"
+description = "Trusted-issuer JWT → NodalMerge RoomToken minting bridge"
 
 [dependencies]
 nodalmerge-core = { path = "../core" }

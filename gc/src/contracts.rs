@@ -4,7 +4,7 @@ use std::time::SystemTime;
 use crate::errors::GcResult;
 use crate::types::{AssetRecord, GcRunDelta, GcRunFinish, GcRunStart};
 
-/// Authoritative mark input from ActiveSync state.
+/// Authoritative mark input from NodalMerge state.
 pub trait LiveHashSource: Send + Sync {
     fn collect_live_hashes(&self) -> GcResult<HashSet<String>>;
 }

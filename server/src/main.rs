@@ -159,7 +159,7 @@ async fn main() {
 
     let addr = std::env::var("AS_BIND_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:7878".to_string());
-    tracing::info!(%addr, "ActiveSync server listening on ws://{addr}/ws/<room>");
+    tracing::info!(%addr, "NodalMerge server listening on ws://{addr}/ws/<room>");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }

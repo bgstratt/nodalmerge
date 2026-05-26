@@ -2,7 +2,7 @@
 name = "nodalmerge-host-axum"
 version = "0.1.0"
 edition = "2021"
-description = "Paper-thin Axum adapter for embedding ActiveSync host runtime"
+description = "Paper-thin Axum adapter for embedding NodalMerge host runtime"
 readme = "README.md"
 keywords = ["crdt", "sync", "axum", "host"]
 categories = ["network-programming", "web-programming::http-server"]

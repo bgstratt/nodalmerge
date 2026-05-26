@@ -2,7 +2,7 @@
 name = "nodalmerge-core"
 version = "0.1.0"
 edition = "2021"
-description = "Core CRDT sync engine for ActiveSync"
+description = "Core CRDT sync engine for NodalMerge"
 readme = "README.md"
 keywords = ["crdt", "sync", "replication", "offline"]
 categories = ["data-structures", "network-programming"]

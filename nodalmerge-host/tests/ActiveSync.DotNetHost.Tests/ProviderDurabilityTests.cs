@@ -10,7 +10,7 @@ public sealed class ProviderDurabilityTests
     [Fact]
     public async Task SqliteFile_profile_supports_multi_device_blob_propagation_and_retrieval()
     {
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-provider-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-provider-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var blobRoot = Path.Combine(tempRoot, "blobs");
 
@@ -68,7 +68,7 @@ public sealed class ProviderDurabilityTests
     [Fact]
     public async Task SqliteFile_profile_preserves_blob_retrieval_across_multiple_restart_reconnect_cycles()
     {
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-provider-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-provider-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var blobRoot = Path.Combine(tempRoot, "blobs");
 
@@ -107,7 +107,7 @@ public sealed class ProviderDurabilityTests
     [Fact]
     public async Task File_blob_provider_missing_result_is_deterministic_across_restarts()
     {
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-provider-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-provider-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var blobRoot = Path.Combine(tempRoot, "blobs");
 
@@ -149,7 +149,7 @@ public sealed class ProviderDurabilityTests
     [Fact]
     public async Task SqliteFile_profile_persists_nodes_and_blobs_across_service_restarts()
     {
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-provider-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-provider-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var blobRoot = Path.Combine(tempRoot, "blobs");
 
@@ -199,7 +199,7 @@ public sealed class ProviderDurabilityTests
     [Fact]
     public async Task SqliteFile_profile_persists_compaction_snapshot_metadata_across_service_restarts()
     {
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-provider-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-provider-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var blobRoot = Path.Combine(tempRoot, "blobs");
 

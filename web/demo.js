@@ -40,6 +40,16 @@ const IDB_NAME    = 'activesync-v7';
 const IDB_VERSION = 1;
 const COLLAB_KEY  = 'collab/doc';
 const LIST_KEY    = 'demo/list';
+const STORAGE_KEYS = {
+  serverUrl: 'nodalmerge-server-url',
+  serverUrlLegacy: 'activesync-server-url',
+  roomId: 'nodalmerge-room-id',
+  roomIdLegacy: 'activesync-room-id',
+  identity: 'nodalmerge-identity-v3',
+  identityLegacy: 'activesync-identity-v3',
+  roomSeed: 'nodalmerge-room-seed',
+  roomSeedLegacy: 'activesync-room-seed'
+};
 let uiRefreshTimer = null;
 const ENV_SERVER_URL = (globalThis.ACTIVESYNC_CONFIG && globalThis.ACTIVESYNC_CONFIG.serverUrl)
   ? String(globalThis.ACTIVESYNC_CONFIG.serverUrl).trim()
@@ -58,10 +68,10 @@ function scheduleUiRefresh() {
 }
 
 function resolveServerUrl() {
-  const storageKey = 'activesync-server-url';
   const params = new URLSearchParams(window.location.search);
   const fromQuery = params.get('server') || params.get('serverUrl') || params.get('ws');
-  const fromSession = sessionStorage.getItem(storageKey);
+  const fromSession = sessionStorage.getItem(STORAGE_KEYS.serverUrl)
+    || sessionStorage.getItem(STORAGE_KEYS.serverUrlLegacy);
   const candidate = (fromQuery || fromSession || ENV_SERVER_URL || DEFAULT_SERVER_URL).trim();
 
   try {
@@ -72,11 +82,11 @@ function resolveServerUrl() {
       throw new Error(`unsupported protocol: ${parsed.protocol}`);
     }
     const normalized = parsed.toString().replace(/\/$/, '');
-    sessionStorage.setItem(storageKey, normalized);
+    sessionStorage.setItem(STORAGE_KEYS.serverUrl, normalized);
     return normalized;
   } catch (e) {
     console.warn('[boot] invalid server url override, falling back to default:', candidate, e);
-    sessionStorage.setItem(storageKey, DEFAULT_SERVER_URL);
+    sessionStorage.setItem(STORAGE_KEYS.serverUrl, DEFAULT_SERVER_URL);
     return DEFAULT_SERVER_URL;
   }
 }
@@ -90,12 +100,12 @@ function normalizeRoomId(raw) {
 }
 
 function resolveRoomId() {
-  const storageKey = 'activesync-room-id';
   const params = new URLSearchParams(window.location.search);
   const fromQuery = params.get('room');
-  const fromSession = sessionStorage.getItem(storageKey);
+  const fromSession = sessionStorage.getItem(STORAGE_KEYS.roomId)
+    || sessionStorage.getItem(STORAGE_KEYS.roomIdLegacy);
   const normalized = normalizeRoomId(fromQuery || fromSession || DEFAULT_ROOM_ID);
-  sessionStorage.setItem(storageKey, normalized);
+  sessionStorage.setItem(STORAGE_KEYS.roomId, normalized);
   return normalized;
 }
 
@@ -106,13 +116,17 @@ const ROOM_ID = resolveRoomId();
 // Identity — Ed25519 seed in sessionStorage (survives refresh, not close)
 // ---------------------------------------------------------------------------
 function getOrCreateIdentity() {
-  const stored = sessionStorage.getItem('activesync-identity-v3');
-  if (stored) return JSON.parse(stored);
+  const stored = sessionStorage.getItem(STORAGE_KEYS.identity)
+    || sessionStorage.getItem(STORAGE_KEYS.identityLegacy);
+  if (stored) {
+    sessionStorage.setItem(STORAGE_KEYS.identity, stored);
+    return JSON.parse(stored);
+  }
   const seed  = crypto.getRandomValues(new Uint8Array(32));
   const color = COLORS[Math.floor(Math.random() * COLORS.length)];
   const id    = Array.from(seed.slice(0, 4)).map(b => b.toString(16).padStart(2,'0')).join('');
   const identity = { seed: Array.from(seed), id, color };
-  sessionStorage.setItem('activesync-identity-v3', JSON.stringify(identity));
+  sessionStorage.setItem(STORAGE_KEYS.identity, JSON.stringify(identity));
   return identity;
 }
 
@@ -123,14 +137,20 @@ const authorSeed = new Uint8Array(seedArr);
 // Room-auth seed (C3) — sessionStorage; null = open room
 // ---------------------------------------------------------------------------
 function loadRoomSeed() {
-  const stored = sessionStorage.getItem('activesync-room-seed');
+  const stored = sessionStorage.getItem(STORAGE_KEYS.roomSeed)
+    || sessionStorage.getItem(STORAGE_KEYS.roomSeedLegacy);
   if (!stored) return null;
-  try { return new Uint8Array(JSON.parse(stored)); } catch (_) { return null; }
+  try {
+    sessionStorage.setItem(STORAGE_KEYS.roomSeed, stored);
+    return new Uint8Array(JSON.parse(stored));
+  } catch (_) {
+    return null;
+  }
 }
 
 function saveRoomSeed(seed32) {
-  if (seed32) sessionStorage.setItem('activesync-room-seed', JSON.stringify(Array.from(seed32)));
-  else sessionStorage.removeItem('activesync-room-seed');
+  if (seed32) sessionStorage.setItem(STORAGE_KEYS.roomSeed, JSON.stringify(Array.from(seed32)));
+  else sessionStorage.removeItem(STORAGE_KEYS.roomSeed);
 }
 
 let roomSeed = loadRoomSeed();
@@ -877,13 +897,13 @@ window.setRoomId = function () {
   const roomInp = document.getElementById('room-id-in');
   if (!roomInp) return;
   const room = normalizeRoomId(roomInp.value);
-  sessionStorage.setItem('activesync-room-id', room);
+  sessionStorage.setItem(STORAGE_KEYS.roomId, room);
   logEvent('sync', `room set to "${room}" — reloading…`);
   setTimeout(() => window.location.reload(), 50);
 };
 
 window.clearRoomId = function () {
-  sessionStorage.removeItem('activesync-room-id');
+  sessionStorage.removeItem(STORAGE_KEYS.roomId);
   logEvent('sync', `room reset to "${DEFAULT_ROOM_ID}" — reloading…`);
   setTimeout(() => window.location.reload(), 50);
 };

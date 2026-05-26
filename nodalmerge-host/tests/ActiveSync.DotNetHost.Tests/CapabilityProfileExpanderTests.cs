@@ -481,7 +481,7 @@ public sealed class CapabilityProfileExpanderTests
 
     private static TempProfileFile TempProfile(string json)
     {
-        var path = Path.Combine(Path.GetTempPath(), $"activesync-capprof-{Guid.NewGuid():N}.json");
+        var path = Path.Combine(Path.GetTempPath(), $"nodalmerge-capprof-{Guid.NewGuid():N}.json");
         File.WriteAllText(path, json);
         return new TempProfileFile(path);
     }

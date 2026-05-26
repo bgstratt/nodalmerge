@@ -19,7 +19,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     [Fact]
     public async Task Host_restart_preserves_nodes_and_blobs_in_sqlite_file_profile()
     {
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var blobRoot = Path.Combine(tempRoot, "blobs");
 
@@ -62,7 +62,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     public async Task Restart_preserves_server_pack_root_hash_via_snapshot_hydration_path()
     {
         var roomId = "room-root";
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
 
@@ -124,7 +124,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     public async Task Pruning_enabled_compaction_preserves_convergence_after_restart()
     {
         var roomId = "room-prune";
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
 
@@ -189,7 +189,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     public async Task Restart_preserves_entity_reconciliation_counts_for_board_button_position_text_list_namespaces()
     {
         var roomId = "room-reconcile-counts";
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
 
@@ -258,7 +258,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     public async Task Warm_restart_cycles_preserve_root_hash_and_entity_counts()
     {
         var roomId = "room-warm-restart";
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
 
@@ -326,7 +326,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     public async Task Restart_during_traffic_preserves_final_convergence()
     {
         var roomId = "room-restart-during-traffic";
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
 
@@ -400,7 +400,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     public async Task Periodic_restart_soak_cycles_do_not_drift_root_or_reconciliation_counts()
     {
         var roomId = "room-restart-soak";
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
 
@@ -479,7 +479,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     public async Task Quiet_steady_state_restart_cycles_do_not_add_churn_or_state_drift()
     {
         var roomId = "room-quiet-steady-state";
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
 
@@ -539,7 +539,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     public async Task Delete_remains_terminal_after_restart_and_hydration()
     {
         var roomId = "room-delete-restart";
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
 
@@ -599,7 +599,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     public async Task Delete_state_survives_pruning_compaction_without_resurrection()
     {
         var roomId = "room-delete-prune";
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
 
@@ -664,7 +664,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     public async Task Offline_delete_reconnect_converges_without_resurrection()
     {
         var roomId = "room-offline-delete";
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
 
@@ -744,7 +744,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
     {
         var roomA = "room-multi-a";
         var roomB = "room-multi-b";
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-host-restart-durability", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-host-restart-durability", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
 

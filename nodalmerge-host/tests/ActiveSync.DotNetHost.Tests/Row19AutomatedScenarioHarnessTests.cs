@@ -18,7 +18,7 @@ public sealed class Row19AutomatedScenarioHarnessTests
         var trace = CreateTrace("r19-98-save-delete-restart", seed: 9801);
         var roomId = $"room-{trace.Seed}";
 
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-row19-98", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-row19-98", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
@@ -81,7 +81,7 @@ public sealed class Row19AutomatedScenarioHarnessTests
         var trace = CreateTrace("r19-98-offline-reconnect", seed: 9802);
         var roomId = $"room-{trace.Seed}";
 
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-row19-98", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-row19-98", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
@@ -153,7 +153,7 @@ public sealed class Row19AutomatedScenarioHarnessTests
         var trace = CreateTrace("r19-98-layout-integrity", seed: 9803);
         var roomId = $"room-{trace.Seed}";
 
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-row19-98", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-row19-98", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
@@ -264,7 +264,7 @@ public sealed class Row19AutomatedScenarioHarnessTests
     public async Task R19_98_asset_propagation_and_retrieval_survives_restart()
     {
         var trace = CreateTrace("r19-98-asset-propagation", seed: 9804);
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-row19-98", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-row19-98", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var blobRoot = Path.Combine(tempRoot, "blobs");
         Directory.CreateDirectory(tempRoot);
@@ -302,7 +302,7 @@ public sealed class Row19AutomatedScenarioHarnessTests
         var trace = CreateTrace("r19-98-duplicate-churn", seed: 9805);
         var roomId = $"room-{trace.Seed}";
 
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-row19-98", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-row19-98", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);
@@ -346,7 +346,7 @@ public sealed class Row19AutomatedScenarioHarnessTests
         const int replayCount = 10_000;
         const int maxPersistedNodeBudget = 2;
 
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-row19-98", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-row19-98", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var configuration = BuildSqliteNodeOnlyConfiguration(dbPath);

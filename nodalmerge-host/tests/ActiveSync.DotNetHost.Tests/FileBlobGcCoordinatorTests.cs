@@ -7,7 +7,7 @@ public sealed class FileBlobGcCoordinatorTests
     [Fact]
     public async Task DryRun_reports_mark_and_delete_candidates_without_mutating_files()
     {
-        var root = Path.Combine(Path.GetTempPath(), "activesync-file-gc-tests", Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(Path.GetTempPath(), "nodalmerge-file-gc-tests", Guid.NewGuid().ToString("N"));
         var liveHash = "sha256:live";
         var orphanHash = "sha256:orphan";
         var staleHash = "sha256:stale";
@@ -48,7 +48,7 @@ public sealed class FileBlobGcCoordinatorTests
     [Fact]
     public async Task LiveRun_applies_mark_then_delete_after_grace_window()
     {
-        var root = Path.Combine(Path.GetTempPath(), "activesync-file-gc-tests", Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(Path.GetTempPath(), "nodalmerge-file-gc-tests", Guid.NewGuid().ToString("N"));
         var orphanHash = "sha256:phase2";
         await SeedBlobAsync(root, orphanHash, new byte[] { 10, 11, 12 });
 

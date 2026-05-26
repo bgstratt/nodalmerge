@@ -23,7 +23,7 @@ public sealed class HostFfiClient : IDisposable
         {
             throw new InvalidOperationException(
                 "Failed to load native host FFI library. Build host-ffi first " +
-                "(for example: `cargo build -p activesync-host-ffi`) or set " +
+                "(for example: `cargo build -p nodalmerge-host-ffi`) or set " +
                 "NODALMERGE_HOST_FFI_DLL (or legacy ACTIVESYNC_HOST_FFI_DLL) " +
                 "to the full path of the compiled library.",
                 ex

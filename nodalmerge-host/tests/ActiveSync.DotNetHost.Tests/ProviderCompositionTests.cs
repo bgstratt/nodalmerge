@@ -118,7 +118,7 @@ public sealed class ProviderCompositionTests
     [Fact]
     public void AddActiveSyncHostProviders_SelectsSqliteAndFileProviders_WhenConfigured()
     {
-        var tempRoot = Path.Combine(Path.GetTempPath(), "activesync-provider-composition", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-provider-composition", Guid.NewGuid().ToString("N"));
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var blobRoot = Path.Combine(tempRoot, "blobs");
 
@@ -177,7 +177,7 @@ public sealed class ProviderCompositionTests
                     ["NodalMerge:Providers:NodeStorage"] = "Mongo",
                     ["NodalMerge:Providers:BlobStorage"] = "S3Delegated",
                     ["NodalMerge:Storage:Mongo:ConnectionString"] = "mongodb://localhost:27017",
-                    ["NodalMerge:Storage:Mongo:DatabaseName"] = "activesync-test",
+                    ["NodalMerge:Storage:Mongo:DatabaseName"] = "nodalmerge-test",
                     ["NodalMerge:Storage:S3Delegated:BaseUrl"] = "https://delegate.example"
                 }
             )

@@ -228,10 +228,10 @@ jobs:
       - name: Restore solution
         run: dotnet restore nodalmerge-host/NodalMerge.DotNetHost.slnx
 
-      - name: Pack legacy ActiveSync.Host.Abstractions (compat)
+      - name: Pack ActiveSync.Host.Abstractions (compat package line)
         run: dotnet pack nodalmerge-host/src/ActiveSync.Host.Abstractions/ActiveSync.Host.Abstractions.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
 
-      - name: Pack legacy ActiveSync.Host.Composition (compat)
+      - name: Pack ActiveSync.Host.Composition (compat package line)
         run: dotnet pack nodalmerge-host/src/ActiveSync.Host.Composition/ActiveSync.Host.Composition.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
 
       - name: Pack NodalMerge.Host.Abstractions
@@ -272,10 +272,10 @@ jobs:
             echo "value=0.1.0-preview.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build host ffi release library (legacy crate id)
+      - name: Build host ffi release library
         run: cargo build -p nodalmerge-host-ffi --release
 
-      - name: Pack legacy ActiveSync.DotNetHost.Native.linux-x64 (compat)
+      - name: Pack ActiveSync.DotNetHost.Native.linux-x64 (compat package line)
         run: dotnet pack nodalmerge-host/src/ActiveSync.DotNetHost.Native.linux-x64/ActiveSync.DotNetHost.Native.linux-x64.csproj -c Release -o "$NUGET_OUTPUT_DIR" /p:Version=${{ steps.version.outputs.value }}
 
       - name: Pack NodalMerge.DotNetHost.Native.linux-x64
@@ -314,10 +314,10 @@ jobs:
             "value=0.1.0-preview.${{ github.run_number }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           }
 
-      - name: Build host ffi release library (legacy crate id)
+      - name: Build host ffi release library
         run: cargo build -p nodalmerge-host-ffi --release
 
-      - name: Pack legacy ActiveSync.DotNetHost.Native.win-x64 (compat)
+      - name: Pack ActiveSync.DotNetHost.Native.win-x64 (compat package line)
         run: dotnet pack nodalmerge-host/src/ActiveSync.DotNetHost.Native.win-x64/ActiveSync.DotNetHost.Native.win-x64.csproj -c Release -o "$env:NUGET_OUTPUT_DIR" /p:Version=${{ steps.version.outputs.value }}
 
       - name: Pack NodalMerge.DotNetHost.Native.win-x64

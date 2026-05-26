@@ -11,7 +11,6 @@ try {
 
     function Resolve-DotnetHostProjectPath {
         $candidates = @(
-            "nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj",
             "nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj"
         )
 
@@ -21,7 +20,7 @@ try {
             }
         }
 
-        throw "Unable to locate DotNet host project. Checked NodalMerge path first, then legacy ActiveSync compatibility path."
+        throw "Unable to locate DotNet host project at nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj."
     }
 
     Write-Host "Starting Docker container..."

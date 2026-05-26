@@ -37,7 +37,6 @@ function Resolve-DotnetPath {
 
 function Resolve-DotnetHostProjectPath {
     $candidates = @(
-        "nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj",
         "nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj"
     )
 
@@ -47,7 +46,7 @@ function Resolve-DotnetHostProjectPath {
         }
     }
 
-    throw "Unable to locate DotNet host project. Checked NodalMerge path first, then legacy ActiveSync compatibility path."
+    throw "Unable to locate DotNet host project at nodalmerge-host/src/ActiveSync.DotNetHost/ActiveSync.DotNetHost.csproj."
 }
 
 function Resolve-FfiDll {

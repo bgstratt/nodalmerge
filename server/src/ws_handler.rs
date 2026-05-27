@@ -32,7 +32,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde_json::Value;
-use nodalmerge_core::{BlobStore, MerkleSearchTree, Policy, PolicyDefault, PolicyRule,
+use nodalmerge_core::{ArchiveWsResponse, BlobStore, MerkleSearchTree, Policy, PolicyDefault, PolicyRule,
                       RoomToken, SyncCapabilities, SyncNode, pack_nodes, unpack_nodes,
                       compact, rebuild_from_snapshot, pack_snapshot_pack, verify_snapshot};
 use nodalmerge_host_core::protocol::{
@@ -71,6 +71,7 @@ use nodalmerge_host_core::protocol::{
     ClientIbfInput,
     CloseFrameSpec,
     SyncDiffInput,
+    serialize_archive_ws_response,
 };
 use nodalmerge_host_core::engine::{
     assemble_welcome_catchup_package,
@@ -171,6 +172,12 @@ use crate::adapter_context::{
     ClientDispatchBuild,
     ClientDispatchCommand,
     build_client_dispatch_context,
+};
+use crate::archive_adapter::{
+    process_archive_describe,
+    process_archive_export,
+    process_archive_import,
+    process_archive_validate,
 };
 use crate::capability_profile::{
     CapabilityProfile,
@@ -1352,6 +1359,72 @@ async fn handle_client_message(
             if should_terminate_after_stop_tick_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
         }
 
+        ClientDispatchCommand::ArchiveDescribe => {
+            if let Err(rejection) =
+                evaluate_control_plane_authorization(is_server_peer, session_caps, "archive.describe")
+            {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+
+            match process_archive_describe(room, room_id, msg).await {
+                Ok(response) => {
+                    if !emit_archive_response(sink, room_id, &response).await {
+                        return false;
+                    }
+                }
+                Err(rejected) => {
+                    send_error(
+                        sink,
+                        &format!("{}: {}", rejected.reason_class.as_str(), rejected.reason_message),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        ClientDispatchCommand::ArchiveValidate => {
+            if let Err(rejection) =
+                evaluate_control_plane_authorization(is_server_peer, session_caps, "archive.validate")
+            {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+
+            let response = process_archive_validate(room, room_id, msg).await;
+            if !emit_archive_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
+        ClientDispatchCommand::ArchiveImport => {
+            if let Err(rejection) =
+                evaluate_control_plane_authorization(is_server_peer, session_caps, "archive.import")
+            {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+
+            let response = process_archive_import(room, room_id, msg).await;
+            if !emit_archive_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
+        ClientDispatchCommand::ArchiveExport => {
+            if let Err(rejection) =
+                evaluate_control_plane_authorization(is_server_peer, session_caps, "archive.export")
+            {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+
+            let response = process_archive_export(room, room_id, msg, server_key.as_ref()).await;
+            if !emit_archive_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
         // D3: Compact the room graph into a snapshot --------------------------
         // Wire format (client → server):
         //   { type: "compact-room" }
@@ -1473,6 +1546,20 @@ async fn send_error(sink: &mut SplitSink<WebSocket, Message>, msg: &str) {
     let _ = sink.send(Message::Text(j.into())).await;
 }
 
+async fn emit_archive_response(
+    sink: &mut SplitSink<WebSocket, Message>,
+    room_id: &str,
+    response: &ArchiveWsResponse,
+) -> bool {
+    match serialize_archive_ws_response(response) {
+        Ok(payload) => emit_single_send(sink, room_id, payload).await,
+        Err(_) => {
+            send_error(sink, "archive adapter response serialization failed").await;
+            true
+        }
+    }
+}
+
 #[inline]
 fn is_control_plane_allowed(
     is_server_peer: bool,
@@ -1488,6 +1575,8 @@ pub fn required_capability_for_control_plane_command(command: &str) -> Option<&'
         "set-policy" => Some("policy.admin"),
         "set-room-key" => Some("room.admin"),
         "start-tick" | "stop-tick" => Some("tick.admin"),
+        "archive.describe" => Some("archive.read"),
+        "archive.validate" | "archive.import" | "archive.export" => Some("archive.admin"),
         _ => None,
     }
 }
@@ -2075,6 +2164,48 @@ mod control_plane_auth_tests {
         let mut caps = HashSet::new();
         caps.insert("policy.admin".to_string());
         assert!(!is_control_plane_allowed(false, &caps, "room.admin"));
+    }
+
+    #[test]
+    fn archive_control_plane_capability_mapping_is_deterministic() {
+        assert_eq!(
+            required_capability_for_control_plane_command("archive.describe"),
+            Some("archive.read")
+        );
+        assert_eq!(
+            required_capability_for_control_plane_command("archive.validate"),
+            Some("archive.admin")
+        );
+        assert_eq!(
+            required_capability_for_control_plane_command("archive.import"),
+            Some("archive.admin")
+        );
+        assert_eq!(
+            required_capability_for_control_plane_command("archive.export"),
+            Some("archive.admin")
+        );
+    }
+
+    #[test]
+    fn archive_validate_forbidden_message_uses_required_capability() {
+        let caps = HashSet::new();
+        let rejection = evaluate_control_plane_authorization(false, &caps, "archive.validate")
+            .expect_err("missing archive.admin capability should reject");
+        assert_eq!(
+            rejection,
+            "reject.control_plane_forbidden: command=archive.validate requires=archive.admin"
+        );
+    }
+
+    #[test]
+    fn archive_export_forbidden_message_uses_required_capability() {
+        let caps = HashSet::new();
+        let rejection = evaluate_control_plane_authorization(false, &caps, "archive.export")
+            .expect_err("missing archive.admin capability should reject");
+        assert_eq!(
+            rejection,
+            "reject.control_plane_forbidden: command=archive.export requires=archive.admin"
+        );
     }
 }
 

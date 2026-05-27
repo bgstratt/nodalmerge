@@ -1,0 +1,12 @@
+{
+  "name": "archive_runtime_export_file_ref",
+  "room_id": "parity-archive-export-room",
+  "scenario": "archive_export_roundtrip_file",
+  "expected_sequence": [
+    "welcome",
+    "archive.export.result",
+    "archive.import.completed"
+  ],
+  "expected_pack_count": 0,
+  "notes": "Golden runtime parity for archive.export command/event path using generated file manifest and roundtrip import."
+}

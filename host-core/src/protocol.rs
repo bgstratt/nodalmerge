@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use nodalmerge_core::{Ibf, MerkleSearchTree, NodeId, SyncCapabilities};
+use nodalmerge_core::{ArchiveWsResponse, Ibf, MerkleSearchTree, NodeId, SyncCapabilities};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -360,6 +360,12 @@ pub fn assemble_error_envelope(msg: String) -> ErrorEnvelope {
     }
 }
 
+pub fn serialize_archive_ws_response(
+    response: &ArchiveWsResponse,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(response)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicySetEnvelope {
     #[serde(rename = "type")]
@@ -566,7 +572,14 @@ pub fn decide_sync_diff(input: SyncDiffInput) -> (Vec<NodeId>, Vec<NodeId>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodalmerge_core::Hash;
+    use nodalmerge_core::{
+        ArchiveCheckpoint,
+        ArchiveExported,
+        ArchiveImported,
+        ArchiveReasonClass,
+        ArchiveRejected,
+        Hash,
+    };
 
     #[test]
     fn negotiate_caps_intersection() {
@@ -753,6 +766,71 @@ mod tests {
         assert_eq!(p.from, "peer-abc");
         assert_eq!(p.nodes, "nodes-b64");
         assert_eq!(p.root, "root-hex");
+    }
+
+    #[test]
+    fn serialize_archive_import_completed_envelope_preserves_wire_type() {
+        let response = ArchiveWsResponse::ImportCompleted(ArchiveImported {
+            room: "room-a".to_string(),
+            archive_ref: "s3://bucket/room-a.nmar".to_string(),
+            canonical_hash: "aa".repeat(32),
+            checkpoint: ArchiveCheckpoint {
+                frontier: vec!["seq:0".to_string()],
+                canonical_hash: "aa".repeat(32),
+            },
+            imported_nodes: 10,
+            imported_blobs: 2,
+        });
+
+        let json = serialize_archive_ws_response(&response)
+            .expect("archive response should serialize");
+        assert!(json.contains("\"type\":\"archive.import.completed\""));
+        assert!(json.contains("\"imported_nodes\":10"));
+    }
+
+    #[test]
+    fn serialize_archive_validate_rejected_envelope_preserves_reason_class() {
+        let response = ArchiveWsResponse::ValidateRejected(ArchiveRejected {
+            room: "room-a".to_string(),
+            archive_ref: "s3://bucket/invalid-manifest.nmar".to_string(),
+            reason_class: ArchiveReasonClass::ManifestInvalid,
+            reason_message: "archive manifest failed schema validation".to_string(),
+        });
+
+        let json = serialize_archive_ws_response(&response)
+            .expect("archive response should serialize");
+        assert!(json.contains("\"type\":\"archive.validate.rejected\""));
+        assert!(json.contains("reject.archive_manifest_invalid"));
+    }
+
+    #[test]
+    fn serialize_archive_export_result_envelope_preserves_wire_type() {
+        let response = ArchiveWsResponse::ExportResult(ArchiveExported {
+            room: "room-a".to_string(),
+            source_room: "room-a-source".to_string(),
+            archive_ref: "file:///tmp/archive.json".to_string(),
+            manifest_id: "m.room-a-source.aaaaaaaaaaaa".to_string(),
+            checkpoint: ArchiveCheckpoint {
+                frontier: vec!["seq:2".to_string()],
+                canonical_hash: "aa".repeat(32),
+            },
+            payload_digest_set: nodalmerge_core::ArchivePayloadDigestSet {
+                nodes: "sha256:nodes".to_string(),
+                blobs: "sha256:blobs".to_string(),
+            },
+            compatibility_window: nodalmerge_core::ArchiveCompatibilityWindow {
+                min_supported: "1".to_string(),
+                max_supported: "2".to_string(),
+            },
+            payload_digest_policy: "strict_sha256_v1".to_string(),
+            policy_timeline_hash: "bb".repeat(32),
+            policy_timeline_cutover_lamport: 0,
+        });
+
+        let json = serialize_archive_ws_response(&response)
+            .expect("archive response should serialize");
+        assert!(json.contains("\"type\":\"archive.export.result\""));
+        assert!(json.contains("\"manifest_id\":\"m.room-a-source.aaaaaaaaaaaa\""));
     }
 
     #[test]

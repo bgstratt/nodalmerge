@@ -1,7 +1,7 @@
 # NodalMerge Rename Inventory Checklist (Phase A)
 
 Owner: Platform + packaging + runtime
-Status: Active (Phase A started)
+Status: Active (Wave R runtime/testable rename complete; closeout in progress)
 Last updated: 2026-05-26
 
 Purpose: machine-checkable, owner-assigned inventory for ActiveSync -> NodalMerge rename execution.
@@ -44,12 +44,12 @@ Each row must have:
 | RNM-002 | Rust binaries | server/Cargo.toml, dev-server/Cargo.toml | ArtifactName | activesync-server | nodalmerge | Legacy command alias required | Wave R through next full release | Rust Runtime Stream | InProgress | Added `nodalmerge-server` + `nodalmerge-dev-server` bin aliases while retaining `activesync-*` binaries (2026-05-25) |
 | RNM-003 | FFI artifacts | host-ffi outputs, probes in scripts | ArtifactName | activesync_host_ffi.dll | nodalmerge_host_ffi.dll | Probe both names during transition | Wave R through next full release | Host Runtime Stream | InProgress | Benchmark and verify scripts now probe nodalmerge first with legacy fallback aliases where required (2026-05-25) |
 | RNM-004 | JS package names | sdk-js/package.json, bridge pkg metadata | ArtifactName | activesync-sdk-js | nodalmerge-sdk-js | Deprecated wrapper package retained | Wave R through next full release | JS SDK Stream | InProgress | Added npm wrapper packages `nodalmerge-bridge` and `nodalmerge-sdk-js` that re-export legacy activesync packages (2026-05-25) |
-| RNM-005 | JS bridge imports | web/sdk.js, web/sdk.d.ts, pkg paths | ScriptRef | ./pkg/activesync_bridge.js | ./pkg/nodalmerge_bridge.js | Compatibility import shim | Wave R through next full release | JS SDK Stream | InProgress | Bridge import paths identified in sdk.js and sdk.d.ts |
+| RNM-005 | JS bridge imports | web/sdk.js, web/sdk.d.ts, pkg paths | ScriptRef | ./pkg/activesync_bridge.js | ./pkg/nodalmerge_bridge.js | Compatibility import shim | Wave R through next full release | JS SDK Stream | Complete | Bridge import paths switched to `./pkg/nodalmerge_bridge.js` in `web/sdk.js` and `web/sdk.d.ts`; wasm artifacts rebuilt with nodalmerge naming (2026-05-26) |
 | RNM-006 | .NET project/package ids | nodalmerge-host/**/*.csproj | ArtifactName | ActiveSync.Host.Abstractions | NodalMerge.Host.Abstractions | Compatibility package id bridge | Wave R through next full release | DotNet Host Stream | InProgress | Added additive wrapper package IDs `NodalMerge.Host.*` and `NodalMerge.DotNetHost.Native.*` with CI/local-pack coverage while retaining legacy ActiveSync package IDs (2026-05-25) |
 | RNM-007 | .NET namespaces/types | nodalmerge-host/src/**/*.cs | NamespaceType | ActiveSync.* namespace | NodalMerge.* namespace | Namespace forwarding strategy | Wave R through next full release | DotNet Host Stream | InProgress | Namespace/usings migrated in host C# files on 2026-05-26; dotnet build and dotnet test succeeded |
 | RNM-008 | .NET config prefixes | nodalmerge-host config binding and docs | ConfigKey | ActiveSync:* | NodalMerge:* | Dual-key read with precedence to NodalMerge | Wave R through next full release | DotNet Host Stream | InProgress | NodalMerge primary + ActiveSync fallback implemented in option/config loaders; dotnet build and dotnet test succeeded on 2026-05-26 |
 | RNM-009 | Environment variables | scripts, runtime config, docs | EnvVar | ACTIVESYNC_* | NODALMERGE_* | Parse both during migration window | Wave R through next full release | Runtime + Ops Stream | InProgress | NODALMERGE_HOST_FFI_DLL primary with ACTIVESYNC_HOST_FFI_DLL fallback implemented in runtime resolver and verify script on 2026-05-26 |
-| RNM-010 | Metric names | server and host metrics | MetricName | activesync_* | nodalmerge_* | Dashboard migration strategy and compatibility | Wave R through next full release | Observability Stream | InProgress | Dotnet-host and Rust server now dual-emit NodalMerge primary + ActiveSync compatibility metric names (2026-05-26) |
+| RNM-010 | Metric names | server and host metrics | MetricName | activesync_* | nodalmerge_* | Dashboard migration strategy and compatibility | Wave R through next full release | Observability Stream | InProgress | Dotnet-host and Rust server metric migration is implemented; `authz-conformance-runner` manifest/bin mismatch is resolved by restoring `server/src/bin/authz_conformance_runner.rs`; canonical conformance parity artifact is pass (`docs/acceptance/authz-conformance-parity.json`, run `20260526-215618`); persistence timing lane is now green at 10k with canonical hash re-hydration equivalence in `server/tests/persistence.rs`; remaining work is dashboard migration/follow-up observability cleanup (2026-05-26) |
 | RNM-011 | Docker image and entrypoint | Dockerfile, deployment docs | ArtifactName | activesync-server | nodalmerge | Dual tags and entrypoint alias | Wave R through next full release | DevOps Stream | InProgress | Dockerfile now defaults ENTRYPOINT to nodalmerge-server with activesync-server compatibility alias via symlink (2026-05-26) |
 | RNM-012 | Container user/path defaults | Dockerfile, runtime defaults | PathDefault | user activesync | user nodalmerge | Legacy user/path compatibility where needed | Wave R through next full release | DevOps Stream | Complete | Docker runtime user switched to `nodalmerge` with `/data` ownership updated to `nodalmerge:nodalmerge`; legacy binary alias remains available (`activesync-server` -> `nodalmerge-server`) on 2026-05-25 |
 | RNM-013 | Data file defaults | sqlite/db and key path defaults | PathDefault | activesync.db, ~/.activesync | nodalmerge.db, ~/.nodalmerge | Legacy location autodetect + migration helper | Wave R through next full release | Runtime + Ops Stream | NotStarted | pending |
@@ -198,8 +198,13 @@ Execution evidence (2026-05-26):
 4. Updated Rust metrics endpoint integration assertions to require both nodalmerge_* and activesync_* baseline series.
 5. `dotnet build nodalmerge-host/NodalMerge.DotNetHost.slnx` succeeded.
 6. `dotnet test nodalmerge-host/NodalMerge.DotNetHost.slnx` succeeded.
-7. Restored missing server bin target file `server/src/bin/authz_conformance_runner.rs` so workspace bin resolution succeeds.
-8. `cargo test -p activesync-server --test metrics_endpoint` succeeded (3/3 passing).
+7. Restored `server/src/bin/authz_conformance_runner.rs` to satisfy `server/Cargo.toml` manifest bin target and unblock package/bin verification.
+8. Current follow-up: dedicated timing artifact is captured at `docs/acceptance/large-room-hydration-20260526.log`; establish a stable repeatable timing baseline for `large_room_hydrates_quickly` in a dedicated performance lane.
+9. Canonical conformance workflow pass captured on 2026-05-26:
+	- `docs/acceptance/authz-conformance-rust.json` (rust pass_count=21, fail_count=0)
+	- `docs/acceptance/authz-conformance-dotnet.trx` (dotnet total=16, failed=0)
+	- `docs/acceptance/authz-conformance-dotnet-records.json`
+	- `docs/acceptance/authz-conformance-parity.json` (`status=pass`, `mismatches=[]`, run_id=`20260526-215618`)
 
 ### RNM-011 Docker image and entrypoint migration
 

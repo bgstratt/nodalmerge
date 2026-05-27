@@ -1,4 +1,5 @@
 pub mod capabilities;
+pub mod archive_contracts;
 pub mod cas;
 pub mod compaction;
 pub mod conflicts;
@@ -34,6 +35,20 @@ pub use graph::TextProjectionResidencyPolicy;
 pub use graph::{LAMPORT_SLACK, WALL_SKEW_MAX_MS};
 pub use frontier::Frontier;
 pub use capabilities::SyncCapabilities;
+pub use archive_contracts::{
+    ArchiveCheckpoint,
+    ArchiveCompatibilityWindow,
+    ArchiveDescribed,
+    ArchiveExported,
+    ArchiveImported,
+    ArchivePayloadDigestSet,
+    ArchiveProvenance,
+    ArchiveReasonClass,
+    ArchiveRejected,
+    ArchiveValidated,
+    ArchiveWsRequest,
+    ArchiveWsResponse,
+};
 pub use ibf::Ibf;
 pub use mst::{MerkleSearchTree, MstNodeWire, MstSyncSim};
 pub use node::{SyncNode, NodeId, pack_nodes, unpack_nodes};

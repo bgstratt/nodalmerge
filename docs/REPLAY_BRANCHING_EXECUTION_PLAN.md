@@ -1,8 +1,8 @@
 # Replay Branching Execution Plan
 
-Status: Draft (proposed)
+Status: InProgress (Wave 0 vector baseline passing)
 Owner: Core + host runtime streams
-Last Updated: 2026-05-25
+Last Updated: 2026-05-26
 
 ## 1. Purpose
 
@@ -86,6 +86,24 @@ Exit criteria:
 1. Contract review approved by core and host maintainers.
 2. No unresolved ambiguity in fork-point semantics.
 
+Phase A decision log (for sign-off capture):
+1. Review date/time (UTC): 2026-05-26
+2. Attendees: core lead Brad; host runtime lead Brad; operator/docs representative Brad
+3. Decision status: Approved
+
+Proposed decisions to ratify:
+1. Fork-point policy: v1 accepts Frontier(Vec<NodeId>) and SnapshotHash(Hash) as the only fork selectors.
+2. Lineage policy: branching v1 is canonical-lane-only; speculative intent lane is excluded by default.
+3. Authorization policy: fork operations are room.admin-gated in v1 with branch.admin reserved for future split.
+4. Metadata durability policy: branch metadata must survive compaction and rebuild without semantic loss.
+
+Ambiguity closure table:
+| Topic | Proposed resolution | Status | Owner | Due |
+|---|---|---|---|---|
+| Frontier cut determinism | Same source DAG + same frontier yields byte-equivalent ancestor-closed payload ordering under deterministic planner rules. | Closed | Brad | 2026-05-26 |
+| Snapshot hash interpretation | SnapshotHash references canonical hash at selected cut; fork payload must replay to that hash. | Closed | Brad | 2026-05-26 |
+| Capability gate split timing | Keep room.admin for Wave 0/1 and revisit branch.admin after operator telemetry confirms need. | Closed | Brad | 2026-05-26 |
+
 ## Phase B: Deterministic History-Cut Planner
 
 Goal:
@@ -150,6 +168,17 @@ Required vectors:
 4. `BRANCH-FORK-004`: source writes after fork do not alter target lineage.
 5. `BRANCH-FORK-005`: compaction/rebuild preserves branch metadata.
 6. `BRANCH-FORK-006`: unauthorized fork request is rejected with canonical reason metadata.
+
+Wave 0 evidence baseline (2026-05-26):
+1. Owner matrix marks all BRANCH-FORK vectors Passing: docs/WAVE0_VECTOR_OWNER_MATRIX.md.
+2. Acceptance artifacts recorded:
+   - docs/acceptance/branch-fork-001.json
+   - docs/acceptance/branch-fork-002.json
+   - docs/acceptance/branch-fork-003.json
+   - docs/acceptance/branch-fork-004.json
+   - docs/acceptance/branch-fork-005.json
+   - docs/acceptance/branch-fork-006.json
+3. Remaining Phase A work is contract-approval capture and unresolved fork-point semantic closure.
 
 ## 9. Risks and Mitigations
 

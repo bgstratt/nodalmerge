@@ -1,7 +1,7 @@
 {
   "name": "nodalmerge-sdk-js",
   "version": "0.1.0",
-  "description": "Compatibility wrapper over activesync-sdk-js during rename migration",
+  "description": "NodalMerge SDK wrapper package with compatibility re-export during migration",
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
@@ -12,7 +12,7 @@
   ],
   "keywords": [
     "nodalmerge",
-    "activesync",
+    "legacy-compat",
     "crdt",
     "sync",
     "offline",

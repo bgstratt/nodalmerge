@@ -1,8 +1,8 @@
 # Query and Materialization Execution Plan
 
 Owner: Core/runtime
-Status: Planned
-Last updated: 2026-05-25
+Status: InProgress (Phase D kickoff; Phase C parity complete across host/core/server/ws)
+Last updated: 2026-05-27
 
 ## 1. Why this plan exists
 
@@ -70,6 +70,39 @@ Acceptance criteria:
 1. contract types compile in host-core without runtime-owned scheduler types
 2. parity matrix covers success + deny/error + invalidation paths
 
+Phase A kickoff record:
+1. Kickoff date (UTC): 2026-05-26
+2. Owner: Brad
+3. Current focus: command/event contract draft outline plus websocket parity mapping table skeleton
+4. Next checkpoint: submit initial contract draft and parity matrix headings for review
+
+Phase A working draft - host command/event contract (v1):
+
+| Operation | Host command (request) | Host event/response (result) | Determinism requirement | Notes |
+|---|---|---|---|---|
+| Register query spec | `RegisterQuerySpec { query_spec_id, version, descriptor, options }` | `QuerySpecRegistered { query_spec_id, version, canonical_hash, accepted }` or `QuerySpecRejected { query_spec_id, version, reason_class, reason_message }` | Same `(query_spec_id, version, descriptor)` input yields stable acceptance/rejection outcome at same policy+capability state. | Descriptor is schema-agnostic in v1 and cannot imply DAG mutation.
+| Build projection | `BuildProjection { projection_id, query_spec_id, target_checkpoint }` | `ProjectionBuildCompleted { projection_id, checkpoint, digest }` or `ProjectionBuildRejected { projection_id, reason_class, reason_message }` | Build result at identical checkpoint is digest-stable. | `target_checkpoint` resolves to canonical-only cut.
+| Read projection | `ReadProjection { projection_id, page_token, limit }` | `ProjectionReadResult { projection_id, checkpoint, rows, digest, next_page_token }` | Row order and payload are deterministic for same checkpoint and query version. | Pagination tokens must be replay-stable.
+| Invalidate projection | `InvalidateProjection { projection_id, reason }` | `ProjectionInvalidated { projection_id, reason, invalidated_at_hlc }` | Invalidation reason class is stable and bounded-cardinality. | Invalidations are metadata events; no DAG mutation.
+| List projections | `ListProjections { query_spec_id?, state_filter? }` | `ProjectionListResult { items, cursor? }` | Item ordering is deterministic under same filter/checkpoint metadata. | Supports operator inspection and audit workflows.
+
+Phase A working draft - websocket parity matrix headings:
+
+| Capability path | Host command/event path | WS request shape | WS response/event shape | Parity status | Open questions |
+|---|---|---|---|---|---|
+| Success path - register spec | `RegisterQuerySpec` -> `QuerySpecRegistered` | `query.register` | `query.registered` | Draft | Finalize descriptor envelope fields.
+| Success path - build projection | `BuildProjection` -> `ProjectionBuildCompleted` | `projection.build` | `projection.build.completed` | Draft | Confirm checkpoint selector encoding.
+| Success path - read projection | `ReadProjection` -> `ProjectionReadResult` | `projection.read` | `projection.read.result` | Draft | Confirm page token stability contract.
+| Success path - list projections | `ListProjections` -> `ProjectionListResult` | `projection.list` | `projection.list.result` | Draft | Confirm default ordering and cursor shape.
+| Deny/error path - capability reject | `<any command>` -> `*Rejected` | `<same request type>` | `error` with reason taxonomy | Draft | Map capability names to reason classes.
+| Invalidation path | `InvalidateProjection` -> `ProjectionInvalidated` | `projection.invalidate` or server-side invalidation trigger | `projection.invalidated` | Draft | Decide explicit client invalidate support in v1.
+
+Phase A versioning and compatibility notes (initial):
+1. `QuerySpecVersion` is required on registration and immutable once accepted.
+2. Host must reject unsupported versions with deterministic `reason_class` (`reject.query_unsupported_version`).
+3. Backward compatibility window is explicit and host-configurable; defaults are documented per release.
+4. WS envelopes must carry version fields needed for parity diagnostics.
+
 ### Phase B - Canonical execution path
 
 Deliverables:
@@ -132,6 +165,37 @@ Add vectors under a new family:
 4. `QUERY-INVAL-001`: invalidation reason propagation parity (host-core/ws)
 5. `QUERY-COMPAT-001`: older `QuerySpecVersion` acceptance within compatibility window
 6. `QUERY-COMPAT-REJECT-001`: unsupported version deterministic rejection
+7. `QUERY-REPLAY-002`: mismatch diagnostics include checkpoint + digest metadata
+8. `QUERY-WS-PARITY-001`: ws mapping parity for query/projection rejection taxonomy and metadata
+
+Wave 1 initial stub evidence (2026-05-27):
+1. `QUERY-DET-001` executable stub is passing in `core/tests/query_materialization_vectors.rs`.
+2. `QUERY-REPLAY-001` executable stub is passing in `core/tests/query_materialization_vectors.rs`.
+3. `QUERY-DET-002` executable host stub is passing in `nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/QueryMaterializationVectorsTests.cs`.
+4. `QUERY-INVAL-001` executable host stub is passing in `nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/QueryMaterializationVectorsTests.cs`.
+5. Projection pagination window semantics (`limit` + `page_token`) are implemented in runtime stub read path with deterministic digest continuity across page windows.
+6. Acceptance artifacts recorded:
+   - `docs/acceptance/query-det-001.json`
+   - `docs/acceptance/query-replay-001.json`
+   - `docs/acceptance/query-det-002.json`
+   - `docs/acceptance/query-inval-001.json`
+   - `docs/acceptance/query-replay-001-host.json`
+   - `docs/acceptance/query-replay-002-host.json`
+   - `docs/acceptance/query-compat-reject-001-host.json`
+   - `docs/acceptance/query-replay-002-core.json`
+   - `docs/acceptance/query-replay-002-server.json`
+   - `docs/acceptance/query-compat-reject-001-core.json`
+   - `docs/acceptance/query-compat-reject-001-server.json`
+   - `docs/acceptance/query-ws-parity-001-host.json`
+7. Phase B host stub lift has replaced build-time synthetic projection rows with canonical runtime map-state row generation (including `map-set`/`map-delete` mutation tracking) and is covered by `Projection_build_uses_canonical_map_state_and_reflects_map_mutations` in `nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/RuntimeMessageProcessorTests.cs`.
+8. Phase C host replay compatibility stub is now executable via explicit checkpoint selection (`target_checkpoint.selector=seq`, `canonical_seq`) and covered by `QueryReplay001LiveVsReplayParityAtExplicitCheckpoint` plus deterministic rejection coverage in `Projection_build_rejects_unknown_checkpoint_sequence`.
+9. Phase C host replay selector expansion now supports equivalent checkpoint addressing by sequence (`selector=seq`), canonical hash (`selector=hash`), and frontier token (`selector=frontier`) with digest parity coverage in `QueryReplaySelectorEquivalenceSeqHashAndFrontier` and deterministic unknown-hash rejection in `Projection_build_rejects_unknown_checkpoint_hash`.
+10. Compatibility lane for selector payload validation is now active with bounded rejection taxonomy assertions: malformed frontier tokens, mixed selector fields, and canonical hash format violations reject as `reject.checkpoint_selector_invalid`, while well-formed but unknown checkpoints reject as `reject.checkpoint_not_found` (`QueryCompatReject001SelectorPayloadValidationBoundedTaxonomy`, `Projection_build_selector_payload_validation_uses_bounded_rejection_taxonomy`).
+11. Phase C parity is complete across host/core/server/ws lanes: core/server vectors now mirror selector-validation taxonomy and mismatch diagnostics (`query_compat_reject_001_selector_payload_validation_bounded_taxonomy`, `server_query_compat_reject_001_selector_payload_validation_bounded_taxonomy`, `query_replay_002_mismatch_diagnostics_include_checkpoint_and_digest_metadata`, `server_query_replay_002_mismatch_diagnostics_include_checkpoint_and_digest_metadata`) and ws mapping parity now asserts rejection reason class/message plus checkpoint/digest metadata surfaces (`Event_mapper_converts_query_projection_events_to_runtime_messages`).
+12. With Phase C parity complete for this slice, execution focus is moved to Phase D deliverables (SDK/operator surface).
+13. Phase D SDK surface implementation has started in `sdk-js`: canonical-lane query/projection helpers (`registerSpec`, `buildProjection`, `readProjection`, `invalidateProjection`, `listProjections`) now emit parity request envelopes and await typed runtime responses, with unit coverage in `sdk-js/index.test.js` for checkpoint selector validation and projection build/read response matching.
+14. Phase D parity coverage now includes deterministic rejected-path SDK tests for register/build/read/invalidate/list (`query.register.rejected`, `projection.build.rejected`, `projection.read.rejected`, `projection.invalidate.rejected`, `projection.list.rejected`) and operator runbook lifecycle guidance for register/build/read/invalidate/list including failure triage keyed by bounded `reason_class` taxonomy.
+15. Phase D pagination parity vectors now include deterministic multi-page ordering and digest continuity checks in both core/server suites (`query_det_003_pagination_multi_page_order_is_deterministic`, `query_det_004_pagination_digest_continuity_matches_full_projection`, `server_query_det_003_pagination_multi_page_order_is_deterministic`, `server_query_det_004_pagination_digest_continuity_matches_full_projection`).
 
 ## 7. Risks and mitigations
 

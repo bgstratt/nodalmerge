@@ -1,0 +1,46 @@
+{
+  "artifact": "archive-phasec-policy-timeline-parity",
+  "recorded_at": "2026-05-26T22:30:25.2084492-05:00",
+  "phase": "Phase C execution",
+  "summary": [
+    "Export manifests include policy_timeline_hash metadata and signatures bind that field.",
+    "archive.export.result envelopes expose policy_timeline_hash for websocket/control-plane consumers.",
+    "Runtime validate/import deterministically reject external manifest policy_timeline_hash mismatches.",
+    "Server and websocket-facing conformance vectors pin policy timeline mismatch rejection mapping."
+  ],
+  "commands": [
+    {
+      "command": "cargo test -p nodalmerge-server archive_export_002_manifest_contains_compatibility_window_and_payload_digest_policy_server_path --test archive_portability_vectors",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_validate_reject_004_policy_timeline_hash_mismatch_uses_deterministic_reason_class_server_path --test archive_portability_vectors",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server parity_archive_negative_policy_timeline_hash_mismatch_fixture --test host_migration_parity",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-host-core serialize_archive_export_result_envelope_preserves_wire_type",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_",
+      "result": "passed",
+      "details": "archive-focused regression suites passed including policy timeline parity vectors"
+    }
+  ],
+  "reason_class_mapping": {
+    "policy_timeline_hash_mismatch": "reject.archive_policy_timeline_mismatch"
+  },
+  "scope_next": [
+    "Compatibility-window range semantics beyond fixed format windows.",
+    "Policy timeline cutover metadata parity (hash + cutover lamport).",
+    "Conformance vectors locking range/cutover behavior across core/server/ws lanes."
+  ]
+}

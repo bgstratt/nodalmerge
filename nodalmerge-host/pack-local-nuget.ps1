@@ -50,21 +50,21 @@ try {
 
     Write-Host "Packing managed packages to $resolvedOutput ..."
     Invoke-Checked -Name "dotnet pack NodalMerge.Host.Abstractions" -Command {
-        dotnet pack ./src/ActiveSync.Host.Abstractions/NodalMerge.Host.Abstractions.csproj -c Release -o $resolvedOutput /p:Version=$Version
+        dotnet pack ./src/NodalMerge.Host.Abstractions/NodalMerge.Host.Abstractions.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
     Invoke-Checked -Name "dotnet pack NodalMerge.Host.Composition" -Command {
-        dotnet pack ./src/ActiveSync.Host.Composition/NodalMerge.Host.Composition.csproj -c Release -o $resolvedOutput /p:Version=$Version
+        dotnet pack ./src/NodalMerge.Host.Composition/NodalMerge.Host.Composition.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
 
     Write-Host "Packing native runtime packages to $resolvedOutput ..."
     Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost.Native.win-x64" -Command {
-        dotnet pack ./src/ActiveSync.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version
+        dotnet pack ./src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
 
     $linuxNative = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../target/release/libnodalmerge_host_ffi.so"))
     if (-not (Test-Path -LiteralPath $linuxNative)) {
-        $isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
-        if ($isWindows) {
+        $isWindowsRuntime = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+        if ($isWindowsRuntime) {
             Write-Warning "linux-x64 native artifact not found at $linuxNative; creating local placeholder for package-mode restore on Windows."
             $linuxDir = Split-Path -Parent $linuxNative
             New-Item -ItemType Directory -Force -Path $linuxDir | Out-Null
@@ -76,7 +76,7 @@ try {
     }
 
     Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost.Native.linux-x64" -Command {
-        dotnet pack ./src/ActiveSync.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version
+        dotnet pack ./src/NodalMerge.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
 
     # Ensure subsequent restore picks up freshly packed local artifacts even when version is reused.

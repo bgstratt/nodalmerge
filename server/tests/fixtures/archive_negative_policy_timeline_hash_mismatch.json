@@ -1,0 +1,8 @@
+{
+  "name": "archive_negative_policy_timeline_hash_mismatch",
+  "room_id": "parity-archive-neg-policy-hash",
+  "scenario": "archive_negative_policy_timeline_hash_mismatch",
+  "expected_sequence": ["welcome", "archive.validate.rejected"],
+  "expected_pack_count": 0,
+  "notes": "External file manifest with mismatched policy_timeline_hash rejects deterministically as policy timeline mismatch."
+}

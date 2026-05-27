@@ -276,23 +276,65 @@ impl Rooms {
             let persistence = Arc::clone(&self.persistence);
             tokio::spawn(async move {
                 if persistence.is_durable() {
+                    let hydrate_start = Instant::now();
+                    tracing::info!(room = %room_clone.room_id, "async persistence hydrate started");
+
                     // Load nodes and apply to the in-memory graph.
+                    let load_nodes_start = Instant::now();
                     let nodes = persistence.load_room_nodes(&room_clone.room_id);
+                    let load_nodes_elapsed = load_nodes_start.elapsed();
+                    tracing::info!(
+                        room = %room_clone.room_id,
+                        loaded_nodes = nodes.len(),
+                        elapsed_ms = load_nodes_elapsed.as_millis(),
+                        "async persistence hydrate stage: load_room_nodes"
+                    );
+
                     if !nodes.is_empty() {
+                        let apply_nodes_start = Instant::now();
                         let res = room_clone.graph.write().await.apply_remote_batch(nodes);
+                        let apply_nodes_elapsed = apply_nodes_start.elapsed();
+                        tracing::info!(
+                            room = %room_clone.room_id,
+                            accepted = res.accepted.len(),
+                            rejected = res.rejected.len(),
+                            elapsed_ms = apply_nodes_elapsed.as_millis(),
+                            "async persistence hydrate stage: apply_remote_batch"
+                        );
                         if !res.rejected.is_empty() {
                             tracing::warn!(room = %room_clone.room_id, rejected = res.rejected.len(), "rejected nodes during async hydrate");
                         }
                     }
+
                     // Load blobs and insert into memory blob store.
+                    let load_blobs_start = Instant::now();
                     let blobs = persistence.load_room_blobs(&room_clone.room_id);
+                    let load_blobs_elapsed = load_blobs_start.elapsed();
+                    tracing::info!(
+                        room = %room_clone.room_id,
+                        loaded_blobs = blobs.len(),
+                        elapsed_ms = load_blobs_elapsed.as_millis(),
+                        "async persistence hydrate stage: load_room_blobs"
+                    );
+
                     if !blobs.is_empty() {
+                        let apply_blobs_start = Instant::now();
                         let mut store = room_clone.blobs.write().await;
                         for (_h, bytes) in blobs {
                             store.put(bytes);
                         }
+                        let apply_blobs_elapsed = apply_blobs_start.elapsed();
+                        tracing::info!(
+                            room = %room_clone.room_id,
+                            elapsed_ms = apply_blobs_elapsed.as_millis(),
+                            "async persistence hydrate stage: apply_blobs"
+                        );
                     }
-                    tracing::info!(room = %room_clone.room_id, "async persistence hydrate completed");
+                    tracing::info!(
+                        room = %room_clone.room_id,
+                        total_elapsed_ms = hydrate_start.elapsed().as_millis(),
+                        "async persistence hydrate completed"
+                    );
                 }
             });
         }
@@ -591,10 +633,23 @@ pub async fn import_nodes(
         let before = pending.len();
 
         // Index pending by id so we can resurrect MissingParent rejects for
-        // the next pass without re-cloning the originals up front.
+        // the next pass without re-cloning the originals up front. Keep the
+        // first-seen id order from `pending` so parent-before-child ordering
+        // in caller-provided batches is preserved for core's in-order apply.
         let mut by_id: std::collections::HashMap<nodalmerge_core::NodeId, SyncNode> =
-            pending.drain(..).map(|n| (n.id, n)).collect();
-        let batch: Vec<SyncNode> = by_id.values().cloned().collect();
+            std::collections::HashMap::with_capacity(before);
+        let mut order: Vec<nodalmerge_core::NodeId> = Vec::with_capacity(before);
+        for n in pending.drain(..) {
+            order.push(n.id);
+            by_id.insert(n.id, n);
+        }
+        let mut seen: std::collections::HashSet<nodalmerge_core::NodeId> =
+            std::collections::HashSet::with_capacity(order.len());
+        let batch: Vec<SyncNode> = order
+            .into_iter()
+            .filter(|id| seen.insert(*id))
+            .filter_map(|id| by_id.get(&id).cloned())
+            .collect();
 
         let result = graph.apply_remote_batch_checked(batch, Some(now_ms));
         accepted += result.accepted.len();

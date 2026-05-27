@@ -1,5 +1,5 @@
 /**
- * demo.js — ActiveSync Production Demo (F1 SDK port)
+ * demo.js — NodalMerge Production Demo (F1 SDK port)
  *
  * Rewritten to consume the high-level `createDoc` SDK from `./sdk.js`.
  * The SDK owns the wire protocol, MST/IBF handshake, blob fan-out, presence
@@ -25,7 +25,7 @@ import { createDoc, room_pubkey_hex } from './sdk.js?v=2';
 
 // Catch any unhandled promise rejections from the module itself.
 window.addEventListener('unhandledrejection', ev => {
-  console.error('[activesync] unhandledRejection:', ev.reason);
+  console.error('[nodalmerge] unhandledRejection:', ev.reason);
   const s = document.getElementById('status');
   if (s) s.textContent = 'Module error: ' + ev.reason;
 });
@@ -47,8 +47,9 @@ const STORAGE_KEYS = {
   roomSeed: 'nodalmerge-room-seed'
 };
 let uiRefreshTimer = null;
-const ENV_SERVER_URL = (globalThis.ACTIVESYNC_CONFIG && globalThis.ACTIVESYNC_CONFIG.serverUrl)
-  ? String(globalThis.ACTIVESYNC_CONFIG.serverUrl).trim()
+const runtimeConfig = globalThis.NODALMERGE_CONFIG || null;
+const ENV_SERVER_URL = (runtimeConfig && runtimeConfig.serverUrl)
+  ? String(runtimeConfig.serverUrl).trim()
   : '';
 
 function scheduleUiRefresh() {

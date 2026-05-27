@@ -1,0 +1,8 @@
+{
+  "name": "archive_negative_checkpoint_not_found_external",
+  "room_id": "parity-archive-neg-checkpoint",
+  "scenario": "archive_negative_checkpoint_not_found_external",
+  "expected_sequence": ["welcome", "archive.validate.rejected"],
+  "expected_pack_count": 0,
+  "notes": "External object manifest that references a non-persisted source room rejects as checkpoint not found."
+}

@@ -373,3 +373,229 @@ Operational handling:
 1. Auth/policy format failures: fix request and retry.
 2. Transient storage/runtime failures: retry with backoff and monitor error counters.
 3. Repeated protocol errors from one peer: isolate client and inspect wire payloads.
+
+---
+
+## Query and projection operations
+
+This section documents the canonical query/materialization operator flow for runtime websocket control-plane usage.
+
+### `query.register`
+
+Purpose:
+
+1. Register a query specification version for later projection builds.
+
+Request:
+
+```json
+{
+  "type": "query.register",
+  "query_spec_id": "q.rooms",
+  "version": "v1",
+  "descriptor": { "source": "rooms" }
+}
+```
+
+Expected success response:
+
+```json
+{
+  "type": "query.registered",
+  "query_spec_id": "q.rooms",
+  "version": "v1",
+  "accepted": true
+}
+```
+
+Expected rejection response:
+
+```json
+{
+  "type": "query.register.rejected",
+  "query_spec_id": "q.rooms",
+  "version": "v2",
+  "reason_class": "reject.query_unsupported_version",
+  "reason_message": "unsupported"
+}
+```
+
+Operational notes:
+
+1. Treat `reason_class` as stable automation key; keep alert routing on class, not message text.
+2. Version rejection means compatibility-window mismatch; retry with an allowed version instead of blind retries.
+
+### `projection.build`
+
+Purpose:
+
+1. Materialize projection state for a query spec at a canonical checkpoint cut.
+
+Request:
+
+```json
+{
+  "type": "projection.build",
+  "projection_id": "p.rooms",
+  "query_spec_id": "q.rooms",
+  "target_checkpoint": { "selector": "latest" }
+}
+```
+
+Expected success response:
+
+```json
+{
+  "type": "projection.build.completed",
+  "projection_id": "p.rooms",
+  "checkpoint": { "selector": "seq", "canonical_seq": 1, "canonical_hash": "<hex>" },
+  "digest": "<digest>"
+}
+```
+
+Expected rejection response:
+
+```json
+{
+  "type": "projection.build.rejected",
+  "projection_id": "p.rooms",
+  "reason_class": "reject.checkpoint_selector_invalid",
+  "reason_message": "selector hash requires canonical_hash in 64-char hex format"
+}
+```
+
+Operational notes:
+
+1. Distinguish `reject.checkpoint_selector_invalid` from `reject.checkpoint_not_found` during triage.
+2. For replay mismatch incidents, capture `checkpoint` and `digest` from build/read responses in incident notes.
+
+### `projection.read`
+
+Purpose:
+
+1. Read deterministic rows and digest for a built projection.
+
+Request:
+
+```json
+{ "type": "projection.read", "projection_id": "p.rooms", "limit": 50, "page_token": "offset:0" }
+```
+
+Expected response:
+
+```json
+{
+  "type": "projection.read.result",
+  "projection_id": "p.rooms",
+  "checkpoint": { "selector": "seq", "canonical_seq": 1, "canonical_hash": "<hex>" },
+  "rows": [],
+  "digest": "<digest>",
+  "next_page_token": "offset:50"
+}
+```
+
+Expected rejection response:
+
+```json
+{
+  "type": "projection.read.rejected",
+  "projection_id": "p.rooms",
+  "reason_class": "reject.projection_not_found",
+  "reason_message": "projection is not registered"
+}
+```
+
+Operational notes:
+
+1. Keep paging requests on returned `next_page_token` only; do not synthesize tokens externally.
+2. Digest drift at the same checkpoint is a deterministic parity bug and should trigger escalation.
+3. Treat `projection.read.rejected` as non-retriable until projection registration/build state is corrected.
+
+### `projection.invalidate`
+
+Purpose:
+
+1. Explicitly mark a projection as invalidated with operator reason metadata.
+
+Request:
+
+```json
+{ "type": "projection.invalidate", "projection_id": "p.rooms", "reason": "schema-change" }
+```
+
+Expected response:
+
+```json
+{
+  "type": "projection.invalidated",
+  "projection_id": "p.rooms",
+  "reason": "schema-change",
+  "invalidated_at_hlc": "<hlc>"
+}
+```
+
+Expected rejection response:
+
+```json
+{
+  "type": "projection.invalidate.rejected",
+  "projection_id": "p.rooms",
+  "reason_class": "reject.projection_immutable",
+  "reason_message": "projection cannot be invalidated in current state"
+}
+```
+
+Operational notes:
+
+1. Use structured reason strings (`schema-change`, `policy-change`, `manual`) for low-cardinality telemetry.
+2. Follow invalidation with rebuild+read and store new checkpoint/digest pair for audit traceability.
+3. For `projection.invalidate.rejected`, stop retry loops and escalate to projection lifecycle state review.
+
+### `projection.list`
+
+Purpose:
+
+1. Enumerate projections deterministically for a query spec and optional state filter.
+
+Request:
+
+```json
+{ "type": "projection.list", "query_spec_id": "q.rooms", "state_filter": "active", "cursor": "offset:0" }
+```
+
+Expected response:
+
+```json
+{
+  "type": "projection.list.result",
+  "query_spec_id": "q.rooms",
+  "items": [{ "projection_id": "p.rooms", "state": "active" }],
+  "cursor": "offset:50"
+}
+```
+
+Expected rejection response:
+
+```json
+{
+  "type": "projection.list.rejected",
+  "query_spec_id": "q.rooms",
+  "reason_class": "reject.query_spec_not_found",
+  "reason_message": "query spec is not registered"
+}
+```
+
+Operational notes:
+
+1. Reuse only server-returned `cursor` values; do not fabricate cursors.
+2. Handle `projection.list.rejected` as deterministic input/state failure, not a transient transport failure.
+
+### Query/Projection failure triage checklist
+
+1. Capture request envelope, response type, `reason_class`, and `reason_message`.
+2. If available, capture `projection_id`, `query_spec_id`, checkpoint selector, and digest fields.
+3. Classify failure bucket:
+4. selector/compatibility class: fix payload and retry once.
+5. not-found/lifecycle class: repair query spec or projection state before retry.
+6. replay/digest mismatch class: escalate as deterministic parity incident.
+7. For repeated rejects with identical payload, stop retries and open an incident with captured envelopes.

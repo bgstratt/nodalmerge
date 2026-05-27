@@ -28,7 +28,17 @@ const runtimeMessageTypes = new Set([
   "error",
   "noop-ack",
   "session-opened",
-  "session-closed"
+  "session-closed",
+  "query.registered",
+  "query.register.rejected",
+  "projection.build.completed",
+  "projection.build.rejected",
+  "projection.read.result",
+  "projection.read.rejected",
+  "projection.invalidated",
+  "projection.invalidate.rejected",
+  "projection.list.result",
+  "projection.list.rejected"
 ]);
 
 function toBase64(bytes) {
@@ -135,6 +145,86 @@ function isNonNegativeInteger(value) {
   return Number.isInteger(value) && value >= 0;
 }
 
+function isHex64(value) {
+  return typeof value === "string" && /^[0-9a-fA-F]{64}$/.test(value);
+}
+
+function normalizeTargetCheckpoint(checkpoint) {
+  if (checkpoint == null) {
+    return { selector: "latest" };
+  }
+
+  if (typeof checkpoint !== "object" || Array.isArray(checkpoint)) {
+    throw new Error("targetCheckpoint must be an object");
+  }
+
+  const selector = typeof checkpoint.selector === "string" ? checkpoint.selector : "latest";
+  const hasSeq = checkpoint.canonical_seq != null;
+  const hasHash = checkpoint.canonical_hash != null;
+  const hasFrontier = checkpoint.frontier != null;
+
+  if (selector === "latest") {
+    if (hasSeq || hasHash || hasFrontier) {
+      throw new Error("selector latest does not allow canonical_seq, canonical_hash, or frontier fields");
+    }
+    return { selector };
+  }
+
+  if (selector === "seq") {
+    if (!isNonNegativeInteger(checkpoint.canonical_seq)) {
+      throw new Error("selector seq requires canonical_seq as a non-negative integer");
+    }
+    if (hasHash || hasFrontier) {
+      throw new Error("selector seq only allows canonical_seq");
+    }
+    return { selector, canonical_seq: checkpoint.canonical_seq };
+  }
+
+  if (selector === "hash") {
+    if (!isHex64(checkpoint.canonical_hash)) {
+      throw new Error("selector hash requires canonical_hash in 64-char hex format");
+    }
+    if (hasSeq || hasFrontier) {
+      throw new Error("selector hash only allows canonical_hash");
+    }
+    return { selector, canonical_hash: checkpoint.canonical_hash.toLowerCase() };
+  }
+
+  if (selector === "frontier") {
+    if (!Array.isArray(checkpoint.frontier) || checkpoint.frontier.length === 0) {
+      throw new Error("selector frontier requires frontier array with at least one token");
+    }
+    for (const token of checkpoint.frontier) {
+      if (typeof token !== "string" || !/^seq:\d+$/.test(token)) {
+        throw new Error("selector frontier requires tokens in seq:<u64> format");
+      }
+    }
+    if (hasSeq || hasHash) {
+      throw new Error("selector frontier only allows frontier");
+    }
+    return { selector, frontier: [...checkpoint.frontier] };
+  }
+
+  throw new Error("targetCheckpoint.selector must be one of: latest, seq, hash, frontier");
+}
+
+function normalizePositiveLimit(limit) {
+  if (!isNonNegativeInteger(limit) || limit === 0) {
+    throw new Error("limit must be a positive integer");
+  }
+  return limit;
+}
+
+function normalizeTimeoutMs(timeoutMs, fallback = 5000) {
+  if (timeoutMs == null) {
+    return fallback;
+  }
+  if (!isNonNegativeInteger(timeoutMs)) {
+    throw new Error("timeoutMs must be a non-negative integer");
+  }
+  return timeoutMs;
+}
+
 function normalizeRangeAnchor(anchor, op) {
   if (!anchor || typeof anchor !== "object") {
     throw new Error(`${op} anchor must be an object`);
@@ -226,6 +316,46 @@ export class NodalMergeSdk {
     this.offlinePersistenceKey = options.offline?.persistenceKey ?? null;
     this.transportPolicy = normalizeTransportMode(options.transport?.mode);
     this.activeTransportMode = "ws-only";
+  }
+
+  ensureConnectedForRuntime(opName) {
+    if (!this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error(`${opName} requires an open runtime websocket connection`);
+    }
+  }
+
+  waitForRuntimeMessage(match, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const timeout = normalizeTimeoutMs(timeoutMs);
+      let settled = false;
+      let timer = null;
+
+      const cleanup = () => {
+        stopRuntime();
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      };
+
+      const stopRuntime = this.on("runtime-message", (message) => {
+        if (settled || !match(message)) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(message);
+      });
+
+      timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        reject(new Error("Timed out waiting for runtime response"));
+      }, timeout);
+    });
   }
 
   async initialize() {
@@ -466,6 +596,125 @@ export class NodalMergeSdk {
     state: () => parseJsonOrDefault(this.store.resolve_json(), {}),
     canonicalHash: () => this.store.resolved_state_hash_hex(),
     replayPack: (packB64) => parseJsonOrDefault(this.store.replay_nodes_json(packB64), {})
+  };
+
+  query = {
+    registerSpec: async ({ querySpecId, version, descriptor, options = undefined, timeoutMs = 5000 }) => {
+      if (typeof querySpecId !== "string" || querySpecId.length === 0) {
+        throw new Error("querySpecId is required");
+      }
+      if (typeof version !== "string" || version.length === 0) {
+        throw new Error("version is required");
+      }
+
+      this.ensureConnectedForRuntime("query.register");
+      this.sendOrQueue({
+        type: "query.register",
+        query_spec_id: querySpecId,
+        version,
+        descriptor,
+        options
+      });
+
+      return this.waitForRuntimeMessage(
+        (msg) =>
+          (msg.type === "query.registered" || msg.type === "query.register.rejected") &&
+          msg.query_spec_id === querySpecId &&
+          msg.version === version,
+        timeoutMs
+      );
+    },
+
+    buildProjection: async ({ projectionId, querySpecId, targetCheckpoint = { selector: "latest" }, timeoutMs = 5000 }) => {
+      if (typeof projectionId !== "string" || projectionId.length === 0) {
+        throw new Error("projectionId is required");
+      }
+      if (typeof querySpecId !== "string" || querySpecId.length === 0) {
+        throw new Error("querySpecId is required");
+      }
+
+      const target_checkpoint = normalizeTargetCheckpoint(targetCheckpoint);
+      this.ensureConnectedForRuntime("projection.build");
+      this.sendOrQueue({
+        type: "projection.build",
+        projection_id: projectionId,
+        query_spec_id: querySpecId,
+        target_checkpoint
+      });
+
+      return this.waitForRuntimeMessage(
+        (msg) =>
+          (msg.type === "projection.build.completed" || msg.type === "projection.build.rejected") &&
+          msg.projection_id === projectionId,
+        timeoutMs
+      );
+    },
+
+    readProjection: async ({ projectionId, limit, pageToken = undefined, timeoutMs = 5000 }) => {
+      if (typeof projectionId !== "string" || projectionId.length === 0) {
+        throw new Error("projectionId is required");
+      }
+
+      this.ensureConnectedForRuntime("projection.read");
+      this.sendOrQueue({
+        type: "projection.read",
+        projection_id: projectionId,
+        limit: normalizePositiveLimit(limit),
+        page_token: typeof pageToken === "string" && pageToken.length > 0 ? pageToken : undefined
+      });
+
+      return this.waitForRuntimeMessage(
+        (msg) =>
+          (msg.type === "projection.read.result" || msg.type === "projection.read.rejected") &&
+          msg.projection_id === projectionId,
+        timeoutMs
+      );
+    },
+
+    invalidateProjection: async ({ projectionId, reason = "manual", timeoutMs = 5000 }) => {
+      if (typeof projectionId !== "string" || projectionId.length === 0) {
+        throw new Error("projectionId is required");
+      }
+
+      this.ensureConnectedForRuntime("projection.invalidate");
+      this.sendOrQueue({
+        type: "projection.invalidate",
+        projection_id: projectionId,
+        reason
+      });
+
+      return this.waitForRuntimeMessage(
+        (msg) =>
+          (msg.type === "projection.invalidated" || msg.type === "projection.invalidate.rejected") &&
+          msg.projection_id === projectionId,
+        timeoutMs
+      );
+    },
+
+    listProjections: async ({ querySpecId = undefined, stateFilter = undefined, cursor = undefined, timeoutMs = 5000 } = {}) => {
+      this.ensureConnectedForRuntime("projection.list");
+      this.sendOrQueue({
+        type: "projection.list",
+        query_spec_id: querySpecId,
+        state_filter: stateFilter,
+        cursor
+      });
+
+      return this.waitForRuntimeMessage(
+        (msg) => {
+          if (msg.type !== "projection.list.result" && msg.type !== "projection.list.rejected") {
+            return false;
+          }
+
+          if (querySpecId == null) {
+            return true;
+          }
+
+          return msg.query_spec_id === querySpecId;
+        },
+        timeoutMs
+      );
+    }
   };
 
   offline = {

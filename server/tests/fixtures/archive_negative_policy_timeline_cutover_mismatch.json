@@ -1,0 +1,8 @@
+{
+  "name": "archive_negative_policy_timeline_cutover_mismatch",
+  "room_id": "parity-archive-neg-policy-cutover",
+  "scenario": "archive_negative_policy_timeline_cutover_mismatch",
+  "expected_sequence": ["welcome", "archive.validate.rejected"],
+  "expected_pack_count": 0,
+  "notes": "External file manifest with mismatched policy_timeline_cutover_lamport rejects deterministically as policy timeline mismatch."
+}

@@ -1,0 +1,46 @@
+{
+  "vector_family": "ARCHIVE-PHASEA-CONTRACT-TYPES",
+  "status": "pass",
+  "run_type": "wave1_contract_promotion",
+  "utc_timestamp": "2026-05-27T02:25:45Z",
+  "contract_module": {
+    "crate": "nodalmerge-core",
+    "path": "core/src/archive_contracts.rs",
+    "exports": [
+      "ArchiveReasonClass",
+      "ArchiveCheckpoint",
+      "ArchivePayloadDigestSet",
+      "ArchiveCompatibilityWindow",
+      "ArchiveProvenance",
+      "ArchiveDescribed",
+      "ArchiveValidated",
+      "ArchiveRejected",
+      "ArchiveImported",
+      "ArchiveWsRequest",
+      "ArchiveWsResponse"
+    ]
+  },
+  "consumers": {
+    "core_vectors": "core/tests/archive_portability_vectors.rs",
+    "server_vectors": "server/tests/archive_portability_vectors.rs"
+  },
+  "validation": [
+    {
+      "command": "cargo test -p nodalmerge-core --test archive_portability_vectors",
+      "result": {
+        "total": 6,
+        "failed": 0,
+        "passed": 6
+      }
+    },
+    {
+      "command": "cargo test -p nodalmerge-server --test archive_portability_vectors",
+      "result": {
+        "total": 6,
+        "failed": 0,
+        "passed": 6
+      }
+    }
+  ],
+  "notes": "Phase A envelope and rejection taxonomy parity now flows through shared core contract types rather than string-only vector-local wire literals."
+}

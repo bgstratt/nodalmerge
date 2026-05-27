@@ -1,0 +1,24 @@
+{
+  "vector_id": "QUERY-REPLAY-001",
+  "status": "pass",
+  "run_type": "wave1_core_stub",
+  "utc_timestamp": "2026-05-27T00:49:05Z",
+  "git_commit": "3b86e9c804166a5399a20408b88accfda542c336",
+  "harness": {
+    "crate": "nodalmerge-core",
+    "test_target": "core/tests/query_materialization_vectors.rs",
+    "test_name": "query_replay_001_live_vs_replay_parity_at_checkpoint"
+  },
+  "command": "cargo test -p nodalmerge-core --test query_materialization_vectors",
+  "result": {
+    "total": 2,
+    "failed": 0,
+    "passed": 2,
+    "duration_seconds": 0.08
+  },
+  "contract_assertion": {
+    "live_vs_replay_rows_equal_at_checkpoint": true,
+    "live_vs_replay_digest_equal_at_checkpoint": true
+  },
+  "notes": "Wave 1 core stub validates query/materialization parity between live checkpoint evaluation and replay-materialized checkpoint evaluation."
+}

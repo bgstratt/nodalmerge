@@ -23,7 +23,13 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..\..")
-$dotnetHostDir = Join-Path $repoRoot "dotnet-host"
+$dotnetHostDir = Join-Path $repoRoot "nodalmerge-host"
+if (-not (Test-Path $dotnetHostDir)) {
+    $legacyDotnetHostDir = Join-Path $repoRoot "dotnet-host"
+    if (Test-Path $legacyDotnetHostDir) {
+        $dotnetHostDir = $legacyDotnetHostDir
+    }
+}
 
 function Resolve-CargoCommand {
     $cargo = Get-Command cargo -ErrorAction SilentlyContinue
@@ -131,7 +137,7 @@ if (-not $SkipDotNet) {
         }
 
         $dotnetCmd = @(
-            "test", "tests/ActiveSync.DotNetHost.Tests/ActiveSync.DotNetHost.Tests.csproj",
+            "test", "tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj",
             "--filter", $filter,
             "--logger", ("trx;LogFileName={0}" -f $dotnetTrxFileName),
             "--results-directory", "..\\docs\\acceptance",

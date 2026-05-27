@@ -124,7 +124,7 @@ try {
         Write-Host "[npm] Building wasm bridge package assets ..."
         Push-Location (Join-Path $repoRoot "bridge")
         try {
-            wasm-pack build --target web
+            wasm-pack build --target web --out-dir pkg --out-name nodalmerge_bridge
             if ($LASTEXITCODE -ne 0) {
                 throw "wasm-pack build failed with exit code $LASTEXITCODE"
             }

@@ -1,0 +1,23 @@
+{
+  "vector_id": "BRANCH-FORK-002",
+  "status": "pass",
+  "run_type": "wave0_core_stub",
+  "utc_timestamp": "2026-05-26T23:17:30.6600708Z",
+  "git_commit": "3b86e9c804166a5399a20408b88accfda542c336",
+  "harness": {
+    "crate": "nodalmerge-core",
+    "test_target": "core/tests/branch_fork_vectors.rs",
+    "test_name": "branch_fork_002_snapshot_hash_equal"
+  },
+  "command": "cargo test -p nodalmerge-core --test branch_fork_vectors",
+  "result": {
+    "total": 2,
+    "failed": 0,
+    "passed": 2,
+    "duration_seconds": 0.09
+  },
+  "contract_assertion": {
+    "fork_from_snapshot_hash_equal": true
+  },
+  "notes": "Wave 0 deterministic replay stub validates snapshot-hash cut payload reproduces expected hash exactly."
+}

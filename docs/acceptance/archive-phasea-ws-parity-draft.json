@@ -1,0 +1,69 @@
+{
+  "artifact": "archive-phasea-ws-parity-draft",
+  "date_utc": "2026-05-27",
+  "owner": "Brad",
+  "phase": "A",
+  "status": "draft",
+  "ws_operations": [
+    "archive.describe",
+    "archive.validate",
+    "archive.import"
+  ],
+  "parity_matrix": {
+    "archive.describe": {
+      "request": {
+        "type": "archive.describe",
+        "room": "room-a",
+        "archive_ref": "s3://nm-archive/room-a/full-2026-05-27.nmar"
+      },
+      "response_type": "archive.describe.result",
+      "host_event": "ArchiveDescribed"
+    },
+    "archive.validate": {
+      "request": {
+        "type": "archive.validate",
+        "room": "room-a",
+        "archive_ref": "s3://nm-archive/room-a/full-2026-05-27.nmar",
+        "mode": "full_integrity"
+      },
+      "response_types": [
+        "archive.validate.result",
+        "archive.validate.rejected"
+      ],
+      "host_events": [
+        "ArchiveValidated",
+        "ArchiveValidationRejected"
+      ]
+    },
+    "archive.import": {
+      "request": {
+        "type": "archive.import",
+        "room": "room-a",
+        "archive_ref": "s3://nm-archive/room-a/full-2026-05-27.nmar",
+        "import_mode": "full_clone"
+      },
+      "response_types": [
+        "archive.import.completed",
+        "archive.import.rejected"
+      ],
+      "host_events": [
+        "ArchiveImported",
+        "ArchiveImportRejected"
+      ]
+    }
+  },
+  "rejection_examples": [
+    {
+      "operation": "archive.validate",
+      "reason_class": "reject.archive_manifest_invalid"
+    },
+    {
+      "operation": "archive.import",
+      "reason_class": "reject.archive_digest_mismatch"
+    }
+  ],
+  "assertions": {
+    "ws_to_host_envelope_mapping_defined": true,
+    "deterministic_reject_classes_attached_to_ws_reject_events": true
+  }
+}

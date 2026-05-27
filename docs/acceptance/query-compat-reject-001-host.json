@@ -1,0 +1,27 @@
+{
+  "vector_id": "QUERY-COMPAT-REJECT-001",
+  "status": "pass",
+  "run_type": "wave1_dotnet_host_stub",
+  "utc_timestamp": "2026-05-27T01:52:36Z",
+  "git_commit": "3b86e9c804166a5399a20408b88accfda542c336",
+  "harness": {
+    "project": "nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj",
+    "test_target": "nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/QueryMaterializationVectorsTests.cs",
+    "test_name": "QueryCompatReject001SelectorPayloadValidationBoundedTaxonomy"
+  },
+  "command": "dotnet test nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter \"FullyQualifiedName~QueryMaterializationVectorsTests|FullyQualifiedName~RuntimeMessageProcessorTests\" -v minimal",
+  "result": {
+    "total": 31,
+    "failed": 0,
+    "passed": 31,
+    "duration_seconds": 1.0
+  },
+  "contract_assertion": {
+    "malformed_frontier_rejected_with_selector_invalid": true,
+    "mixed_selector_fields_rejected_with_selector_invalid": true,
+    "invalid_canonical_hash_format_rejected_with_selector_invalid": true,
+    "unknown_canonical_hash_rejected_with_checkpoint_not_found": true,
+    "rejection_taxonomy_bounded_to_selector_invalid_and_checkpoint_not_found": true
+  },
+  "notes": "Compatibility lane validates selector payload contract checks and bounded rejection taxonomy for checkpoint selection envelopes."
+}

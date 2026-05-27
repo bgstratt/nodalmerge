@@ -18,7 +18,7 @@ use wasm_bindgen::JsCast;
 ///
 /// Usage from JS/TS:
 /// ```js
-/// import init, { SyncStore } from './activesync_bridge.js';
+/// import init, { SyncStore } from './nodalmerge_bridge.js';
 /// await init();
 /// const store = new SyncStore(new Uint8Array(32)); // 32-byte author key
 /// store.set("username", new TextEncoder().encode("Alice"));

@@ -1,0 +1,23 @@
+{
+  "vector_id": "BRANCH-FORK-004",
+  "status": "pass",
+  "run_type": "wave0_server_stub",
+  "utc_timestamp": "2026-05-26T23:49:23.3106701Z",
+  "git_commit": "3b86e9c804166a5399a20408b88accfda542c336",
+  "harness": {
+    "crate": "nodalmerge-server",
+    "test_target": "server/tests/branch_fork_vectors.rs",
+    "test_name": "branch_fork_004_source_writes_isolated"
+  },
+  "command": "cargo test -p nodalmerge-server --test branch_fork_vectors",
+  "result": {
+    "total": 2,
+    "failed": 0,
+    "passed": 2,
+    "duration_seconds": 0.04
+  },
+  "contract_assertion": {
+    "source_writes_do_not_alter_target_lineage": true
+  },
+  "notes": "Wave 0 server stub validates post-fork source-only writes preserve target lineage and produce expected divergence."
+}

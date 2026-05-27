@@ -1,0 +1,25 @@
+{
+  "vector_id": "BRANCH-FORK-005",
+  "status": "pass",
+  "run_type": "wave0_core_stub",
+  "utc_timestamp": "2026-05-26T23:56:01Z",
+  "git_commit": "3b86e9c804166a5399a20408b88accfda542c336",
+  "harness": {
+    "crate": "nodalmerge-core",
+    "test_target": "core/tests/branch_fork_vectors.rs",
+    "test_name": "branch_fork_005_compaction_preserves_metadata"
+  },
+  "command": "cargo test -p nodalmerge-core --test branch_fork_vectors",
+  "result": {
+    "total": 3,
+    "failed": 0,
+    "passed": 3,
+    "duration_seconds": 0.09
+  },
+  "contract_assertion": {
+    "incremental_snapshot_records_expected_base_id": true,
+    "snapshot_hash_matches_pre_compaction_canonical_hash": true,
+    "snapshot_metadata_stable_across_rebuild": true
+  },
+  "notes": "Wave 0 core stub validates compaction metadata invariants (base linkage, frontier, snapshot hash) through rebuild transport path."
+}

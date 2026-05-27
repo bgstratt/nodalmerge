@@ -1,0 +1,24 @@
+{
+  "vector_id": "SPEC-AUTH-001",
+  "status": "pass",
+  "run_type": "wave0_server_stub",
+  "utc_timestamp": "2026-05-26T23:56:01Z",
+  "git_commit": "3b86e9c804166a5399a20408b88accfda542c336",
+  "harness": {
+    "crate": "nodalmerge-server",
+    "test_target": "server/tests/spec_auth_vectors.rs",
+    "test_name": "spec_auth_001_optimistic_visible_before_authority"
+  },
+  "command": "cargo test -p nodalmerge-server --test spec_auth_vectors",
+  "result": {
+    "total": 3,
+    "failed": 0,
+    "passed": 3,
+    "duration_seconds": 0.03
+  },
+  "contract_assertion": {
+    "optimistic_intent_visible_before_authority_response": true,
+    "canonical_lane_not_materialized_pre_authority": true
+  },
+  "notes": "Wave 0 server stub validates optimistic intent visibility while canonical authority keys remain absent prior to authoritative write emission."
+}

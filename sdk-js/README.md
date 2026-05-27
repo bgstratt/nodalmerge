@@ -99,6 +99,46 @@ sdk.sync.insertTextRange("doc:title", {
 
 These helpers apply locally; call `sdk.sync.push()` to send changes.
 
+## Query and Projection Helpers
+
+The SDK includes runtime query/projection helpers under `sdk.query` for canonical-lane workflows:
+
+- `registerSpec({ querySpecId, version, descriptor, options?, timeoutMs? })`
+- `buildProjection({ projectionId, querySpecId, targetCheckpoint?, timeoutMs? })`
+- `readProjection({ projectionId, limit, pageToken?, timeoutMs? })`
+- `invalidateProjection({ projectionId, reason?, timeoutMs? })`
+- `listProjections({ querySpecId?, stateFilter?, cursor?, timeoutMs? })`
+
+`targetCheckpoint` supports these selector shapes:
+
+- `{ selector: "latest" }`
+- `{ selector: "seq", canonical_seq: <non-negative integer> }`
+- `{ selector: "hash", canonical_hash: <64-char hex> }`
+- `{ selector: "frontier", frontier: ["seq:<u64>", ...] }`
+
+Example:
+
+```ts
+await sdk.room.connect();
+
+await sdk.query.registerSpec({
+  querySpecId: "q.rooms",
+  version: "v1",
+  descriptor: { source: "rooms" }
+});
+
+const build = await sdk.query.buildProjection({
+  projectionId: "p.rooms",
+  querySpecId: "q.rooms",
+  targetCheckpoint: { selector: "latest" }
+});
+
+if (build.type === "projection.build.completed") {
+  const page = await sdk.query.readProjection({ projectionId: "p.rooms", limit: 50 });
+  console.log(page.rows, page.digest);
+}
+```
+
 ## Notes
 
 - This SDK intentionally wraps the lower-level bridge with straightforward defaults.

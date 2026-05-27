@@ -10,13 +10,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nodalmerge_core::{BlobStore, MapOp, Op, RoomToken, StateGraph};
+use nodalmerge_core::{
+    BlobStore,
+    MapOp,
+    Op,
+    Policy,
+    PolicyDefault,
+    PolicyRule,
+    RoomToken,
+    StateGraph,
+};
 use nodalmerge_server::room::{import_nodes, Rooms};
-use nodalmerge_server::store::{NoPersistence, SharedPersistence};
+use nodalmerge_server::store::{DirPersistence, NoPersistence, SharedPersistence};
 use nodalmerge_server::ws_handler;
 use axum::{routing::get, Router};
 use base64::Engine as _;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio_tungstenite::tungstenite::Message as TMessage;
@@ -124,12 +133,76 @@ async fn spawn_locked_server(room_id: &str) -> (std::net::SocketAddr, Rooms, Sig
     (addr, rooms, room_key)
 }
 
+async fn spawn_durable_locked_server(
+    room_id: &str,
+) -> (std::net::SocketAddr, Rooms, SigningKey, std::path::PathBuf) {
+    let tmp_root = std::env::temp_dir().join(format!(
+        "nodalmerge-archive-parity-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&tmp_root).expect("temp persistence root should be created");
+
+    let server_key = SigningKey::from_bytes(&[0x51u8; 32]);
+    let persistence: SharedPersistence = Arc::new(
+        DirPersistence::open(&tmp_root).expect("dir persistence should open"),
+    );
+    let rooms = Rooms::new(server_key, persistence, 512, 0, 0);
+
+    let app = Router::new()
+        .route("/ws/:room_id", get(ws_handler::handler))
+        .with_state(rooms.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let addr = listener
+        .local_addr()
+        .expect("listener should expose local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("archive parity server should run");
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let room_key = SigningKey::from_bytes(&[0xABu8; 32]);
+    let target_room = rooms.get_or_create(room_id).await;
+    *target_room.auth_key.write().await = Some(room_key.verifying_key());
+
+    (addr, rooms, room_key, tmp_root)
+}
+
 async fn run_current_path(fx: &GoldenFixture) -> CanonicalTrace {
     match fx.scenario.as_str() {
         "hello_catchup" => run_current_hello_catchup(fx).await,
         "token_expiry" => run_current_token_expiry(fx).await,
         "blob_flow" => run_current_blob_flow(fx).await,
         "tick_compaction" => run_current_tick_compaction(fx).await,
+        "archive_flow" => run_current_archive_flow(fx).await,
+        "archive_export_roundtrip_file" => run_current_archive_export_roundtrip_file(fx).await,
+        "archive_negative_unsupported_format" => {
+            run_current_archive_negative_unsupported_format(fx).await
+        }
+        "archive_negative_signature_invalid" => {
+            run_current_archive_negative_signature_invalid(fx).await
+        }
+        "archive_negative_payload_digest_policy_invalid" => {
+            run_current_archive_negative_payload_digest_policy_invalid(fx).await
+        }
+        "archive_negative_compatibility_window_unsupported" => {
+            run_current_archive_negative_compatibility_window_unsupported(fx).await
+        }
+        "archive_negative_policy_timeline_hash_mismatch" => {
+            run_current_archive_negative_policy_timeline_hash_mismatch(fx).await
+        }
+        "archive_negative_policy_timeline_cutover_mismatch" => {
+            run_current_archive_negative_policy_timeline_cutover_mismatch(fx).await
+        }
+        "archive_negative_checkpoint_not_found_external" => {
+            run_current_archive_negative_checkpoint_not_found_external(fx).await
+        }
         other => panic!("unknown fixture scenario: {other}"),
     }
 }
@@ -431,7 +504,7 @@ async fn run_current_blob_flow(fx: &GoldenFixture) -> CanonicalTrace {
 }
 
 async fn run_current_tick_compaction(fx: &GoldenFixture) -> CanonicalTrace {
-    let (addr, rooms) = spawn_server().await;
+    let (addr, rooms, room_key) = spawn_locked_server(&fx.room_id).await;
     let room = rooms.get_or_create(&fx.room_id).await;
 
     // Ensure the room has at least one node before compaction.
@@ -447,10 +520,18 @@ async fn run_current_tick_compaction(fx: &GoldenFixture) -> CanonicalTrace {
 
     let peer = SigningKey::from_bytes(&[0x73u8; 32]).verifying_key().to_bytes();
     let peer_hex = hex_lower(&peer);
+    let token = RoomToken::sign(
+        &fx.room_id,
+        &peer,
+        now_secs() + 300,
+        &["tick.admin".to_string()],
+        &room_key,
+    );
     let hello = serde_json::json!({
         "type": "hello",
         "pubkey": peer_hex,
         "frontier": [],
+        "token": token_json(&token),
         "subscribe": ["**"]
     })
     .to_string();
@@ -562,6 +643,1037 @@ async fn run_current_tick_compaction(fx: &GoldenFixture) -> CanonicalTrace {
         upload_denied_reason: None,
         has_snapshot_pack: Some(has_snapshot_pack),
         has_compact_ack: Some(has_compact_ack),
+    }
+}
+
+async fn run_current_archive_flow(fx: &GoldenFixture) -> CanonicalTrace {
+    let (addr, rooms, room_key, _tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+
+    let source_room_id = format!("{}-source", fx.room_id);
+    let source_room = rooms.get_or_create(&source_room_id).await;
+    let source_author = SigningKey::from_bytes(&[0x7Au8; 32]);
+    let source_node = make_map_set_node(&source_author, "world/archive-key", b"archive-value");
+    let (accepted, _, errs) = import_nodes(&source_room, vec![source_node]).await;
+    assert_eq!(accepted, 1);
+    assert!(errs.is_empty());
+
+    let source_blob = b"archive-flow-blob".to_vec();
+    let source_blob_hash = nodalmerge_core::Hash::of(&source_blob);
+    source_room.blobs.write().await.put(source_blob.clone());
+    source_room
+        .persistence
+        .persist_blob(&source_room.room_id, &source_blob_hash, &source_blob);
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    // Use the server key identity (spawn_server uses [0x51;32]) so control-plane
+    // authorization is deterministic without relying on capability profile expansion.
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer_hex = hex_lower(&peer);
+    let token = RoomToken::sign(
+        &fx.room_id,
+        &peer,
+        now_secs() + 300,
+        &[],
+        &room_key,
+    );
+
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": peer_hex,
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+    let mut describe_checkpoint = None;
+
+    // Wait for welcome.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let archive_ref = format!("room://{source_room_id}");
+
+    let describe = serde_json::json!({
+        "type": "archive.describe",
+        "archive_ref": archive_ref
+    })
+    .to_string();
+    sink.send(TMessage::Text(describe.into()))
+        .await
+        .expect("send archive.describe");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.describe.result") {
+                    sequence.push("archive.describe.result".to_string());
+                    describe_checkpoint = v.get("checkpoint").cloned();
+                    break;
+                }
+                if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+                    panic!("archive.describe produced error envelope: {text}");
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let validate = serde_json::json!({
+        "type": "archive.validate",
+        "archive_ref": format!("room://{source_room_id}"),
+        "mode": "full_integrity"
+    })
+    .to_string();
+    sink.send(TMessage::Text(validate.into()))
+        .await
+        .expect("send archive.validate");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.validate.result") {
+                    sequence.push("archive.validate.result".to_string());
+                    break;
+                }
+                if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+                    panic!("archive.validate produced error envelope: {text}");
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let import = serde_json::json!({
+        "type": "archive.import",
+        "archive_ref": format!("room://{source_room_id}"),
+        "import_mode": "full_apply",
+        "expected_checkpoint": describe_checkpoint
+    })
+    .to_string();
+    sink.send(TMessage::Text(import.into()))
+        .await
+        .expect("send archive.import");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.import.completed") {
+                    sequence.push("archive.import.completed".to_string());
+                    break;
+                }
+                if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+                    panic!("archive.import produced error envelope: {text}");
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
+async fn run_current_archive_export_roundtrip_file(fx: &GoldenFixture) -> CanonicalTrace {
+    let (addr, rooms, room_key, tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+
+    let source_room_id = format!("{}-source-export", fx.room_id);
+    let source_room = rooms.get_or_create(&source_room_id).await;
+    let source_author = SigningKey::from_bytes(&[0x6Au8; 32]);
+    let source_node = make_map_set_node(&source_author, "world/export-key", b"export-value");
+    let (accepted, _, errs) = import_nodes(&source_room, vec![source_node]).await;
+    assert_eq!(accepted, 1);
+    assert!(errs.is_empty());
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer_hex = hex_lower(&peer);
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
+
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": peer_hex,
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let manifest_path = tmp_root.join("archives").join("roundtrip-export.json");
+    let archive_ref = format!("file://{}", manifest_path.display());
+
+    let export = serde_json::json!({
+        "type": "archive.export",
+        "source_room": source_room_id,
+        "archive_ref": archive_ref,
+    })
+    .to_string();
+    sink.send(TMessage::Text(export.into()))
+        .await
+        .expect("send archive.export");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.export.result") {
+                    sequence.push("archive.export.result".to_string());
+                    assert_eq!(
+                        v.get("compatibility_window")
+                            .and_then(|cw| cw.get("min_supported"))
+                            .and_then(|m| m.as_str()),
+                        Some("1")
+                    );
+                    assert_eq!(
+                        v.get("compatibility_window")
+                            .and_then(|cw| cw.get("max_supported"))
+                            .and_then(|m| m.as_str()),
+                        Some("2")
+                    );
+                    assert_eq!(
+                        v.get("payload_digest_policy").and_then(|p| p.as_str()),
+                        Some("strict_sha256_v1")
+                    );
+                    assert!(
+                        v.get("policy_timeline_hash")
+                            .and_then(|h| h.as_str())
+                            .map(|h| !h.is_empty())
+                            .unwrap_or(false)
+                    );
+                    assert_eq!(
+                        v.get("policy_timeline_cutover_lamport")
+                            .and_then(|c| c.as_u64()),
+                        Some(0)
+                    );
+                    break;
+                }
+                if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+                    panic!("archive.export produced error envelope: {text}");
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let import = serde_json::json!({
+        "type": "archive.import",
+        "archive_ref": format!("file://{}", manifest_path.display()),
+        "import_mode": "full_apply",
+    })
+    .to_string();
+    sink.send(TMessage::Text(import.into()))
+        .await
+        .expect("send archive.import");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.import.completed") {
+                    sequence.push("archive.import.completed".to_string());
+                    break;
+                }
+                if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+                    panic!("archive.import produced error envelope: {text}");
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
+fn write_signed_external_manifest(
+    path: &std::path::Path,
+    source_room: &str,
+    signer: &SigningKey,
+    tamper_signature: bool,
+) {
+    let default_policy_timeline =
+        nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default());
+    write_signed_external_manifest_with_policy(
+        path,
+        source_room,
+        signer,
+        tamper_signature,
+        "1",
+        "2",
+        "strict_sha256_v1",
+        &default_policy_timeline.hash_hex,
+        default_policy_timeline.cutover_lamport,
+    );
+}
+
+fn write_signed_external_manifest_with_policy(
+    path: &std::path::Path,
+    source_room: &str,
+    signer: &SigningKey,
+    tamper_signature: bool,
+    min_supported: &str,
+    max_supported: &str,
+    payload_digest_policy: &str,
+    policy_timeline_hash: &str,
+    policy_timeline_cutover_lamport: u64,
+) {
+    let payload = format!(
+        "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}",
+        "1",
+        source_room,
+        min_supported,
+        max_supported,
+        payload_digest_policy,
+        policy_timeline_hash,
+        policy_timeline_cutover_lamport,
+    );
+    let mut sig = signer.sign(payload.as_bytes()).to_bytes();
+    if tamper_signature {
+        sig[0] ^= 0x01;
+    }
+
+    let manifest = serde_json::json!({
+        "format_version": "1",
+        "source_room": source_room,
+        "compatibility_window": {
+            "min_supported": min_supported,
+            "max_supported": max_supported
+        },
+        "payload_digest_policy": payload_digest_policy,
+        "policy_timeline_hash": policy_timeline_hash,
+        "policy_timeline_cutover_lamport": policy_timeline_cutover_lamport,
+        "signature": {
+            "public_key": hex_lower(&signer.verifying_key().to_bytes()),
+            "signature": hex_lower(&sig),
+        }
+    });
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("manifest parent directory should exist");
+    }
+    std::fs::write(path, manifest.to_string()).expect("manifest should be written");
+}
+
+async fn run_current_archive_negative_unsupported_format(fx: &GoldenFixture) -> CanonicalTrace {
+    let (addr, _rooms, room_key, _tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": hex_lower(&peer),
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let validate = serde_json::json!({
+        "type": "archive.validate",
+        "archive_ref": "ftp://unsupported/archive.nmar",
+        "mode": "full_integrity"
+    })
+    .to_string();
+    sink.send(TMessage::Text(validate.into()))
+        .await
+        .expect("send archive.validate");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.validate.rejected") {
+                    sequence.push("archive.validate.rejected".to_string());
+                    assert_eq!(
+                        v.get("reason_class").and_then(|r| r.as_str()),
+                        Some("reject.archive_unsupported_format")
+                    );
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
+async fn run_current_archive_negative_signature_invalid(fx: &GoldenFixture) -> CanonicalTrace {
+    let (addr, rooms, room_key, tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+    let source_room_id = format!("{}-source-signature", fx.room_id);
+    let source_room = rooms.get_or_create(&source_room_id).await;
+    let source_author = SigningKey::from_bytes(&[0x7Cu8; 32]);
+    let source_node = make_map_set_node(&source_author, "world/a", b"1");
+    let _ = import_nodes(&source_room, vec![source_node]).await;
+
+    let signer = SigningKey::from_bytes(&[0x41u8; 32]);
+    let manifest_path = tmp_root.join("archives").join("invalid-sig.json");
+    write_signed_external_manifest(&manifest_path, &source_room_id, &signer, true);
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": hex_lower(&peer),
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let validate = serde_json::json!({
+        "type": "archive.validate",
+        "archive_ref": format!("file://{}", manifest_path.display()),
+        "mode": "full_integrity"
+    })
+    .to_string();
+    sink.send(TMessage::Text(validate.into()))
+        .await
+        .expect("send archive.validate");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.validate.rejected") {
+                    sequence.push("archive.validate.rejected".to_string());
+                    assert_eq!(
+                        v.get("reason_class").and_then(|r| r.as_str()),
+                        Some("reject.archive_signature_invalid")
+                    );
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
+async fn run_current_archive_negative_payload_digest_policy_invalid(
+    fx: &GoldenFixture,
+) -> CanonicalTrace {
+    let (addr, rooms, room_key, tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+    let source_room_id = format!("{}-source-policy", fx.room_id);
+    let source_room = rooms.get_or_create(&source_room_id).await;
+    let source_author = SigningKey::from_bytes(&[0x7Eu8; 32]);
+    let source_node = make_map_set_node(&source_author, "world/a", b"1");
+    let _ = import_nodes(&source_room, vec![source_node]).await;
+
+    let signer = SigningKey::from_bytes(&[0x43u8; 32]);
+    let manifest_path = tmp_root.join("archives").join("invalid-policy.json");
+    write_signed_external_manifest_with_policy(
+        &manifest_path,
+        &source_room_id,
+        &signer,
+        false,
+        "1",
+        "2",
+        "legacy_md5_v0",
+        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default()).hash_hex,
+        0,
+    );
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": hex_lower(&peer),
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let validate = serde_json::json!({
+        "type": "archive.validate",
+        "archive_ref": format!("file://{}", manifest_path.display()),
+        "mode": "full_integrity"
+    })
+    .to_string();
+    sink.send(TMessage::Text(validate.into()))
+        .await
+        .expect("send archive.validate");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.validate.rejected") {
+                    sequence.push("archive.validate.rejected".to_string());
+                    assert_eq!(
+                        v.get("reason_class").and_then(|r| r.as_str()),
+                        Some("reject.archive_policy_timeline_mismatch")
+                    );
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
+async fn run_current_archive_negative_compatibility_window_unsupported(
+    fx: &GoldenFixture,
+) -> CanonicalTrace {
+    let (addr, rooms, room_key, tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+    let source_room_id = format!("{}-source-compat", fx.room_id);
+    let source_room = rooms.get_or_create(&source_room_id).await;
+    let source_author = SigningKey::from_bytes(&[0x7Fu8; 32]);
+    let source_node = make_map_set_node(&source_author, "world/a", b"1");
+    let _ = import_nodes(&source_room, vec![source_node]).await;
+
+    let signer = SigningKey::from_bytes(&[0x44u8; 32]);
+    let manifest_path = tmp_root.join("archives").join("unsupported-window.json");
+    write_signed_external_manifest_with_policy(
+        &manifest_path,
+        &source_room_id,
+        &signer,
+        false,
+        "2",
+        "2",
+        "strict_sha256_v1",
+        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default()).hash_hex,
+        0,
+    );
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": hex_lower(&peer),
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let validate = serde_json::json!({
+        "type": "archive.validate",
+        "archive_ref": format!("file://{}", manifest_path.display()),
+        "mode": "full_integrity"
+    })
+    .to_string();
+    sink.send(TMessage::Text(validate.into()))
+        .await
+        .expect("send archive.validate");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.validate.rejected") {
+                    sequence.push("archive.validate.rejected".to_string());
+                    assert_eq!(
+                        v.get("reason_class").and_then(|r| r.as_str()),
+                        Some("reject.archive_unsupported_format")
+                    );
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
+async fn run_current_archive_negative_policy_timeline_hash_mismatch(
+    fx: &GoldenFixture,
+) -> CanonicalTrace {
+    let (addr, rooms, room_key, tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+    let target_room = rooms.get_or_create(&fx.room_id).await;
+    target_room
+        .set_policy(Policy {
+            rules: vec![PolicyRule {
+                path_glob: "world/**".to_string(),
+                can_write: vec![],
+                can_read: vec![],
+                can_derive: vec![],
+            }],
+            default: PolicyDefault::DenyAll,
+        })
+        .await;
+
+    let source_room_id = format!("{}-source-policy-hash", fx.room_id);
+    let source_room = rooms.get_or_create(&source_room_id).await;
+    let source_author = SigningKey::from_bytes(&[0x45u8; 32]);
+    let source_node = make_map_set_node(&source_author, "world/a", b"1");
+    let _ = import_nodes(&source_room, vec![source_node]).await;
+
+    let signer = SigningKey::from_bytes(&[0x46u8; 32]);
+    let manifest_path = tmp_root.join("archives").join("policy-hash-mismatch.json");
+    let default_policy_timeline =
+        nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default());
+    write_signed_external_manifest_with_policy(
+        &manifest_path,
+        &source_room_id,
+        &signer,
+        false,
+        "1",
+        "2",
+        "strict_sha256_v1",
+        &default_policy_timeline.hash_hex,
+        default_policy_timeline.cutover_lamport,
+    );
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": hex_lower(&peer),
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let validate = serde_json::json!({
+        "type": "archive.validate",
+        "archive_ref": format!("file://{}", manifest_path.display()),
+        "mode": "full_integrity"
+    })
+    .to_string();
+    sink.send(TMessage::Text(validate.into()))
+        .await
+        .expect("send archive.validate");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.validate.rejected") {
+                    sequence.push("archive.validate.rejected".to_string());
+                    assert_eq!(
+                        v.get("reason_class").and_then(|r| r.as_str()),
+                        Some("reject.archive_policy_timeline_mismatch")
+                    );
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
+async fn run_current_archive_negative_policy_timeline_cutover_mismatch(
+    fx: &GoldenFixture,
+) -> CanonicalTrace {
+    let (addr, rooms, room_key, tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+
+    let source_room_id = format!("{}-source-policy-cutover", fx.room_id);
+    let source_room = rooms.get_or_create(&source_room_id).await;
+    let source_author = SigningKey::from_bytes(&[0x47u8; 32]);
+    let source_node = make_map_set_node(&source_author, "world/a", b"1");
+    let _ = import_nodes(&source_room, vec![source_node]).await;
+
+    let signer = SigningKey::from_bytes(&[0x48u8; 32]);
+    let manifest_path = tmp_root.join("archives").join("policy-cutover-mismatch.json");
+    let default_policy_timeline =
+        nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default());
+    write_signed_external_manifest_with_policy(
+        &manifest_path,
+        &source_room_id,
+        &signer,
+        false,
+        "1",
+        "2",
+        "strict_sha256_v1",
+        &default_policy_timeline.hash_hex,
+        default_policy_timeline.cutover_lamport + 7,
+    );
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": hex_lower(&peer),
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let validate = serde_json::json!({
+        "type": "archive.validate",
+        "archive_ref": format!("file://{}", manifest_path.display()),
+        "mode": "full_integrity"
+    })
+    .to_string();
+    sink.send(TMessage::Text(validate.into()))
+        .await
+        .expect("send archive.validate");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.validate.rejected") {
+                    sequence.push("archive.validate.rejected".to_string());
+                    assert_eq!(
+                        v.get("reason_class").and_then(|r| r.as_str()),
+                        Some("reject.archive_policy_timeline_mismatch")
+                    );
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
+async fn run_current_archive_negative_checkpoint_not_found_external(
+    fx: &GoldenFixture,
+) -> CanonicalTrace {
+    let (addr, _rooms, room_key, tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+
+    let signer = SigningKey::from_bytes(&[0x42u8; 32]);
+    let object_root = tmp_root.join("object-root");
+    let manifest_path = object_root.join("bucket-a").join("missing.json");
+    write_signed_external_manifest(&manifest_path, "missing-room", &signer, false);
+    std::env::set_var(
+        "NODALMERGE_ARCHIVE_OBJECT_ROOT",
+        object_root.display().to_string(),
+    );
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": hex_lower(&peer),
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let validate = serde_json::json!({
+        "type": "archive.validate",
+        "archive_ref": "object://bucket-a/missing.json",
+        "mode": "full_integrity"
+    })
+    .to_string();
+    sink.send(TMessage::Text(validate.into()))
+        .await
+        .expect("send archive.validate");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.validate.rejected") {
+                    sequence.push("archive.validate.rejected".to_string());
+                    assert_eq!(
+                        v.get("reason_class").and_then(|r| r.as_str()),
+                        Some("reject.archive_checkpoint_not_found")
+                    );
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    std::env::remove_var("NODALMERGE_ARCHIVE_OBJECT_ROOT");
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
     }
 }
 
@@ -688,6 +1800,114 @@ async fn parity_blob_flow_request_upload_and_fetch_fixture() {
 async fn parity_tick_compaction_control_fixture() {
     let fx = load_fixture("tick_compaction_start_stop_snapshot.json");
     assert_eq!(fx.name, "tick_compaction_start_stop_snapshot");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_runtime_adapter_fixture() {
+    let fx = load_fixture("archive_runtime_adapter_room_ref.json");
+    assert_eq!(fx.name, "archive_runtime_adapter_room_ref");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_export_runtime_fixture() {
+    let fx = load_fixture("archive_runtime_export_file_ref.json");
+    assert_eq!(fx.name, "archive_runtime_export_file_ref");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_negative_unsupported_format_fixture() {
+    let fx = load_fixture("archive_negative_unsupported_format.json");
+    assert_eq!(fx.name, "archive_negative_unsupported_format");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_negative_signature_invalid_fixture() {
+    let fx = load_fixture("archive_negative_signature_invalid.json");
+    assert_eq!(fx.name, "archive_negative_signature_invalid");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_negative_payload_digest_policy_invalid_fixture() {
+    let fx = load_fixture("archive_negative_payload_digest_policy_invalid.json");
+    assert_eq!(fx.name, "archive_negative_payload_digest_policy_invalid");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_negative_compatibility_window_unsupported_fixture() {
+    let fx = load_fixture("archive_negative_compatibility_window_unsupported.json");
+    assert_eq!(fx.name, "archive_negative_compatibility_window_unsupported");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_negative_policy_timeline_hash_mismatch_fixture() {
+    let fx = load_fixture("archive_negative_policy_timeline_hash_mismatch.json");
+    assert_eq!(fx.name, "archive_negative_policy_timeline_hash_mismatch");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_negative_policy_timeline_cutover_mismatch_fixture() {
+    let fx = load_fixture("archive_negative_policy_timeline_cutover_mismatch.json");
+    assert_eq!(fx.name, "archive_negative_policy_timeline_cutover_mismatch");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_negative_checkpoint_not_found_external_fixture() {
+    let fx = load_fixture("archive_negative_checkpoint_not_found_external.json");
+    assert_eq!(fx.name, "archive_negative_checkpoint_not_found_external");
 
     let baseline = run_current_path(&fx).await;
     let shadow = run_shadow_path(&fx).await;

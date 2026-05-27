@@ -37,7 +37,7 @@ function Resolve-DotnetPath {
 
 function Resolve-DotnetHostProjectPath {
     $candidates = @(
-        "nodalmerge-host/src/ActiveSync.DotNetHost/NodalMerge.DotNetHost.csproj"
+        "nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj"
     )
 
     foreach ($candidate in $candidates) {
@@ -46,7 +46,7 @@ function Resolve-DotnetHostProjectPath {
         }
     }
 
-    throw "Unable to locate DotNet host project at nodalmerge-host/src/ActiveSync.DotNetHost/NodalMerge.DotNetHost.csproj."
+    throw "Unable to locate DotNet host project at nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj."
 }
 
 function Resolve-FfiDll {

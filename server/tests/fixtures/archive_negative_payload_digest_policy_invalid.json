@@ -1,0 +1,8 @@
+{
+  "name": "archive_negative_payload_digest_policy_invalid",
+  "room_id": "parity-archive-neg-digest-policy",
+  "scenario": "archive_negative_payload_digest_policy_invalid",
+  "expected_sequence": ["welcome", "archive.validate.rejected"],
+  "expected_pack_count": 0,
+  "notes": "External file manifest with unsupported payload_digest_policy rejects deterministically as policy timeline mismatch."
+}

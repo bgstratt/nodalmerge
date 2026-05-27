@@ -17,8 +17,7 @@ function Resolve-TestProjectPath {
     }
 
     $candidates = @(
-        "tests/ActiveSync.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj",
-        "tests/ActiveSync.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj"
+        "tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj"
     )
 
     foreach ($candidate in $candidates) {
@@ -27,7 +26,7 @@ function Resolve-TestProjectPath {
         }
     }
 
-    throw "Unable to locate DotNet host test project. Checked NodalMerge path first, then legacy ActiveSync compatibility path."
+    throw "Unable to locate DotNet host test project at tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj."
 }
 
 Push-Location $scriptRoot

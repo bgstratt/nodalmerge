@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>7575e404-45c6-42e8-9cba-3a37140683ce</UserSecretsId>
+    <NodalMergeUseNuGetPackages Condition="'$(NodalMergeUseNuGetPackages)' == ''">false</NodalMergeUseNuGetPackages>
+    <NodalMergePackageVersion Condition="'$(NodalMergePackageVersion)' == ''">0.1.0-local</NodalMergePackageVersion>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(NodalMergeUseNuGetPackages)' != 'true'">
+    <ProjectReference Include="..\NodalMerge.Host.Abstractions\NodalMerge.Host.Abstractions.csproj" />
+    <ProjectReference Include="..\NodalMerge.Host.Composition\NodalMerge.Host.Composition.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(NodalMergeUseNuGetPackages)' == 'true'">
+    <PackageReference Include="NodalMerge.Host.Abstractions" Version="$(NodalMergePackageVersion)" />
+    <PackageReference Include="NodalMerge.Host.Composition" Version="$(NodalMergePackageVersion)" />
+    <PackageReference Include="NodalMerge.DotNetHost.Native.win-x64" Version="$(NodalMergePackageVersion)" />
+    <PackageReference Include="NodalMerge.DotNetHost.Native.linux-x64" Version="$(NodalMergePackageVersion)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Remove="appsettings.json" />
+    <Content Remove="appsettings.Development.json" />
+    <None Remove="appsettings.json" />
+    <None Remove="appsettings.Development.json" />
+
+    <Content Update="appsettings.json">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </Content>
+    <Content Update="appsettings.Development.json">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

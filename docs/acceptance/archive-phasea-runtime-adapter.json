@@ -1,0 +1,48 @@
+{
+  "vector_family": "ARCHIVE-PHASEA-RUNTIME-ADAPTER",
+  "status": "pass",
+  "run_type": "wave1_runtime_adapter_parity",
+  "utc_timestamp": "2026-05-27T02:30:22Z",
+  "adapter_paths": {
+    "server_dispatch": "server/src/adapter_context.rs",
+    "server_runtime_ingress": "server/src/ws_handler.rs",
+    "host_core_serializer": "host-core/src/protocol.rs"
+  },
+  "shared_contracts": {
+    "source": "core/src/archive_contracts.rs",
+    "types": [
+      "ArchiveWsResponse",
+      "ArchiveReasonClass",
+      "ArchiveRejected",
+      "ArchiveValidated",
+      "ArchiveImported",
+      "ArchiveDescribed"
+    ]
+  },
+  "validation": [
+    {
+      "command": "cargo test -p nodalmerge-host-core protocol::tests::serialize_archive",
+      "result": {
+        "passed": 2,
+        "failed": 0
+      }
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_",
+      "result": {
+        "passed": 10,
+        "failed": 0,
+        "notes": "includes adapter routing/auth tests plus archive portability vectors"
+      }
+    },
+    {
+      "command": "cargo test -p nodalmerge-core --test archive_portability_vectors",
+      "result": {
+        "passed": 6,
+        "failed": 0
+      }
+    }
+  ],
+  "notes": "Runtime adapter ingress now emits archive ws envelopes through shared ArchiveWsResponse contracts and deterministic reason classes.
+"
+}

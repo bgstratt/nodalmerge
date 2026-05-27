@@ -1,0 +1,13 @@
+{
+  "name": "archive_runtime_adapter_room_ref",
+  "room_id": "parity-archive-room",
+  "scenario": "archive_flow",
+  "expected_sequence": [
+    "welcome",
+    "archive.describe.result",
+    "archive.validate.result",
+    "archive.import.completed"
+  ],
+  "expected_pack_count": 0,
+  "notes": "Golden baseline for persistence-backed archive runtime adapter flow using room:// archive refs and capability-gated control-plane commands."
+}

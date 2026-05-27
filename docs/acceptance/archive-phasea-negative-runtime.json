@@ -1,0 +1,33 @@
+{
+  "artifact": "archive-phasea-negative-runtime",
+  "recorded_at": "2026-05-26T21:46:50.4431648-05:00",
+  "phase": "Phase A closeout",
+  "summary": [
+    "External non-room-local archive providers are active for file:// and object:// manifest refs.",
+    "Signature verification path is active for external manifests.",
+    "Deterministic negative runtime parity fixtures pass for unsupported format, invalid signature, and checkpoint-not-found external refs."
+  ],
+  "commands": [
+    {
+      "command": "cargo test -p nodalmerge-server archive_adapter::tests::",
+      "result": "passed",
+      "details": "5 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server parity_archive_negative_ --test host_migration_parity",
+      "result": "passed",
+      "details": "3 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server parity_archive_runtime_adapter_fixture --test host_migration_parity",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    }
+  ],
+  "fixtures": [
+    "server/tests/fixtures/archive_negative_unsupported_format.json",
+    "server/tests/fixtures/archive_negative_signature_invalid.json",
+    "server/tests/fixtures/archive_negative_checkpoint_not_found_external.json",
+    "server/tests/fixtures/archive_runtime_adapter_room_ref.json"
+  ]
+}

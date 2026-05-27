@@ -52,16 +52,32 @@ async fn durable_idle_room_is_evicted_and_rehydrates() {
         // Drop our handle so Arc::strong_count drops to 1 (registry only).
     }
 
-    // Sweep with zero timeout -> should evict immediately.
-    let evicted = rooms.sweep_idle(Duration::ZERO, Instant::now()).await;
+    // Sweep with zero timeout -> should evict once background hydrate tasks
+    // release their temporary Arc handle.
+    let mut evicted = Vec::new();
+    for _ in 0..20 {
+        evicted = rooms.sweep_idle(Duration::ZERO, Instant::now()).await;
+        if evicted.contains(&"r1".to_string()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     assert_eq!(evicted, vec!["r1".to_string()]);
 
     // Rejoining hydrates from disk.
     let room = rooms.get_or_create("r1").await;
-    let graph = room.graph.read().await;
-    let state: std::collections::HashMap<String, Vec<u8>> = graph.resolve().into_iter().collect();
-    assert_eq!(state.get("hello").map(|v| v.as_slice()), Some(b"world".as_slice()));
-    drop(graph);
+    let mut found = false;
+    for _ in 0..20 {
+        let graph = room.graph.read().await;
+        let state: std::collections::HashMap<String, Vec<u8>> = graph.resolve().into_iter().collect();
+        if state.get("hello").map(|v| v.as_slice()) == Some(b"world".as_slice()) {
+            found = true;
+            break;
+        }
+        drop(graph);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(found, "rehydrated room should contain persisted key after async hydrate");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -98,8 +114,16 @@ async fn connected_room_is_not_evicted() {
 
     room.deregister_peer("peer-c").await;
     drop(room);
-    // Now only the registry holds it and peers is empty -> eligible.
-    let evicted = rooms.sweep_idle(Duration::ZERO, Instant::now()).await;
+    // Now only the registry should hold it and peers are empty. Allow a short
+    // window for background hydrate task handles to drain before asserting.
+    let mut evicted = Vec::new();
+    for _ in 0..20 {
+        evicted = rooms.sweep_idle(Duration::ZERO, Instant::now()).await;
+        if evicted.contains(&"r3".to_string()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     assert_eq!(evicted, vec!["r3".to_string()]);
 
     let _ = std::fs::remove_dir_all(&dir);

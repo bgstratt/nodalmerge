@@ -11,7 +11,7 @@ try {
 
     function Resolve-DotnetHostProjectPath {
         $candidates = @(
-            "nodalmerge-host/src/ActiveSync.DotNetHost/NodalMerge.DotNetHost.csproj"
+            "nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj"
         )
 
         foreach ($candidate in $candidates) {
@@ -20,7 +20,7 @@ try {
             }
         }
 
-        throw "Unable to locate DotNet host project at nodalmerge-host/src/ActiveSync.DotNetHost/NodalMerge.DotNetHost.csproj."
+        throw "Unable to locate DotNet host project at nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj."
     }
 
     Write-Host "Starting Docker container..."

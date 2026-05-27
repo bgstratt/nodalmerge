@@ -6,6 +6,8 @@
 pub mod keypair;
 pub mod metrics;
 pub mod gc_adapter;
+pub mod archive_adapter;
+pub mod archive_export;
 pub mod adapter_context;
 pub mod capability_profile;
 pub mod room;

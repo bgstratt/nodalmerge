@@ -1,7 +1,7 @@
 """Demo dev server that serves ./web with aggressive no-cache headers.
 
 The default `python -m http.server` sends ETags without `Cache-Control`,
-which lets Chrome keep the old `activesync_bridge_bg.wasm` module alive
+which lets Chrome keep the old `nodalmerge_bridge_bg.wasm` module alive
 across hard-reloads (WASM modules can outlive a Ctrl+Shift+R in some
 cases). That caused phantom "lamport ceiling exceeded" floods after
 rebuilding the bridge. Using this wrapper guarantees the browser always
@@ -38,9 +38,11 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self) -> None:  # noqa: D401 - stdlib override
-        if self.path.startswith("/__activesync_config.js"):
+        if self.path.startswith("/__nodalmerge_config.js") or self.path.startswith("/__activesync_config.js"):
             env_server = (
-                os.environ.get("ACTIVESYNC_SERVER_URL")
+                os.environ.get("NODALMERGE_SERVER_URL")
+                or os.environ.get("NODALMERGE_DEMO_SERVER_URL")
+                or os.environ.get("ACTIVESYNC_SERVER_URL")
                 or os.environ.get("ACTIVESYNC_DEMO_SERVER_URL")
                 or ""
             ).strip()
@@ -48,7 +50,7 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
                 "serverUrl": env_server,
             }
             body = (
-                "window.ACTIVESYNC_CONFIG = "
+                "window.NODALMERGE_CONFIG = "
                 + json.dumps(payload, separators=(",", ":"))
                 + ";\n"
             ).encode("utf-8")
@@ -64,9 +66,11 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
 
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
-    handler = partial(NoCacheHandler, directory="web")
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    web_dir = os.path.join(repo_root, "web")
+    handler = partial(NoCacheHandler, directory=web_dir)
     with ThreadingHTTPServer(("127.0.0.1", port), handler) as httpd:
-        print(f"activesync demo: http://localhost:{port} (no-cache)")
+        print(f"nodalmerge demo: http://localhost:{port} (no-cache) serving {web_dir}")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

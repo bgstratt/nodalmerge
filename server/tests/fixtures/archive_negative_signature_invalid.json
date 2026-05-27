@@ -1,0 +1,8 @@
+{
+  "name": "archive_negative_signature_invalid",
+  "room_id": "parity-archive-neg-signature",
+  "scenario": "archive_negative_signature_invalid",
+  "expected_sequence": ["welcome", "archive.validate.rejected"],
+  "expected_pack_count": 0,
+  "notes": "External file manifest with invalid signature rejects deterministically as signature invalid."
+}

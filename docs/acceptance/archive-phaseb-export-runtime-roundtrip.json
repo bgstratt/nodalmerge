@@ -1,0 +1,56 @@
+{
+  "artifact": "archive-phaseb-export-runtime-roundtrip",
+  "recorded_at": "2026-05-26T22:09:15.7542624-05:00",
+  "phase": "Phase B execution",
+  "summary": [
+    "archive.export is wired through runtime adapter routing and websocket control-plane authorization.",
+    "Runtime responses emit archive.export.result and archive.export.rejected envelopes.",
+    "Generated file:// and object:// manifests are consumed by roundtrip parity vectors that assert deterministic canonical hash parity on import."
+  ],
+  "commands": [
+    {
+      "command": "cargo test -p nodalmerge-host-core serialize_archive_export_result_envelope_preserves_wire_type",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server parity_archive_export_runtime_fixture --test host_migration_parity",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_roundtrip_002_generated_file_manifest_import_parity_server_path --test archive_portability_vectors",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_roundtrip_003_generated_object_manifest_import_parity_server_path --test archive_portability_vectors",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_",
+      "result": "passed",
+      "details": "archive-focused suites passed including adapter, export, portability vectors, and host migration parity"
+    }
+  ],
+  "scope": {
+    "runtime_files": [
+      "server/src/archive_adapter.rs",
+      "server/src/adapter_context.rs",
+      "server/src/ws_handler.rs",
+      "core/src/archive_contracts.rs",
+      "core/src/lib.rs",
+      "host-core/src/protocol.rs"
+    ],
+    "parity_vectors": [
+      "server/tests/archive_portability_vectors.rs",
+      "server/tests/host_migration_parity.rs",
+      "server/tests/fixtures/archive_runtime_export_file_ref.json"
+    ]
+  },
+  "next_checkpoint": [
+    "Add compatibility-window metadata and payload digest policy checks to export manifest outputs.",
+    "Add ws conformance vectors that pin those policy fields and rejection mapping behavior."
+  ]
+}

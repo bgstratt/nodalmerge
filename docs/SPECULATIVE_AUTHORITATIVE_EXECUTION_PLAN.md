@@ -1,8 +1,8 @@
 # Speculative vs Authoritative Execution Plan
 
-Status: Draft (proposed)
+Status: InProgress (Wave 0 vector baseline passing)
 Owner: Core + host runtime + SDK streams
-Last Updated: 2026-05-25
+Last Updated: 2026-05-26
 
 ## 1. Purpose
 
@@ -100,6 +100,24 @@ Exit criteria:
 1. Contract approved by core, host, and SDK maintainers.
 2. Rejection taxonomy mapping agreed for intent rejects.
 
+Phase A decision log (for sign-off capture):
+1. Review date/time (UTC): 2026-05-26
+2. Attendees: core lead Brad; host runtime lead Brad; SDK lead Brad; docs facilitator Brad
+3. Decision status: Approved
+
+Proposed decisions to ratify:
+1. Lane namespace policy: speculative writes are scoped to intent/** and canonical writes remain outside intent/**.
+2. Lifecycle contract: intent_status values are exactly pending, accepted, rejected, superseded for v1.
+3. Metadata floor: intent_id, intent_author, intent_status are required; canonical_refs is optional.
+4. Rejection contract: rejected intents must emit deterministic reason metadata in canonical taxonomy classes.
+
+Ambiguity closure table:
+| Topic | Proposed resolution | Status | Owner | Due |
+|---|---|---|---|---|
+| Intent terminalization SLA | Every non-expired intent must reach accepted or rejected; superseded is terminal only when explicit successor intent is referenced. | Closed | Brad | 2026-05-26 |
+| Canonical refs optionality | canonical_refs remains optional in v1 to avoid over-constraining authority adapters. | Closed | Brad | 2026-05-26 |
+| Rejection taxonomy floor | Require stable machine class plus human-readable message; no host-specific free-form-only rejects. | Closed | Brad | 2026-05-26 |
+
 ## Phase B: Core Projection + Replay Semantics
 
 Goal:
@@ -165,6 +183,17 @@ Required vectors:
 4. `SPEC-AUTH-004`: replay canonical hash is unchanged by pending or rejected intents.
 5. `SPEC-AUTH-005`: intent disposition events are idempotent and order-safe under reconnect/replay.
 6. `SPEC-AUTH-006`: capability-gated intent namespaces reject unauthorized writes deterministically.
+
+Wave 0 evidence baseline (2026-05-26):
+1. Owner matrix marks all SPEC-AUTH vectors Passing: docs/WAVE0_VECTOR_OWNER_MATRIX.md.
+2. Acceptance artifacts recorded:
+   - docs/acceptance/spec-auth-001.json
+   - docs/acceptance/spec-auth-002.json
+   - docs/acceptance/spec-auth-003.json
+   - docs/acceptance/spec-auth-004.json
+   - docs/acceptance/spec-auth-005.json
+   - docs/acceptance/spec-auth-006.json
+3. Remaining Phase A work is contract-approval capture and ambiguity closure, not vector stub implementation.
 
 ## 9. Risks and Mitigations
 

@@ -1,0 +1,26 @@
+{
+  "vector_id": "QUERY-COMPAT-REJECT-001",
+  "status": "pass",
+  "run_type": "wave1_core_vector",
+  "utc_timestamp": "2026-05-27T02:00:01Z",
+  "git_commit": "3b86e9c804166a5399a20408b88accfda542c336",
+  "harness": {
+    "crate": "nodalmerge-core",
+    "test_target": "core/tests/query_materialization_vectors.rs",
+    "test_name": "query_compat_reject_001_selector_payload_validation_bounded_taxonomy"
+  },
+  "command": "cargo test -p nodalmerge-core --test query_materialization_vectors",
+  "result": {
+    "total": 4,
+    "failed": 0,
+    "passed": 4,
+    "duration_seconds": 0.08
+  },
+  "contract_assertion": {
+    "selector_validation_rejects_malformed_frontier": true,
+    "selector_validation_rejects_mixed_selector_fields": true,
+    "selector_validation_rejects_invalid_hash_format": true,
+    "selector_validation_bounded_taxonomy": true
+  },
+  "notes": "Core selector payload compatibility lane validates bounded rejection taxonomy for checkpoint selectors."
+}

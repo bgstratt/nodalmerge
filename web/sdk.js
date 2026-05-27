@@ -1,4 +1,4 @@
-// sdk.js — ActiveSync high-level SDK (F1)
+// sdk.js — NodalMerge high-level SDK (F1)
 //
 // Firebase/Replicache-style document API on top of the low-level `SyncStore`.
 // The underlying bridge is unchanged; this file is a pure JS wrapper.
@@ -23,7 +23,7 @@ import init, {
   SyncStore,
   sign_room_token,
   room_pubkey_hex,
-} from './pkg/activesync_bridge.js';
+} from './pkg/nodalmerge_bridge.js';
 
 // -----------------------------------------------------------------------------
 // Module init — idempotent. Callers can also await `createDoc` directly; this
@@ -115,7 +115,7 @@ function randomSeed32() {
 }
 
 // -----------------------------------------------------------------------------
-// Transport — WebSocket wrapper that speaks the ActiveSync wire protocol.
+// Transport — WebSocket wrapper that speaks the NodalMerge wire protocol.
 // Reuses the protocol shipped in demo.js (hello/welcome/pack/request/mst/blob).
 // -----------------------------------------------------------------------------
 function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, getPubkey, getSubscription, onRemotePack, onConnect, onDisconnect, onError, onPresence, onPeerJoined, onPeerLeft, onWelcomePeers, onSignal, log, metrics, blobContentTypes }) {
@@ -1137,7 +1137,7 @@ export async function createDoc(opts) {
     iceServers = null,
     presenceHeartbeatMs = 15_000,
     presenceStaleMs = 45_000,
-    logger = (level, ...a) => console[level === 'warn' ? 'warn' : 'log']('[activesync]', ...a),
+    logger = (level, ...a) => console[level === 'warn' ? 'warn' : 'log']('[nodalmerge]', ...a),
     onMetric = null,
     onDirectUpload = null,
   } = opts;

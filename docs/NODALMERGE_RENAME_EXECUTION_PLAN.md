@@ -1,13 +1,33 @@
 # NodalMerge Rename Execution Plan
 
 Owner: Platform + packaging + runtime
-Status: Planned
-Last updated: 2026-05-25
+Status: Active execution (Phase B/C runtime/testable closeout complete; residual docs sweep in progress)
+Last updated: 2026-05-26
 
 Phase A execution artifact:
 
 1. `docs/NODALMERGE_RENAME_INVENTORY_CHECKLIST.md`
 2. `docs/NODALMERGE_PACKAGE_MIGRATION_QUICK_REFERENCE.md`
+
+## 0. Current execution snapshot
+
+Completed:
+
+1. Runtime/testable rename surfaces are NodalMerge-first across dotnet host, Rust host/core, host FFI, bridge artifacts, and web SDK import paths.
+2. DotNet host naming/config/env migration paths are implemented and validated with passing host solution tests.
+3. Local packaging flow now produces NodalMerge-managed/native NuGet artifacts with compatibility coverage.
+4. Docker primary entrypoint/image naming is NodalMerge-first with compatibility alias retained.
+5. Canonical authz conformance workflow executed successfully with parity pass artifacts (`docs/acceptance/authz-conformance-rust.json`, `docs/acceptance/authz-conformance-dotnet.trx`, `docs/acceptance/authz-conformance-dotnet-records.json`, `docs/acceptance/authz-conformance-parity.json`; run id `20260526-215618`).
+6. Dedicated persistence timing lane is green after import-order fix: `large_room_hydrates_quickly` now completes at 10k with stage timing evidence and canonical hash equivalence assertion across restart/hydration.
+
+Remaining:
+
+1. Documentation sweep items remain for lower-priority historical ActiveSync references.
+2. Metrics dashboard migration and residual observability rename cleanup remain as non-blocking follow-up.
+
+Closure target:
+
+1. Wave R is now closed for runtime/testable surfaces; continue Wave 0 execution priorities while tracking residual docs/observability follow-ups to completion.
 
 ## 1. Objective
 

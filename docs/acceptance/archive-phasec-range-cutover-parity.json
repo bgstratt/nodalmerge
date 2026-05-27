@@ -1,0 +1,51 @@
+{
+  "artifact": "archive-phasec-range-cutover-parity",
+  "recorded_at": "2026-05-26T22:51:52.1466060-05:00",
+  "phase": "Phase C execution",
+  "summary": [
+    "Compatibility-window handling now uses explicit range overlap semantics rather than fixed-window equality assumptions.",
+    "Export manifests and archive.export.result now include policy_timeline_cutover_lamport in parity metadata.",
+    "Manifest signatures bind both policy_timeline_hash and policy_timeline_cutover_lamport.",
+    "Core, server, and websocket-facing conformance vectors pin range acceptance and cutover mismatch rejection behavior."
+  ],
+  "commands": [
+    {
+      "command": "cargo test -p nodalmerge-core archive_ --test archive_portability_vectors",
+      "result": "passed",
+      "details": "8 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-host-core serialize_archive_export_result_envelope_preserves_wire_type",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_validate_accept_005_compatibility_window_range_overlaps_runtime_server_path --test archive_portability_vectors",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_validate_reject_006_policy_timeline_cutover_mismatch_uses_deterministic_reason_class_server_path --test archive_portability_vectors",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server parity_archive_negative_policy_timeline_cutover_mismatch_fixture --test host_migration_parity",
+      "result": "passed",
+      "details": "1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_",
+      "result": "passed",
+      "details": "archive-focused regression suites passed including new range/cutover vectors"
+    }
+  ],
+  "reason_class_mapping": {
+    "policy_timeline_cutover_mismatch": "reject.archive_policy_timeline_mismatch"
+  },
+  "scope_next": [
+    "Model policy timeline transition histories with non-zero cutover progression.",
+    "Add migration vectors for mixed compatibility ranges around version boundaries.",
+    "Pin deterministic rejection classes for transition-history and range-edge mismatch lanes."
+  ]
+}

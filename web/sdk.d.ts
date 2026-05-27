@@ -1,4 +1,4 @@
-// sdk.d.ts — TypeScript types for the ActiveSync SDK.
+// sdk.d.ts — TypeScript types for the NodalMerge SDK.
 
 export type JsonValue =
   | null
@@ -184,7 +184,7 @@ export interface RejectionEvent {
   raw: unknown;
 }
 
-export interface ActiveSyncRejectionError extends Error {
+export interface NodalMergeRejectionError extends Error {
   rejection?: RejectionEvent;
   serverEnvelope?: Record<string, unknown>;
 }
@@ -227,7 +227,7 @@ export interface Doc {
   onChange(cb: (ev: ChangeEvent) => void): Unsubscribe;
   onConnect(cb: () => void): Unsubscribe;
   onDisconnect(cb: () => void): Unsubscribe;
-  onError(cb: (err: ActiveSyncRejectionError) => void): Unsubscribe;
+  onError(cb: (err: NodalMergeRejectionError) => void): Unsubscribe;
   /** Typed server-side rejection stream parsed from error envelopes and reject prefixes. */
   onRejection(cb: (ev: RejectionEvent) => void): Unsubscribe;
   /** Return buffered rejections newer than `sinceMs` (default 5 minutes). */
@@ -344,4 +344,4 @@ export function attachServer(
 ): Promise<void>;
 
 // Low-level re-exports.
-export { SyncStore, sign_room_token, room_pubkey_hex } from './pkg/activesync_bridge.js';
+export { SyncStore, sign_room_token, room_pubkey_hex } from './pkg/nodalmerge_bridge.js';

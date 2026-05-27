@@ -1,0 +1,23 @@
+{
+  "vector_id": "SPEC-AUTH-002",
+  "status": "pass",
+  "run_type": "wave0_server_stub",
+  "utc_timestamp": "2026-05-26T23:49:23.3106701Z",
+  "git_commit": "3b86e9c804166a5399a20408b88accfda542c336",
+  "harness": {
+    "crate": "nodalmerge-server",
+    "test_target": "server/tests/spec_auth_vectors.rs",
+    "test_name": "spec_auth_002_accepted_converges"
+  },
+  "command": "cargo test -p nodalmerge-server --test spec_auth_vectors",
+  "result": {
+    "total": 2,
+    "failed": 0,
+    "passed": 2,
+    "duration_seconds": 0.03
+  },
+  "contract_assertion": {
+    "accepted_intent_yields_canonical_state_convergence": true
+  },
+  "notes": "Wave 0 server stub validates canonical-lane convergence across independent room peers after accepted intent/canonical writes replay."
+}

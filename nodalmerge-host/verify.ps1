@@ -136,24 +136,20 @@ try {
     if ($UseNuGetPackages.IsPresent) {
         Write-Host "Using package mode; native runtime should resolve from NuGet runtime assets."
     }
-    elseif ([string]::IsNullOrWhiteSpace($env:NODALMERGE_HOST_FFI_DLL) -and [string]::IsNullOrWhiteSpace($env:ACTIVESYNC_HOST_FFI_DLL)) {
+    elseif ([string]::IsNullOrWhiteSpace($env:NODALMERGE_HOST_FFI_DLL)) {
         $resolvedFfiDll = Resolve-FfiDllPath
         if ($resolvedFfiDll) {
             $hostEnv["NODALMERGE_HOST_FFI_DLL"] = $resolvedFfiDll
             Write-Host "Using NODALMERGE_HOST_FFI_DLL=$resolvedFfiDll"
         }
         else {
-            Write-Host "Warning: NODALMERGE_HOST_FFI_DLL/ACTIVESYNC_HOST_FFI_DLL is not set and no local host-ffi DLL was found."
+            Write-Host "Warning: NODALMERGE_HOST_FFI_DLL is not set and no local host-ffi DLL was found."
             Write-Host "Build with: cargo build -p nodalmerge-host-ffi"
         }
     }
     elseif (-not [string]::IsNullOrWhiteSpace($env:NODALMERGE_HOST_FFI_DLL)) {
         $hostEnv["NODALMERGE_HOST_FFI_DLL"] = $env:NODALMERGE_HOST_FFI_DLL
         Write-Host "Using NODALMERGE_HOST_FFI_DLL from current environment"
-    }
-    else {
-        $hostEnv["ACTIVESYNC_HOST_FFI_DLL"] = $env:ACTIVESYNC_HOST_FFI_DLL
-        Write-Host "Using ACTIVESYNC_HOST_FFI_DLL from current environment"
     }
 
     $resolvedPackageVersion = if (-not [string]::IsNullOrWhiteSpace($LegacyNodalMergePackageVersion)) {
@@ -205,7 +201,7 @@ try {
 
     $hostArgs = @(
         "run",
-        "--project", "src/ActiveSync.DotNetHost/NodalMerge.DotNetHost.csproj",
+        "--project", "src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj",
         "--no-launch-profile"
     )
 

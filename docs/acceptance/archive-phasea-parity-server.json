@@ -1,0 +1,27 @@
+{
+  "vector_family": "ARCHIVE-PHASEA-PARITY",
+  "status": "pass",
+  "run_type": "wave1_server_vector",
+  "utc_timestamp": "2026-05-27T02:00:01Z",
+  "harness": {
+    "crate": "nodalmerge-server",
+    "test_target": "server/tests/archive_portability_vectors.rs",
+    "tests": [
+      "archive_describe_001_envelope_contains_manifest_checkpoint_and_digest_metadata_server_path",
+      "archive_validate_reject_001_manifest_invalid_uses_deterministic_reason_class_server_path",
+      "archive_import_reject_001_digest_mismatch_uses_deterministic_reason_class_server_path"
+    ]
+  },
+  "command": "cargo test -p nodalmerge-server --test archive_portability_vectors",
+  "result": {
+    "total": 6,
+    "failed": 0,
+    "passed": 6
+  },
+  "contract_assertion": {
+    "archive_describe_envelope_includes_checkpoint_and_digest_metadata_server_path": true,
+    "archive_validate_rejection_reason_class_is_deterministic_server_path": true,
+    "archive_import_rejection_reason_class_is_deterministic_server_path": true
+  },
+  "notes": "Phase A parity expansion in server lane mirrors core vectors for describe/validate/import envelope and deterministic rejection taxonomy behavior." 
+}

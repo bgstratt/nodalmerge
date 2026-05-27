@@ -1,0 +1,8 @@
+{
+  "name": "archive_negative_unsupported_format",
+  "room_id": "parity-archive-neg-unsupported",
+  "scenario": "archive_negative_unsupported_format",
+  "expected_sequence": ["welcome", "archive.validate.rejected"],
+  "expected_pack_count": 0,
+  "notes": "Unsupported archive reference scheme rejects with deterministic archive unsupported-format class."
+}

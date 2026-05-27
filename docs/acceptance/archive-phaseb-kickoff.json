@@ -1,0 +1,28 @@
+{
+  "artifact": "archive-phaseb-kickoff",
+  "recorded_at": "2026-05-26T21:46:50.4431648-05:00",
+  "phase": "Phase B kickoff",
+  "objective": "Deterministic export builders for portable file/object manifest outputs",
+  "initial_scope": [
+    "Add deterministic manifest builder for persisted room checkpoints.",
+    "Emit signed manifest payloads compatible with external ref validation path.",
+    "Add file/object writer helpers for export materialization.",
+    "Add repeatability tests that prove deterministic output for identical room checkpoints."
+  ],
+  "implemented_in_kickoff": [
+    "server/src/archive_export.rs",
+    "server/src/lib.rs"
+  ],
+  "validation": [
+    {
+      "command": "cargo test -p nodalmerge-server archive_export::tests::",
+      "result": "passed",
+      "details": "2 passed, 0 failed"
+    }
+  ],
+  "next_steps": [
+    "Integrate export builder behind archive export command/event path.",
+    "Add roundtrip parity vectors consuming generated file:// and object:// manifests.",
+    "Include compatibility-window metadata and payload digest policy checks in builder output."
+  ]
+}

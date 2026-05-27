@@ -1,0 +1,26 @@
+{
+  "vector_id": "QUERY-COMPAT-REJECT-001",
+  "status": "pass",
+  "run_type": "wave1_server_vector",
+  "utc_timestamp": "2026-05-27T02:00:01Z",
+  "git_commit": "3b86e9c804166a5399a20408b88accfda542c336",
+  "harness": {
+    "crate": "nodalmerge-server",
+    "test_target": "server/tests/query_materialization_vectors.rs",
+    "test_name": "server_query_compat_reject_001_selector_payload_validation_bounded_taxonomy"
+  },
+  "command": "cargo test -p nodalmerge-server --test query_materialization_vectors",
+  "result": {
+    "total": 3,
+    "failed": 0,
+    "passed": 3,
+    "duration_seconds": 0.03
+  },
+  "contract_assertion": {
+    "server_selector_validation_rejects_malformed_frontier": true,
+    "server_selector_validation_rejects_mixed_selector_fields": true,
+    "server_selector_validation_rejects_invalid_hash_format": true,
+    "server_selector_validation_bounded_taxonomy": true
+  },
+  "notes": "Server selector payload compatibility vectors mirror bounded rejection taxonomy in host/core lanes."
+}

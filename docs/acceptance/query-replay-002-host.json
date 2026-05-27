@@ -1,0 +1,25 @@
+{
+  "vector_id": "QUERY-REPLAY-002",
+  "status": "pass",
+  "run_type": "wave1_dotnet_host_stub",
+  "utc_timestamp": "2026-05-27T01:47:04Z",
+  "git_commit": "3b86e9c804166a5399a20408b88accfda542c336",
+  "harness": {
+    "project": "nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj",
+    "test_target": "nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/QueryMaterializationVectorsTests.cs",
+    "test_name": "QueryReplaySelectorEquivalenceSeqHashAndFrontier"
+  },
+  "command": "dotnet test nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter \"FullyQualifiedName~QueryMaterializationVectorsTests|FullyQualifiedName~RuntimeMessageProcessorTests\" -v minimal",
+  "result": {
+    "total": 26,
+    "failed": 0,
+    "passed": 26,
+    "duration_seconds": 1.2
+  },
+  "contract_assertion": {
+    "selector_seq_hash_frontier_resolve_same_checkpoint_state": true,
+    "digest_parity_across_selector_forms": true,
+    "unknown_hash_rejected_with_checkpoint_not_found": true
+  },
+  "notes": "Wave 1 host stub validates selector equivalence for canonical checkpoint addressing by sequence, canonical hash, and frontier token forms."
+}

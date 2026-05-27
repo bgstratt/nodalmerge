@@ -1,0 +1,47 @@
+{
+  "artifact": "archive-phasea-host-stub",
+  "date_utc": "2026-05-27",
+  "owner": "Brad",
+  "phase": "A",
+  "status": "implemented",
+  "scope": {
+    "inbound_mapper_commands": [
+      "archive.describe",
+      "archive.validate",
+      "archive.import"
+    ],
+    "outbound_ws_events": [
+      "archive.describe.result",
+      "archive.validate.result",
+      "archive.validate.rejected",
+      "archive.import.completed",
+      "archive.import.rejected"
+    ],
+    "deterministic_reject_classes": [
+      "reject.archive_manifest_invalid",
+      "reject.archive_digest_mismatch"
+    ]
+  },
+  "tests": {
+    "runtime_protocol_tests": [
+      "Archive_describe_maps_to_host_command_when_archive_read_capability_present",
+      "Archive_validate_requires_archive_admin_capability",
+      "Archive_import_maps_to_host_command_when_archive_admin_capability_present",
+      "Event_mapper_converts_archive_events_to_runtime_messages"
+    ],
+    "runtime_message_processor_tests": [
+      "Archive_describe_without_capability_returns_control_plane_forbidden_error_envelope_with_archive_metric_tags",
+      "Archive_validate_executes_local_stub_and_emits_deterministic_reject_reason_class_without_bridge_call",
+      "Archive_import_executes_local_stub_and_emits_import_completed_with_checkpoint_hash_without_bridge_call"
+    ]
+  },
+  "validation": {
+    "command": "dotnet test NodalMerge.DotNetHost.Tests.csproj --filter RuntimeProtocolTests|RuntimeMessageProcessorTests",
+    "result": {
+      "total": 111,
+      "failed": 0,
+      "succeeded": 111
+    }
+  },
+  "notes": "Host Phase A archive envelope mapping and deterministic reject taxonomy stubs are now executable with ws parity coverage."
+}

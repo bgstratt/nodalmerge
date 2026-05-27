@@ -48,12 +48,28 @@ export type NodalMergeRuntimeMessageType =
   | "error"
   | "noop-ack"
   | "session-opened"
-  | "session-closed";
+  | "session-closed"
+  | "query.registered"
+  | "query.register.rejected"
+  | "projection.build.completed"
+  | "projection.build.rejected"
+  | "projection.read.result"
+  | "projection.read.rejected"
+  | "projection.invalidated"
+  | "projection.invalidate.rejected"
+  | "projection.list.result"
+  | "projection.list.rejected";
 
 export interface NodalMergeRuntimeMessage {
   type: NodalMergeRuntimeMessageType;
   [key: string]: unknown;
 }
+
+export type ProjectionCheckpointSelector =
+  | { selector?: "latest" }
+  | { selector: "seq"; canonical_seq: number }
+  | { selector: "hash"; canonical_hash: string }
+  | { selector: "frontier"; frontier: string[] };
 
 export type NodalMergeSdkEvent =
   | "message"
@@ -105,6 +121,39 @@ export declare class NodalMergeSdk {
     state: () => Record<string, string>;
     canonicalHash: () => string;
     replayPack: (packB64: string) => unknown;
+  };
+
+  query: {
+    registerSpec: (args: {
+      querySpecId: string;
+      version: string;
+      descriptor: unknown;
+      options?: unknown;
+      timeoutMs?: number;
+    }) => Promise<NodalMergeRuntimeMessage>;
+    buildProjection: (args: {
+      projectionId: string;
+      querySpecId: string;
+      targetCheckpoint?: ProjectionCheckpointSelector;
+      timeoutMs?: number;
+    }) => Promise<NodalMergeRuntimeMessage>;
+    readProjection: (args: {
+      projectionId: string;
+      limit: number;
+      pageToken?: string;
+      timeoutMs?: number;
+    }) => Promise<NodalMergeRuntimeMessage>;
+    invalidateProjection: (args: {
+      projectionId: string;
+      reason?: string;
+      timeoutMs?: number;
+    }) => Promise<NodalMergeRuntimeMessage>;
+    listProjections: (args?: {
+      querySpecId?: string;
+      stateFilter?: string;
+      cursor?: string;
+      timeoutMs?: number;
+    }) => Promise<NodalMergeRuntimeMessage>;
   };
 
   offline: {

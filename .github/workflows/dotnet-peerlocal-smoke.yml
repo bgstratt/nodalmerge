@@ -1,0 +1,52 @@
+name: dotnet-peerlocal-smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "nodalmerge-host/**"
+      - "runtime-local-ffi/**"
+      - "core/**"
+      - "runtime-local/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/dotnet-peerlocal-smoke.yml"
+  pull_request:
+    paths:
+      - "nodalmerge-host/**"
+      - "runtime-local-ffi/**"
+      - "core/**"
+      - "runtime-local/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/dotnet-peerlocal-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet-peerlocal:
+    name: .NET peer-local FFI smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build peer-local FFI (release)
+        run: cargo build -p nodalmerge-runtime-local-ffi --release
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Test LocalPersistFfi + peer-local service
+        env:
+          NODALMERGE_LOCAL_FFI_DLL: ${{ github.workspace }}/target/release/libnodalmerge_runtime_local_ffi.so
+        run: |
+          dotnet test nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj \
+            --filter "FullyQualifiedName~LocalPersistFfi|FullyQualifiedName~RuntimePeerLocal"

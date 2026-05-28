@@ -184,11 +184,38 @@ fn write_signed_manifest_with_policy(
     payload_digest_policy: &str,
     policy_timeline_cutover_lamport: u64,
 ) {
+    let transition_cutovers = if policy_timeline_cutover_lamport == 0 {
+        vec![0]
+    } else {
+        vec![0, policy_timeline_cutover_lamport]
+    };
+    write_signed_manifest_with_policy_and_transitions(
+        path,
+        source_room,
+        signer,
+        min_supported,
+        max_supported,
+        payload_digest_policy,
+        policy_timeline_cutover_lamport,
+        &transition_cutovers,
+    );
+}
+
+fn write_signed_manifest_with_policy_and_transitions(
+    path: &std::path::Path,
+    source_room: &str,
+    signer: &SigningKey,
+    min_supported: &str,
+    max_supported: &str,
+    payload_digest_policy: &str,
+    policy_timeline_cutover_lamport: u64,
+    policy_timeline_transition_cutovers: &[u64],
+) {
     let policy_timeline = nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(
         &nodalmerge_core::Policy::default(),
     );
     let payload = format!(
-        "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}",
+        "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}|policy_timeline_transition_cutovers={}",
         "1",
         source_room,
         min_supported,
@@ -196,6 +223,11 @@ fn write_signed_manifest_with_policy(
         payload_digest_policy,
         policy_timeline.hash_hex,
         policy_timeline_cutover_lamport,
+        policy_timeline_transition_cutovers
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<String>>()
+            .join(","),
     );
     let sig = signer.sign(payload.as_bytes()).to_bytes();
     let manifest = serde_json::json!({
@@ -208,6 +240,7 @@ fn write_signed_manifest_with_policy(
         "payload_digest_policy": payload_digest_policy,
         "policy_timeline_hash": policy_timeline.hash_hex,
         "policy_timeline_cutover_lamport": policy_timeline_cutover_lamport,
+        "policy_timeline_transition_cutovers": policy_timeline_transition_cutovers,
         "signature": {
             "public_key": signer.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>(),
             "signature": sig.iter().map(|b| format!("{b:02x}")).collect::<String>()
@@ -514,6 +547,7 @@ async fn archive_export_002_manifest_contains_compatibility_window_and_payload_d
     assert_eq!(envelope.payload_digest_policy, "strict_sha256_v1");
     assert!(!envelope.policy_timeline_hash.is_empty());
     assert_eq!(envelope.policy_timeline_cutover_lamport, 0);
+    assert_eq!(envelope.policy_timeline_transition_cutovers, vec![0]);
 
     let written: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(&file_manifest).expect("manifest file should be readable"),
@@ -533,6 +567,148 @@ async fn archive_export_002_manifest_contains_compatibility_window_and_payload_d
     );
     assert!(written["policy_timeline_hash"].as_str().is_some());
     assert_eq!(written["policy_timeline_cutover_lamport"].as_u64(), Some(0));
+    assert_eq!(written["policy_timeline_transition_cutovers"], serde_json::json!([0]));
+}
+
+#[tokio::test]
+async fn archive_export_003_policy_timeline_transition_progression_non_zero_server_path() {
+    let root = tmpdir();
+    let persistence: SharedPersistence = Arc::new(
+        DirPersistence::open(&root).expect("dir persistence should open"),
+    );
+    let source_room = Room::new("archive-export-policy-transition-source".to_string(), Arc::clone(&persistence), 256);
+
+    let signer = SigningKey::from_bytes(&[0x74u8; 32]);
+    let nodes = build_set_nodes(&signer, &[("world/meta", "1")]);
+    let (accepted, _, errors) = import_nodes(&source_room, nodes).await;
+    assert_eq!(accepted, 1);
+    assert!(errors.is_empty());
+
+    source_room
+        .set_policy(Policy {
+            rules: vec![PolicyRule {
+                path_glob: "world/**".to_string(),
+                can_write: vec![],
+                can_read: vec![],
+                can_derive: vec![],
+            }],
+            default: PolicyDefault::DenyAll,
+        })
+        .await;
+    source_room
+        .set_policy(Policy {
+            rules: vec![PolicyRule {
+                path_glob: "world/**".to_string(),
+                can_write: vec![signer.verifying_key().to_bytes()],
+                can_read: vec![],
+                can_derive: vec![],
+            }],
+            default: PolicyDefault::AllowAll,
+        })
+        .await;
+
+    let export_signer = SigningKey::from_bytes(&[0x75u8; 32]);
+    let file_manifest = root.join("exports").join("meta-policy-transition.json");
+    let response = process_archive_export(
+        &source_room,
+        "archive-export-policy-transition-target",
+        &serde_json::json!({
+            "type": "archive.export",
+            "source_room": "archive-export-policy-transition-source",
+            "archive_ref": format!("file://{}", file_manifest.display()),
+        }),
+        &export_signer,
+    )
+    .await;
+    let ArchiveWsResponse::ExportResult(envelope) = response else {
+        panic!("expected archive.export.result response")
+    };
+
+    assert_eq!(envelope.policy_timeline_cutover_lamport, 2);
+    assert_eq!(envelope.policy_timeline_transition_cutovers, vec![0, 1, 2]);
+
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&file_manifest).expect("manifest file should be readable"),
+    )
+    .expect("manifest json should parse");
+    assert_eq!(written["policy_timeline_cutover_lamport"].as_u64(), Some(2));
+    assert_eq!(
+        written["policy_timeline_transition_cutovers"],
+        serde_json::json!([0, 1, 2])
+    );
+}
+
+#[tokio::test]
+async fn archive_validate_accept_010_policy_timeline_transition_progression_non_zero_server_path() {
+    let root = tmpdir();
+    let persistence: SharedPersistence = Arc::new(
+        DirPersistence::open(&root).expect("dir persistence should open"),
+    );
+    let room = Room::new("archive-validate-policy-transition-non-zero".to_string(), Arc::clone(&persistence), 256);
+
+    let signer = SigningKey::from_bytes(&[0x7Au8; 32]);
+    let nodes = build_set_nodes(&signer, &[("world/meta", "1")]);
+    let (accepted, _, errors) = import_nodes(&room, nodes).await;
+    assert_eq!(accepted, 1);
+    assert!(errors.is_empty());
+
+    room
+        .set_policy(Policy {
+            rules: vec![PolicyRule {
+                path_glob: "world/**".to_string(),
+                can_write: vec![],
+                can_read: vec![],
+                can_derive: vec![],
+            }],
+            default: PolicyDefault::DenyAll,
+        })
+        .await;
+    room
+        .set_policy(Policy {
+            rules: vec![PolicyRule {
+                path_glob: "world/**".to_string(),
+                can_write: vec![signer.verifying_key().to_bytes()],
+                can_read: vec![],
+                can_derive: vec![],
+            }],
+            default: PolicyDefault::AllowAll,
+        })
+        .await;
+
+    let export_signer = SigningKey::from_bytes(&[0x7Bu8; 32]);
+    let file_manifest = root.join("exports").join("validate-policy-transition-non-zero.json");
+    let export_response = process_archive_export(
+        &room,
+        "archive-validate-policy-transition-non-zero",
+        &serde_json::json!({
+            "type": "archive.export",
+            "source_room": "archive-validate-policy-transition-non-zero",
+            "archive_ref": format!("file://{}", file_manifest.display()),
+        }),
+        &export_signer,
+    )
+    .await;
+    let ArchiveWsResponse::ExportResult(exported) = export_response else {
+        panic!("expected archive.export.result response")
+    };
+    assert_eq!(exported.policy_timeline_cutover_lamport, 2);
+    assert_eq!(exported.policy_timeline_transition_cutovers, vec![0, 1, 2]);
+
+    let validate_response = process_archive_validate(
+        &room,
+        "archive-validate-policy-transition-non-zero",
+        &serde_json::json!({
+            "type": "archive.validate",
+            "archive_ref": format!("file://{}", file_manifest.display()),
+            "mode": "full_integrity"
+        }),
+    )
+    .await;
+
+    let ArchiveWsResponse::ValidateResult(validated) = validate_response else {
+        panic!("expected archive.validate.result response")
+    };
+    assert!(validated.accepted);
 }
 
 #[tokio::test]
@@ -749,4 +925,128 @@ async fn archive_validate_reject_006_policy_timeline_cutover_mismatch_uses_deter
         panic!("expected archive.validate.rejected response")
     };
     assert_eq!(reject.reason_class, ArchiveReasonClass::PolicyTimelineMismatch);
+}
+
+#[tokio::test]
+async fn archive_validate_reject_007_policy_timeline_transition_progression_invalid_uses_deterministic_reason_class_server_path() {
+    let root = tmpdir();
+    let persistence: SharedPersistence = Arc::new(
+        DirPersistence::open(&root).expect("dir persistence should open"),
+    );
+    let target_room = Room::new("archive-validate-policy-transition-target".to_string(), Arc::clone(&persistence), 256);
+    let source_room = Room::new("archive-validate-policy-transition-source".to_string(), Arc::clone(&persistence), 256);
+    let source_signer = SigningKey::from_bytes(&[0x6Au8; 32]);
+    let nodes = build_set_nodes(&source_signer, &[("world/a", "1")]);
+    let _ = import_nodes(&source_room, nodes).await;
+
+    let manifest_signer = SigningKey::from_bytes(&[0x6Bu8; 32]);
+    let manifest_path = root.join("exports").join("policy-transition-invalid.json");
+    write_signed_manifest_with_policy_and_transitions(
+        &manifest_path,
+        "archive-validate-policy-transition-source",
+        &manifest_signer,
+        "1",
+        "2",
+        "strict_sha256_v1",
+        7,
+        &[0, 7, 7],
+    );
+
+    let response = process_archive_validate(
+        &target_room,
+        "archive-validate-policy-transition-target",
+        &serde_json::json!({
+            "type": "archive.validate",
+            "archive_ref": format!("file://{}", manifest_path.display()),
+            "mode": "full_integrity"
+        }),
+    )
+    .await;
+
+    let ArchiveWsResponse::ValidateRejected(reject) = response else {
+        panic!("expected archive.validate.rejected response")
+    };
+    assert_eq!(reject.reason_class, ArchiveReasonClass::ManifestInvalid);
+}
+
+#[tokio::test]
+async fn archive_validate_reject_008_compatibility_window_no_overlap_uses_deterministic_reason_class_server_path() {
+    let root = tmpdir();
+    let persistence: SharedPersistence = Arc::new(
+        DirPersistence::open(&root).expect("dir persistence should open"),
+    );
+    let target_room = Room::new("archive-validate-compat-no-overlap-target".to_string(), Arc::clone(&persistence), 256);
+    let source_room = Room::new("archive-validate-compat-no-overlap-source".to_string(), Arc::clone(&persistence), 256);
+    let source_signer = SigningKey::from_bytes(&[0x6Cu8; 32]);
+    let nodes = build_set_nodes(&source_signer, &[("world/a", "1")]);
+    let _ = import_nodes(&source_room, nodes).await;
+
+    let manifest_signer = SigningKey::from_bytes(&[0x6Du8; 32]);
+    let manifest_path = root.join("exports").join("compat-no-overlap.json");
+    write_signed_manifest_with_policy(
+        &manifest_path,
+        "archive-validate-compat-no-overlap-source",
+        &manifest_signer,
+        "3",
+        "4",
+        "strict_sha256_v1",
+        0,
+    );
+
+    let response = process_archive_validate(
+        &target_room,
+        "archive-validate-compat-no-overlap-target",
+        &serde_json::json!({
+            "type": "archive.validate",
+            "archive_ref": format!("file://{}", manifest_path.display()),
+            "mode": "full_integrity"
+        }),
+    )
+    .await;
+
+    let ArchiveWsResponse::ValidateRejected(reject) = response else {
+        panic!("expected archive.validate.rejected response")
+    };
+    assert_eq!(reject.reason_class, ArchiveReasonClass::UnsupportedFormat);
+}
+
+#[tokio::test]
+async fn archive_validate_accept_009_compatibility_window_edge_overlap_lower_bound_server_path() {
+    let root = tmpdir();
+    let persistence: SharedPersistence = Arc::new(
+        DirPersistence::open(&root).expect("dir persistence should open"),
+    );
+    let target_room = Room::new("archive-validate-compat-edge-lower-target".to_string(), Arc::clone(&persistence), 256);
+    let source_room = Room::new("archive-validate-compat-edge-lower-source".to_string(), Arc::clone(&persistence), 256);
+    let source_signer = SigningKey::from_bytes(&[0x6Eu8; 32]);
+    let nodes = build_set_nodes(&source_signer, &[("world/a", "1")]);
+    let _ = import_nodes(&source_room, nodes).await;
+
+    let manifest_signer = SigningKey::from_bytes(&[0x6Fu8; 32]);
+    let manifest_path = root.join("exports").join("compat-edge-overlap-lower.json");
+    write_signed_manifest_with_policy(
+        &manifest_path,
+        "archive-validate-compat-edge-lower-source",
+        &manifest_signer,
+        "0",
+        "1",
+        "strict_sha256_v1",
+        0,
+    );
+
+    let response = process_archive_validate(
+        &target_room,
+        "archive-validate-compat-edge-lower-target",
+        &serde_json::json!({
+            "type": "archive.validate",
+            "archive_ref": format!("file://{}", manifest_path.display()),
+            "mode": "full_integrity"
+        }),
+    )
+    .await;
+
+    let ArchiveWsResponse::ValidateResult(result) = response else {
+        panic!("expected archive.validate.result response")
+    };
+    assert!(result.accepted);
 }

@@ -1,0 +1,81 @@
+name: wave2-runtime-smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - "host-core/**"
+      - "server/**"
+      - "runtime-local/**"
+      - "headless/**"
+      - "cli/**"
+      - "runtime-local-ffi/**"
+      - "nodalmerge-host/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/wave2-runtime-smoke.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "host-core/**"
+      - "server/**"
+      - "runtime-local/**"
+      - "headless/**"
+      - "cli/**"
+      - "runtime-local-ffi/**"
+      - "nodalmerge-host/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/wave2-runtime-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wave2-smoke:
+    name: Wave 2 runtime smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Query/materialization vectors (core)
+        run: cargo test -p nodalmerge-core query_ --test query_materialization_vectors
+
+      - name: Query/materialization vectors (server)
+        run: cargo test -p nodalmerge-server server_query_ --test query_materialization_vectors
+
+      - name: Peer-local persistence vectors
+        run: cargo test -p nodalmerge-runtime-local --test local_persist_vectors
+
+      - name: Headless worker vectors
+        run: cargo test -p nodalmerge-headless --test headless_run_vectors
+
+      - name: Authority/topology vectors
+        run: cargo test -p nodalmerge-server --test authority_topology_vectors
+
+      - name: Topology multi-peer vectors
+        run: cargo test -p nodalmerge-server --test topology_multi_peer_vectors
+
+      - name: Topology host-migration parity fixture
+        run: cargo test -p nodalmerge-server parity_topology_promotion_workflow_fixture --test host_migration_parity
+
+      - name: Host-core topology envelope parity
+        run: cargo test -p nodalmerge-host-core serialize_topology
+
+      - name: Topology CLI vectors
+        run: cargo test -p nodalmerge-cli --test topology_cli_vectors
+
+      - name: Archive CLI vectors
+        run: cargo test -p nodalmerge-cli --test archive_cli_vectors
+
+      - name: Peer-local FFI ABI
+        run: cargo test -p nodalmerge-runtime-local-ffi --test abi
+
+      - name: Headless health probe
+        run: cargo run -p nodalmerge-headless -- --health

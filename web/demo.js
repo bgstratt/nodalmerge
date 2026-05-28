@@ -8,7 +8,7 @@
  * Features retained from the pre-SDK demo:
  *   • Identity bootstrap (Ed25519 seed in sessionStorage).
  *   • Room-auth seed management + `set-room-key` (via `doc.send` escape hatch).
- *   • IndexedDB persistence of nodes + blobs (SDK doesn't opine on storage).
+ *   • IndexedDB persistence via createDoc `persistence` (peer-local adapter).
  *   • Key/Value lab, Blob Lab, Conflict Lab, Collaborative Text (RGA).
  *   • Peer list, event log, server badge, offline toggle.
  *
@@ -36,8 +36,7 @@ window.addEventListener('unhandledrejection', ev => {
 const DEFAULT_ROOM_ID = 'default';
 const DEFAULT_SERVER_URL = 'ws://127.0.0.1:5271';
 const COLORS     = ['#60a5fa','#4ade80','#f472b6','#fb923c','#a78bfa','#34d399','#fbbf24','#f87171'];
-const IDB_NAME    = 'nodalmerge-v7';
-const IDB_VERSION = 1;
+const PEER_LOCAL_DB_NAME = 'nodalmerge-v7';
 const COLLAB_KEY  = 'collab/doc';
 const LIST_KEY    = 'demo/list';
 const STORAGE_KEYS = {
@@ -141,69 +140,6 @@ function saveRoomSeed(seed32) {
 let roomSeed = loadRoomSeed();
 
 // ---------------------------------------------------------------------------
-// IndexedDB persistence (C2). Kept client-side — the SDK doesn't opine on
-// local storage. Nodes: one key 'all' → pack string. Blobs: hash → bytes.
-// ---------------------------------------------------------------------------
-let db = null;
-
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
-    req.onupgradeneeded = (e) => {
-      const idb = e.target.result;
-      if (!idb.objectStoreNames.contains('nodes')) idb.createObjectStore('nodes');
-      if (!idb.objectStoreNames.contains('blobs')) idb.createObjectStore('blobs');
-    };
-    req.onsuccess = (e) => resolve(e.target.result);
-    req.onerror   = (e) => reject(e.target.error);
-  });
-}
-
-function idbPut(storeName, key, value) {
-  if (!db) return Promise.resolve();
-  return new Promise((resolve) => {
-    const tx = db.transaction(storeName, 'readwrite');
-    tx.objectStore(storeName).put(value, key);
-    tx.oncomplete = resolve;
-    tx.onerror    = resolve;
-  });
-}
-
-function idbGet(storeName, key) {
-  if (!db) return Promise.resolve(undefined);
-  return new Promise((resolve) => {
-    const tx  = db.transaction(storeName, 'readonly');
-    const req = tx.objectStore(storeName).get(key);
-    req.onsuccess = (e) => resolve(e.target.result);
-    req.onerror   = ()  => resolve(undefined);
-  });
-}
-
-function idbCursor(storeName, cb) {
-  if (!db) return Promise.resolve();
-  return new Promise((resolve) => {
-    const tx = db.transaction(storeName, 'readonly');
-    tx.objectStore(storeName).openCursor().onsuccess = (e) => {
-      const cursor = e.target.result;
-      if (cursor) { cb(cursor.key, cursor.value); cursor.continue(); }
-      else resolve();
-    };
-    tx.onerror = resolve;
-  });
-}
-
-// Debounced full-graph save so typing doesn't thrash IDB.
-function saveState() {
-  if (saveState._t) return;
-  saveState._t = setTimeout(async () => {
-    saveState._t = null;
-    try { await idbPut('nodes', 'all', doc.store.export_all_nodes()); } catch (_) {}
-  }, 250);
-}
-
-function saveBlob(hashHex, bytes) { idbPut('blobs', hashHex, bytes); }
-
-// ---------------------------------------------------------------------------
 // Stats / local state
 // ---------------------------------------------------------------------------
 const blobStats = { sent: 0, received: 0, cacheHits: 0 };
@@ -293,14 +229,8 @@ function formatResolvedKeyForDisplay(key) {
 }
 
 // ---------------------------------------------------------------------------
-// Boot: hydrate from IDB, then createDoc with authorSeed + roomSeed.
+// Boot: createDoc hydrates peer-local IndexedDB before connect.
 // ---------------------------------------------------------------------------
-console.log('[boot] opening IDB…');
-db = await openDB().catch((e) => { console.warn('[boot] IDB unavailable:', e); return null; });
-console.log('[boot] IDB ready:', db ? 'ok' : 'unavailable');
-
-// Construct the doc first (autoConnect:false) so we can hydrate into its
-// store before the first wire handshake.
 setStatus('Loading WASM…');
 const doc = await createDoc({
   serverUrl: SERVER_URL,
@@ -309,6 +239,11 @@ const doc = await createDoc({
   roomSeed,
   transport: 'ws-only',
   autoConnect: false,
+  persistence: {
+    enabled: true,
+    dbName: PEER_LOCAL_DB_NAME,
+    migrateLegacyDemo: true,
+  },
   // G8 — surface metric events on a debug channel so the demo exercises
   // the hook end-to-end. Real apps would forward to OpenTelemetry / a
   // counter/histogram backend instead of console.
@@ -322,14 +257,10 @@ const myPubkey = doc.pubkeyHex;
 // the browser console. Harmless in demos; strip in production embeds.
 if (typeof window !== 'undefined') window.doc = doc;
 
-// Hydrate nodes + blobs from IDB into the SDK's underlying SyncStore.
-console.log('[boot] loading nodes…');
-const storedNodes = await idbGet('nodes', 'all');
-if (storedNodes) { try { doc.store.import_pack(storedNodes); } catch (_) {} }
-console.log('[boot] loading blobs…');
-await idbCursor('blobs', (hashHex, bytes) => {
-  try { doc.store.store_blob_bytes(hashHex, bytes); } catch (_) {}
-});
+if (doc.persistence.isEnabled()) {
+  const hydrate = doc.persistence.hydrateReport();
+  console.log('[boot] peer-local persistence', hydrate);
+}
 for (const h of JSON.parse(doc.store.local_blob_hashes_json())) lastKnownBlobHashes.add(h);
 try {
   stateCache = JSON.parse(doc.store.resolve_json());
@@ -387,8 +318,6 @@ doc.onChange((ev) => {
     logEvent('sync', `← received ${kind}${via}${from}`);
   }
   queueMicrotask(() => {
-    saveState();
-    // Persist any newly-arrived blobs to IDB.
     try {
       const hashes = JSON.parse(doc.store.local_blob_hashes_json());
       for (const h of hashes) {
@@ -396,10 +325,7 @@ doc.onChange((ev) => {
           lastKnownBlobHashes.add(h);
           try {
             const bytes = doc.store.get_blob_bytes(h);
-            if (bytes) {
-              saveBlob(h, bytes);
-              blobStats.received += bytes.length;
-            }
+            if (bytes) blobStats.received += bytes.length;
           } catch (_) {}
         }
       }
@@ -460,7 +386,6 @@ window.doSet = function () {
   lastKnownNodeCount = Object.keys(stateCache).length;
   kv.set(key, val);
   logEvent('set', `set "${key}" = ${JSON.stringify(val)}`);
-  saveState();
   scheduleUiRefresh();
 };
 
@@ -473,7 +398,6 @@ window.doDelete = function () {
   lastKnownNodeCount = Object.keys(stateCache).length;
   kv.delete(key);
   logEvent('del', `delete "${key}"`);
-  saveState();
   scheduleUiRefresh();
 };
 
@@ -490,10 +414,8 @@ window.uploadBlob = function () {
   const hashHex = kv.setBlob(key, data);
   if (lastKnownBlobHashes.has(hashHex)) blobStats.cacheHits++;
   else lastKnownBlobHashes.add(hashHex);
-  saveBlob(hashHex, data);
   blobStats.sent += data.length;
   logEvent('set', `set_blob "${key}" → ${hashHex.slice(0,8)}… (${fmtBytes(data.length)})`);
-  saveState();
   scheduleUiRefresh();
 };
 
@@ -605,7 +527,6 @@ function renderCollabText() {
     if (!collabTextBroken) return;
     collabTextCache = ta.value;
     publishFallbackText(collabTextCache);
-    saveState();
     scheduleUiRefresh();
   });
 
@@ -634,7 +555,6 @@ function renderCollabText() {
         const next = collabTextCache.slice(0, start) + e.data + collabTextCache.slice(end);
         collabTextCache = next;
         publishFallbackText(next);
-        saveState();
         scheduleUiRefresh();
         return;
       }
@@ -659,7 +579,6 @@ function renderCollabText() {
       collabTextCache = collabTextCache.slice(0, start) + '\n' + collabTextCache.slice(start);
     }
 
-    saveState();
     scheduleUiRefresh();
 
     const delta = e.inputType.startsWith('delete')
@@ -721,7 +640,6 @@ function renderList() {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       listHandle.delete(btn.dataset.del);
-      saveState();
       scheduleUiRefresh();
     });
   });
@@ -761,7 +679,6 @@ function renderList() {
       if (region === 'onto')        listHandle.gestures.dropOnto(dragged, target);
       else if (region === 'before') listHandle.gestures.dropBefore(dragged, target);
       else                          listHandle.gestures.dropAfter(dragged, target);
-      saveState();
       scheduleUiRefresh();
     });
   });
@@ -790,7 +707,6 @@ function dropRegion(e, li) {
     if (!label) return;
     listHandle.push({ label });
     input.value = '';
-    saveState();
     scheduleUiRefresh();
   };
   addBtn.addEventListener('click', add);

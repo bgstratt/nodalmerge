@@ -257,6 +257,66 @@ fn query_replay_001_live_vs_replay_parity_at_checkpoint() {
     );
 }
 
+/// Phase E run-03: end-to-end replay to a fixed checkpoint, materialize the prefix
+/// projection, then exercise deterministic paged reads (digest continuity) on two
+/// independent replays of the same checkpoint payload.
+#[test]
+fn query_phasee_replay_003_e2e_checkpoint_pagination_digest_parity() {
+    let signer = SigningKey::from_bytes(&[0x53u8; 32]);
+
+    let n1 = signed_set_node(&signer, 1, "world/a", "1", vec![]);
+    let n2 = signed_set_node(&signer, 2, "world/b", "2", vec![n1.id]);
+    let n3 = signed_set_node(&signer, 3, "world/c", "3", vec![n2.id]);
+    let n4 = signed_set_node(&signer, 4, "world/d", "4", vec![n3.id]);
+    let n5 = signed_set_node(&signer, 5, "world/e", "5", vec![n4.id]);
+
+    let _full = replay(&[n1.clone(), n2.clone(), n3.clone(), n4, n5], None)
+        .expect("full history replay should succeed");
+
+    let checkpoint_nodes = vec![n1, n2, n3];
+
+    let first = replay(&checkpoint_nodes, None).expect("checkpoint replay a should succeed");
+    let second = replay(&checkpoint_nodes, None).expect("checkpoint replay b should succeed");
+
+    assert_eq!(
+        canonical_hash(&first.map),
+        canonical_hash(&second.map),
+        "QUERY-PHASEE-REPLAY-E2E-001: canonical map hash must match across independent checkpoint replays"
+    );
+
+    let entries_a = query_prefix_projection(&first.map, "world/");
+    let entries_b = query_prefix_projection(&second.map, "world/");
+    assert_eq!(
+        entries_a, entries_b,
+        "QUERY-PHASEE-REPLAY-E2E-001: prefix projection rows must match across replays"
+    );
+
+    let full_digest = projection_digest(&entries_a);
+    const PAGE_LIMIT: usize = 2;
+
+    for (label, entries) in [("replay_a", &entries_a), ("replay_b", &entries_b)] {
+        let mut rebuilt = Vec::new();
+        let mut token = None;
+        loop {
+            let (page, next) = paginate_projection_entries(entries, PAGE_LIMIT, token.as_deref());
+            rebuilt.extend(page);
+            token = next;
+            if token.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            *entries, rebuilt,
+            "QUERY-PHASEE-REPLAY-E2E-001: pagination must reconstruct full row set ({label})"
+        );
+        assert_eq!(
+            projection_digest(&rebuilt),
+            full_digest,
+            "QUERY-PHASEE-REPLAY-E2E-001: paged projection digest must equal full projection digest ({label})"
+        );
+    }
+}
+
 #[test]
 fn query_compat_reject_001_selector_payload_validation_bounded_taxonomy() {
     let known_hashes = BTreeSet::from(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]);

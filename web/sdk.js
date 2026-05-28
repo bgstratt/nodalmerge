@@ -24,6 +24,7 @@ import init, {
   sign_room_token,
   room_pubkey_hex,
 } from './pkg/nodalmerge_bridge.js';
+import { createPeerLocalIndexedDbPersistence } from '../sdk-js/persistence/peer-local-indexeddb.js';
 
 // -----------------------------------------------------------------------------
 // Module init — idempotent. Callers can also await `createDoc` directly; this
@@ -1117,6 +1118,7 @@ function makePeerMesh({
  *   logger?: (level, ...args) => void, // default console
  *   onMetric?: (ev) => void,           // G8: metric event hook. See docs/sdk.md.
  *   onDirectUpload?: (args: { hash: string; length: number }) => void | Promise<void>; // F6: callback after a direct presigned PUT completes
+ *   persistence?: { enabled?: boolean, dbName?: string, dbVersion?: number, debounceMs?: number, migrateLegacyDemo?: boolean },
  * }} opts
  */
 export async function createDoc(opts) {
@@ -1140,6 +1142,7 @@ export async function createDoc(opts) {
     logger = (level, ...a) => console[level === 'warn' ? 'warn' : 'log']('[nodalmerge]', ...a),
     onMetric = null,
     onDirectUpload = null,
+    persistence: persistenceOpts = null,
   } = opts;
 
   if (!serverUrl) throw new Error('createDoc: serverUrl is required');
@@ -1152,6 +1155,35 @@ export async function createDoc(opts) {
 
   const store = new SyncStore(authorSeed);
   const pubkeyHex = store.pubkey_hex();
+
+  let peerLocalPersistence = null;
+  let peerLocalHydrateReport = null;
+  if (persistenceOpts?.enabled) {
+    peerLocalPersistence = createPeerLocalIndexedDbPersistence({
+      dbName: persistenceOpts.dbName,
+      dbVersion: persistenceOpts.dbVersion,
+      debounceMs: persistenceOpts.debounceMs,
+      migrateLegacyDemo: persistenceOpts.migrateLegacyDemo === true,
+    });
+    if (!peerLocalPersistence.isAvailable()) {
+      throw new Error('createDoc: persistence.enabled requires IndexedDB');
+    }
+    await peerLocalPersistence.open();
+    peerLocalHydrateReport = await peerLocalPersistence.hydrate(store, room, {
+      migrateLegacyDemo: persistenceOpts.migrateLegacyDemo === true,
+    });
+  }
+
+  function schedulePeerLocalPersist() {
+    if (peerLocalPersistence) {
+      peerLocalPersistence.schedulePersist(store, room);
+    }
+  }
+
+  async function flushPeerLocalPersist() {
+    if (!peerLocalPersistence) return null;
+    return peerLocalPersistence.flush(store, room);
+  }
 
   // ---- subscription (F3a) ----
   // Client-side materialization filter. The wire still carries the full room
@@ -1250,6 +1282,12 @@ export async function createDoc(opts) {
     // Any pack/bulk/local apply may have surfaced new conflicts.
     if (ev.type === 'pack' || ev.type === 'bulk' || ev.source === 'local') {
       pollConflicts();
+    }
+    if (
+      peerLocalPersistence &&
+      (ev.type === 'pack' || ev.type === 'blob' || ev.type === 'bulk' || ev.source === 'local')
+    ) {
+      schedulePeerLocalPersist();
     }
   }
 
@@ -2089,8 +2127,28 @@ export async function createDoc(opts) {
       return conflictBuffer.filter(ev => ev.at >= cutoff).slice();
     },
 
+    persistence: {
+      isEnabled: () => peerLocalPersistence != null,
+      kind: () => peerLocalPersistence?.kind ?? null,
+      hydrateReport: () => peerLocalHydrateReport,
+      flush: () => flushPeerLocalPersist(),
+      recover: async () => {
+        if (!peerLocalPersistence) throw new Error('persistence is not configured');
+        peerLocalHydrateReport = await peerLocalPersistence.recover(store, room);
+        schedulePeerLocalPersist();
+        return peerLocalHydrateReport;
+      },
+      clearRoom: async () => {
+        if (!peerLocalPersistence) throw new Error('persistence is not configured');
+        return peerLocalPersistence.clearRoom(room);
+      },
+    },
+
     connect()    { transport.connect(); },
-    disconnect() { transport.disconnect(); },
+    disconnect() {
+      void flushPeerLocalPersist();
+      transport.disconnect();
+    },
     // D2 observability: list known peers and their active transport.
     peers() { return mesh.peers(); },
     // Escape hatch: send a raw wire-protocol message to the server. Used by
@@ -2099,10 +2157,12 @@ export async function createDoc(opts) {
     // automatically — callers generally do not need this.
     send(msg) { transport.send(msg); },
     close() {
+      void flushPeerLocalPersist();
       transport.disconnect();
       mesh.shutdown();
       presence._shutdown();
       if (tokenRefreshTimer) { clearTimeout(tokenRefreshTimer); tokenRefreshTimer = null; }
+      void peerLocalPersistence?.close?.();
       try { store.free(); } catch (_) {}
     },
   };

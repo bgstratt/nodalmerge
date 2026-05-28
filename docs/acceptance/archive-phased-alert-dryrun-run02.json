@@ -1,0 +1,43 @@
+{
+  "artifact": "archive-phased-alert-dryrun-run02",
+  "recorded_at": "2026-05-27T00:25:54.5114041-05:00",
+  "phase": "Phase D critical-route live dry-run",
+  "status": "completed",
+  "inputs": {
+    "dashboard_annotation_template": "docs/ALERT_DASHBOARD_ANNOTATION_TEMPLATE.md",
+    "incident_ticket_template": "docs/INCIDENT_TICKET_TEMPLATE_ARCHIVE_ALERT.md",
+    "runbook": "docs/operator.md"
+  },
+  "outputs": {
+    "dashboard_annotation": "docs/acceptance/archive-alert-dashboard-annotation-dryrun-run02.txt",
+    "incident_ticket": "docs/acceptance/archive-alert-incident-ticket-dryrun-run02.md"
+  },
+  "timing_minutes": {
+    "alert_to_ack": 1.18,
+    "ack_to_l3_page": 5.07,
+    "l3_page_to_freeze": 1.28,
+    "freeze_to_rollback_decision": 4.28,
+    "rollback_decision_to_recovery_observed": 17.8,
+    "total_to_recovery_window_complete": 59.62
+  },
+  "sla_evaluation": {
+    "ack_under_10_minutes": true,
+    "critical_l3_page_under_10_minutes": true,
+    "freeze_declared_under_15_minutes": true,
+    "rollback_decision_logged": true
+  },
+  "route_exercised": "critical",
+  "l3_decision_log": {
+    "freeze_declared": true,
+    "freeze_declared_at": "2026-05-27T05:33:05Z",
+    "freeze_owner": "runtime-techlead-01",
+    "rollback_decision": "approved",
+    "rollback_decision_at": "2026-05-27T05:37:22Z",
+    "rollback_scope": "archive rollout ring-2",
+    "rollback_verification_completed_at": "2026-05-27T05:44:51Z"
+  },
+  "notes": [
+    "Critical route dry-run validated the mandatory L3 freeze and rollback decision log contract.",
+    "Dry-run remained simulation-only and did not execute a production rollback action."
+  ]
+}

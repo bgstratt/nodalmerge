@@ -1,0 +1,142 @@
+{
+  "artifact": "query-phasee-benchmark-baseline-run02",
+  "recorded_at": "2026-05-27T01:15:18.9960172-05:00",
+  "phase": "Phase E benchmark baseline profile run-02",
+  "status": "completed",
+  "method": {
+    "command": "cargo bench -p nodalmerge-core --bench text_write_path -- --sample-size 10 --measurement-time 2 --warm-up-time 1",
+    "measurement": "Criterion benchmark wall-clock timing of representative pressure-cardinality projection build/read/rebuild loops",
+    "sample_size": 10,
+    "warm_up_time_s": 1,
+    "measurement_time_s": 2,
+    "memory": "peak cargo process working set during benchmark execution"
+  },
+  "pressure_profile": {
+    "projection_mode": "enabled",
+    "typing_ops": 5000,
+    "typing_read_every": 100,
+    "remote_burst_nodes": 5000,
+    "mixed_steps": 3000,
+    "mixed_remote_every": 10,
+    "emit_snapshot": true
+  },
+  "benchmarks": [
+    {
+      "label": "text_write_rapid_typing_enabled/append_single_char",
+      "time_ms_range": [14.391, 17.483]
+    },
+    {
+      "label": "text_write_rapid_typing_enabled/append_single_char_apply_only",
+      "time_ms_range": [16.623, 18.159]
+    },
+    {
+      "label": "text_write_rapid_typing_enabled/append_single_char_periodic_read",
+      "time_ms_range": [14.202, 16.985]
+    },
+    {
+      "label": "text_write_paste_bursts_enabled/insert_range_end",
+      "time_ms_range": [0.5402, 0.60378]
+    },
+    {
+      "label": "text_write_remote_burst_enabled/apply_remote_batch",
+      "time_ms_range": [13.323, 14.261]
+    },
+    {
+      "label": "text_write_remote_burst_enabled/apply_remote_per_op",
+      "time_ms_range": [12.368, 13.559]
+    },
+    {
+      "label": "text_write_mixed_local_remote_enabled/interleaved_local_remote",
+      "time_ms_range": [419.57, 468.99]
+    },
+    {
+      "label": "text_write_run_churn_enabled/mid_range_insert_delete_churn",
+      "time_ms_range": [380.07, 407.92]
+    },
+    {
+      "label": "text_projection_rebuild_latency_enabled/evict_then_rebuild_resident",
+      "time_ms_range": [17.761, 18.181]
+    }
+  ],
+  "text_write_path_snapshots": [
+    {
+      "label": "rapid_typing",
+      "projection_update_calls": 5000,
+      "projection_update_total_ns": 3723300,
+      "projection_invalidation_count": 0,
+      "projection_rebuild_count": 0,
+      "index_maintenance_total_ns": 141700,
+      "index_rebuild_total_ns": 0,
+      "dirty_range_count_total": 1,
+      "dirty_span_chars_total": 5000,
+      "dirty_range_merge_count_total": 4999,
+      "projection_hits": 0,
+      "replay_fallbacks": 0
+    },
+    {
+      "label": "paste_bursts",
+      "projection_update_calls": 128,
+      "projection_update_total_ns": 267400,
+      "projection_invalidation_count": 0,
+      "projection_rebuild_count": 0,
+      "index_maintenance_total_ns": 4700,
+      "index_rebuild_total_ns": 0,
+      "dirty_range_count_total": 1,
+      "dirty_span_chars_total": 159,
+      "dirty_range_merge_count_total": 158,
+      "projection_hits": 0,
+      "replay_fallbacks": 0
+    },
+    {
+      "label": "remote_burst",
+      "projection_update_calls": 5000,
+      "projection_update_total_ns": 2676000,
+      "projection_invalidation_count": 1,
+      "projection_rebuild_count": 1,
+      "index_maintenance_total_ns": 0,
+      "index_rebuild_total_ns": 500,
+      "dirty_range_count_total": 1,
+      "dirty_span_chars_total": 5000,
+      "dirty_range_merge_count_total": 0,
+      "projection_hits": 0,
+      "replay_fallbacks": 0
+    },
+    {
+      "label": "mixed_local_remote",
+      "projection_update_calls": 3300,
+      "projection_update_total_ns": 250258400,
+      "projection_invalidation_count": 0,
+      "projection_rebuild_count": 0,
+      "index_maintenance_total_ns": 44847900,
+      "index_rebuild_total_ns": 0,
+      "dirty_range_count_total": 299,
+      "dirty_span_chars_total": 45195,
+      "dirty_range_merge_count_total": 3001,
+      "projection_hits": 0,
+      "replay_fallbacks": 0
+    },
+    {
+      "label": "mid_range_churn",
+      "projection_update_calls": 8024,
+      "projection_update_total_ns": 304441100,
+      "projection_invalidation_count": 0,
+      "projection_rebuild_count": 0,
+      "index_maintenance_total_ns": 65752100,
+      "index_rebuild_total_ns": 0,
+      "dirty_range_count_total": 1,
+      "dirty_span_chars_total": 1024,
+      "dirty_range_merge_count_total": 8023,
+      "projection_hits": 0,
+      "replay_fallbacks": 0
+    }
+  ],
+  "memory_profile": {
+    "peak_working_set_mb": 12.95
+  },
+  "summary": [
+    "Run-02 pressure-cardinality baseline is captured for the Phase E query/materialization projection lane.",
+    "Observed cargo bench peak working set is 12.95 MB, well below the run-01 memory ceiling of 64 MB.",
+    "Heavy rebuild/churn workloads dominate the pressure path with observed benchmark latencies in the 380-470 ms range for mixed local/remote and mid-range insert/delete churn phases.",
+    "Next decision point: evaluate whether a run-03 workload should scale sustained synthetic cardinality and end-to-end query projection replay scenarios."
+  ]
+}

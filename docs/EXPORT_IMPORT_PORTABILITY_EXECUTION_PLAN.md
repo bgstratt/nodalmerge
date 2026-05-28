@@ -1,7 +1,7 @@
 # Export and Import Portability Execution Plan
 
 Owner: Core/runtime
-Status: InProgress (Phase C execution)
+Status: InProgress (Phase D closed for this slice; post-closeout monitoring active)
 Last updated: 2026-05-27
 
 ## 1. Why this plan exists
@@ -23,7 +23,7 @@ In scope:
 3. deterministic import verification and compatibility checks
 4. host-core and websocket parity for export/import operations
 5. conformance vectors for roundtrip parity and failure classes
-6. Next checkpoint: extend Phase C to multi-step policy timeline transition parity (non-zero cutover progression) and mixed-range portability vectors across version-boundary migrations
+6. Next checkpoint: maintain post-closeout monitoring cadence and record threshold recalibration updates when triggered
 Out of scope (v1):
 
 1. cloud vendor-specific backup orchestration
@@ -75,6 +75,14 @@ Minimal conceptual operations:
    - `docs/acceptance/archive-phasec-scope-open.json`
    - `docs/acceptance/archive-phasec-policy-timeline-parity.json`
    - `docs/acceptance/archive-phasec-range-cutover-parity.json`
+   - `docs/acceptance/archive-phasec-transition-progression.json`
+   - `docs/acceptance/archive-phasec-mixed-range-boundaries.json`
+   - `docs/acceptance/archive-phasec-nonzero-transition-progression.json`
+   - `docs/acceptance/archive-phasec-closeout.json`
+   - `docs/acceptance/archive-phased-scope-open.json`
+   - `docs/acceptance/archive-phased-drill-run01.json`
+   - `docs/acceptance/archive-phased-drill-run01-003-004.json`
+   - `docs/acceptance/archive-phased-benchmark-baseline-run01.json`
 7. Shared archive contract types are now promoted in `nodalmerge-core` (`core/src/archive_contracts.rs`) and consumed by core/server archive parity vectors, including deterministic reason-class enums and ws request/response envelopes.
 8. Runtime adapter consumption is now active in server ingress paths: `server/src/adapter_context.rs` routes `archive.describe|archive.validate|archive.import|archive.export`, `server/src/ws_handler.rs` emits shared `ArchiveWsResponse` envelopes, and `host-core/src/protocol.rs` provides shared envelope serialization helpers.
 9. Persistence-backed runtime processors are now active in `server/src/archive_adapter.rs`: archive describe/validate/import load persisted room data (`room://` refs), compute deterministic digest/checkpoint metadata, enforce expected checkpoint verification on import, and are covered by host migration parity fixture `archive_runtime_adapter_room_ref`.
@@ -85,6 +93,26 @@ Minimal conceptual operations:
 14. Phase C conformance vectors now include policy timeline mismatch lanes in server vectors and websocket-facing parity harness fixtures.
 15. Phase C compatibility semantics are broadened: runtime now enforces explicit compatibility-window range overlap behavior (instead of fixed-window equality assumptions) for external manifest acceptance/rejection.
 16. Phase C policy timeline parity metadata now includes both `policy_timeline_hash` and `policy_timeline_cutover_lamport` in signed manifests and export envelopes, with deterministic mismatch vectors in core/server/ws lanes.
+17. Phase C transition progression parity is now active: signed manifests and export envelopes include `policy_timeline_transition_cutovers`, runtime validate/import enforce deterministic progression-shape checks (`non-empty`, `strictly increasing`, `ends_with(policy_timeline_cutover_lamport)`), and server/core/host lanes include deterministic conformance coverage.
+18. Phase C mixed-range migration boundary vectors are now active in server + websocket parity suites, pinning deterministic outcomes for no-overlap reject and edge-overlap accept compatibility-window behavior.
+19. Phase C positive non-zero transition progression vectors are now active: room runtime tracks monotonic policy cutover history, and server/websocket vectors verify non-zero `policy_timeline_cutover_lamport` + `policy_timeline_transition_cutovers` parity on export and validate flows.
+20. Phase C closeout rerun is complete: full archive conformance suites in core/server/websocket lanes are green and recorded in `docs/acceptance/archive-phasec-closeout.json`.
+21. Phase D scope is now open for operationalization: migration drill matrix and baseline benchmark gates are defined in this plan and recorded in `docs/acceptance/archive-phased-scope-open.json`.
+22. Phase D drill run-01 for ARCHIVE-DRILL-001/002 is complete with passing server/ws conformance lanes and recorded in `docs/acceptance/archive-phased-drill-run01.json`.
+23. Phase D drill run-01 for ARCHIVE-DRILL-003/004 is complete with passing server/ws conformance lanes and recorded in `docs/acceptance/archive-phased-drill-run01-003-004.json`.
+24. Phase D baseline benchmark profile run-01 for DRILL-001/002 is recorded in `docs/acceptance/archive-phased-benchmark-baseline-run01.json`; latency gates are currently above target while memory stays within target.
+25. Phase D baseline benchmark profile run-02 is recorded in `docs/acceptance/archive-phased-benchmark-baseline-run02.json` with runtime-aligned in-process measurements, all latency gates passing at p95, and memory gate still passing.
+26. Phase D benchmark profile run-03 is recorded in `docs/acceptance/archive-phased-benchmark-baseline-run03.json`: second-slice manifest metadata cache optimization further reduces validate/import p95 while retaining gate pass across latency and memory.
+27. Cache-hit telemetry is now instrumented for external manifest metadata loads (`nodalmerge_archive_manifest_cache_lookup_total`, `nodalmerge_archive_manifest_cache_lookup_seconds`) with focused cache miss-hit-invalidation test coverage.
+28. Phase D object-manifest parity benchmark run-04 is recorded in `docs/acceptance/archive-phased-benchmark-baseline-run04.json`; file/object p95 deltas are within the 5 ms threshold while latency and memory gates remain green for both lanes.
+29. Operator alert thresholds are now defined and recorded in `docs/acceptance/archive-phased-alert-thresholds-run01.json` for cache miss ratio, object/file parity drift, and absolute latency safety rails.
+30. Operator runbook/dashboard wiring is complete and recorded in `docs/acceptance/archive-phased-operator-alert-runbook-run01.json`, including panel contract, on-call ownership, and escalation flow.
+31. Alert-route tabletop drill run-01 is complete and recorded in `docs/acceptance/archive-phased-alert-route-tabletop-run01.json` with warn and critical paths meeting acknowledgement/escalation timing targets.
+32. Alert template publication checkpoint is complete and recorded in `docs/acceptance/archive-phased-alert-template-publication-run01.json`.
+33. Live dashboard annotation + incident ticket dry-run run-01 is complete and recorded in `docs/acceptance/archive-phased-alert-dryrun-run01.json`.
+34. Critical-route live dry-run run-02 is complete and recorded in `docs/acceptance/archive-phased-alert-dryrun-run02.json` with L3 freeze/rollback decision logging evidence.
+35. Warn + critical dry-run evidence is consolidated and Phase D operational closeout recommendation is recorded in `docs/acceptance/archive-phased-operational-closeout-recommendation-run01.json`.
+36. Runtime-owner signoff is complete and Phase D closeout is approved in `docs/acceptance/archive-phased-operational-closeout-signoff-run01.json`.
 
 ### Phase A - Contract freeze
 
@@ -103,7 +131,52 @@ Phase A kickoff record:
 1. Kickoff date (UTC): 2026-05-27
 2. Owner: Brad
 3. Current focus: Phase C execution for explicit compatibility range semantics and policy timeline cutover parity metadata across lanes.
-4. Next checkpoint: implement multi-step policy timeline transition parity and mixed-range migration vectors across version boundaries.
+4. Mixed-range migration boundary checkpoint complete: server + websocket conformance vectors now pin no-overlap reject and edge-overlap accept semantics.
+5. Positive non-zero transition progression checkpoint complete: runtime policy timeline history now yields multi-cutover parity metadata and vectors for deterministic export/validate behavior.
+6. Transition progression checkpoint complete: `policy_timeline_transition_cutovers` is now signed and validated with deterministic rejection vectors.
+7. Phase C closeout evidence bundle is recorded in `docs/acceptance/archive-phasec-closeout.json`.
+8. Phase D scope open evidence is recorded in `docs/acceptance/archive-phased-scope-open.json`.
+9. ARCHIVE-DRILL-001 and ARCHIVE-DRILL-002 run-01 evidence is recorded in `docs/acceptance/archive-phased-drill-run01.json`.
+10. ARCHIVE-DRILL-003 and ARCHIVE-DRILL-004 run-01 evidence is recorded in `docs/acceptance/archive-phased-drill-run01-003-004.json`.
+11. Baseline benchmark profile run-01 for DRILL-001/002 is recorded in `docs/acceptance/archive-phased-benchmark-baseline-run01.json`.
+12. Baseline benchmark profile run-02 for DRILL-001/002 is recorded in `docs/acceptance/archive-phased-benchmark-baseline-run02.json`.
+13. Baseline benchmark profile run-03 for DRILL-001/002 is recorded in `docs/acceptance/archive-phased-benchmark-baseline-run03.json`.
+14. Cache-hit telemetry checkpoint is complete for external manifest metadata loads.
+15. Object-manifest parity benchmark run-04 is recorded in `docs/acceptance/archive-phased-benchmark-baseline-run04.json`.
+16. Operator alert thresholds checkpoint is complete and recorded in `docs/acceptance/archive-phased-alert-thresholds-run01.json`.
+17. Operator runbook and dashboard wiring checkpoint is complete and recorded in `docs/acceptance/archive-phased-operator-alert-runbook-run01.json`.
+18. Alert-route tabletop drill run-01 is complete and recorded in `docs/acceptance/archive-phased-alert-route-tabletop-run01.json`.
+19. Dashboard annotation and incident ticket templates are published and recorded in `docs/acceptance/archive-phased-alert-template-publication-run01.json`.
+20. Live dashboard annotation + incident ticket dry-run run-01 is complete and recorded in `docs/acceptance/archive-phased-alert-dryrun-run01.json`.
+21. Critical-route live dry-run run-02 is complete and recorded in `docs/acceptance/archive-phased-alert-dryrun-run02.json` with L3 freeze/rollback decision logging evidence.
+22. Warn + critical dry-run evidence is consolidated and Phase D operational closeout recommendation is recorded in `docs/acceptance/archive-phased-operational-closeout-recommendation-run01.json`.
+23. Runtime-owner signoff is complete and Phase D closeout is approved in `docs/acceptance/archive-phased-operational-closeout-signoff-run01.json`.
+24. Next checkpoint: maintain post-closeout monitoring cadence and record threshold recalibration updates when triggered.
+
+### Phase D scope opening record (operationalization matrix)
+
+Phase D kickoff record:
+1. Scope-open timestamp: 2026-05-26T23:33:20.7491872-05:00
+2. Evidence artifact: `docs/acceptance/archive-phased-scope-open.json`
+3. Focus: operator-facing migration drills with deterministic pass/fail gates and benchmark ceilings.
+
+Migration drill matrix:
+
+| Drill ID | Lane | Scenario | Deterministic pass criteria | Deterministic fail criteria |
+|---|---|---|---|---|
+| ARCHIVE-DRILL-001 | File manifest migration | Validate -> import full clone from `file://` manifest | `archive.validate.result.accepted=true`; `archive.import.completed` canonical hash parity; rollback checkpoint unchanged on retry path | Any `*.rejected` reason class outside bounded taxonomy; canonical hash drift after completed import |
+| ARCHIVE-DRILL-002 | Object manifest migration | Validate -> import full clone from `object://` manifest | Same parity criteria as DRILL-001 with object root wiring confirmed | `reject.archive_checkpoint_not_found` when manifest exists and source room is present; non-deterministic reason class mapping |
+| ARCHIVE-DRILL-003 | Compatibility boundary rehearsal | Edge-overlap accept and no-overlap reject windows | Edge-overlap lanes accepted; no-overlap lanes rejected as `reject.archive_unsupported_format` | Any inverse boundary outcome or unstable reason class |
+| ARCHIVE-DRILL-004 | Policy timeline progression rehearsal | Non-zero progression parity + malformed progression reject | Non-zero progression emits expected cutover list; malformed progression rejects as `reject.archive_manifest_invalid` | Missing cutover progression metadata or accept of malformed progression |
+
+Baseline benchmark target gates:
+
+| Metric | Target (p95 unless noted) | Enforcement point |
+|---|---|---|
+| Export manifest build latency | <= 100 ms | DRILL-001, DRILL-002 pre-import step |
+| Validate full integrity latency | <= 200 ms | DRILL-001, DRILL-002 validate stage |
+| Import full apply latency | <= 400 ms | DRILL-001, DRILL-002 import stage |
+| Import peak memory ceiling | <= 512 MB (max) | DRILL-001, DRILL-002 run profile capture |
 
 Phase B closeout record:
 1. Runtime export command path is active (`archive.export`) with deterministic result/rejected envelopes.

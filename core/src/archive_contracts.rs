@@ -109,6 +109,7 @@ pub struct ArchiveExported {
     pub payload_digest_policy: String,
     pub policy_timeline_hash: String,
     pub policy_timeline_cutover_lamport: u64,
+    pub policy_timeline_transition_cutovers: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

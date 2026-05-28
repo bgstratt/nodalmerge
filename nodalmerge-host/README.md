@@ -82,7 +82,7 @@ This folder contains the PR7 prototype for a host-owned .NET runtime that calls 
 - Host events are translated back to typed runtime responses (welcome, session-opened, session-closed, noop-ack).
 - Unsupported message types return an error message (keeps connection open).
 - Runtime error frames are serialized through typed JSON envelope builders so error text/status values are JSON-safe (no malformed frames from quote/newline content).
-- Offline persistence boundary: this runtime host does not own browser IndexedDB hydrate/save behavior. Local offline persistence remains an SDK/browser concern; runtime host responsibilities stop at sync command/event translation and transport orchestration.
+- Offline persistence boundary: browser IndexedDB remains SDK-owned. Optional in-process peer-local persistence is available via `NodalMerge:Runtime:PeerLocal` (`RuntimePeerLocalPersistenceService` + `nodalmerge-runtime-local-ffi`); when enabled, inbound `pack` messages are mirrored into the peer-local log and flushed on disconnect.
 - Undo boundary: this runtime host does not implement `undoManager` policy/state machines. Undo/redo remains SDK/app-layer compensating-op behavior over host runtime command/event primitives.
 - Transport boundary: reconnect/backoff policy and `transport: auto | ws-only` selection remain SDK transport concerns. This runtime host is WS-first authoritative and exposes optional signaling relay verbs used by SDK WebRTC mesh flows.
 - Metrics boundary: app-facing `onMetric` callbacks are SDK-owned and server operational telemetry export remains adapter-owned (for example Prometheus endpoint wiring). This runtime host does not define a separate metrics wire command/event stream.

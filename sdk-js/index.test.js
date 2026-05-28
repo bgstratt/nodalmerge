@@ -14,6 +14,16 @@ async function loadSdkModuleWithBridgeStub() {
     ].join("\n")
   );
 
+  source = source.replace(
+    'import { resolvePeerLocalPersistence } from "./persistence/peer-local-indexeddb.js";',
+    "function resolvePeerLocalPersistence() { return null; }"
+  );
+
+  source = source.replace(
+    /export\s*\{\s*createPeerLocalIndexedDbPersistence,\s*resolvePeerLocalPersistence\s*\}\s*from\s*"\.\/persistence\/peer-local-indexeddb\.js";\s*/,
+    ""
+  );
+
   const dataUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(source)}`;
   return import(dataUrl);
 }

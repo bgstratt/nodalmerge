@@ -1,0 +1,13 @@
+{
+  "name": "topology_promotion_workflow",
+  "room_id": "parity-topology-parent",
+  "scenario": "topology_promotion_workflow",
+  "expected_sequence": [
+    "welcome",
+    "topology.propose-promotion.completed",
+    "topology.validate-promotion.completed",
+    "topology.apply-promotion.completed"
+  ],
+  "expected_pack_count": 0,
+  "notes": "Golden runtime parity for topology propose/validate/apply on parent room WS with topology.admin capability."
+}

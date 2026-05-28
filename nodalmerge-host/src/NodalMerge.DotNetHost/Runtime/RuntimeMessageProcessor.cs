@@ -715,6 +715,318 @@ public sealed class RuntimeMessageProcessor
             return true;
         }
 
+        if (command.TryGetPropertyValue("CreateTopologyChild", out var createChildNode)
+            && createChildNode is JsonObject createChild)
+        {
+            var parentRoomId = createChild["parent_room_id"]?.GetValue<string>() ?? roomId;
+            var childRoomId = createChild["child_room_id"]?.GetValue<string>() ?? string.Empty;
+            var childPurpose = createChild["child_purpose"]?.GetValue<string>() ?? string.Empty;
+            var createdBy = createChild["created_by"]?.GetValue<string>() ?? "dotnet-host-stub";
+            var promotionPolicyId = createChild["promotion_policy_id"]?.GetValue<string>() ?? "promotion-based";
+            var parentCheckpoint = createChild["parent_checkpoint"] as JsonObject
+                ?? new JsonObject
+                {
+                    ["frontier"] = new JsonArray("seq:0"),
+                    ["canonical_hash"] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                };
+
+            var lineage = new JsonObject
+            {
+                ["parent_room_id"] = parentRoomId,
+                ["parent_checkpoint"] = parentCheckpoint.DeepClone(),
+                ["child_purpose"] = childPurpose,
+                ["created_by"] = createdBy,
+                ["created_at_hlc"] = 1,
+                ["promotion_policy_id"] = promotionPolicyId
+            };
+
+            if (state is not null)
+            {
+                if (!state.TopologyChildrenByParent.TryGetValue(parentRoomId, out var children))
+                {
+                    children = [];
+                    state.TopologyChildrenByParent[parentRoomId] = children;
+                }
+
+                children.Add(new TopologyChildStubState(
+                    childRoomId,
+                    childPurpose,
+                    promotionPolicyId,
+                    createdBy,
+                    lineage
+                ));
+            }
+
+            var events = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["ChildRoomCreated"] = new JsonObject
+                    {
+                        ["child_room_id"] = childRoomId,
+                        ["lineage"] = lineage
+                    }
+                }
+            };
+            result = FfiJsonBridgeResult.Success(events.ToJsonString());
+            return true;
+        }
+
+        if (command.TryGetPropertyValue("DescribeRoomLineage", out var describeLineageNode)
+            && describeLineageNode is JsonObject describeLineage)
+        {
+            var targetRoomId = describeLineage["room_id"]?.GetValue<string>() ?? roomId;
+            JsonNode? lineageNode = null;
+            var ancestors = new JsonArray();
+            if (state is not null)
+            {
+                foreach (var children in state.TopologyChildrenByParent.Values)
+                {
+                    foreach (var child in children)
+                    {
+                        if (string.Equals(child.ChildRoomId, targetRoomId, StringComparison.Ordinal))
+                        {
+                            lineageNode = child.Lineage.DeepClone();
+                            break;
+                        }
+                    }
+
+                    if (lineageNode is not null)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            var events = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["RoomLineageDescribed"] = new JsonObject
+                    {
+                        ["room_id"] = targetRoomId,
+                        ["lineage"] = lineageNode,
+                        ["ancestors"] = ancestors
+                    }
+                }
+            };
+            result = FfiJsonBridgeResult.Success(events.ToJsonString());
+            return true;
+        }
+
+        if (command.TryGetPropertyValue("ListTopologyChildren", out var listChildrenNode)
+            && listChildrenNode is JsonObject listChildren)
+        {
+            var parentRoomId = listChildren["parent_room_id"]?.GetValue<string>() ?? roomId;
+            var childrenArray = new JsonArray();
+            if (state is not null
+                && state.TopologyChildrenByParent.TryGetValue(parentRoomId, out var children))
+            {
+                foreach (var child in children)
+                {
+                    childrenArray.Add(new JsonObject
+                    {
+                        ["child_room_id"] = child.ChildRoomId,
+                        ["child_purpose"] = child.ChildPurpose,
+                        ["promotion_policy_id"] = child.PromotionPolicyId,
+                        ["created_by"] = child.CreatedBy
+                    });
+                }
+            }
+
+            var events = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["ChildrenListed"] = new JsonObject
+                    {
+                        ["parent_room_id"] = parentRoomId,
+                        ["children"] = childrenArray
+                    }
+                }
+            };
+            result = FfiJsonBridgeResult.Success(events.ToJsonString());
+            return true;
+        }
+
+        if (command.TryGetPropertyValue("ProposeTopologyPromotion", out var proposePromotionNode)
+            && proposePromotionNode is JsonObject proposePromotion)
+        {
+            var parentRoomId = proposePromotion["parent_room_id"]?.GetValue<string>() ?? string.Empty;
+            var childRoomId = proposePromotion["child_room_id"]?.GetValue<string>() ?? string.Empty;
+            var childCheckpointHash = proposePromotion["child_checkpoint_hash"]?.GetValue<string>() ?? string.Empty;
+            var payloadRef = proposePromotion["payload_ref"]?.GetValue<string>() ?? string.Empty;
+            var idempotencyKey = proposePromotion["idempotency_key"]?.GetValue<string>();
+            if (childCheckpointHash.Contains("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", StringComparison.Ordinal))
+            {
+                result = FfiJsonBridgeResult.Failure(
+                    AsStatus.InvalidArg,
+                    new FfiDenyMetadata(
+                        "reject.promotion_child_checkpoint_mismatch",
+                        "topology.propose-promotion",
+                        "topology.admin",
+                        "child canonical_hash does not match child_checkpoint_hash"
+                    )
+                );
+                return true;
+            }
+
+            var proposalDigest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+            var proposalId = string.IsNullOrWhiteSpace(idempotencyKey) ? proposalDigest : idempotencyKey;
+            if (state is not null)
+            {
+                state.TopologyPromotions[proposalId] = new TopologyPromotionStubState(
+                    proposalId,
+                    parentRoomId,
+                    childRoomId,
+                    childCheckpointHash,
+                    payloadRef,
+                    proposalDigest,
+                    Validated: false,
+                    Applied: false
+                );
+            }
+
+            var events = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["PromotionProposed"] = new JsonObject
+                    {
+                        ["proposal_id"] = proposalId,
+                        ["parent_room_id"] = parentRoomId,
+                        ["child_room_id"] = childRoomId,
+                        ["child_checkpoint_hash"] = childCheckpointHash,
+                        ["payload_ref"] = payloadRef,
+                        ["proposal_digest"] = proposalDigest
+                    }
+                }
+            };
+            result = FfiJsonBridgeResult.Success(events.ToJsonString());
+            return true;
+        }
+
+        if (command.TryGetPropertyValue("ValidateTopologyPromotion", out var validatePromotionNode)
+            && validatePromotionNode is JsonObject validatePromotion)
+        {
+            var proposalId = validatePromotion["proposal_id"]?.GetValue<string>() ?? string.Empty;
+            if (state is null || !state.TopologyPromotions.TryGetValue(proposalId, out var promotion))
+            {
+                result = FfiJsonBridgeResult.Failure(
+                    AsStatus.InvalidArg,
+                    new FfiDenyMetadata(
+                        "reject.promotion_not_found",
+                        "topology.validate-promotion",
+                        "topology.admin",
+                        "proposal not found"
+                    )
+                );
+                return true;
+            }
+
+            if (promotion.Applied)
+            {
+                var idempotentEvents = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["PromotionValidated"] = new JsonObject
+                        {
+                            ["proposal_id"] = proposalId,
+                            ["validation_digest"] = promotion.ProposalDigest
+                        }
+                    }
+                };
+                result = FfiJsonBridgeResult.Success(idempotentEvents.ToJsonString());
+                return true;
+            }
+
+            var validationDigest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+            state.TopologyPromotions[proposalId] = promotion with { Validated = true };
+            var events = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["PromotionValidated"] = new JsonObject
+                    {
+                        ["proposal_id"] = proposalId,
+                        ["validation_digest"] = validationDigest
+                    }
+                }
+            };
+            result = FfiJsonBridgeResult.Success(events.ToJsonString());
+            return true;
+        }
+
+        if (command.TryGetPropertyValue("ApplyTopologyPromotion", out var applyPromotionNode)
+            && applyPromotionNode is JsonObject applyPromotion)
+        {
+            var proposalId = applyPromotion["proposal_id"]?.GetValue<string>() ?? string.Empty;
+            if (state is null || !state.TopologyPromotions.TryGetValue(proposalId, out var promotion))
+            {
+                result = FfiJsonBridgeResult.Failure(
+                    AsStatus.InvalidArg,
+                    new FfiDenyMetadata(
+                        "reject.promotion_not_found",
+                        "topology.apply-promotion",
+                        "topology.admin",
+                        "proposal not found"
+                    )
+                );
+                return true;
+            }
+
+            if (promotion.Applied)
+            {
+                var idempotentEvents = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["PromotionApplied"] = new JsonObject
+                        {
+                            ["proposal_id"] = proposalId,
+                            ["parent_room_id"] = promotion.ParentRoomId,
+                            ["parent_new_canonical_hash"] = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                            ["audit_key"] = $"_topology/promotion/{proposalId}"
+                        }
+                    }
+                };
+                result = FfiJsonBridgeResult.Success(idempotentEvents.ToJsonString());
+                return true;
+            }
+
+            if (!promotion.Validated)
+            {
+                result = FfiJsonBridgeResult.Failure(
+                    AsStatus.InvalidArg,
+                    new FfiDenyMetadata(
+                        "reject.promotion_not_validated",
+                        "topology.apply-promotion",
+                        "topology.admin",
+                        "proposal must be validated before apply"
+                    )
+                );
+                return true;
+            }
+
+            state.TopologyPromotions[proposalId] = promotion with { Applied = true };
+            var events = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["PromotionApplied"] = new JsonObject
+                    {
+                        ["proposal_id"] = proposalId,
+                        ["parent_room_id"] = promotion.ParentRoomId,
+                        ["parent_new_canonical_hash"] = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                        ["audit_key"] = $"_topology/promotion/{proposalId}"
+                    }
+                }
+            };
+            result = FfiJsonBridgeResult.Success(events.ToJsonString());
+            return true;
+        }
+
         return false;
     }
 
@@ -1051,6 +1363,12 @@ public sealed class RuntimeMessageProcessor
             "archive.describe" => "archive.describe",
             "archive.validate" => "archive.validate",
             "archive.import" => "archive.import",
+            "topology.create-child" => "topology.create-child",
+            "topology.describe-lineage" => "topology.describe-lineage",
+            "topology.list-children" => "topology.list-children",
+            "topology.propose-promotion" => "topology.propose-promotion",
+            "topology.validate-promotion" => "topology.validate-promotion",
+            "topology.apply-promotion" => "topology.apply-promotion",
             _ => "unknown"
         };
     }
@@ -1066,6 +1384,7 @@ public sealed class RuntimeMessageProcessor
             "query.read" => "query.read",
             "archive.admin" => "archive.admin",
             "archive.read" => "archive.read",
+            "topology.admin" => "topology.admin",
             _ => "unknown"
         };
     }

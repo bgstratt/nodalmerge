@@ -225,6 +225,59 @@ async fn server_query_replay_001_live_vs_replay_parity_at_checkpoint() {
     assert_eq!(projection_digest(&checkpoint_rows), projection_digest(&replay_rows));
 }
 
+/// Phase E run-03 (server lane): materialize the same checkpoint twice via `import_nodes`,
+/// build the prefix projection from resolved room state, and assert paged reads preserve
+/// digest continuity (mirrors core `query_phasee_replay_003_e2e_checkpoint_pagination_digest_parity`).
+#[tokio::test]
+async fn server_query_phasee_replay_003_e2e_checkpoint_pagination_digest_parity() {
+    let persistence: SharedPersistence = Arc::new(NoPersistence);
+    let signer = SigningKey::from_bytes(&[0x7au8; 32]);
+
+    let room_a = Room::new("query-phasee-replay-a".to_string(), Arc::clone(&persistence), 512);
+    let room_b = Room::new("query-phasee-replay-b".to_string(), Arc::clone(&persistence), 512);
+
+    let checkpoint_nodes = build_set_nodes(
+        &signer,
+        &[("world/a", "1"), ("world/b", "2"), ("world/c", "3")],
+    );
+
+    let (accepted_a, _, errs_a) = import_nodes(&room_a, checkpoint_nodes.clone()).await;
+    let (accepted_b, _, errs_b) = import_nodes(&room_b, checkpoint_nodes).await;
+    assert_eq!(accepted_a, 3);
+    assert_eq!(accepted_b, 3);
+    assert!(errs_a.is_empty());
+    assert!(errs_b.is_empty());
+
+    let rows_a = projection_rows(&room_a.graph.read().await.resolve(), "world/");
+    let rows_b = projection_rows(&room_b.graph.read().await.resolve(), "world/");
+
+    assert_eq!(rows_a, rows_b);
+    let full_digest = projection_digest(&rows_a);
+    const PAGE_LIMIT: usize = 2;
+
+    for (label, rows) in [("room_a", &rows_a), ("room_b", &rows_b)] {
+        let mut rebuilt = Vec::new();
+        let mut token = None;
+        loop {
+            let (page, next) = paginate_projection_entries(rows, PAGE_LIMIT, token.as_deref());
+            rebuilt.extend(page);
+            token = next;
+            if token.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            *rows, rebuilt,
+            "QUERY-PHASEE-REPLAY-E2E-001 server: pagination must reconstruct full row set ({label})"
+        );
+        assert_eq!(
+            projection_digest(&rebuilt),
+            full_digest,
+            "QUERY-PHASEE-REPLAY-E2E-001 server: paged projection digest must equal full projection digest ({label})"
+        );
+    }
+}
+
 #[test]
 fn server_query_compat_reject_001_selector_payload_validation_bounded_taxonomy() {
     let known_hashes = BTreeSet::from(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]);

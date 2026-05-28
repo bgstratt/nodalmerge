@@ -1,0 +1,43 @@
+{
+  "artifact": "archive-phased-drill-run01",
+  "recorded_at": "2026-05-26T23:36:10.9921950-05:00",
+  "phase": "Phase D drill execution",
+  "run": "run-01",
+  "summary": [
+    "ARCHIVE-DRILL-001 and ARCHIVE-DRILL-002 run-01 operational lanes are green in server and websocket parity suites.",
+    "File/object migration parity lanes confirm deterministic import canonical hash parity with stable envelope sequencing.",
+    "Compatibility validate acceptance gate for overlapping ranges remains deterministic and accepted."
+  ],
+  "commands": [
+    {
+      "command": "cargo test -p nodalmerge-server archive_roundtrip_002_generated_file_manifest_import_parity_server_path --test archive_portability_vectors",
+      "result": "passed",
+      "details": "1 passed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_roundtrip_003_generated_object_manifest_import_parity_server_path --test archive_portability_vectors",
+      "result": "passed",
+      "details": "1 passed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_validate_accept_005_compatibility_window_range_overlaps_runtime_server_path --test archive_portability_vectors",
+      "result": "passed",
+      "details": "1 passed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server parity_archive_export_runtime_fixture --test host_migration_parity",
+      "result": "passed",
+      "details": "1 passed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server parity_archive_runtime_adapter_fixture --test host_migration_parity",
+      "result": "passed",
+      "details": "1 passed"
+    }
+  ],
+  "benchmark_capture": {
+    "status": "pending",
+    "note": "Latency/memory profiles for DRILL-001/002 are not yet captured in this run-01 evidence bundle."
+  },
+  "next_checkpoint": "Execute ARCHIVE-DRILL-003 and ARCHIVE-DRILL-004 run-01, then capture baseline benchmark profiles for DRILL-001/002."
+}

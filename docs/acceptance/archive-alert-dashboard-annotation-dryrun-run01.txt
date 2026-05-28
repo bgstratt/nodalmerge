@@ -1,0 +1,15 @@
+[archive-alert-policy]
+incident_id=INC-20260527-041
+route=warn
+source=cache_miss_ratio
+metric=nodalmerge_archive_manifest_cache_lookup_total (miss/(hit+miss))
+threshold=warn > 0.10 over 15m
+sample_guard=pass;samples=286
+ack_l1=runtime-oncall-01;ack_utc=2026-05-27T00:11:37Z
+scope=prod-us-east/room-prefix=room://archive
+escalation=l2;escalate_utc=2026-05-27T00:20:12Z
+change_freeze=no
+recovery_observed_utc=2026-05-27T00:42:04Z
+recovery_window_complete_utc=2026-05-27T01:12:04Z
+follow_up_owner=platform-performance-01
+follow_up_due=2026-05-29

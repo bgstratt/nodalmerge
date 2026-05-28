@@ -512,6 +512,10 @@ Recommended implementation order:
 7. Execute headless runtime/persistence and authority/topology plans after core contract freeze and before broad pod rollout.
 8. Track remaining post-core workstreams in `docs/future-state-enhancements.md`.
 
+### 11.7 Wave 2 sequencing note (2026-05-27)
+
+Phase A **contract drafts** and acceptance artifacts are recorded: `headless-persistence-phasea-contract-freeze-run01.json`, `authority-topology-phasea-contract-freeze-run01.json`, `manager-worker-cli-workflow-plan-run01.json` (see `docs/roadmap.md` Wave 2). Forward work is **Phase B+** per each plan (adapters, runtime lineage, executable `nodalmerge topology`).
+
 Current Wave R execution status (2026-05-26):
 
 1. RNM-007 namespace migration in host C# surfaces is implemented and validated (`dotnet build` + `dotnet test`).

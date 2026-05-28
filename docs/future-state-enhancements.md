@@ -30,7 +30,7 @@ Priority levels:
 | FSE-05 | Presence/session durability polish | P3 | Planned | Better operational continuity and reconnect semantics | Spec/Auth A-B |
 | FSE-06 | Schema/version ergonomics | P3 | Planned | Safer long-lived app migrations and compatibility windows | Existing migration docs |
 | FSE-07 | Native text acceleration structures | P3 | Planned | Larger-doc performance headroom while preserving determinism | Benchmark baselines |
-| FSE-09 | Headless runtime + peer-local persistence adapters | P2 | Planned | Enables pod/worker embedding and configurable local persistence backends | Spec/Auth A-B, Replay Branching A-C |
+| FSE-09 | Headless runtime + peer-local persistence adapters | P2 | InProgress | Pod/worker embedding; pluggable peer-local backends (memory/file today; LocalDB/NoSQL/distributed follow-on) | Spec/Auth A-B, Replay Branching A-C |
 | FSE-10 | Authority model + parent/child room topology | P1 | Planned | Freezes mainline/worker governance and replayable promotion semantics | Spec/Auth A-B, Replay Branching A-C |
 | FSE-08 | Distributed authority/federation semantics | P4 | Deferred | Multi-authority and trust-domain deployments | Identity continuity + lineage foundation |
 
@@ -113,18 +113,24 @@ Planned deliverables:
 
 ### FSE-09 Headless runtime + peer-local persistence adapters
 
-Execution plan: `docs/HEADLESS_RUNTIME_PERSISTENCE_EXECUTION_PLAN.md`
+Execution plan: `docs/HEADLESS_RUNTIME_PERSISTENCE_EXECUTION_PLAN.md` (§4a packaging, §4b extensible backends)
 
-Planned deliverables:
+Delivered (2026-05-27 slice):
 
-1. shared local persistence adapter contract (memory/file/embedded-db/browser)
-2. SDK integration with additive persistence configuration
-3. headless runtime module and CLI workflow for pods/workers
+1. `nodalmerge-runtime-local`: `PeerLocalPersistence`, memory + file adapters, `PersistBackendKind` config, `LOCAL-PERSIST-001` vectors.
+2. `nodalmerge-headless` worker: WS handshake + pack → peer-local log; env-configurable backend.
+
+Follow-on (configurable / plugin backends):
+
+1. embedded DB adapter (SQLite schema dedicated to peer-local, distinct from server store)
+2. document/KV and distributed cache adapters behind same trait
+3. composite memory + durable tier; optional backend registry / host-injected `Arc<dyn PeerLocalPersistence>`
+4. SDK IndexedDB adapter; .NET packaging via sidecar or persistence FFI (§4a)
 
 Success criteria:
 
-1. restart/hash parity across adapter backends
-2. headless worker parity with browser SDK flows
+1. restart/hash parity across adapter backends (memory + file met for LOCAL-PERSIST-001)
+2. headless worker parity with browser SDK flows (initial HEADLESS-RUN-001/002 met; IBF/MST depth remains)
 
 ### FSE-10 Authority model + parent/child room topology
 

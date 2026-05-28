@@ -19,6 +19,36 @@ export interface NodalMergeSdkOptions {
   transport?: {
     mode?: "ws-only" | "auto";
   };
+  /** Optional peer-local graph persistence (IndexedDB in browsers). Off by default. */
+  persistence?: {
+    enabled?: boolean;
+    adapter?: "indexeddb" | PeerLocalPersistenceAdapter;
+    dbName?: string;
+    dbVersion?: number;
+    debounceMs?: number;
+    indexedDB?: IDBFactory;
+    /** Migrate pre-Phase-C demo keys (`nodes/all`, flat blob hashes). */
+    migrateLegacyDemo?: boolean;
+  };
+}
+
+export interface PeerLocalHydrateReport {
+  roomId: string;
+  nodesPack: string | null;
+  blobsRestored: number;
+  canonicalHash: string | null;
+}
+
+export interface PeerLocalPersistenceAdapter {
+  kind: string;
+  isAvailable(): boolean;
+  open(): Promise<unknown>;
+  hydrate(store: unknown, roomId: string): Promise<PeerLocalHydrateReport>;
+  schedulePersist(store: unknown, roomId: string): void;
+  flush(store: unknown, roomId: string): Promise<unknown>;
+  recover(store: unknown, roomId: string): Promise<PeerLocalHydrateReport>;
+  clearRoom?(roomId: string): Promise<unknown>;
+  close?(): Promise<void>;
 }
 
 export interface TopologySnapshot {
@@ -162,6 +192,15 @@ export declare class NodalMergeSdk {
     clearPersisted: () => void;
   };
 
+  persistence: {
+    isEnabled: () => boolean;
+    kind: () => string | null;
+    hydrateReport: () => PeerLocalHydrateReport | null;
+    flush: () => Promise<unknown>;
+    recover: () => Promise<PeerLocalHydrateReport>;
+    clearRoom: () => Promise<unknown>;
+  };
+
   presence: {
     set: (data: unknown, options?: { sessionId?: string; ttlMs?: number; nowUnixMs?: number }) => void;
     getAll: () => void;
@@ -189,5 +228,18 @@ export declare class NodalMergeSdk {
 }
 
 export declare function parseRuntimeMessage(data: string): NodalMergeRuntimeMessage | null;
+
+export declare function createPeerLocalIndexedDbPersistence(
+  options?: {
+    dbName?: string;
+    dbVersion?: number;
+    debounceMs?: number;
+    indexedDB?: IDBFactory;
+  }
+): PeerLocalPersistenceAdapter;
+
+export declare function resolvePeerLocalPersistence(
+  options: NodalMergeSdkOptions
+): PeerLocalPersistenceAdapter | null;
 
 export declare function createNodalMergeSdk(options: NodalMergeSdkOptions): Promise<NodalMergeSdk>;

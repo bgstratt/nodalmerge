@@ -1,0 +1,27 @@
+{
+  "artifact": "archive-phasec-nonzero-transition-progression",
+  "recorded_at": "2026-05-26T23:28:41.8168484-05:00",
+  "phase": "Phase C execution",
+  "summary": [
+    "Room runtime now tracks policy timeline history with monotonic cutover progression.",
+    "Archive export emits non-zero policy timeline progression metadata after multiple policy updates.",
+    "Validate path accepts non-zero transition progression when manifest metadata matches current room timeline, and websocket parity fixture pins export envelope behavior."
+  ],
+  "commands": [
+    {
+      "command": "cargo test -p nodalmerge-server archive_export_003_policy_timeline_transition_progression_non_zero_server_path --test archive_portability_vectors",
+      "result": "passed",
+      "details": "1 passed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server archive_validate_accept_010_policy_timeline_transition_progression_non_zero_server_path --test archive_portability_vectors",
+      "result": "passed",
+      "details": "1 passed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server parity_archive_positive_policy_timeline_transition_non_zero_fixture --test host_migration_parity",
+      "result": "passed",
+      "details": "1 passed"
+    }
+  ]
+}

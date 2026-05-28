@@ -159,12 +159,23 @@ pub trait ServerPersistence: NodePersistence + BlobPersistence {
     fn is_durable(&self) -> bool {
         self.nodes_durable() && self.blobs_durable()
     }
+
+    /// On-disk store root for topology sidecars (promotion proposals). `None`
+    /// when the server is fully in-memory.
+    fn topology_store_root(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
-/// Blanket impl: any type that implements both halves implements the
-/// whole. Covers `DirPersistence`, `NoPersistence`, `Composite`, and any
-/// future single-backend type.
-impl<T: NodePersistence + BlobPersistence + ?Sized> ServerPersistence for T {}
+impl ServerPersistence for DirPersistence {
+    fn topology_store_root(&self) -> Option<PathBuf> {
+        Some(self.root().to_path_buf())
+    }
+}
+
+impl ServerPersistence for NoPersistence {}
+
+impl<N: NodePersistence, B: BlobPersistence> ServerPersistence for Composite<N, B> {}
 
 // ─── Composite<N, B> ─────────────────────────────────────────────────────────
 
@@ -258,6 +269,7 @@ impl BlobPersistence for NoPersistence {
 /// ```text
 /// <root>/
 ///   nodalmerge.db                      ← SQLite: one row per (room, node)
+///   topology-promotions.db             ← SQLite: promotion proposals (Wave 3)
 ///   blobs/
 ///     <sanitized_room_id>/
 ///       <hash_hex>                     ← one file per blob (content-addressed)
@@ -272,6 +284,11 @@ pub struct DirPersistence {
 }
 
 impl DirPersistence {
+    /// On-disk store root (`nodalmerge.db`, `blobs/`, topology sidecars).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Open (or create) the store rooted at `root`. Creates the directory,
     /// opens the SQLite file, and ensures the schema.
     pub fn open(root: impl AsRef<Path>) -> std::io::Result<Self> {
@@ -575,6 +592,11 @@ fn hex_digit(b: u8) -> Option<u8> {
 
 /// Boxed handle used by `Rooms` — one instance is shared across all rooms.
 pub type SharedPersistence = Arc<dyn ServerPersistence>;
+
+/// Topology sidecar root derived from the active persistence backend.
+pub fn topology_store_root(persistence: &SharedPersistence) -> Option<PathBuf> {
+    persistence.topology_store_root()
+}
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 

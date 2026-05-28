@@ -2,7 +2,7 @@
 
 Owner: Platform/runtime
 Status: Active execution baseline
-Last updated: 2026-05-26
+Last updated: 2026-05-27
 
 ## 1. Executive decisions
 
@@ -12,6 +12,17 @@ Last updated: 2026-05-26
 4. Two topology modes are supported:
    - reference-only room topology
    - promotion-based convergence topology
+
+### 1a. Program map (where this file sits vs earlier ActiveSync planning)
+
+An older **ActiveSync Combined Roadmap** used the same wave names (R, 0, 1, …) and **§7 immediate next items** (Wave 0 sign-off, rename inventory, query Phase A, export Phase A, topology CLI draft). That document is **superseded** by this NodalMerge roadmap; the work did not disappear, it was **executed and folded into the status bullets below**.
+
+Plain-language position:
+
+1. **Wave R (rename)** — done for runtime-critical surfaces; residual items are low-priority docs/dashboard sweep.
+2. **Wave 0** — contract freeze and vectors are **done** (see Wave 0 status).
+3. **Wave 1** — **Query/materialization** progressed through Phases A–D and **Phase E** (benchmarks + guardrails). **Phase E “run-NN”** is only an internal evidence label: run-01/02 captured vector-suite SLOs and Criterion pressure baselines; **run-03** adds an **end-to-end** vector: replay to a **fixed checkpoint**, build the **prefix projection**, then **paginate reads** and prove **digest continuity** (see `docs/acceptance/query-phasee-benchmark-baseline-run03.json`). **Export/import** Phases A–C and operational **Phase D** are **closed**; remaining work is **post-closeout monitoring** artifacts, not new conformance code.
+4. **Wave 2** — **peer-local** + **headless** (depth, Phase E ops, composite/registry pilot) and **authority/topology Phases A–D closed**. Evidence: `docs/acceptance/headless-persistence-phaseb-composite-pilot-run01.json`, `docs/acceptance/authority-topology-phased-closeout.json`. **Wave 3 topology hardening (declared slice) closed** — `docs/acceptance/authority-topology-wave3-closeout.json`. Phase A sign-offs: out of band.
 
 ## 2. Canonical source plans
 
@@ -27,6 +38,7 @@ Core execution plans:
 8. docs/HEADLESS_RUNTIME_PERSISTENCE_EXECUTION_PLAN.md
 9. docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md
 10. docs/MANAGER_WORKER_TOPOLOGY_PLAYBOOK.md
+11. docs/EXECUTION_CHECKLIST.md
 
 Backlog tracker:
 
@@ -133,28 +145,53 @@ Current status:
 5. Checkpoint selector equivalence is now in host stub coverage: sequence, canonical hash, and frontier selector forms resolve the same canonical cut with digest parity and deterministic unknown-hash rejection.
 6. Compatibility lane is now covered for selector payload validation: malformed frontier tokens, mixed selector fields, and canonical hash format failures deterministically reject with bounded reason classes (`reject.checkpoint_selector_invalid`, `reject.checkpoint_not_found`).
 7. Query/materialization Phase C parity is now complete across host/core/server/ws lanes, including mismatch diagnostics coverage (checkpoint + digest metadata) and ws rejection-mapping parity for selector validation reason classes/messages.
-8. Query/materialization slice is now moving to Phase D deliverables (SDK/operator surface).
+8. Query/materialization slice has completed Phase D deliverables for this scope and is now in Phase E kickoff.
 9. Export/import portability parallel track has started in Wave 1 with initial core/server deterministic vector coverage and acceptance artifacts.
 10. Phase D implementation has started in `sdk-js`: query/projection runtime helpers now cover register/build/read/invalidate/list request paths with canonical checkpoint selector validation and runtime response matching tests.
 11. Phase D hardening increment landed: `sdk-js` now includes rejected-path parity tests for `query.register.rejected` and `projection.build.rejected`, and `docs/operator.md` now documents operator lifecycle + failure triage for register/build/read/invalidate flows.
-12. Export/import Phase A checkpoint advanced: `docs/EXPORT_IMPORT_PORTABILITY_EXECUTION_PLAN.md` now includes host/ws parity matrix headings and an initial deterministic rejection taxonomy draft for compatibility and integrity failure classes.
-13. Export/import Phase A checkpoint advanced again: concrete host/ws envelope drafts and parity examples are now recorded for `archive.describe`, `archive.validate`, and `archive.import`, with acceptance artifacts `docs/acceptance/archive-phasea-envelope-draft.json` and `docs/acceptance/archive-phasea-ws-parity-draft.json`.
-14. Export/import Phase A host implementation stub is now in place across mapper/processor/tests: runtime mapper supports `archive.describe`/`archive.validate`/`archive.import`, ws event mapping includes completed/rejected archive responses, and deterministic reject class stubs are validated via focused host tests and `docs/acceptance/archive-phasea-host-stub.json`.
-15. Export/import Phase A parity vectors in core/server now include archive describe envelope metadata assertions plus deterministic validation/import rejection classes (`reject.archive_manifest_invalid`, `reject.archive_digest_mismatch`) with passing `archive_portability_vectors` suites in both lanes.
-16. Export/import Phase A contract promotion is now in place: shared archive envelope/taxonomy types live in `nodalmerge-core` and both core/server archive parity vectors consume these shared contract types (`ArchiveWsResponse`, `ArchiveReasonClass`, archive checkpoint/provenance payload structs).
-17. Export/import Phase A runtime adapter adoption is now in place for host-core/server integration paths: server dispatch routes archive control-plane commands, runtime ingress emits shared `ArchiveWsResponse` envelopes via host-core serializer helpers, and focused adapter parity tests are passing.
-18. Export/import Phase A runtime processors are now persistence-backed in server paths: `server/src/archive_adapter.rs` resolves `room://` archive refs from persisted nodes/blobs, emits deterministic describe/validate/import contract payloads, enforces expected checkpoint mismatch rejection on import, and is covered by host migration parity fixture `archive_runtime_adapter_room_ref`.
-19. Export/import runtime processors now support external archive manifest providers (`file://`, `object://`) with signature verification path and deterministic negative rejection parity (`reject.archive_unsupported_format`, `reject.archive_signature_invalid`, `reject.archive_checkpoint_not_found`) validated in host migration fixtures.
-20. Export/import Phase A is now closed out with contract/runtime/negative-path evidence, and Phase B deterministic export builder kickoff is active for signed manifest generation and external-ref roundtrip vectors.
-21. Export/import Phase B runtime wiring is now active: `archive.export` is routed through server adapter + websocket control-plane authorization, emits `archive.export.result` / `archive.export.rejected` envelopes, and is covered by host migration parity fixture `archive_runtime_export_file_ref`.
-22. Export/import Phase B roundtrip parity vectors are now active for generated manifests: file/object export destinations are materialized by runtime builders and consumed by import parity tests that assert deterministic canonical hash equality.
-23. Export/import Phase B conformance hardening is now complete: export manifest output includes compatibility-window metadata and payload digest policy declarations, with deterministic validation rejection mappings (`reject.archive_unsupported_format`, `reject.archive_policy_timeline_mismatch`) pinned by websocket-facing and server vector fixtures.
-24. Export/import Phase B is now closed out with runtime/export/roundtrip/conformance evidence, and Phase C scope is open for richer portability semantics (expanded compatibility windows, policy timeline parity, and ws conformance lock for those semantics).
-25. Export/import Phase C initial execution is now active: export outputs include `policy_timeline_hash` metadata (signed in manifest payload), and runtime validate/import enforce deterministic policy timeline parity checks for external manifests.
-26. Phase C parity vectors now include deterministic policy timeline mismatch lanes in server and websocket-facing harnesses (`reject.archive_policy_timeline_mismatch`) while preserving existing archive suite stability.
-27. Phase C compatibility semantics are broadened to explicit range behavior: export now declares a compatibility support window (`min_supported`..`max_supported`), and runtime validation accepts overlapping ranges while deterministically rejecting unsupported windows.
-28. Phase C policy timeline parity now includes both hash and cutover metadata (`policy_timeline_hash`, `policy_timeline_cutover_lamport`) in signed manifests and `archive.export.result`, with deterministic mismatch rejection lanes pinned in core/server/websocket fixtures.
-29. Next Phase C checkpoint: extend portability semantics for multi-step policy timeline transitions (non-zero cutover progression) and add conformance vectors for mixed-range migrations across version boundaries.
+12. Query/materialization Phase D closeout is now complete for this slice: sdk-js rejected-path parity spans register/build/read/invalidate/list (`*.rejected`) and operator runbook coverage now includes rejection-specific triage and recovery guidance.
+13. Query/materialization Phase E kickoff is active: core/server vector lanes now include deterministic multi-page ordering and digest continuity coverage as baseline performance-hardening guardrails.
+14. Query/materialization Phase E benchmark run-01 is now recorded (`docs/acceptance/query-phasee-benchmark-slo-run01.json`, `docs/acceptance/query-phasee-benchmark-baseline-run01.json`) with warm latency/memory ceilings and baseline profile evidence.
+15. Query/materialization Phase E benchmark run-02 is now recorded (`docs/acceptance/query-phasee-benchmark-baseline-run02.json`) with pressure-cardinality projection build/read/rebuild loop evidence and memory ceiling validation.
+16. Query/materialization Phase E benchmark run-03 is now recorded (`docs/acceptance/query-phasee-benchmark-baseline-run03.json`): end-to-end replay to a fixed checkpoint, prefix projection materialization, and paginated read digest continuity across independent replays/imports (`query_phasee_replay_003_e2e_checkpoint_pagination_digest_parity`, `server_query_phasee_replay_003_e2e_checkpoint_pagination_digest_parity`). Minimal Phase E slice closeout (including deferral of cooperative projection-build backpressure) is in `docs/acceptance/query-phasee-closeout.json`.
+17. Export/import Phase A checkpoint advanced: `docs/EXPORT_IMPORT_PORTABILITY_EXECUTION_PLAN.md` now includes host/ws parity matrix headings and an initial deterministic rejection taxonomy draft for compatibility and integrity failure classes.
+18. Export/import Phase A checkpoint advanced again: concrete host/ws envelope drafts and parity examples are now recorded for `archive.describe`, `archive.validate`, and `archive.import`, with acceptance artifacts `docs/acceptance/archive-phasea-envelope-draft.json` and `docs/acceptance/archive-phasea-ws-parity-draft.json`.
+19. Export/import Phase A host implementation stub is now in place across mapper/processor/tests: runtime mapper supports `archive.describe`/`archive.validate`/`archive.import`, ws event mapping includes completed/rejected archive responses, and deterministic reject class stubs are validated via focused host tests and `docs/acceptance/archive-phasea-host-stub.json`.
+20. Export/import Phase A parity vectors in core/server now include archive describe envelope metadata assertions plus deterministic validation/import rejection classes (`reject.archive_manifest_invalid`, `reject.archive_digest_mismatch`) with passing `archive_portability_vectors` suites in both lanes.
+21. Export/import Phase A contract promotion is now in place: shared archive envelope/taxonomy types live in `nodalmerge-core` and both core/server archive parity vectors consume these shared contract types (`ArchiveWsResponse`, `ArchiveReasonClass`, archive checkpoint/provenance payload structs).
+22. Export/import Phase A runtime adapter adoption is now in place for host-core/server integration paths: server dispatch routes archive control-plane commands, runtime ingress emits shared `ArchiveWsResponse` envelopes via host-core serializer helpers, and focused adapter parity tests are passing.
+23. Export/import Phase A runtime processors are now persistence-backed in server paths: `server/src/archive_adapter.rs` resolves `room://` archive refs from persisted nodes/blobs, emits deterministic describe/validate/import contract payloads, enforces expected checkpoint mismatch rejection on import, and is covered by host migration parity fixture `archive_runtime_adapter_room_ref`.
+24. Export/import runtime processors now support external archive manifest providers (`file://`, `object://`) with signature verification path and deterministic negative rejection parity (`reject.archive_unsupported_format`, `reject.archive_signature_invalid`, `reject.archive_checkpoint_not_found`) validated in host migration fixtures.
+25. Export/import Phase A is now closed out with contract/runtime/negative-path evidence, and Phase B deterministic export builder kickoff is active for signed manifest generation and external-ref roundtrip vectors.
+26. Export/import Phase B runtime wiring is now active: `archive.export` is routed through server adapter + websocket control-plane authorization, emits `archive.export.result` / `archive.export.rejected` envelopes, and is covered by host migration parity fixture `archive_runtime_export_file_ref`.
+27. Export/import Phase B roundtrip parity vectors are now active for generated manifests: file/object export destinations are materialized by runtime builders and consumed by import parity tests that assert deterministic canonical hash equality.
+28. Export/import Phase B conformance hardening is now complete: export manifest output includes compatibility-window metadata and payload digest policy declarations, with deterministic validation rejection mappings (`reject.archive_unsupported_format`, `reject.archive_policy_timeline_mismatch`) pinned by websocket-facing and server vector fixtures.
+29. Export/import Phase B is now closed out with runtime/export/roundtrip/conformance evidence, and Phase C scope is open for richer portability semantics (expanded compatibility windows, policy timeline parity, and ws conformance lock for those semantics).
+30. Export/import Phase C initial execution is now active: export outputs include `policy_timeline_hash` metadata (signed in manifest payload), and runtime validate/import enforce deterministic policy timeline parity checks for external manifests.
+31. Phase C parity vectors now include deterministic policy timeline mismatch lanes in server and websocket-facing harnesses (`reject.archive_policy_timeline_mismatch`) while preserving existing archive suite stability.
+32. Phase C compatibility semantics are broadened to explicit range behavior: export now declares a compatibility support window (`min_supported`..`max_supported`), and runtime validation accepts overlapping ranges while deterministically rejecting unsupported windows.
+33. Phase C policy timeline parity now includes both hash and cutover metadata (`policy_timeline_hash`, `policy_timeline_cutover_lamport`) in signed manifests and `archive.export.result`, with deterministic mismatch rejection lanes pinned in core/server/websocket fixtures.
+34. Phase C portability semantics now include multi-step policy timeline transition metadata (`policy_timeline_transition_cutovers`) in signed manifests and `archive.export.result` envelopes, with deterministic runtime progression-shape validation and rejection vectors (`reject.archive_manifest_invalid`) for invalid transition ordering.
+35. Phase C mixed-range migration boundary conformance vectors are now in place across server/ws lanes: no-overlap compatibility windows reject deterministically, and boundary edge-overlap windows accept deterministically with pinned fixture parity.
+36. Phase C positive non-zero policy timeline transition progression conformance is now active: room runtime tracks monotonic policy cutover history, archive export emits non-zero cutover progression metadata when policy updates occur, and server/ws vectors pin deterministic parity for export/validate envelopes.
+37. Export/import Phase C closeout evidence is now recorded after full core/server/websocket conformance rerun (`docs/acceptance/archive-phasec-closeout.json`), with compatibility range and policy timeline progression semantics locked across deterministic vectors.
+38. Export/import Phase D scope is now open: migration drill matrix and baseline benchmark target gates are defined and recorded in `docs/acceptance/archive-phased-scope-open.json`.
+39. Phase D drill run-01 is now recorded for ARCHIVE-DRILL-001/002 (`docs/acceptance/archive-phased-drill-run01.json`) with passing file/object migration conformance lanes.
+40. Phase D drill run-01 is now recorded for ARCHIVE-DRILL-003/004 (`docs/acceptance/archive-phased-drill-run01-003-004.json`) with passing compatibility-boundary and policy-transition conformance lanes.
+41. Phase D benchmark baseline run-01 is now recorded for ARCHIVE-DRILL-001/002 (`docs/acceptance/archive-phased-benchmark-baseline-run01.json`): peak memory is within gate, while latency lanes are currently above target and queued for optimization.
+42. Phase D benchmark baseline run-02 is now recorded for ARCHIVE-DRILL-001/002 (`docs/acceptance/archive-phased-benchmark-baseline-run02.json`): runtime-aligned p95 latency gates and memory gate are all passing.
+43. Phase D benchmark baseline run-03 is now recorded for ARCHIVE-DRILL-001/002 (`docs/acceptance/archive-phased-benchmark-baseline-run03.json`): second-slice manifest metadata cache optimization reduced validate/import p95 further while preserving gate pass.
+44. Cache-hit telemetry is now instrumented for manifest metadata loads with focused cache behavior test coverage.
+45. Phase D object-manifest parity benchmark run-04 is now recorded (`docs/acceptance/archive-phased-benchmark-baseline-run04.json`): file/object p95 deltas remain within 5 ms and all latency/memory gates stay green across both lanes.
+46. Operator alert thresholds are now defined and recorded (`docs/acceptance/archive-phased-alert-thresholds-run01.json`) for cache miss ratio, parity drift, and absolute latency safety rails.
+47. Operator runbook/dashboard wiring is now complete (`docs/acceptance/archive-phased-operator-alert-runbook-run01.json`) with explicit dashboard panel contract, ownership, and escalation flow.
+48. Alert-route tabletop drill run-01 is now complete (`docs/acceptance/archive-phased-alert-route-tabletop-run01.json`) with warn/critical path acknowledgement and escalation timings meeting runbook SLAs.
+49. Dashboard annotation and incident ticket templates are now published (`docs/acceptance/archive-phased-alert-template-publication-run01.json`) and linked from the operator runbook.
+50. Live dashboard annotation + incident ticket dry-run run-01 is now complete (`docs/acceptance/archive-phased-alert-dryrun-run01.json`) with operator timing capture against runbook SLAs.
+51. Critical-route live dry-run run-02 is now complete (`docs/acceptance/archive-phased-alert-dryrun-run02.json`) with L3 freeze and rollback decision logging evidence.
+52. Warn + critical dry-run evidence is consolidated and Phase D operational closeout recommendation is now recorded (`docs/acceptance/archive-phased-operational-closeout-recommendation-run01.json`).
+53. Runtime-owner signoff is complete and Phase D closeout is approved (`docs/acceptance/archive-phased-operational-closeout-signoff-run01.json`).
+54. Next checkpoint: maintain post-closeout monitoring cadence and record threshold recalibration updates when triggered (see `docs/EXECUTION_CHECKLIST.md` §1.2).
 
 Goals:
 
@@ -172,6 +209,19 @@ Exit criteria:
 2. Archive roundtrip and compatibility vectors passing.
 
 ### Wave 2: Service topology and worker architecture
+
+Current status:
+
+1. **Headless runtime / peer-local persistence — Phase A:** working draft recorded in `docs/HEADLESS_RUNTIME_PERSISTENCE_EXECUTION_PLAN.md` (persistence facets, lifecycle hooks, bounded error taxonomy, compatibility policy). Evidence: `docs/acceptance/headless-persistence-phasea-contract-freeze-run01.json`. Formal SDK/runtime/host maintainer sign-off remains out of band.
+1b. **Headless persistence — Phase B:** `nodalmerge-runtime-local` ships `PeerLocalPersistence`, built-in backends (`memory`, `file` via `PersistBackendKind`), and extensibility notes for custom stores (plan §4b). Evidence: `docs/acceptance/headless-persistence-phaseb-memory-adapter-run01.json`, `docs/acceptance/headless-persistence-phaseb-filesystem-adapter-run01.json`.
+1c. **Headless worker — Phase D (initial):** `nodalmerge-headless` joins a room over WS, applies catch-up `pack`s into peer-local persistence, flush/checkpoint on exit; env-configurable backend. Evidence: `docs/acceptance/headless-run-phased-worker-run01.json`. Packaging: §4a (browser WASM vs pod vs future NuGet).
+2. **Authority and room topology — Phase A:** working draft recorded in `docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md` (authority role matrix, lineage metadata field table, promotion command/event table). Evidence: `docs/acceptance/authority-topology-phasea-contract-freeze-run01.json`. Cross-stream sign-off remains out of band.
+3. **Manager/worker playbook — Phase A CLI plan + implementation:** frozen §7a commands implemented in `nodalmerge-cli` (`topology`, `run`, `archive`, `query`). Evidence: `docs/acceptance/manager-worker-cli-workflow-plan-run01.json`, `authority-topology-phased-cli-run01.json`, `pre-ai-workspace-integration-closeout.json`.
+4. **Authority/topology — Phase B:** `RoomLineage` in core; server `create_child_room` / `list_children` / WS `topology.*` lineage commands (`topology.admin` cap). Evidence: `docs/acceptance/authority-topology-phaseb-lineage-run01.json`.
+5. **Authority/topology — Phase C:** propose/validate/apply promotion on server (in-memory proposals + parent audit node). Evidence: `docs/acceptance/authority-topology-phasec-promotion-run01.json`.
+6. **Authority/topology — Phase D + closeout:** `nodalmerge` binary in `nodalmerge-cli` crate; frozen §7a topology commands over WebSocket. Evidence: `docs/acceptance/authority-topology-phased-cli-run01.json`, `docs/acceptance/authority-topology-phased-closeout.json`.
+7. **Headless worker depth:** IBF + MST in worker loop (`headless/src/sync.rs`), file restart catch-up vector `HEADLESS-RUN-003`, container image `headless/Dockerfile`. Evidence: `docs/acceptance/headless-run-phased-depth-run01.json`.
+8. **Headless Phase E (ops slice):** session report JSON (`--report-json`), operator runbook section, `LOCAL-PERSIST-002`, CI `wave2-runtime-smoke.yml`. Evidence: `docs/acceptance/headless-run-phased-phasee-run01.json`.
 
 Goals:
 
@@ -252,8 +302,8 @@ Use this checklist at each iteration:
 
 ## 7. Immediate next 5 execution items
 
-1. Start Query/materialization Phase A contract freeze implementation.
-2. Start Export/import Phase A manifest and compatibility schema draft.
-3. Record residual Wave R docs/dashboard follow-ups in backlog with owners and explicit non-blocking status.
-4. Define Wave 1 parity vectors and acceptance artifact targets for query/materialization.
-5. Define Wave 1 portability vectors and acceptance artifact targets for export/import compatibility.
+1. **Pre–AI workspace integration — closed (2026-05-27):** `docs/INTEGRATION_READINESS.md`, `scripts/integration-smoke.ps1`, CLI (`run` / `topology` / `archive` / `query`), `runtime-local-ffi` + `RuntimePeerLocalPersistenceService`. Evidence: `docs/acceptance/pre-ai-workspace-integration-closeout.json`. Next product lane: AI workspace / agent memory (out of scope here). Observability vendor/dashboards remain deferred.
+2. Execute export/import **weekly post-closeout monitoring** per `docs/acceptance/archive-phased-post-closeout-monitoring-run01.json` (next review **2026-06-03**).
+3. Close **Wave 2 Phase A** sign-off threads out of band: SDK/runtime/host (headless plan) and runtime/host/operator (authority plan) acknowledge contract drafts or request edits.
+4. Keep **query/materialization** smoke commands in CI when touching runtime: `cargo test -p nodalmerge-core query_ --test query_materialization_vectors` and `cargo test -p nodalmerge-server server_query_ --test query_materialization_vectors`.
+5. Sweep **Wave R** residual docs/dashboard follow-ups into `docs/future-state-enhancements.md` with owners (non-blocking).

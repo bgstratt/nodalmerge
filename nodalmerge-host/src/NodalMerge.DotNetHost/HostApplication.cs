@@ -232,6 +232,14 @@ public static class HostApplication
         startupLogger.LogWarning(
             "Runtime websocket path remains relay-first; experimental DAG pack persistence/hydration via configured node store is enabled"
         );
+        var peerLocal = app.Services.GetRequiredService<RuntimePeerLocalPersistenceService>();
+        if (peerLocal.IsEnabled)
+        {
+            startupLogger.LogInformation(
+                "Runtime peer-local persistence is enabled (in-process nodalmerge-runtime-local-ffi)"
+            );
+        }
+
         EmitAuthReadinessChecks(app.Services, providerOptions, startupLogger);
 
         app.MapGet("/", () => Results.Ok(new
@@ -524,6 +532,7 @@ public static class HostApplication
             var sessionIds = context.RequestServices.GetRequiredService<RuntimeSessionIdAllocator>();
             var roomBroker = context.RequestServices.GetRequiredService<RuntimeRoomBroker>();
             var dagPersistence = context.RequestServices.GetRequiredService<RuntimeDagPersistenceService>();
+            var peerLocalPersistence = context.RequestServices.GetRequiredService<RuntimePeerLocalPersistenceService>();
             var tokenValidationService = context.RequestServices.GetRequiredService<RuntimeTokenValidationService>();
             var state = new RuntimeConnectionState(sessionIds.Next());
 
@@ -543,7 +552,16 @@ public static class HostApplication
             using var socket = await context.WebSockets.AcceptWebSocketAsync();
             try
             {
-                await loopRunner.RunAsync(socket, frameProcessor, state, roomBroker, tokenValidationService, dagPersistence, context.RequestAborted);
+                await loopRunner.RunAsync(
+                    socket,
+                    frameProcessor,
+                    state,
+                    roomBroker,
+                    tokenValidationService,
+                    dagPersistence,
+                    peerLocalPersistence,
+                    context.RequestAborted
+                );
             }
             finally
             {

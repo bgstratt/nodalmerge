@@ -1,0 +1,32 @@
+{
+  "artifact": "query-phased-closeout",
+  "recorded_at": "2026-05-26T23:15:19.5840054-05:00",
+  "phase": "Phase D closeout",
+  "summary": [
+    "sdk-js query/projection helpers now cover deterministic rejected paths for register/build/read/invalidate/list.",
+    "Operator runbook now includes rejection-specific triage and recovery guidance for query/projection lifecycle operations.",
+    "Phase D parity scope for SDK/operator surface is complete for this slice."
+  ],
+  "commands": [
+    {
+      "command": "Set-Location sdk-js; npm test",
+      "result": "passed",
+      "details": "15 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-core query_ --test query_materialization_vectors",
+      "result": "passed",
+      "details": "6 passed, 0 failed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server server_query_ --test query_materialization_vectors",
+      "result": "passed",
+      "details": "5 passed, 0 failed"
+    }
+  ],
+  "scope_next": [
+    "Phase E benchmark and SLO lane definitions for projection build/read/rebuild.",
+    "Determinism-under-pressure vectors for pagination continuity and digest stability.",
+    "Memory and latency baseline profile capture for reproducible tuning."
+  ]
+}

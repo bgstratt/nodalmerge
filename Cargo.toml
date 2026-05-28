@@ -24,6 +24,10 @@ members = [
     "wrappers/nodalmerge-postgres-store",
     "node-stores/conformance",
     "wrappers/nodalmerge-nodestore-conformance",
+    "runtime-local",
+    "runtime-local-ffi",
+    "headless",
+    "cli",
 ]
 resolver = "2"
 

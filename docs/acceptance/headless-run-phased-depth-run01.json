@@ -1,0 +1,32 @@
+{
+  "artifact": "headless-run-phased-depth-run01",
+  "recorded_at": "2026-05-27T22:00:00.0000000-05:00",
+  "wave": 2,
+  "phase": "Headless worker depth (IBF/MST loop, restart, container)",
+  "status": "recorded",
+  "source_plan": "docs/HEADLESS_RUNTIME_PERSISTENCE_EXECUTION_PLAN.md",
+  "deliverables": [
+    {
+      "id": "mst-ibf-worker-loop",
+      "summary": "headless/src/sync.rs: IBF + mst_root in hello; post-welcome MST descent (mst-request / mst-done) and pack apply; env NODALMERGE_HEADLESS_NEGOTIATE_MST."
+    },
+    {
+      "id": "file-restart-catchup",
+      "summary": "HEADLESS-RUN-003: file backend restart catches server-appended node with updated canonical hash."
+    },
+    {
+      "id": "container-image",
+      "summary": "headless/Dockerfile — release binary, file backend default, /data volume."
+    }
+  ],
+  "vectors": [
+    "HEADLESS-RUN-001",
+    "HEADLESS-RUN-002",
+    "HEADLESS-RUN-003 (headless_run_003_file_restart_catches_up_server_append)"
+  ],
+  "completion_gate": {
+    "ibf_mst_in_worker_loop": true,
+    "file_restart_vector": true,
+    "dockerfile_published": true
+  }
+}

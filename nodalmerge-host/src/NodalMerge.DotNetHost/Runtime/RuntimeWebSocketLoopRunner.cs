@@ -64,6 +64,7 @@ public sealed class RuntimeWebSocketLoopRunner
             roomBroker: null,
             tokenValidationService: null,
             dagPersistenceService: null,
+            peerLocalPersistenceService: null,
             cancellationToken
         );
     }
@@ -75,11 +76,13 @@ public sealed class RuntimeWebSocketLoopRunner
         RuntimeRoomBroker? roomBroker = null,
         RuntimeTokenValidationService? tokenValidationService = null,
         RuntimeDagPersistenceService? dagPersistenceService = null,
+        RuntimePeerLocalPersistenceService? peerLocalPersistenceService = null,
         CancellationToken cancellationToken = default
     )
     {
         roomBroker ??= new RuntimeRoomBroker(NullLogger<RuntimeRoomBroker>.Instance);
         dagPersistenceService ??= null;
+        peerLocalPersistenceService ??= null;
         var connectionTraceId = GetOrCreateTraceId(state);
         RuntimeWsConnectionsOpenedCounter.Add(
             1,
@@ -193,7 +196,6 @@ public sealed class RuntimeWebSocketLoopRunner
                 var traceId = GetOrCreateTraceId(state);
 
                 if (!state.IsInitialized
-                    && dagPersistenceService is not null
                     && !string.IsNullOrWhiteSpace(inboundType)
                     && (string.Equals(inboundType, "hello", StringComparison.OrdinalIgnoreCase)
                         || string.Equals(inboundType, "client-hello", StringComparison.OrdinalIgnoreCase))
@@ -204,7 +206,18 @@ public sealed class RuntimeWebSocketLoopRunner
                         : state.RoomId;
                     if (!string.IsNullOrWhiteSpace(hydrateRoomId))
                     {
-                        await dagPersistenceService.HydrateRoomIfNeededAsync(hydrateRoomId, cancellationToken);
+                        if (dagPersistenceService is not null)
+                        {
+                            await dagPersistenceService.HydrateRoomIfNeededAsync(hydrateRoomId, cancellationToken);
+                        }
+
+                        if (peerLocalPersistenceService is not null)
+                        {
+                            await peerLocalPersistenceService.HydrateRoomIfNeededAsync(
+                                hydrateRoomId,
+                                cancellationToken
+                            );
+                        }
                     }
                 }
 
@@ -248,6 +261,15 @@ public sealed class RuntimeWebSocketLoopRunner
                         if (!string.IsNullOrWhiteSpace(nodesB64))
                         {
                             await dagPersistenceService.PersistInboundPackAsync(state.RoomId!, nodesB64, cancellationToken);
+                            if (peerLocalPersistenceService is not null)
+                            {
+                                await peerLocalPersistenceService.PersistInboundPackAsync(
+                                    state.RoomId!,
+                                    nodesB64,
+                                    cancellationToken
+                                );
+                            }
+
                             // Also persist the room's current server-pack snapshot.
                             // In practice most client writes arrive as `pack` messages,
                             // so relying only on non-pack mutation hooks can leave
@@ -402,6 +424,11 @@ public sealed class RuntimeWebSocketLoopRunner
                 if (roomBecameEmpty && dagPersistenceService is not null && !string.IsNullOrWhiteSpace(state.RoomId))
                 {
                     dagPersistenceService.InvalidateHydration(state.RoomId);
+                }
+
+                if (peerLocalPersistenceService is not null && !string.IsNullOrWhiteSpace(state.RoomId))
+                {
+                    await peerLocalPersistenceService.FlushRoomAsync(state.RoomId, CancellationToken.None);
                 }
 
                 if (!string.IsNullOrWhiteSpace(state.RoomId) && !string.IsNullOrWhiteSpace(state.PeerPubkeyHex))

@@ -1,0 +1,31 @@
+{
+  "artifact": "archive-phased-alert-dryrun-run01",
+  "recorded_at": "2026-05-27T00:22:46.9851236-05:00",
+  "phase": "Phase D live template dry-run",
+  "status": "completed",
+  "inputs": {
+    "dashboard_annotation_template": "docs/ALERT_DASHBOARD_ANNOTATION_TEMPLATE.md",
+    "incident_ticket_template": "docs/INCIDENT_TICKET_TEMPLATE_ARCHIVE_ALERT.md",
+    "runbook": "docs/operator.md"
+  },
+  "outputs": {
+    "dashboard_annotation": "docs/acceptance/archive-alert-dashboard-annotation-dryrun-run01.txt",
+    "incident_ticket": "docs/acceptance/archive-alert-incident-ticket-dryrun-run01.md"
+  },
+  "timing_minutes": {
+    "alert_to_ack": 1.32,
+    "ack_to_annotation": 1.08,
+    "annotation_to_ticket_ready": 8.58,
+    "total_to_ticket_ready": 10.98
+  },
+  "sla_evaluation": {
+    "ack_under_10_minutes": true,
+    "warn_escalation_under_15_minutes": true,
+    "dry_run_preparation_under_15_minutes": true
+  },
+  "route_exercised": "warn",
+  "notes": [
+    "Dry-run used production-like values while preserving non-actioning simulation scope.",
+    "Templates are actionable and complete for L1/L2 handoff flow."
+  ]
+}

@@ -10,11 +10,11 @@ The wrapper groups operations into:
 2. sync
 3. replay
 4. offline
-5. CAS
-6. topology
-7. presence
-8. signaling
-9. transport policy and runtime-message typing
+5. persistence (optional peer-local graph durability)
+6. CAS
+7. topology
+8. presence
+9. signaling
 10. transport policy and runtime-message typing
 
 ## Install
@@ -59,6 +59,26 @@ const stop = sdk.on("runtime-message", (msg) => {
 });
 
 stop();
+```
+
+## Optional peer-local persistence (IndexedDB)
+
+Off by default. See `PERSISTENCE_MIGRATION.md` for cutover from app-managed storage.
+
+```ts
+const sdk = await createNodalMergeSdk({
+  wsUrl: "ws://127.0.0.1:8787/ws/runtime",
+  roomId: "demo-room",
+  persistence: {
+    enabled: true,
+    adapter: "indexeddb",
+    dbName: "nodalmerge-peer-local"
+  }
+});
+
+// Hydration runs during initialize(); then connect.
+await sdk.room.connect();
+await sdk.persistence.flush();
 ```
 
 ## Text Range Convenience API

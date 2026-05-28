@@ -1,0 +1,13 @@
+{
+  "artifact": "archive-phased-alert-template-publication-run01",
+  "recorded_at": "2026-05-27T00:21:01.5683873-05:00",
+  "phase": "Phase D alert template publication",
+  "status": "completed",
+  "published_templates": [
+    "docs/ALERT_DASHBOARD_ANNOTATION_TEMPLATE.md",
+    "docs/INCIDENT_TICKET_TEMPLATE_ARCHIVE_ALERT.md"
+  ],
+  "runbook_reference": "docs/operator.md",
+  "policy_reference": "docs-site/benchmarks/runtime-attribution.mdx",
+  "checkpoint": "dashboard annotation and incident ticket template publication"
+}

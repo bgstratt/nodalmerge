@@ -1,0 +1,30 @@
+{
+  "artifact": "query-phasee-benchmark-slo-run01",
+  "recorded_at": "2026-05-27T00:55:46.8438534-05:00",
+  "phase": "Phase E benchmark and SLO lane definition",
+  "status": "completed",
+  "scope": "query/materialization projection build-read-rebuild lane (run-01 baseline harness)",
+  "commands": [
+    "cargo test -p nodalmerge-core query_ --test query_materialization_vectors",
+    "cargo test -p nodalmerge-server server_query_ --test query_materialization_vectors"
+  ],
+  "slo_ceilings": {
+    "latency": {
+      "core_query_vector_suite_p95_ms_max": 550.0,
+      "server_query_vector_suite_p95_ms_max": 600.0,
+      "suite_window": "warm-run command wall clock"
+    },
+    "memory": {
+      "core_query_vector_suite_peak_working_set_mb_max": 64.0,
+      "server_query_vector_suite_peak_working_set_mb_max": 64.0,
+      "measurement_method": "peak cargo process working set during test execution"
+    },
+    "determinism": {
+      "digest_drift_at_fixed_checkpoint": "must remain zero"
+    }
+  },
+  "notes": [
+    "Run-01 defines reproducible SLO guardrails around current vector-suite timing and memory envelope.",
+    "Pressure expansion with larger synthetic projection cardinality and explicit rebuild loops is queued for run-02."
+  ]
+}

@@ -1,5 +1,7 @@
 pub mod capabilities;
 pub mod archive_contracts;
+pub mod topology_contracts;
+pub mod room_lineage;
 pub mod cas;
 pub mod compaction;
 pub mod conflicts;
@@ -35,6 +37,11 @@ pub use graph::TextProjectionResidencyPolicy;
 pub use graph::{LAMPORT_SLACK, WALL_SKEW_MAX_MS};
 pub use frontier::Frontier;
 pub use capabilities::SyncCapabilities;
+pub use room_lineage::{
+    ChildRoomCreated, ChildRoomSummary, ChildrenListed, LineageReasonClass, LineageRejected,
+    ParentCheckpoint, PromotionApplied, PromotionLifecycle, PromotionProposed, PromotionReasonClass,
+    PromotionRejected, PromotionValidated, RoomLineage, RoomLineageDescribed,
+};
 pub use archive_contracts::{
     ArchiveCheckpoint,
     ArchiveCompatibilityWindow,
@@ -49,6 +56,7 @@ pub use archive_contracts::{
     ArchiveWsRequest,
     ArchiveWsResponse,
 };
+pub use topology_contracts::TopologyWsResponse;
 pub use ibf::Ibf;
 pub use mst::{MerkleSearchTree, MstNodeWire, MstSyncSim};
 pub use node::{SyncNode, NodeId, pack_nodes, unpack_nodes};

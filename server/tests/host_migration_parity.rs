@@ -20,6 +20,9 @@ use nodalmerge_core::{
     RoomToken,
     StateGraph,
 };
+use nodalmerge_server::lineage::{
+    snapshot_parent_checkpoint, snapshot_room_canonical_hash,
+};
 use nodalmerge_server::room::{import_nodes, Rooms};
 use nodalmerge_server::store::{DirPersistence, NoPersistence, SharedPersistence};
 use nodalmerge_server::ws_handler;
@@ -182,6 +185,9 @@ async fn run_current_path(fx: &GoldenFixture) -> CanonicalTrace {
         "tick_compaction" => run_current_tick_compaction(fx).await,
         "archive_flow" => run_current_archive_flow(fx).await,
         "archive_export_roundtrip_file" => run_current_archive_export_roundtrip_file(fx).await,
+        "archive_positive_policy_timeline_transition_non_zero" => {
+            run_current_archive_positive_policy_timeline_transition_non_zero(fx).await
+        }
         "archive_negative_unsupported_format" => {
             run_current_archive_negative_unsupported_format(fx).await
         }
@@ -194,6 +200,12 @@ async fn run_current_path(fx: &GoldenFixture) -> CanonicalTrace {
         "archive_negative_compatibility_window_unsupported" => {
             run_current_archive_negative_compatibility_window_unsupported(fx).await
         }
+        "archive_negative_compatibility_window_no_overlap" => {
+            run_current_archive_negative_compatibility_window_no_overlap(fx).await
+        }
+        "archive_positive_compatibility_window_edge_overlap_lower" => {
+            run_current_archive_positive_compatibility_window_edge_overlap_lower(fx).await
+        }
         "archive_negative_policy_timeline_hash_mismatch" => {
             run_current_archive_negative_policy_timeline_hash_mismatch(fx).await
         }
@@ -203,6 +215,7 @@ async fn run_current_path(fx: &GoldenFixture) -> CanonicalTrace {
         "archive_negative_checkpoint_not_found_external" => {
             run_current_archive_negative_checkpoint_not_found_external(fx).await
         }
+        "topology_promotion_workflow" => run_current_topology_promotion_workflow(fx).await,
         other => panic!("unknown fixture scenario: {other}"),
     }
 }
@@ -914,6 +927,12 @@ async fn run_current_archive_export_roundtrip_file(fx: &GoldenFixture) -> Canoni
                             .and_then(|c| c.as_u64()),
                         Some(0)
                     );
+                    assert_eq!(
+                        v.get("policy_timeline_transition_cutovers")
+                            .and_then(|c| c.as_array())
+                            .cloned(),
+                        Some(vec![serde_json::json!(0)])
+                    );
                     break;
                 }
                 if v.get("type").and_then(|t| t.as_str()) == Some("error") {
@@ -966,6 +985,140 @@ async fn run_current_archive_export_roundtrip_file(fx: &GoldenFixture) -> Canoni
     }
 }
 
+async fn run_current_archive_positive_policy_timeline_transition_non_zero(
+    fx: &GoldenFixture,
+) -> CanonicalTrace {
+    let (addr, rooms, room_key, tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+    let target_room = rooms.get_or_create(&fx.room_id).await;
+
+    let source_room_id = format!("{}-source-policy-transition", fx.room_id);
+    let source_room = rooms.get_or_create(&source_room_id).await;
+    let source_author = SigningKey::from_bytes(&[0x76u8; 32]);
+    let source_node = make_map_set_node(&source_author, "world/export-key", b"export-value");
+    let (accepted, _, errs) = import_nodes(&source_room, vec![source_node]).await;
+    assert_eq!(accepted, 1);
+    assert!(errs.is_empty());
+
+    target_room
+        .set_policy(Policy {
+            rules: vec![PolicyRule {
+                path_glob: "world/**".to_string(),
+                can_write: vec![],
+                can_read: vec![],
+                can_derive: vec![],
+            }],
+            default: PolicyDefault::DenyAll,
+        })
+        .await;
+    target_room
+        .set_policy(Policy {
+            rules: vec![PolicyRule {
+                path_glob: "world/**".to_string(),
+                can_write: vec![source_author.verifying_key().to_bytes()],
+                can_read: vec![],
+                can_derive: vec![],
+            }],
+            default: PolicyDefault::AllowAll,
+        })
+        .await;
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer_hex = hex_lower(&peer);
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
+
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": peer_hex,
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let manifest_path = tmp_root.join("archives").join("policy-transition-export.json");
+    let archive_ref = format!("file://{}", manifest_path.display());
+
+    let export = serde_json::json!({
+        "type": "archive.export",
+        "source_room": source_room_id,
+        "archive_ref": archive_ref,
+    })
+    .to_string();
+    sink.send(TMessage::Text(export.into()))
+        .await
+        .expect("send archive.export");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.export.result") {
+                    sequence.push("archive.export.result".to_string());
+                    assert_eq!(
+                        v.get("policy_timeline_cutover_lamport")
+                            .and_then(|c| c.as_u64()),
+                        Some(2)
+                    );
+                    assert_eq!(
+                        v.get("policy_timeline_transition_cutovers")
+                            .and_then(|c| c.as_array())
+                            .cloned(),
+                        Some(vec![
+                            serde_json::json!(0),
+                            serde_json::json!(1),
+                            serde_json::json!(2),
+                        ])
+                    );
+                    break;
+                }
+                if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+                    panic!("archive.export produced error envelope: {text}");
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
 fn write_signed_external_manifest(
     path: &std::path::Path,
     source_room: &str,
@@ -998,8 +1151,13 @@ fn write_signed_external_manifest_with_policy(
     policy_timeline_hash: &str,
     policy_timeline_cutover_lamport: u64,
 ) {
+    let policy_timeline_transition_cutovers = if policy_timeline_cutover_lamport == 0 {
+        vec![0]
+    } else {
+        vec![0, policy_timeline_cutover_lamport]
+    };
     let payload = format!(
-        "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}",
+        "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}|policy_timeline_transition_cutovers={}",
         "1",
         source_room,
         min_supported,
@@ -1007,6 +1165,11 @@ fn write_signed_external_manifest_with_policy(
         payload_digest_policy,
         policy_timeline_hash,
         policy_timeline_cutover_lamport,
+        policy_timeline_transition_cutovers
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<String>>()
+            .join(","),
     );
     let mut sig = signer.sign(payload.as_bytes()).to_bytes();
     if tamper_signature {
@@ -1023,6 +1186,7 @@ fn write_signed_external_manifest_with_policy(
         "payload_digest_policy": payload_digest_policy,
         "policy_timeline_hash": policy_timeline_hash,
         "policy_timeline_cutover_lamport": policy_timeline_cutover_lamport,
+        "policy_timeline_transition_cutovers": policy_timeline_transition_cutovers,
         "signature": {
             "public_key": hex_lower(&signer.verifying_key().to_bytes()),
             "signature": hex_lower(&sig),
@@ -1382,6 +1546,193 @@ async fn run_current_archive_negative_compatibility_window_unsupported(
     }
 }
 
+async fn run_current_archive_negative_compatibility_window_no_overlap(
+    fx: &GoldenFixture,
+) -> CanonicalTrace {
+    let (addr, rooms, room_key, tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+    let source_room_id = format!("{}-source-compat-no-overlap", fx.room_id);
+    let source_room = rooms.get_or_create(&source_room_id).await;
+    let source_author = SigningKey::from_bytes(&[0x70u8; 32]);
+    let source_node = make_map_set_node(&source_author, "world/a", b"1");
+    let _ = import_nodes(&source_room, vec![source_node]).await;
+
+    let signer = SigningKey::from_bytes(&[0x71u8; 32]);
+    let manifest_path = tmp_root.join("archives").join("no-overlap-window.json");
+    write_signed_external_manifest_with_policy(
+        &manifest_path,
+        &source_room_id,
+        &signer,
+        false,
+        "3",
+        "4",
+        "strict_sha256_v1",
+        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default()).hash_hex,
+        0,
+    );
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": hex_lower(&peer),
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let validate = serde_json::json!({
+        "type": "archive.validate",
+        "archive_ref": format!("file://{}", manifest_path.display()),
+        "mode": "full_integrity"
+    })
+    .to_string();
+    sink.send(TMessage::Text(validate.into()))
+        .await
+        .expect("send archive.validate");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.validate.rejected") {
+                    sequence.push("archive.validate.rejected".to_string());
+                    assert_eq!(
+                        v.get("reason_class").and_then(|r| r.as_str()),
+                        Some("reject.archive_unsupported_format")
+                    );
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
+async fn run_current_archive_positive_compatibility_window_edge_overlap_lower(
+    fx: &GoldenFixture,
+) -> CanonicalTrace {
+    let (addr, rooms, room_key, tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
+    let source_room_id = format!("{}-source-compat-edge-lower", fx.room_id);
+    let source_room = rooms.get_or_create(&source_room_id).await;
+    let source_author = SigningKey::from_bytes(&[0x72u8; 32]);
+    let source_node = make_map_set_node(&source_author, "world/a", b"1");
+    let _ = import_nodes(&source_room, vec![source_node]).await;
+
+    let signer = SigningKey::from_bytes(&[0x73u8; 32]);
+    let manifest_path = tmp_root.join("archives").join("edge-overlap-lower-window.json");
+    write_signed_external_manifest_with_policy(
+        &manifest_path,
+        &source_room_id,
+        &signer,
+        false,
+        "0",
+        "1",
+        "strict_sha256_v1",
+        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default()).hash_hex,
+        0,
+    );
+
+    let url = format!("ws://{addr}/ws/{}", fx.room_id);
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": hex_lower(&peer),
+        "frontier": [],
+        "token": token_json(&token),
+        "subscribe": ["**"]
+    })
+    .to_string();
+    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+
+    let mut sequence = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let validate = serde_json::json!({
+        "type": "archive.validate",
+        "archive_ref": format!("file://{}", manifest_path.display()),
+        "mode": "full_integrity"
+    })
+    .to_string();
+    sink.send(TMessage::Text(validate.into()))
+        .await
+        .expect("send archive.validate");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if v.get("type").and_then(|t| t.as_str()) == Some("archive.validate.result") {
+                    sequence.push("archive.validate.result".to_string());
+                    assert_eq!(v.get("accepted").and_then(|a| a.as_bool()), Some(true));
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
 async fn run_current_archive_negative_policy_timeline_hash_mismatch(
     fx: &GoldenFixture,
 ) -> CanonicalTrace {
@@ -1677,6 +2028,155 @@ async fn run_current_archive_negative_checkpoint_not_found_external(
     }
 }
 
+async fn topology_drain_until_type(
+    stream: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+    expected_type: &str,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value =
+                    serde_json::from_str(&text).expect("topology parity frame should be json");
+                if v.get("type").and_then(|t| t.as_str()) == Some(expected_type) {
+                    return;
+                }
+                if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+                    panic!("topology parity unexpected error: {text}");
+                }
+            }
+            _ => continue,
+        }
+    }
+    panic!("timed out waiting for {expected_type}");
+}
+
+/// Golden path: propose → validate → apply on parent room WS (topology.admin).
+async fn run_current_topology_promotion_workflow(fx: &GoldenFixture) -> CanonicalTrace {
+    let parent_id = fx.room_id.as_str();
+    let child_id = format!("{parent_id}-child");
+    let (addr, rooms, room_key) = spawn_locked_server(parent_id).await;
+
+    let author = SigningKey::from_bytes(&[0xC1u8; 32]);
+    let parent = rooms.get_or_create(parent_id).await;
+    import_nodes(
+        &parent,
+        vec![make_map_set_node(&author, "world/topo-parent", b"p")],
+    )
+    .await;
+    let checkpoint = snapshot_parent_checkpoint(&parent).await.unwrap();
+    rooms
+        .create_child_room(
+            parent_id,
+            &child_id,
+            checkpoint,
+            "parity-task".to_string(),
+            "parity-mgr".to_string(),
+            "promotion-based".to_string(),
+        )
+        .await
+        .expect("create child for topology parity");
+
+    let child = rooms.get_or_create(&child_id).await;
+    import_nodes(
+        &child,
+        vec![make_map_set_node(&author, "world/topo-child", b"c")],
+    )
+    .await;
+    let child_hash = snapshot_room_canonical_hash(&child).await.unwrap();
+
+    let url = format!("ws://{addr}/ws/{parent_id}");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (mut sink, mut stream) = ws.split();
+
+    let peer = SigningKey::from_bytes(&[0xC2u8; 32]);
+    let token = RoomToken::sign(
+        parent_id,
+        &peer.verifying_key().to_bytes(),
+        now_secs() + 300,
+        &["topology.admin".to_string()],
+        &room_key,
+    );
+    let hello = serde_json::json!({
+        "type": "hello",
+        "pubkey": hex_lower(&peer.verifying_key().to_bytes()),
+        "frontier": [],
+        "token": token_json(&token),
+    });
+    sink.send(TMessage::Text(hello.to_string().into()))
+        .await
+        .expect("hello");
+
+    let mut sequence = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(TMessage::Text(text)))) => {
+                let v: serde_json::Value =
+                    serde_json::from_str(&text).expect("topology parity frame should be json");
+                if v.get("type").and_then(|t| t.as_str()) == Some("welcome") {
+                    sequence.push("welcome".to_string());
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+    assert!(
+        sequence.iter().any(|s| s == "welcome"),
+        "topology parity never received welcome"
+    );
+
+    let propose = serde_json::json!({
+        "type": "topology.propose-promotion",
+        "parent_room_id": parent_id,
+        "child_room_id": child_id,
+        "child_checkpoint_hash": child_hash,
+        "payload_ref": "artifact://parity",
+        "idempotency_key": "prop-parity",
+    });
+    sink.send(TMessage::Text(propose.to_string().into()))
+        .await
+        .expect("propose");
+    topology_drain_until_type(&mut stream, "topology.propose-promotion.completed").await;
+    sequence.push("topology.propose-promotion.completed".to_string());
+
+    let validate = serde_json::json!({
+        "type": "topology.validate-promotion",
+        "proposal_id": "prop-parity",
+    });
+    sink.send(TMessage::Text(validate.to_string().into()))
+        .await
+        .expect("validate");
+    topology_drain_until_type(&mut stream, "topology.validate-promotion.completed").await;
+    sequence.push("topology.validate-promotion.completed".to_string());
+
+    let apply = serde_json::json!({
+        "type": "topology.apply-promotion",
+        "proposal_id": "prop-parity",
+    });
+    sink.send(TMessage::Text(apply.to_string().into()))
+        .await
+        .expect("apply");
+    topology_drain_until_type(&mut stream, "topology.apply-promotion.completed").await;
+    sequence.push("topology.apply-promotion.completed".to_string());
+
+    CanonicalTrace {
+        sequence,
+        pack_count: 0,
+        close_code: None,
+        welcome_has_mst_root: None,
+        blob_pack_count: None,
+        upload_denied_reason: None,
+        has_snapshot_pack: None,
+        has_compact_ack: None,
+    }
+}
+
 async fn run_shadow_path(fx: &GoldenFixture) -> CanonicalTrace {
     // Compatibility mode: shadow path is the current adapter until host-core
     // extraction replaces this execution path.
@@ -1833,6 +2333,18 @@ async fn parity_archive_export_runtime_fixture() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_positive_policy_timeline_transition_non_zero_fixture() {
+    let fx = load_fixture("archive_positive_policy_timeline_transition_non_zero.json");
+    assert_eq!(fx.name, "archive_positive_policy_timeline_transition_non_zero");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parity_archive_negative_unsupported_format_fixture() {
     let fx = load_fixture("archive_negative_unsupported_format.json");
     assert_eq!(fx.name, "archive_negative_unsupported_format");
@@ -1881,6 +2393,30 @@ async fn parity_archive_negative_compatibility_window_unsupported_fixture() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_negative_compatibility_window_no_overlap_fixture() {
+    let fx = load_fixture("archive_negative_compatibility_window_no_overlap.json");
+    assert_eq!(fx.name, "archive_negative_compatibility_window_no_overlap");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_archive_positive_compatibility_window_edge_overlap_lower_fixture() {
+    let fx = load_fixture("archive_positive_compatibility_window_edge_overlap_lower.json");
+    assert_eq!(fx.name, "archive_positive_compatibility_window_edge_overlap_lower");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parity_archive_negative_policy_timeline_hash_mismatch_fixture() {
     let fx = load_fixture("archive_negative_policy_timeline_hash_mismatch.json");
     assert_eq!(fx.name, "archive_negative_policy_timeline_hash_mismatch");
@@ -1908,6 +2444,18 @@ async fn parity_archive_negative_policy_timeline_cutover_mismatch_fixture() {
 async fn parity_archive_negative_checkpoint_not_found_external_fixture() {
     let fx = load_fixture("archive_negative_checkpoint_not_found_external.json");
     assert_eq!(fx.name, "archive_negative_checkpoint_not_found_external");
+
+    let baseline = run_current_path(&fx).await;
+    let shadow = run_shadow_path(&fx).await;
+
+    assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
+    assert_trace_against_fixture(&baseline, &fx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parity_topology_promotion_workflow_fixture() {
+    let fx = load_fixture("topology_promotion_workflow.json");
+    assert_eq!(fx.name, "topology_promotion_workflow");
 
     let baseline = run_current_path(&fx).await;
     let shadow = run_shadow_path(&fx).await;

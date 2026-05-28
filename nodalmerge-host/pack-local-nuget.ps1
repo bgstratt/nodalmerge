@@ -47,6 +47,9 @@ try {
     Invoke-Checked -Name "cargo build host ffi runtime (nodalmerge-host-ffi)" -Command {
         cargo build -p nodalmerge-host-ffi --release
     }
+    Invoke-Checked -Name "cargo build peer-local ffi runtime (nodalmerge-runtime-local-ffi)" -Command {
+        cargo build -p nodalmerge-runtime-local-ffi --release
+    }
 
     Write-Host "Packing managed packages to $resolvedOutput ..."
     Invoke-Checked -Name "dotnet pack NodalMerge.Host.Abstractions" -Command {
@@ -59,6 +62,20 @@ try {
     Write-Host "Packing native runtime packages to $resolvedOutput ..."
     Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost.Native.win-x64" -Command {
         dotnet pack ./src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version
+    }
+
+    $linuxLocalNative = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../target/release/libnodalmerge_runtime_local_ffi.so"))
+    if (-not (Test-Path -LiteralPath $linuxLocalNative)) {
+        $isWindowsRuntime = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+        if ($isWindowsRuntime) {
+            Write-Warning "linux-x64 peer-local FFI artifact not found at $linuxLocalNative; creating placeholder for package restore on Windows."
+            $linuxLocalDir = Split-Path -Parent $linuxLocalNative
+            New-Item -ItemType Directory -Force -Path $linuxLocalDir | Out-Null
+            New-Item -ItemType File -Force -Path $linuxLocalNative | Out-Null
+        }
+        else {
+            throw "Missing linux peer-local native artifact at $linuxLocalNative"
+        }
     }
 
     $linuxNative = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../target/release/libnodalmerge_host_ffi.so"))

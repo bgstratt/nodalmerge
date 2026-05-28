@@ -1,0 +1,114 @@
+---
+title: Quickstart
+description: Get NodalMerge running locally and understand the basic sync model.
+---
+
+# Quickstart
+
+This guide walks you through running NodalMerge locally and understanding the minimal mental model required to start building collaborative applications.
+
+## 1. What you're building
+
+NodalMerge is a local-first, replicated state engine built around:
+
+- Deterministic CRDT state resolution
+- DAG-based transaction history
+- Speculative vs authoritative execution paths
+- Room-based sync topology
+
+Everything is designed so that:
+- Clients can write offline
+- Writes are merged deterministically
+- State converges across peers without central coordination
+
+## 2. Core concepts (minimal)
+
+### Document
+A document is a logical container of replicated state.
+
+### Room
+A room is a sync boundary. All replication happens within a room.
+
+### Transaction
+A transaction contains operations (text, map, list, etc.) and is the atomic unit of replication.
+
+### Sync
+Peers exchange transactions. The engine resolves state deterministically.
+
+## 3. Running locally
+
+### Server
+
+Start the server:
+
+```bash
+nodalmerge-server --store ./data
+```
+
+### Client connection
+
+In your application:
+
+```ts
+const doc = await createDoc({
+  room: "demo-room"
+})
+
+await doc.connect()
+```
+
+## 4. Writing data
+
+### Map example
+
+```ts
+const map = doc.map("profile")
+
+map.set("name", "Alice")
+map.set("role", "engineer")
+```
+
+### Text example
+
+```ts
+const text = doc.text("editor")
+
+text.insert(0, "Hello")
+text.insert(5, " world")
+```
+
+### List example
+
+```ts
+const list = doc.list("tasks")
+
+list.push({ title: "Build system" })
+list.push({ title: "Ship product" })
+```
+
+## 5. Real-time sync
+
+Once connected:
+
+- Changes propagate as transactions
+- Conflicts resolve deterministically
+- All peers converge to the same state
+
+## 6. Speculative vs authoritative model
+
+Writes may be:
+
+- Speculative: applied immediately on client
+- Authoritative: confirmed by server policy layer
+
+The system merges both paths into a single convergent DAG.
+
+## 7. Next steps
+
+Once you're comfortable:
+
+- Explore architecture/
+- Understand replay and branching
+- Learn about speculative vs authoritative lanes
+- Set up hosted rooms and persistence
+

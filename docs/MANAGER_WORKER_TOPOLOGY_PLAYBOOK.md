@@ -1,8 +1,8 @@
 # Manager Worker Topology Playbook
 
 Owner: Runtime + operator streams
-Status: Draft
-Last updated: 2026-05-25
+Status: InProgress (Wave 2 CLI implemented — `nodalmerge topology` / `run` / `archive` / `query`; see `pre-ai-workspace-integration-closeout.json`)
+Last updated: 2026-05-27
 
 ## 1. Decision summary
 
@@ -93,6 +93,36 @@ Parent replay concern depends on chosen mode.
 4. topology validate-promotion
 5. topology apply-promotion
 6. topology show-lineage
+
+### 7a. Phase A CLI command freeze (v1, 2026-05-27)
+
+Evidence artifact: `docs/acceptance/manager-worker-cli-workflow-plan-run01.json`
+
+| Command | Purpose | Required flags (conceptual) | Idempotent when |
+|---|---|---|---|
+| `nodalmerge topology create-child` | Create child room bound to parent checkpoint | `--parent-room`, `--parent-checkpoint`, `--purpose`, `--policy` | same inputs yield same logical child id (host may enforce) |
+| `nodalmerge topology list-children` | List children for a parent | `--parent-room` | read-only |
+| `nodalmerge topology propose-promotion` | Submit promotion proposal | `--parent-room`, `--child-room`, `--child-checkpoint`, `--payload-ref` | new `proposal_id` per invocation unless `--idempotency-key` matches prior |
+| `nodalmerge topology validate-promotion` | Run validator on proposal | `--proposal-id` | read-only validation |
+| `nodalmerge topology apply-promotion` | Apply validated proposal to parent | `--proposal-id` | no-op if already applied at same parent head |
+| `nodalmerge topology show-lineage` | Print lineage chain for room | `--room` | read-only |
+
+**Operator drill script (restart/retry outline):**
+
+1. Bootstrap: verify parent room reachable; record `parent_checkpoint` hash used for child binding.
+2. Create child via CLI; persist returned `child_room_id` and lineage JSON to operator state store.
+3. Simulate worker crash: kill worker process; restart with same config and local persistence path (when headless persistence exists); confirm child room reconnects and tail catches up.
+4. Propose promotion with known-good child checkpoint; if `reject.promotion_stale_parent`, refresh parent head, re-validate lineage, retry propose.
+5. Validate then apply; confirm parent canonical hash matches expected acceptance artifact from rehearsal.
+
+**Conformance mapping (initial):**
+
+| CLI step | Authority/topology vector (target) |
+|---|---|
+| create-child with valid parent checkpoint | `AUTH-ROOM-002` inverse (valid child accepted); negative missing lineage in server tests |
+| propose/validate/apply happy path | `AUTH-ROOM-003` |
+| invalid lineage / stale parent | `AUTH-ROOM-004` |
+| replay parent after apply | `AUTH-ROOM-005` |
 
 ## 8. Non-goals for this playbook
 

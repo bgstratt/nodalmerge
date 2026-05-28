@@ -62,6 +62,8 @@ churn can't explode the series count.
 | `nodalmerge_blob_gc_deleted_total` | counter | `room` | steady rate confirms GC is running |
 | `nodalmerge_lamport_rejected_total` | counter | `reason` (`ceiling` / `wall_skew`) | any non-zero = client clock broken or malicious |
 | `nodalmerge_token_expired_disconnects_total` | counter | `room` | trend; rate should correlate with token TTL |
+| `nodalmerge_topology_promotion_total` | counter | `stage`, `outcome`, `reason` (rejects only) | rejection rate by `reason`; see [Topology promotion metrics](#topology-promotion-metrics-wave-3) |
+| `nodalmerge_topology_promotion_seconds` | histogram | `stage`, `outcome` | handler latency; `p95` per stage when tuning promotion workflows |
 | `nodalmerge_room_bytes_resident` | gauge | `room` | capacity; approximate — per-node estimate is flat 512 B, under-counts large transactions |
 
 Compatibility note: legacy `activesync_*` metric names are still emitted while
@@ -77,6 +79,124 @@ Histogram buckets are hand-tuned for the hot path:
 **Admission.** `metrics::init` installs a *process-global* recorder; a
 second install fails. Install failure is logged and the server
 continues without observability.
+
+### Topology promotion metrics (Wave 3)
+
+Emitted by `nodalmerge-server` on `topology.propose-promotion`,
+`topology.validate-promotion`, and `topology.apply-promotion` (requires
+`topology.admin`). These are **scrape-only** Prometheus series on
+`/metrics` — there is no separate topology metrics HTTP API. Dashboard
+panels and alert thresholds are **not** defined in-repo yet; use the
+names and example queries below when you wire your own observability
+stack.
+
+| Series | Labels | Meaning |
+|---|---|---|
+| `nodalmerge_topology_promotion_total` | `stage` (`propose` \| `validate` \| `apply`), `outcome` (`ok` \| `rejected`) | One increment per handler completion. |
+| `nodalmerge_topology_promotion_total` | `reason` (rejects only) | Stable wire value from `PromotionReasonClass`, e.g. `reject.promotion_stale_parent`, `reject.promotion_not_found`. |
+| `nodalmerge_topology_promotion_seconds` | `stage`, `outcome` | Wall time inside the promotion handler (seconds). |
+
+Example PromQL (adjust job/label selectors to your scrape config):
+
+```promql
+# Successful applies per minute
+sum(rate(nodalmerge_topology_promotion_total{stage="apply",outcome="ok"}[5m])) * 60
+
+# Rejection rate by reason (all stages)
+sum by (reason) (rate(nodalmerge_topology_promotion_total{outcome="rejected"}[5m]))
+
+# p95 apply latency (seconds)
+histogram_quantile(0.95, sum by (le) (rate(nodalmerge_topology_promotion_seconds_bucket{stage="apply"}[5m])))
+```
+
+Evidence: `docs/acceptance/authority-topology-wave3-promotion-metrics-run01.json`.
+
+---
+
+## Archive alert policy wiring (Phase D)
+
+This section wires the Phase D threshold policy into operational ownership
+and dashboards. Threshold source-of-truth is
+`docs-site/benchmarks/runtime-attribution.mdx`, with accepted baseline
+evidence in `docs/acceptance/archive-phased-alert-thresholds-run01.json`
+and `docs/acceptance/archive-phased-benchmark-baseline-run04.json`.
+
+Published templates:
+
+1. Dashboard annotation template: `docs/ALERT_DASHBOARD_ANNOTATION_TEMPLATE.md`
+2. Incident ticket template: `docs/INCIDENT_TICKET_TEMPLATE_ARCHIVE_ALERT.md`
+
+Published dry-run examples:
+
+1. Dashboard annotation dry-run: `docs/acceptance/archive-alert-dashboard-annotation-dryrun-run01.txt`
+2. Incident ticket dry-run: `docs/acceptance/archive-alert-incident-ticket-dryrun-run01.md`
+3. Timing evidence bundle: `docs/acceptance/archive-phased-alert-dryrun-run01.json`
+4. Dashboard annotation dry-run (critical route): `docs/acceptance/archive-alert-dashboard-annotation-dryrun-run02.txt`
+5. Incident ticket dry-run (critical route): `docs/acceptance/archive-alert-incident-ticket-dryrun-run02.md`
+6. Timing evidence bundle (critical route): `docs/acceptance/archive-phased-alert-dryrun-run02.json`
+
+### Dashboard panels (required)
+
+Create a dashboard folder named "Archive portability" with these panels:
+
+1. Manifest cache miss ratio (15m):
+  - Query inputs: `nodalmerge_archive_manifest_cache_lookup_total{outcome="hit"}` and `nodalmerge_archive_manifest_cache_lookup_total{outcome="miss"}`
+  - Plot: `miss / (hit + miss)` with sample guard annotation (`hit + miss >= 200`)
+  - Threshold overlays: warn 0.10, critical 0.25
+2. Manifest cache miss ratio (5m fast-burn):
+  - Same ratio with 5-minute window and sample guard (`hit + miss >= 100`)
+  - Threshold overlay: critical 0.40
+3. Object/file parity drift p95 (export/validate/import):
+  - Plot absolute p95 delta between object lane and file lane
+  - Threshold overlays: warn (1/1/2 ms by operation), critical 5 ms
+4. Runtime p95 safety rail:
+  - Plot p95 `archive.export`, `archive.validate`, and `archive.import`
+  - Threshold overlays: warn 50 ms, critical 100 ms
+
+### On-call ownership
+
+Primary owner:
+
+1. Runtime on-call (L1) monitors all four panels during business hours and pager windows.
+
+Secondary owner:
+
+1. Platform performance owner (L2) handles sustained threshold breaches and threshold tuning requests.
+
+Escalation owner:
+
+1. Runtime tech lead (L3) approves rollback, threshold override, or release hold decisions.
+
+### Escalation flow
+
+When a threshold triggers, use this flow:
+
+1. L1 acknowledges within 10 minutes and captures panel screenshots + current room scope.
+2. L1 validates sample guard before escalation:
+  - miss ratio alerts require sample minimum in-window
+  - parity alerts require both file/object lanes emitting
+3. If warn persists for 15 minutes, page L2 and open incident ticket with runbook tag `archive-alert-policy`.
+4. If any critical threshold fires or warn exceeds 30 minutes, page L3 and freeze archive-related rollout changes.
+5. Recovery exit criteria:
+  - all metrics return below warn thresholds for 30 consecutive minutes
+  - incident ticket includes root-cause note and follow-up owner/date
+
+### Immediate triage playbook
+
+1. Cache miss ratio high:
+  - verify manifest path churn and revision instability
+  - inspect object root or file staging pipeline for frequent rewrites
+2. Parity drift high:
+  - compare object store latency/error rate with file lane
+  - verify object manifest resolution path and storage gateway health
+3. Absolute p95 high:
+  - inspect CPU and disk saturation first, then signature/manifest path regressions
+
+### Weekly review cadence
+
+1. Review previous 7 days of threshold crossings in ops standup.
+2. Recalibrate only if two consecutive benchmark runs show >20% stable p95 shift.
+3. Record every threshold change in acceptance artifacts before deployment.
 
 ---
 
@@ -599,3 +719,81 @@ Operational notes:
 5. not-found/lifecycle class: repair query spec or projection state before retry.
 6. replay/digest mismatch class: escalate as deterministic parity incident.
 7. For repeated rejects with identical payload, stop retries and open an incident with captured envelopes.
+
+---
+
+## Headless peer worker (`nodalmerge-headless`)
+
+Pod/workstation peer that syncs to a reflector over WebSocket and persists a **peer-local** log (separate from server `--store`). See `headless/README.md` and `docs/HEADLESS_RUNTIME_PERSISTENCE_EXECUTION_PLAN.md`.
+
+### When to use
+
+| Deployment | Peer-local backend | Server store |
+|---|---|---|
+| Kubernetes worker pod | `file` + mounted volume at `/data` | Reflector `--store` (room authority) |
+| CI / dev smoke | `memory` | In-memory or `--store` reflector |
+| Workstation tool | `file` under operator home | Remote reflector URL |
+
+Never point peer-local `NODALMERGE_HEADLESS_DATA_DIR` at the server persistence root — layouts differ by design.
+
+### Environment (required)
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `NODALMERGE_HEADLESS_SERVER_URL` | yes | `ws://host:port/ws/<room-id>` |
+| `NODALMERGE_HEADLESS_ROOM` | yes | Room id (must match URL path) |
+| `NODALMERGE_HEADLESS_BACKEND` | no | `memory` (default), `file`, or `composite` (cache + durable file); `registered:<name>` for registry pilots |
+| `NODALMERGE_HEADLESS_DATA_DIR` | if `file` | Peer-local SQLite + blobs directory |
+| `NODALMERGE_HEADLESS_RUN_SECS` | no | Catch-up window after hello (default `10`) |
+| `NODALMERGE_HEADLESS_NEGOTIATE_IBF` | no | `0`/`false` disables IBF in hello |
+| `NODALMERGE_HEADLESS_NEGOTIATE_MST` | no | `0`/`false` disables MST descent |
+| `NODALMERGE_HEADLESS_REPORT_JSON` | no | Path for session report JSON (`-` = stdout) |
+
+Container image: `docker build -f headless/Dockerfile -t nodalmerge-headless .`
+
+### Session report JSON
+
+Use `--report-json /path/report.json` (or env above) after each run for dashboards and acceptance baselines. Fields include `backend`, `durable`, sync counters (`packs_applied`, `mst_requests`), `canonical_hash_hex`, and `timings_ms` (`hydrate_ms`, `websocket_sync_ms`, `flush_ms`, `checkpoint_ms`, `total_ms`).
+
+### Failure triage
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `handshake did not receive welcome` | Wrong URL/room, reflector down, token required on locked room | Verify WS path; issue `RoomToken` with sync caps (headless open rooms need no token) |
+| `reject.` in stderr | Policy/capability rejection | Capture full WS line; compare with server logs |
+| `websocket connect failed` | Network / TLS mismatch | Use `ws://` for dev; terminate TLS at ingress for prod |
+| Restart with same `data_dir` but stale hash | Server gained new ops while worker was down | Re-run worker (HEADLESS-RUN-003 pattern); increase `RUN_SECS` if catch-up window too short |
+| `timed out waiting for protocol message` | MST descent or slow catch-up | Increase `NODALMERGE_HEADLESS_RUN_SECS`; check server load |
+| High `flush_ms` on file backend | Disk pressure | Move volume to faster storage; ensure exclusive mount |
+
+### Backend selection
+
+1. **memory** — ephemeral; process exit loses peer-local state unless server still holds authority.
+2. **file** — durable across pod restarts; mount a PVC at `NODALMERGE_HEADLESS_DATA_DIR` (image default `/data`).
+3. **composite** — write-through memory cache + file durability (§4b pilot); same `data_dir` as `file`.
+4. **registered:\<name\>** — opens a backend from `nodalmerge_runtime_local` registry (built-in: `registered:composite`).
+5. Custom backends — `register_backend` + `PersistenceHandle::from_arc`; must pass `LOCAL-PERSIST-*` vectors.
+
+### In-process peer-local on .NET host (`NodalMerge.DotNetHost`)
+
+Optional mirror of inbound WS `pack` traffic into `nodalmerge-runtime-local-ffi` (same peer-local semantics as headless, without a sidecar).
+
+| Setting | Meaning |
+|---|---|
+| `NodalMerge:Runtime:PeerLocal:Enabled` | `true` to open `LocalPersistFfiClient` at host startup |
+| `NodalMerge:Runtime:PeerLocal:Backend` | `memory`, `embedded`/`file`, `composite` |
+| `NodalMerge:Runtime:PeerLocal:DataDir` | Required for durable backends |
+
+Build native library before pack/run:
+
+```bash
+cargo build -p nodalmerge-runtime-local-ffi --release
+```
+
+Set `NODALMERGE_LOCAL_FFI_DLL` when the DLL is not beside the host binary. NuGet native packages (`NodalMerge.DotNetHost.Native.*`) include both `nodalmerge_host_ffi` and `nodalmerge_runtime_local_ffi` after `nodalmerge-host/pack-local-nuget.ps1`.
+
+Integration smoke: `scripts/integration-smoke.ps1` (vectors + live `nodalmerge run`). Pass `-TokenJsonPath` for locked-room `archive` / `query` CLI steps.
+
+### Room-family topology (manager/worker)
+
+Use `nodalmerge topology` CLI (`nodalmerge-cli` crate) against the same reflector for child rooms and promotion. Headless workers hold child-room peer-local state; topology commands require `topology.admin` on locked rooms. See `docs/MANAGER_WORKER_TOPOLOGY_PLAYBOOK.md`. Promotion counters and histograms are listed under [Topology promotion metrics](#topology-promotion-metrics-wave-3) (metrics scrape only; no in-repo dashboards yet).

@@ -1,0 +1,8 @@
+{
+  "name": "archive_positive_compatibility_window_edge_overlap_lower",
+  "room_id": "parity-archive-pos-compat-edge-lower",
+  "scenario": "archive_positive_compatibility_window_edge_overlap_lower",
+  "expected_sequence": ["welcome", "archive.validate.result"],
+  "expected_pack_count": 0,
+  "notes": "External file manifest with lower-bound edge overlap (runtime 1..2, manifest 0..1) is accepted deterministically."
+}

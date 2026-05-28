@@ -1,7 +1,7 @@
 # Query and Materialization Execution Plan
 
 Owner: Core/runtime
-Status: InProgress (Phase D kickoff; Phase C parity complete across host/core/server/ws)
+Status: Completed for Wave 1 slice (Phase D closeout recorded; Phase E minimal closeout recorded)
 Last updated: 2026-05-27
 
 ## 1. Why this plan exists
@@ -155,6 +155,8 @@ Acceptance criteria:
 1. benchmark targets and memory ceilings are documented and reproducible
 2. projection rebuild under pressure remains deterministic
 
+**Wave 1 minimal close (2026-05-27):** (1) and (2) are satisfied for this slice via SLO/benchmark artifacts (`query-phasee-benchmark-*-run01.json`, `run02.json`) plus vector-suite guardrails. (3) **cooperative projection-build backpressure** is explicitly **deferred** to Wave 3 / FSE-03 (see `docs/acceptance/query-phasee-closeout.json`) so it does not block Wave 1 exit; operator limits remain as documented in `docs/operator.md` where applicable.
+
 ## 6. Conformance vector additions
 
 Add vectors under a new family:
@@ -167,6 +169,7 @@ Add vectors under a new family:
 6. `QUERY-COMPAT-REJECT-001`: unsupported version deterministic rejection
 7. `QUERY-REPLAY-002`: mismatch diagnostics include checkpoint + digest metadata
 8. `QUERY-WS-PARITY-001`: ws mapping parity for query/projection rejection taxonomy and metadata
+9. `QUERY-PHASEE-REPLAY-E2E-001`: replay to fixed checkpoint, prefix projection, paginated read digest continuity (core + server vector tests; evidence `query-phasee-benchmark-baseline-run03.json`)
 
 Wave 1 initial stub evidence (2026-05-27):
 1. `QUERY-DET-001` executable stub is passing in `core/tests/query_materialization_vectors.rs`.
@@ -187,6 +190,8 @@ Wave 1 initial stub evidence (2026-05-27):
    - `docs/acceptance/query-compat-reject-001-core.json`
    - `docs/acceptance/query-compat-reject-001-server.json`
    - `docs/acceptance/query-ws-parity-001-host.json`
+   - `docs/acceptance/query-phased-closeout.json`
+   - `docs/acceptance/query-phasee-kickoff.json`
 7. Phase B host stub lift has replaced build-time synthetic projection rows with canonical runtime map-state row generation (including `map-set`/`map-delete` mutation tracking) and is covered by `Projection_build_uses_canonical_map_state_and_reflects_map_mutations` in `nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/RuntimeMessageProcessorTests.cs`.
 8. Phase C host replay compatibility stub is now executable via explicit checkpoint selection (`target_checkpoint.selector=seq`, `canonical_seq`) and covered by `QueryReplay001LiveVsReplayParityAtExplicitCheckpoint` plus deterministic rejection coverage in `Projection_build_rejects_unknown_checkpoint_sequence`.
 9. Phase C host replay selector expansion now supports equivalent checkpoint addressing by sequence (`selector=seq`), canonical hash (`selector=hash`), and frontier token (`selector=frontier`) with digest parity coverage in `QueryReplaySelectorEquivalenceSeqHashAndFrontier` and deterministic unknown-hash rejection in `Projection_build_rejects_unknown_checkpoint_hash`.
@@ -196,6 +201,13 @@ Wave 1 initial stub evidence (2026-05-27):
 13. Phase D SDK surface implementation has started in `sdk-js`: canonical-lane query/projection helpers (`registerSpec`, `buildProjection`, `readProjection`, `invalidateProjection`, `listProjections`) now emit parity request envelopes and await typed runtime responses, with unit coverage in `sdk-js/index.test.js` for checkpoint selector validation and projection build/read response matching.
 14. Phase D parity coverage now includes deterministic rejected-path SDK tests for register/build/read/invalidate/list (`query.register.rejected`, `projection.build.rejected`, `projection.read.rejected`, `projection.invalidate.rejected`, `projection.list.rejected`) and operator runbook lifecycle guidance for register/build/read/invalidate/list including failure triage keyed by bounded `reason_class` taxonomy.
 15. Phase D pagination parity vectors now include deterministic multi-page ordering and digest continuity checks in both core/server suites (`query_det_003_pagination_multi_page_order_is_deterministic`, `query_det_004_pagination_digest_continuity_matches_full_projection`, `server_query_det_003_pagination_multi_page_order_is_deterministic`, `server_query_det_004_pagination_digest_continuity_matches_full_projection`).
+16. Phase D closeout evidence is now recorded in `docs/acceptance/query-phased-closeout.json`; execution focus has moved to Phase E benchmark/SLO hardening.
+17. Phase E kickoff evidence is now recorded in `docs/acceptance/query-phasee-kickoff.json` with pagination-order/digest-continuity guardrails active prior to latency/memory benchmark targets.
+18. Phase E benchmark/SLO lane definition run-01 is now recorded in `docs/acceptance/query-phasee-benchmark-slo-run01.json` with warm-latency and memory ceilings for core/server query vector suites.
+19. Phase E benchmark baseline profile run-01 is now recorded in `docs/acceptance/query-phasee-benchmark-baseline-run01.json`; warm p95 and memory envelope are within run-01 ceilings.
+20. Phase E benchmark baseline profile run-02 is now recorded in `docs/acceptance/query-phasee-benchmark-baseline-run02.json` with pressure-cardinality projection build/read/rebuild loop evidence and operation-level memory ceiling validation.
+21. Phase E benchmark baseline profile run-03 is now recorded in `docs/acceptance/query-phasee-benchmark-baseline-run03.json`: end-to-end replay to a fixed checkpoint, prefix projection materialization, and paginated read digest continuity (`QUERY-PHASEE-REPLAY-E2E-001` / `query_phasee_replay_003_*` and `server_query_phasee_replay_003_*` in core/server vector suites).
+22. Phase E minimal slice closeout is recorded in `docs/acceptance/query-phasee-closeout.json`. Cooperative backpressure for long-running projection builds remains explicitly deferred to Wave 3 / FSE-03 (scheduler/backpressure) rather than blocking this Wave 1 exit.
 
 ## 7. Risks and mitigations
 

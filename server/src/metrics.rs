@@ -24,6 +24,8 @@
 //! | `nodalmerge_blob_gc_deleted_total` | counter | `room` | G4 |
 //! | `nodalmerge_lamport_rejected_total` | counter | `reason` | G5 |
 //! | `nodalmerge_token_expired_disconnects_total` | counter | `room` | G6 |
+//! | `nodalmerge_topology_promotion_total` | counter | `stage`, `outcome`, `reason`? | Wave 3 |
+//! | `nodalmerge_topology_promotion_seconds` | histogram | `stage`, `outcome` | Wave 3 |
 //!
 //! All Phase G gaps now have metrics instrumentation registered at their
 //! instrumentation sites; describing the whole list here keeps the doc in
@@ -55,6 +57,15 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
         0.000_1, 0.000_25, 0.000_5,
         0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
     ];
+    let archive_buckets = [
+        0.000_1, 0.000_25, 0.000_5,
+        0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.4, 0.8,
+    ];
+    let cache_lookup_buckets = [
+        0.000_001, 0.000_0025, 0.000_005,
+        0.000_01, 0.000_025, 0.000_05, 0.000_1, 0.000_25, 0.000_5,
+        0.001, 0.0025, 0.005,
+    ];
 
     PrometheusBuilder::new()
         .with_http_listener(addr)
@@ -70,6 +81,18 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
             ),
             &persist_buckets,
         )?
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Full(
+                "nodalmerge_archive_operation_seconds".to_string(),
+            ),
+            &archive_buckets,
+        )?
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Full(
+                "nodalmerge_archive_manifest_cache_lookup_seconds".to_string(),
+            ),
+            &cache_lookup_buckets,
+        )?
         .install()?;
 
     // Describe the baseline set up front so they appear in `/metrics` before
@@ -80,6 +103,9 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
     describe_counter!("nodalmerge_nodes_accepted_total", "Total nodes accepted by `import_nodes` (post-verify, post-policy).");
     describe_histogram!("nodalmerge_merge_batch_seconds", Unit::Seconds, "Wall time spent inside `import_nodes` per call (one call = one pack).");
     describe_histogram!("nodalmerge_persistence_write_seconds", Unit::Seconds, "Wall time spent in `ServerPersistence::persist_*`. Labeled by `kind` (`node`/`nodes_batch`/`blob`).");
+    describe_histogram!("nodalmerge_archive_operation_seconds", Unit::Seconds, "Wall time spent in archive operation sections. Labels: `operation` (`describe`|`validate`|`import`|`export`) and `stage` (`manifest_load`|`digest_check`|`timeline_validation`|`import_apply`|`manifest_build`|`manifest_write`|`total`).");
+    describe_counter!("nodalmerge_archive_manifest_cache_lookup_total", "External manifest metadata cache lookup count. Labels: `outcome` (`hit`|`miss`) and `source` (`file`|`object`).");
+    describe_histogram!("nodalmerge_archive_manifest_cache_lookup_seconds", Unit::Seconds, "External manifest metadata cache lookup latency. Labels: `outcome` (`hit`|`miss`) and `source` (`file`|`object`).");
     describe_counter!("nodalmerge_eviction_total", "Rooms evicted by the idle sweeper (F4 follow-up).");
     // G1 — backpressure & slow-client policy.
     describe_counter!("nodalmerge_broadcast_lagged_total", "Peers disconnected with close code 4001 after falling behind the per-room broadcast ring buffer.");
@@ -92,6 +118,15 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
     describe_counter!("nodalmerge_lamport_rejected_total", "Nodes rejected by the G5 sanity checks; label `reason` = `ceiling` (lamport > local + LAMPORT_SLACK) or `wall_skew` (wall_ms > now + 24h).");
     // G6 — capability token expiry.
     describe_counter!("nodalmerge_token_expired_disconnects_total", "Peers disconnected with WS close code 4002 after their capability token's `expiry` lapsed mid-session.");
+    describe_counter!(
+        "nodalmerge_topology_promotion_total",
+        "Topology promotion pipeline outcomes. Labels: `stage` (`propose`|`validate`|`apply`), `outcome` (`ok`|`rejected`), optional `reason` (PromotionReasonClass wire value)."
+    );
+    describe_histogram!(
+        "nodalmerge_topology_promotion_seconds",
+        Unit::Seconds,
+        "Wall time for topology promotion handlers. Labels: `stage`, `outcome`."
+    );
     // Scoped replication (Phase A): filtering/catch-up observability.
     describe_counter!("nodalmerge_filtered_nodes_total", "Total nodes removed by subscription filtering before relay/catch-up send. Labels: `room`, `stage` (`catchup`|`broadcast`).");
     describe_counter!("nodalmerge_filtered_bytes_total", "Total node-payload bytes removed by subscription filtering before relay/catch-up send. Labels: `room`, `stage` (`catchup`|`broadcast`).");

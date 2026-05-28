@@ -1,0 +1,122 @@
+{
+  "artifact": "archive-phased-benchmark-baseline-run02",
+  "recorded_at": "2026-05-26T23:47:38.0571586-05:00",
+  "phase": "Phase D baseline benchmark profile",
+  "scope": [
+    "ARCHIVE-DRILL-001",
+    "ARCHIVE-DRILL-002"
+  ],
+  "measurement_method": {
+    "operation_runtime": "In-process repeated runtime harness (`archive_profile_001_operation_runtime_sections_reports_p50_p95`) measuring export/validate/import wall time inside server paths",
+    "hot_sections": "In-process repeated section timing for manifest load + signature, archive data load, digest check, timeline validation, and import apply",
+    "memory_gate": "Process peak working set sampling for the runtime harness cargo command"
+  },
+  "targets": {
+    "export_manifest_build_ms": 100,
+    "validate_full_integrity_ms": 100,
+    "import_full_apply_ms": 100,
+    "peak_memory_mb": 128
+  },
+  "operation_runtime_ms": {
+    "iterations": 25,
+    "export_total": {
+      "p50_ms": 8.31,
+      "p95_ms": 9.0,
+      "min_ms": 7.93,
+      "max_ms": 9.17
+    },
+    "validate_total": {
+      "p50_ms": 7.87,
+      "p95_ms": 8.35,
+      "min_ms": 7.37,
+      "max_ms": 8.41
+    },
+    "import_total": {
+      "p50_ms": 17.72,
+      "p95_ms": 19.05,
+      "min_ms": 17.11,
+      "max_ms": 19.08
+    }
+  },
+  "hot_section_runtime_ms": {
+    "manifest_load_signature": {
+      "p50_ms": 8.5,
+      "p95_ms": 9.02,
+      "min_ms": 8.02,
+      "max_ms": 9.19
+    },
+    "archive_data_load": {
+      "p50_ms": 7.77,
+      "p95_ms": 8.51,
+      "min_ms": 7.41,
+      "max_ms": 8.57
+    },
+    "digest_check": {
+      "p50_ms": 0.0,
+      "p95_ms": 0.0,
+      "min_ms": 0.0,
+      "max_ms": 0.0
+    },
+    "timeline_validation": {
+      "p50_ms": 0.02,
+      "p95_ms": 0.03,
+      "min_ms": 0.02,
+      "max_ms": 0.12
+    },
+    "import_apply": {
+      "p50_ms": 9.32,
+      "p95_ms": 10.01,
+      "min_ms": 8.71,
+      "max_ms": 10.14
+    }
+  },
+  "memory_profile": {
+    "command": "cargo test -p nodalmerge-server archive_profile_001_operation_runtime_sections_reports_p50_p95 --lib",
+    "peak_working_set_mb": 13.46,
+    "duration_ms": 2028.72,
+    "exit_code": 0
+  },
+  "gate_evaluation": {
+    "export_manifest_build": {
+      "measured_ms": 9.0,
+      "target_ms": 100,
+      "pass": true
+    },
+    "validate_full_integrity": {
+      "measured_ms": 8.35,
+      "target_ms": 100,
+      "pass": true
+    },
+    "import_full_apply": {
+      "measured_ms": 19.05,
+      "target_ms": 100,
+      "pass": true
+    },
+    "peak_memory": {
+      "measured_mb": 13.46,
+      "target_mb": 128,
+      "pass": true
+    }
+  },
+  "run01_delta": {
+    "export_manifest_build_ms": -901.62,
+    "validate_full_integrity_ms": -467.5,
+    "import_full_apply_ms": -527.58,
+    "peak_memory_mb": 0.06
+  },
+  "optimization_slice": {
+    "change": "`load_archive_from_ref` now computes checkpoint/digest summaries only for describe flows; validate/import skip replay + digest-set reconstruction that was not consumed",
+    "affected_file": "server/src/archive_adapter.rs",
+    "expected_effect": "Lower runtime latency on validate/import paths by removing redundant per-call summary reconstruction"
+  },
+  "validation": {
+    "drill_001": "passed",
+    "drill_002": "passed",
+    "validate_gate": "passed",
+    "export_parity_gate": "passed"
+  },
+  "notes": [
+    "Run-02 uses runtime-aligned in-process profiling and is directly tied to operation path latency; run-01 values included cargo process overhead.",
+    "Manifest load/signature and import apply are the dominant hot sections in run-02 and remain the next optimization candidates if tighter gates are introduced."
+  ]
+}

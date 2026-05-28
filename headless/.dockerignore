@@ -1,0 +1,8 @@
+target
+**/target
+.git
+docs-site
+web
+nodalmerge-host
+*.md
+!headless/README.md

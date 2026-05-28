@@ -5,7 +5,18 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use nodalmerge_core::{MemoryBlobStore, BlobStore, Op, MapOp, Policy, StateGraph, SyncNode, pack_nodes};
+use nodalmerge_core::{
+    MemoryBlobStore,
+    BlobStore,
+    Op,
+    MapOp,
+    Policy,
+    PolicyTimelineEntry,
+    RoomLineage,
+    StateGraph,
+    SyncNode,
+    pack_nodes,
+};
 use nodalmerge_host_core::engine::{
     PeerCountGaugeUpdate,
     plan_deregister_peer_membership,
@@ -41,6 +52,7 @@ pub struct Room {
     /// The server is a full peer: it merges incoming nodes, enforces policy,
     /// and can sign authoritative canonical nodes (E1).
     pub graph: RwLock<StateGraph>,
+    pub policy_timeline: RwLock<Vec<PolicyTimelineEntry>>,
     pub blobs: RwLock<MemoryBlobStore>,
     /// Optional Ed25519 verifying key that locks this room (C3).
     /// `None` = open room (anyone may join).
@@ -62,6 +74,8 @@ pub struct Room {
     /// sweeper in [`Rooms::sweep_idle`] drops rooms whose idle timer has
     /// exceeded the configured timeout. `None` while any peer is connected.
     pub idle_since: Mutex<Option<Instant>>,
+    /// Wave 2 topology: set once for child work rooms; `None` for mainline rooms.
+    pub lineage: RwLock<Option<RoomLineage>>,
 }
 
 impl Room {
@@ -74,9 +88,14 @@ impl Room {
         // hydration is performed asynchronously by the caller so we don't
         // perform blocking I/O during the WebSocket handshake.
         let graph = StateGraph::new();
+        let policy_timeline = vec![PolicyTimelineEntry {
+            effective_lamport: 0,
+            policy: Policy::default(),
+        }];
         let blobs = MemoryBlobStore::new();
         Arc::new(Room {
             graph:           RwLock::new(graph),
+            policy_timeline: RwLock::new(policy_timeline),
             blobs:           RwLock::new(blobs),
             auth_key:        RwLock::new(None),
             tx,
@@ -87,6 +106,7 @@ impl Room {
             // Brand-new room has no peers yet, so the idle clock starts now.
             // The first `register_peer` call will clear it.
             idle_since:      Mutex::new(Some(Instant::now())),
+            lineage:         RwLock::new(None),
         })
     }
 
@@ -121,7 +141,22 @@ impl Room {
     /// Install a room-level write policy.  Called when a client sends
     /// `set-policy`.  Subsequent `apply_remote` calls will enforce it.
     pub async fn set_policy(&self, policy: Policy) {
+        {
+            let mut timeline = self.policy_timeline.write().await;
+            let next_cutover = timeline
+                .last()
+                .map(|entry| entry.effective_lamport.saturating_add(1))
+                .unwrap_or(0);
+            timeline.push(PolicyTimelineEntry {
+                effective_lamport: next_cutover,
+                policy: policy.clone(),
+            });
+        }
         self.graph.write().await.set_policy(policy);
+    }
+
+    pub async fn current_policy_timeline(&self) -> Vec<PolicyTimelineEntry> {
+        self.policy_timeline.read().await.clone()
     }
 
     /// E1: Start the Authoritative tick loop for this room if not already running.
@@ -218,7 +253,11 @@ impl Room {
 /// handler can sign authoritative nodes.
 #[derive(Clone)]
 pub struct Rooms {
-    rooms:  Arc<RwLock<HashMap<String, Arc<Room>>>>,
+    pub(crate) rooms:  Arc<RwLock<HashMap<String, Arc<Room>>>>,
+    /// Parent room id → child room ids (topology list-children).
+    pub(crate) children_index: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// Promotion proposals — volatile or SQLite-backed (topology Phase C / Wave 3).
+    pub(crate) promotion_store: Arc<crate::promotion_store::PromotionStoreHandle>,
     /// Persistent server keypair generated/loaded at startup.
     pub server_key: Arc<SigningKey>,
     /// F4: shared persistence handle threaded into every newly-created room.
@@ -242,8 +281,13 @@ impl Rooms {
         peer_rate_nodes: u32,
         peer_rate_bytes: u32,
     ) -> Self {
+        let promotion_store = Arc::new(crate::promotion_store::PromotionStoreHandle::open(
+            crate::store::topology_store_root(&persistence),
+        ));
         Rooms {
             rooms: Arc::new(RwLock::new(HashMap::new())),
+            children_index: Arc::new(RwLock::new(HashMap::new())),
+            promotion_store,
             server_key: Arc::new(server_key),
             persistence,
             broadcast_capacity,

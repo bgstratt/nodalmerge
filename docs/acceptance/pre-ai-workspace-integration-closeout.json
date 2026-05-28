@@ -1,0 +1,53 @@
+{
+  "artifact": "pre-ai-workspace-integration-closeout",
+  "run_id": "pre-ai-workspace-integration-closeout",
+  "date": "2026-05-27",
+  "status": "closed",
+  "scope": "Integration lane before AI workspace / agent memory product work",
+  "deliverables": {
+    "cli": {
+      "binary": "nodalmerge",
+      "groups": ["run", "topology", "archive", "query"],
+      "evidence": [
+        "docs/acceptance/authority-topology-phased-cli-run01.json",
+        "cli/tests/topology_cli_vectors.rs",
+        "cli/tests/archive_cli_vectors.rs"
+      ]
+    },
+    "headless": {
+      "binary": "nodalmerge-headless",
+      "cli_alias": "nodalmerge run",
+      "evidence": [
+        "docs/acceptance/headless-run-phased-worker-run01.json",
+        "docs/acceptance/headless-run-phased-phasee-run01.json",
+        "headless/tests/headless_run_vectors.rs"
+      ]
+    },
+    "peer_local_ffi": {
+      "crate": "nodalmerge-runtime-local-ffi",
+      "dotnet": "LocalPersistFfiClient + RuntimePeerLocalPersistenceService",
+      "evidence": [
+        "runtime-local-ffi/tests/abi.rs",
+        "docs/acceptance/dotnet-peerlocal-runtime-wiring-run01.json"
+      ]
+    },
+    "live_smoke": {
+      "script": "scripts/integration-smoke.ps1",
+      "default_server": "ws://127.0.0.1:7878",
+      "evidence": "docs/acceptance/integration-smoke-live-run01.json"
+    }
+  },
+  "ci": {
+    "wave2_runtime_smoke": ".github/workflows/wave2-runtime-smoke.yml",
+    "dotnet_peerlocal_smoke": ".github/workflows/dotnet-peerlocal-smoke.yml"
+  },
+  "packaging": {
+    "nuget": "nodalmerge-host/pack-local-nuget.ps1 builds host-ffi + runtime-local-ffi --release"
+  },
+  "known_limits": [
+    "CLI query commands target NodalMerge.DotNetHost /ws/runtime, not nodalmerge-server Rust WS",
+    "Locked-room archive/query smoke requires -TokenJsonPath on integration-smoke.ps1",
+    "Headless Prometheus metrics and hosted Grafana dashboards deferred"
+  ],
+  "next_product_lane": "AI workspace / shared agent memory (see docs/roadmap.md)"
+}

@@ -1,0 +1,124 @@
+{
+  "artifact": "archive-phased-benchmark-baseline-run03",
+  "recorded_at": "2026-05-26T23:50:46.5378012-05:00",
+  "phase": "Phase D baseline benchmark profile",
+  "scope": [
+    "ARCHIVE-DRILL-001",
+    "ARCHIVE-DRILL-002"
+  ],
+  "measurement_method": {
+    "operation_runtime": "In-process repeated runtime harness (`archive_profile_001_operation_runtime_sections_reports_p50_p95`) measuring export/validate/import wall time inside server paths",
+    "hot_sections": "In-process repeated section timing for manifest load + signature, archive data load, digest check, timeline validation, and import apply",
+    "memory_gate": "Process peak working set sampling for the runtime harness cargo command"
+  },
+  "targets": {
+    "export_manifest_build_ms": 100,
+    "validate_full_integrity_ms": 100,
+    "import_full_apply_ms": 100,
+    "peak_memory_mb": 128
+  },
+  "operation_runtime_ms": {
+    "iterations": 25,
+    "export_total": {
+      "p50_ms": 8.41,
+      "p95_ms": 8.98,
+      "min_ms": 8.09,
+      "max_ms": 9.04
+    },
+    "validate_total": {
+      "p50_ms": 0.3,
+      "p95_ms": 0.38,
+      "min_ms": 0.27,
+      "max_ms": 0.43
+    },
+    "import_total": {
+      "p50_ms": 10.64,
+      "p95_ms": 11.53,
+      "min_ms": 10.16,
+      "max_ms": 12.04
+    }
+  },
+  "hot_section_runtime_ms": {
+    "manifest_load_signature": {
+      "p50_ms": 8.29,
+      "p95_ms": 8.86,
+      "min_ms": 7.95,
+      "max_ms": 8.97
+    },
+    "archive_data_load": {
+      "p50_ms": 0.39,
+      "p95_ms": 0.45,
+      "min_ms": 0.31,
+      "max_ms": 0.48
+    },
+    "digest_check": {
+      "p50_ms": 0.0,
+      "p95_ms": 0.0,
+      "min_ms": 0.0,
+      "max_ms": 0.01
+    },
+    "timeline_validation": {
+      "p50_ms": 0.03,
+      "p95_ms": 0.03,
+      "min_ms": 0.02,
+      "max_ms": 0.03
+    },
+    "import_apply": {
+      "p50_ms": 9.18,
+      "p95_ms": 9.91,
+      "min_ms": 8.95,
+      "max_ms": 10.31
+    }
+  },
+  "memory_profile": {
+    "command": "cargo test -p nodalmerge-server archive_profile_001_operation_runtime_sections_reports_p50_p95 --lib",
+    "peak_working_set_mb": 13.0,
+    "duration_ms": 1418.72,
+    "exit_code": 0
+  },
+  "gate_evaluation": {
+    "export_manifest_build": {
+      "measured_ms": 8.98,
+      "target_ms": 100,
+      "pass": true
+    },
+    "validate_full_integrity": {
+      "measured_ms": 0.38,
+      "target_ms": 100,
+      "pass": true
+    },
+    "import_full_apply": {
+      "measured_ms": 11.53,
+      "target_ms": 100,
+      "pass": true
+    },
+    "peak_memory": {
+      "measured_mb": 13.0,
+      "target_mb": 128,
+      "pass": true
+    }
+  },
+  "run02_delta": {
+    "export_manifest_build_ms": -0.02,
+    "validate_full_integrity_ms": -7.97,
+    "import_full_apply_ms": -7.52,
+    "peak_memory_mb": -0.46,
+    "manifest_load_signature_ms": -0.16,
+    "archive_data_load_ms": -8.06,
+    "import_apply_ms": -0.1
+  },
+  "optimization_slice": {
+    "change": "Add external manifest metadata cache keyed by file revision (`len_bytes` + `modified_unix_nanos`) so repeated validate/import loads on unchanged manifests reuse verified metadata and skip re-read/re-parse/re-signature-verification.",
+    "affected_file": "server/src/archive_adapter.rs",
+    "expected_effect": "Lower repeated validate/import overhead for drill lanes that reuse the same file/object manifest reference during a run"
+  },
+  "validation": {
+    "drill_001": "passed",
+    "drill_002": "passed",
+    "runtime_profile_harness": "passed"
+  },
+  "notes": [
+    "Run-03 confirms second optimization slice impact while preserving conformance for DRILL-001/002 lanes.",
+    "Manifest load/signature remains the largest single stage and is the next candidate for further reduction if tighter targets are introduced."
+  ]
+}

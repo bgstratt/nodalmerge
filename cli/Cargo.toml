@@ -1,0 +1,40 @@
+[package]
+name = "nodalmerge-cli"
+version = "0.1.0"
+edition = "2021"
+description = "NodalMerge operator CLI (topology and room-family workflows)"
+readme = "README.md"
+
+[[bin]]
+name = "nodalmerge"
+path = "src/main.rs"
+
+[lib]
+name = "nodalmerge_cli"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+ed25519-dalek = { workspace = true }
+futures-util = { version = "0.3", features = ["sink"] }
+nodalmerge-core = { path = "../core" }
+nodalmerge-headless = { path = "../headless" }
+nodalmerge-runtime-local = { path = "../runtime-local" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = "1"
+tokio-tungstenite = "0.24"
+
+[dev-dependencies]
+axum = { version = "0.7", features = ["ws"] }
+nodalmerge-server = { path = "../server" }
+tempfile = "3"
+
+[[test]]
+name = "topology_cli_vectors"
+path = "tests/topology_cli_vectors.rs"
+
+[[test]]
+name = "archive_cli_vectors"
+path = "tests/archive_cli_vectors.rs"

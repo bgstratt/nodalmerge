@@ -1,0 +1,30 @@
+{
+  "artifact": "archive-phased-post-closeout-monitoring-run01",
+  "recorded_at": "2026-05-27T23:00:00.0000000-05:00",
+  "phase": "Export/import post-closeout monitoring cadence",
+  "status": "active",
+  "source_plan": "docs/EXPORT_IMPORT_PORTABILITY_EXECUTION_PLAN.md",
+  "threshold_source": "docs/acceptance/archive-phased-alert-thresholds-run01.json",
+  "runbook": "docs/acceptance/archive-phased-operator-alert-runbook-run01.json",
+  "cadence": {
+    "frequency": "weekly",
+    "owner": "runtime on-call + platform performance",
+    "next_review_date": "2026-06-03",
+    "timezone": "America/Chicago"
+  },
+  "weekly_review_checklist": [
+    "Scrape archive cache-miss ratio vs warn (0.10) and critical (0.25) thresholds.",
+    "Compare file vs object lane p95 deltas to parity warn rails (export/validate/import).",
+    "Confirm absolute latency p95 remains below warn (50 ms) and critical (100 ms) safety rails.",
+    "Record decision: no-change OR open threshold recalibration artifact."
+  ],
+  "recalibration_policy": {
+    "artifact_on_change": "docs/acceptance/archive-phased-threshold-recalibration-run01.json",
+    "requires": "runtime-owner acknowledgement + runbook linkage update"
+  },
+  "completion_gate": {
+    "cadence_documented": true,
+    "next_review_scheduled": true,
+    "threshold_recalibration_this_cycle": false
+  }
+}

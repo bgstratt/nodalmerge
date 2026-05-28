@@ -72,7 +72,9 @@ use nodalmerge_host_core::protocol::{
     CloseFrameSpec,
     SyncDiffInput,
     serialize_archive_ws_response,
+    serialize_topology_ws_response,
 };
+use nodalmerge_core::TopologyWsResponse;
 use nodalmerge_host_core::engine::{
     assemble_welcome_catchup_package,
     classify_hello_payload,
@@ -820,7 +822,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
             msg = stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if !handle_client_message(&text, &room, &pubkey_hex, is_server_peer, &room_id, &server_key, &mut sink, &subscription, &session_caps, node_limiter.as_ref(), byte_limiter.as_ref(), &negotiated_caps).await {
+                        if !handle_client_message(&text, &room, &rooms, &pubkey_hex, is_server_peer, &room_id, &server_key, &mut sink, &subscription, &session_caps, node_limiter.as_ref(), byte_limiter.as_ref(), &negotiated_caps).await {
                             break;
                         }
                     }
@@ -915,6 +917,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
 async fn handle_client_message(
     text: &str,
     room: &Arc<Room>,
+    rooms: &Rooms,
     pubkey_hex: &str,
     is_server_peer: bool,
     room_id: &str,
@@ -1425,6 +1428,205 @@ async fn handle_client_message(
             }
         }
 
+        ClientDispatchCommand::TopologyCreateChild => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "topology.create-child",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let parent_room_id = msg
+                .get("parent_room_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(room_id);
+            match crate::lineage::process_topology_create_child(rooms, parent_room_id, msg).await {
+                Ok(created) => {
+                    let response =
+                        crate::topology_adapter::create_child_completed(created);
+                    if !emit_topology_response(sink, room_id, &response).await {
+                        return false;
+                    }
+                }
+                Err(rejected) => {
+                    send_error(
+                        sink,
+                        &format!(
+                            "{}: {}",
+                            rejected.reason_class.as_str(),
+                            rejected.reason_message
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        ClientDispatchCommand::TopologyDescribeLineage => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "topology.describe-lineage",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let target_room = msg
+                .get("room_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(room_id);
+            match crate::lineage::process_topology_describe_lineage(rooms, target_room).await {
+                Ok(described) => {
+                    let response =
+                        crate::topology_adapter::describe_lineage_result(described);
+                    if !emit_topology_response(sink, room_id, &response).await {
+                        return false;
+                    }
+                }
+                Err(rejected) => {
+                    send_error(
+                        sink,
+                        &format!(
+                            "{}: {}",
+                            rejected.reason_class.as_str(),
+                            rejected.reason_message
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        ClientDispatchCommand::TopologyListChildren => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "topology.list-children",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let parent_room_id = msg
+                .get("parent_room_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(room_id);
+            match crate::lineage::process_topology_list_children(rooms, parent_room_id).await {
+                Ok(listed) => {
+                    let response = crate::topology_adapter::list_children_result(listed);
+                    if !emit_topology_response(sink, room_id, &response).await {
+                        return false;
+                    }
+                }
+                Err(rejected) => {
+                    send_error(
+                        sink,
+                        &format!(
+                            "{}: {}",
+                            rejected.reason_class.as_str(),
+                            rejected.reason_message
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        ClientDispatchCommand::TopologyProposePromotion => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "topology.propose-promotion",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            match crate::promotion::process_topology_propose_promotion(rooms, msg).await {
+                Ok(proposed) => {
+                    let response =
+                        crate::topology_adapter::propose_promotion_completed(proposed);
+                    if !emit_topology_response(sink, room_id, &response).await {
+                        return false;
+                    }
+                }
+                Err(rejected) => {
+                    send_error(
+                        sink,
+                        &format!(
+                            "{}: {}",
+                            rejected.reason_class.as_str(),
+                            rejected.reason_message
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        ClientDispatchCommand::TopologyValidatePromotion => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "topology.validate-promotion",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            match crate::promotion::process_topology_validate_promotion(rooms, msg).await {
+                Ok(validated) => {
+                    let response =
+                        crate::topology_adapter::validate_promotion_completed(validated);
+                    if !emit_topology_response(sink, room_id, &response).await {
+                        return false;
+                    }
+                }
+                Err(rejected) => {
+                    send_error(
+                        sink,
+                        &format!(
+                            "{}: {}",
+                            rejected.reason_class.as_str(),
+                            rejected.reason_message
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        ClientDispatchCommand::TopologyApplyPromotion => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "topology.apply-promotion",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            match crate::promotion::process_topology_apply_promotion(rooms, server_key.as_ref(), msg)
+                .await
+            {
+                Ok(applied) => {
+                    let response =
+                        crate::topology_adapter::apply_promotion_completed(applied);
+                    if !emit_topology_response(sink, room_id, &response).await {
+                        return false;
+                    }
+                }
+                Err(rejected) => {
+                    send_error(
+                        sink,
+                        &format!(
+                            "{}: {}",
+                            rejected.reason_class.as_str(),
+                            rejected.reason_message
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+
         // D3: Compact the room graph into a snapshot --------------------------
         // Wire format (client → server):
         //   { type: "compact-room" }
@@ -1560,6 +1762,20 @@ async fn emit_archive_response(
     }
 }
 
+async fn emit_topology_response(
+    sink: &mut SplitSink<WebSocket, Message>,
+    room_id: &str,
+    response: &TopologyWsResponse,
+) -> bool {
+    match serialize_topology_ws_response(response) {
+        Ok(payload) => emit_single_send(sink, room_id, payload).await,
+        Err(_) => {
+            send_error(sink, "topology adapter response serialization failed").await;
+            true
+        }
+    }
+}
+
 #[inline]
 fn is_control_plane_allowed(
     is_server_peer: bool,
@@ -1577,6 +1793,12 @@ pub fn required_capability_for_control_plane_command(command: &str) -> Option<&'
         "start-tick" | "stop-tick" => Some("tick.admin"),
         "archive.describe" => Some("archive.read"),
         "archive.validate" | "archive.import" | "archive.export" => Some("archive.admin"),
+        "topology.create-child"
+        | "topology.describe-lineage"
+        | "topology.list-children"
+        | "topology.propose-promotion"
+        | "topology.validate-promotion"
+        | "topology.apply-promotion" => Some("topology.admin"),
         _ => None,
     }
 }

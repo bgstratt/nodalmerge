@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use nodalmerge_core::{
@@ -27,7 +28,7 @@ use serde_json::Value;
 
 use crate::archive_export::{
     build_external_manifest_document,
-    policy_timeline_metadata_for_policy,
+    policy_timeline_metadata_for_timeline,
     EXPORT_COMPAT_MAX_SUPPORTED,
     EXPORT_COMPAT_MIN_SUPPORTED,
     write_file_manifest,
@@ -41,12 +42,13 @@ struct LoadedArchive {
     source_room: String,
     manifest_policy_timeline_hash: Option<String>,
     manifest_policy_timeline_cutover_lamport: Option<u64>,
+    manifest_policy_timeline_transition_cutovers: Option<Vec<u64>>,
     nodes: Vec<SyncNode>,
     blobs: Vec<(Hash, Vec<u8>)>,
-    checkpoint_hash: String,
+    checkpoint_hash: Option<String>,
     frontier: Vec<String>,
-    nodes_digest: String,
-    blobs_digest: String,
+    nodes_digest: Option<String>,
+    blobs_digest: Option<String>,
 }
 
 pub async fn process_archive_describe(
@@ -54,29 +56,47 @@ pub async fn process_archive_describe(
     current_room_id: &str,
     message: &Value,
 ) -> Result<ArchiveWsResponse, ArchiveRejected> {
+    let operation_start = Instant::now();
     let req = parse_archive_describe_request(current_room_id, message)?;
     let ArchiveWsRequest::Describe { room: _, archive_ref } = req else {
         unreachable!("describe parser must return describe request")
     };
 
-    let loaded = load_archive_from_ref(room, current_room_id, &archive_ref)?;
+    let load_start = Instant::now();
+    let loaded = load_archive_from_ref(room, current_room_id, &archive_ref, true)?;
+    observe_archive_stage("describe", "manifest_load", load_start);
+
+    let checkpoint_hash = loaded
+        .checkpoint_hash
+        .clone()
+        .expect("describe load must include checkpoint hash");
+    let nodes_digest = loaded
+        .nodes_digest
+        .clone()
+        .expect("describe load must include node digest");
+    let blobs_digest = loaded
+        .blobs_digest
+        .clone()
+        .expect("describe load must include blob digest");
+
+    observe_archive_stage("describe", "total", operation_start);
     Ok(ArchiveWsResponse::DescribeResult(ArchiveDescribed {
         room: current_room_id.to_string(),
         archive_ref,
         manifest_id: format!(
             "m.{}.{}",
             loaded.source_room,
-            &loaded.checkpoint_hash[..12.min(loaded.checkpoint_hash.len())]
+            &checkpoint_hash[..12.min(checkpoint_hash.len())]
         ),
         format_version: "1".to_string(),
         archive_kind: "full_clone".to_string(),
         checkpoint: ArchiveCheckpoint {
             frontier: loaded.frontier,
-            canonical_hash: loaded.checkpoint_hash,
+            canonical_hash: checkpoint_hash,
         },
         payload_digest_set: ArchivePayloadDigestSet {
-            nodes: loaded.nodes_digest,
-            blobs: loaded.blobs_digest,
+            nodes: nodes_digest,
+            blobs: blobs_digest,
         },
         compatibility_window: Some(ArchiveCompatibilityWindow {
             min_supported: "1".to_string(),
@@ -94,6 +114,7 @@ pub async fn process_archive_validate(
     current_room_id: &str,
     message: &Value,
 ) -> ArchiveWsResponse {
+    let operation_start = Instant::now();
     let req = match parse_archive_validate_request(current_room_id, message) {
         Ok(req) => req,
         Err(rejected) => return ArchiveWsResponse::ValidateRejected(rejected),
@@ -117,15 +138,18 @@ pub async fn process_archive_validate(
         ));
     }
 
-    let loaded = match load_archive_from_ref(room, current_room_id, &archive_ref) {
+    let load_start = Instant::now();
+    let loaded = match load_archive_from_ref(room, current_room_id, &archive_ref, false) {
         Ok(loaded) => loaded,
         Err(rejected) => return ArchiveWsResponse::ValidateRejected(rejected),
     };
+    observe_archive_stage("validate", "manifest_load", load_start);
 
     if let (Some(manifest_policy_timeline_hash), Some(manifest_policy_timeline_cutover_lamport)) = (
         &loaded.manifest_policy_timeline_hash,
         loaded.manifest_policy_timeline_cutover_lamport,
     ) {
+        let timeline_validation_start = Instant::now();
         let current_policy_timeline = current_room_policy_timeline_metadata(room).await;
         if manifest_policy_timeline_hash != &current_policy_timeline.hash_hex
             || manifest_policy_timeline_cutover_lamport != current_policy_timeline.cutover_lamport
@@ -137,20 +161,34 @@ pub async fn process_archive_validate(
                 "external archive manifest policy timeline parity metadata mismatches target room policy",
             ));
         }
+        if let Some(transition_cutovers) = &loaded.manifest_policy_timeline_transition_cutovers {
+            if transition_cutovers != &current_policy_timeline.transition_cutovers {
+                return ArchiveWsResponse::ValidateRejected(rejected(
+                    current_room_id,
+                    &archive_ref,
+                    ArchiveReasonClass::PolicyTimelineMismatch,
+                    "external archive manifest policy timeline transition metadata mismatches target room policy",
+                ));
+            }
+        }
+        observe_archive_stage("validate", "timeline_validation", timeline_validation_start);
     }
 
-    if mode == "full_integrity"
-        && loaded
+    if mode == "full_integrity" {
+        let digest_check_start = Instant::now();
+        if loaded
             .blobs
             .iter()
             .any(|(expected_hash, bytes)| Hash::of(bytes) != *expected_hash)
-    {
-        return ArchiveWsResponse::ValidateRejected(rejected(
-            current_room_id,
-            &archive_ref,
-            ArchiveReasonClass::DigestMismatch,
-            "blob digest verification failed",
-        ));
+        {
+            return ArchiveWsResponse::ValidateRejected(rejected(
+                current_room_id,
+                &archive_ref,
+                ArchiveReasonClass::DigestMismatch,
+                "blob digest verification failed",
+            ));
+        }
+        observe_archive_stage("validate", "digest_check", digest_check_start);
     }
 
     let checks = if mode == "full_integrity" {
@@ -165,6 +203,7 @@ pub async fn process_archive_validate(
         vec!["manifest".to_string(), "compatibility".to_string()]
     };
 
+    observe_archive_stage("validate", "total", operation_start);
     ArchiveWsResponse::ValidateResult(ArchiveValidated {
         room: current_room_id.to_string(),
         archive_ref,
@@ -183,6 +222,7 @@ pub async fn process_archive_import(
     current_room_id: &str,
     message: &Value,
 ) -> ArchiveWsResponse {
+    let operation_start = Instant::now();
     let req = match parse_archive_import_request(current_room_id, message) {
         Ok(req) => req,
         Err(rejected) => return ArchiveWsResponse::ImportRejected(rejected),
@@ -207,15 +247,18 @@ pub async fn process_archive_import(
         ));
     }
 
-    let loaded = match load_archive_from_ref(room, current_room_id, &archive_ref) {
+    let load_start = Instant::now();
+    let loaded = match load_archive_from_ref(room, current_room_id, &archive_ref, false) {
         Ok(loaded) => loaded,
         Err(rejected) => return ArchiveWsResponse::ImportRejected(rejected),
     };
+    observe_archive_stage("import", "manifest_load", load_start);
 
     if let (Some(manifest_policy_timeline_hash), Some(manifest_policy_timeline_cutover_lamport)) = (
         &loaded.manifest_policy_timeline_hash,
         loaded.manifest_policy_timeline_cutover_lamport,
     ) {
+        let timeline_validation_start = Instant::now();
         let current_policy_timeline = current_room_policy_timeline_metadata(room).await;
         if manifest_policy_timeline_hash != &current_policy_timeline.hash_hex
             || manifest_policy_timeline_cutover_lamport != current_policy_timeline.cutover_lamport
@@ -227,10 +270,23 @@ pub async fn process_archive_import(
                 "external archive manifest policy timeline parity metadata mismatches target room policy",
             ));
         }
+        if let Some(transition_cutovers) = &loaded.manifest_policy_timeline_transition_cutovers {
+            if transition_cutovers != &current_policy_timeline.transition_cutovers {
+                return ArchiveWsResponse::ImportRejected(rejected(
+                    current_room_id,
+                    &archive_ref,
+                    ArchiveReasonClass::PolicyTimelineMismatch,
+                    "external archive manifest policy timeline transition metadata mismatches target room policy",
+                ));
+            }
+        }
+        observe_archive_stage("import", "timeline_validation", timeline_validation_start);
     }
 
     let loaded_frontier = loaded.frontier.clone();
+    let import_apply_start = Instant::now();
     let (accepted, _, errors) = import_nodes(room, loaded.nodes.clone()).await;
+    observe_archive_stage("import", "import_apply", import_apply_start);
     if !errors.is_empty() {
         return ArchiveWsResponse::ImportRejected(rejected(
             current_room_id,
@@ -271,6 +327,7 @@ pub async fn process_archive_import(
         }
     }
 
+    observe_archive_stage("import", "total", operation_start);
     ArchiveWsResponse::ImportCompleted(ArchiveImported {
         room: current_room_id.to_string(),
         archive_ref,
@@ -290,6 +347,7 @@ pub async fn process_archive_export(
     message: &Value,
     signer: &SigningKey,
 ) -> ArchiveWsResponse {
+    let operation_start = Instant::now();
     let req = match parse_archive_export_request(current_room_id, message) {
         Ok(req) => req,
         Err(rejected) => return ArchiveWsResponse::ExportRejected(rejected),
@@ -304,13 +362,18 @@ pub async fn process_archive_export(
         unreachable!("export parser must return export request")
     };
 
+    let timeline_metadata_start = Instant::now();
     let export_policy_timeline = current_room_policy_timeline_metadata(room).await;
+    observe_archive_stage("export", "timeline_validation", timeline_metadata_start);
+
+    let manifest_build_start = Instant::now();
     let manifest = match build_external_manifest_document(
         &*room.persistence,
         &source_room,
         signer,
         &export_policy_timeline.hash_hex,
         export_policy_timeline.cutover_lamport,
+        &export_policy_timeline.transition_cutovers,
     ) {
         Ok(manifest) => manifest,
         Err(reason_message) => {
@@ -322,7 +385,9 @@ pub async fn process_archive_export(
             ));
         }
     };
+    observe_archive_stage("export", "manifest_build", manifest_build_start);
 
+    let manifest_write_start = Instant::now();
     let write_result = match parse_archive_ref(&archive_ref) {
         Ok(ArchiveSourceRef::FileManifest { path }) => write_file_manifest(&path, &manifest),
         Ok(ArchiveSourceRef::ObjectManifest { bucket, key }) => {
@@ -353,6 +418,7 @@ pub async fn process_archive_export(
             ));
         }
     };
+    observe_archive_stage("export", "manifest_write", manifest_write_start);
 
     if let Err(reason_message) = write_result {
         return ArchiveWsResponse::ExportRejected(rejected(
@@ -363,6 +429,7 @@ pub async fn process_archive_export(
         ));
     }
 
+    observe_archive_stage("export", "total", operation_start);
     ArchiveWsResponse::ExportResult(ArchiveExported {
         room: current_room_id.to_string(),
         source_room: source_room.clone(),
@@ -389,14 +456,15 @@ pub async fn process_archive_export(
         payload_digest_policy: manifest.payload_digest_policy,
         policy_timeline_hash: manifest.policy_timeline_hash,
         policy_timeline_cutover_lamport: manifest.policy_timeline_cutover_lamport,
+        policy_timeline_transition_cutovers: manifest.policy_timeline_transition_cutovers,
     })
 }
 
 async fn current_room_policy_timeline_metadata(
     room: &Arc<Room>,
 ) -> crate::archive_export::PolicyTimelineParityMetadata {
-    let policy = room.graph.read().await.policy().clone();
-    policy_timeline_metadata_for_policy(&policy)
+    let timeline = room.current_policy_timeline().await;
+    policy_timeline_metadata_for_timeline(&timeline)
 }
 
 fn parse_archive_describe_request(
@@ -588,6 +656,7 @@ fn load_archive_from_ref(
     room: &Arc<Room>,
     current_room_id: &str,
     archive_ref: &str,
+    include_summary_digests: bool,
 ) -> Result<LoadedArchive, ArchiveRejected> {
     let source_ref = match parse_archive_ref(archive_ref) {
         Ok(source_ref) => source_ref,
@@ -606,6 +675,7 @@ fn load_archive_from_ref(
             source_room,
             policy_timeline_hash: None,
             policy_timeline_cutover_lamport: None,
+            policy_timeline_transition_cutovers: None,
         },
         ArchiveSourceRef::FileManifest { path } => {
             load_external_manifest_source_room(&path, current_room_id, archive_ref)?
@@ -638,33 +708,38 @@ fn load_archive_from_ref(
     let blobs = room.persistence.load_room_blobs(&source_room);
 
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
-    let replayed = replay(&nodes, None).map_err(|_| {
-        rejected(
-            current_room_id,
-            archive_ref,
-            ArchiveReasonClass::ManifestInvalid,
-            "persisted archive nodes could not be replayed",
+    let (checkpoint_hash, nodes_digest, blobs_digest) = if include_summary_digests {
+        let replayed = replay(&nodes, None).map_err(|_| {
+            rejected(
+                current_room_id,
+                archive_ref,
+                ArchiveReasonClass::ManifestInvalid,
+                "persisted archive nodes could not be replayed",
+            )
+        })?;
+
+        let checkpoint_hash = canonical_hash(
+            &replayed
+                .map
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<String, Vec<u8>>>(),
         )
-    })?;
+        .to_hex();
 
-    let checkpoint_hash = canonical_hash(
-        &replayed
-            .map
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<BTreeMap<String, Vec<u8>>>(),
-    )
-    .to_hex();
+        let node_refs: Vec<&SyncNode> = nodes.iter().collect();
+        let nodes_pack = pack_nodes(&node_refs);
+        let nodes_digest = format!("sha256:{}", Hash::of(&nodes_pack).to_hex());
 
-    let node_refs: Vec<&SyncNode> = nodes.iter().collect();
-    let nodes_pack = pack_nodes(&node_refs);
-    let nodes_digest = format!("sha256:{}", Hash::of(&nodes_pack).to_hex());
-
-    let mut blob_digest_map = BTreeMap::new();
-    for (hash, bytes) in &blobs {
-        blob_digest_map.insert(hash.to_hex(), bytes.clone());
-    }
-    let blobs_digest = format!("sha256:{}", canonical_hash(&blob_digest_map).to_hex());
+        let mut blob_digest_map = BTreeMap::new();
+        for (hash, bytes) in &blobs {
+            blob_digest_map.insert(hash.to_hex(), bytes.clone());
+        }
+        let blobs_digest = format!("sha256:{}", canonical_hash(&blob_digest_map).to_hex());
+        (Some(checkpoint_hash), Some(nodes_digest), Some(blobs_digest))
+    } else {
+        (None, None, None)
+    };
 
     let node_count = nodes.len();
 
@@ -673,6 +748,8 @@ fn load_archive_from_ref(
         manifest_policy_timeline_hash: external_manifest_metadata.policy_timeline_hash,
         manifest_policy_timeline_cutover_lamport: external_manifest_metadata
             .policy_timeline_cutover_lamport,
+        manifest_policy_timeline_transition_cutovers: external_manifest_metadata
+            .policy_timeline_transition_cutovers,
         nodes,
         blobs,
         checkpoint_hash,
@@ -692,6 +769,15 @@ fn load_external_manifest_source_room(
     current_room_id: &str,
     archive_ref: &str,
 ) -> Result<ExternalManifestMetadata, ArchiveRejected> {
+    let cache_key = path.to_path_buf();
+    let revision = manifest_file_revision(path);
+    let cache_lookup_start = Instant::now();
+    if let Some(cached) = load_cached_external_manifest_metadata(&cache_key, revision) {
+        observe_manifest_cache_lookup("hit", archive_ref, cache_lookup_start);
+        return Ok(cached);
+    }
+    observe_manifest_cache_lookup("miss", archive_ref, cache_lookup_start);
+
     let raw = std::fs::read_to_string(path).map_err(|_| {
         rejected(
             current_room_id,
@@ -782,11 +868,133 @@ fn load_external_manifest_source_room(
         ));
     }
 
-    Ok(ExternalManifestMetadata {
+    if manifest.policy_timeline_transition_cutovers.is_empty() {
+        return Err(rejected(
+            current_room_id,
+            archive_ref,
+            ArchiveReasonClass::ManifestInvalid,
+            "external archive manifest policy_timeline_transition_cutovers is required",
+        ));
+    }
+    let mut previous = None;
+    for &cutover in &manifest.policy_timeline_transition_cutovers {
+        if let Some(prev) = previous {
+            if cutover <= prev {
+                return Err(rejected(
+                    current_room_id,
+                    archive_ref,
+                    ArchiveReasonClass::ManifestInvalid,
+                    "external archive manifest policy_timeline_transition_cutovers must be strictly increasing",
+                ));
+            }
+        }
+        previous = Some(cutover);
+    }
+    if manifest
+        .policy_timeline_transition_cutovers
+        .last()
+        .copied()
+        != Some(manifest.policy_timeline_cutover_lamport)
+    {
+        return Err(rejected(
+            current_room_id,
+            archive_ref,
+            ArchiveReasonClass::ManifestInvalid,
+            "external archive manifest policy_timeline_transition_cutovers must end at policy_timeline_cutover_lamport",
+        ));
+    }
+
+    let metadata = ExternalManifestMetadata {
         source_room: source_room.to_string(),
         policy_timeline_hash: Some(manifest.policy_timeline_hash.trim().to_string()),
         policy_timeline_cutover_lamport: Some(manifest.policy_timeline_cutover_lamport),
+        policy_timeline_transition_cutovers: Some(manifest.policy_timeline_transition_cutovers),
+    };
+
+    cache_external_manifest_metadata(cache_key, revision, &metadata);
+    Ok(metadata)
+}
+
+fn manifest_file_revision(path: &Path) -> Option<ManifestCacheRevision> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let modified_unix_nanos = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(ManifestCacheRevision {
+        len_bytes: metadata.len(),
+        modified_unix_nanos,
     })
+}
+
+fn external_manifest_cache(
+) -> &'static Mutex<HashMap<PathBuf, CachedExternalManifestMetadata>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedExternalManifestMetadata>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn clear_external_manifest_cache() {
+    let cache = external_manifest_cache();
+    if let Ok(mut guard) = cache.lock() {
+        guard.clear();
+    }
+}
+
+fn load_cached_external_manifest_metadata(
+    path: &PathBuf,
+    revision: Option<ManifestCacheRevision>,
+) -> Option<ExternalManifestMetadata> {
+    let revision = revision?;
+    let cache = external_manifest_cache();
+    let guard = cache.lock().ok()?;
+    let cached = guard.get(path)?;
+    if cached.revision != revision {
+        return None;
+    }
+    Some(cached.metadata.clone())
+}
+
+fn cache_external_manifest_metadata(
+    path: PathBuf,
+    revision: Option<ManifestCacheRevision>,
+    metadata: &ExternalManifestMetadata,
+) {
+    let Some(revision) = revision else {
+        return;
+    };
+    let cache = external_manifest_cache();
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(
+            path,
+            CachedExternalManifestMetadata {
+                revision,
+                metadata: metadata.clone(),
+            },
+        );
+    }
+}
+
+fn observe_manifest_cache_lookup(outcome: &str, archive_ref: &str, started_at: Instant) {
+    let source = if archive_ref.starts_with("object://") {
+        "object"
+    } else {
+        "file"
+    };
+    metrics::counter!(
+        "nodalmerge_archive_manifest_cache_lookup_total",
+        "outcome" => outcome.to_string(),
+        "source" => source.to_string()
+    )
+    .increment(1);
+    metrics::histogram!(
+        "nodalmerge_archive_manifest_cache_lookup_seconds",
+        "outcome" => outcome.to_string(),
+        "source" => source.to_string()
+    )
+    .record(started_at.elapsed().as_secs_f64());
 }
 
 fn verify_external_manifest_signature(manifest: &ExternalArchiveManifest) -> Result<(), String> {
@@ -819,8 +1027,26 @@ fn verify_external_manifest_signature(manifest: &ExternalArchiveManifest) -> Res
 }
 
 fn external_manifest_signature_payload(manifest: &ExternalArchiveManifest) -> String {
+    let transition_cutovers = manifest
+        .policy_timeline_transition_cutovers
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<String>>()
+        .join(",");
+    if transition_cutovers.is_empty() {
+        return format!(
+            "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}",
+            manifest.format_version,
+            manifest.source_room,
+            manifest.compatibility_window.min_supported,
+            manifest.compatibility_window.max_supported,
+            manifest.payload_digest_policy,
+            manifest.policy_timeline_hash,
+            manifest.policy_timeline_cutover_lamport,
+        );
+    }
     format!(
-        "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}",
+        "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}|policy_timeline_transition_cutovers={}",
         manifest.format_version,
         manifest.source_room,
         manifest.compatibility_window.min_supported,
@@ -828,6 +1054,7 @@ fn external_manifest_signature_payload(manifest: &ExternalArchiveManifest) -> St
         manifest.payload_digest_policy,
         manifest.policy_timeline_hash,
         manifest.policy_timeline_cutover_lamport,
+        transition_cutovers,
     )
 }
 
@@ -879,6 +1106,15 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
+fn observe_archive_stage(operation: &str, stage: &str, started_at: Instant) {
+    metrics::histogram!(
+        "nodalmerge_archive_operation_seconds",
+        "operation" => operation.to_string(),
+        "stage" => stage.to_string()
+    )
+    .record(started_at.elapsed().as_secs_f64());
+}
+
 fn rejected(
     room: &str,
     archive_ref: &str,
@@ -895,7 +1131,9 @@ fn rejected(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::time::Instant;
 
     use ed25519_dalek::{Signer, SigningKey};
     use nodalmerge_core::{MapOp, Op, StateGraph};
@@ -903,6 +1141,31 @@ mod tests {
     use super::*;
     use crate::room::Room;
     use crate::store::{DirPersistence, SharedPersistence};
+
+    fn percentile_ms(samples: &[f64], p: f64) -> f64 {
+        let mut sorted = samples.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
+        sorted[idx]
+    }
+
+    fn summarize_ms(samples: &[f64]) -> serde_json::Value {
+        let min = samples
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, |acc, v| if v < acc { v } else { acc });
+        let max = samples
+            .iter()
+            .copied()
+            .fold(0.0f64, |acc, v| if v > acc { v } else { acc });
+        serde_json::json!({
+            "count": samples.len(),
+            "min_ms": (min * 100.0).round() / 100.0,
+            "p50_ms": (percentile_ms(samples, 0.50) * 100.0).round() / 100.0,
+            "p95_ms": (percentile_ms(samples, 0.95) * 100.0).round() / 100.0,
+            "max_ms": (max * 100.0).round() / 100.0
+        })
+    }
 
     fn tmpdir() -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -925,9 +1188,9 @@ mod tests {
     }
 
     fn write_external_manifest(path: &Path, source_room: &str, sign_with: Option<&SigningKey>) {
-        let policy_timeline = policy_timeline_metadata_for_policy(&nodalmerge_core::Policy::default());
+        let policy_timeline = crate::archive_export::policy_timeline_metadata_for_policy(&nodalmerge_core::Policy::default());
         let payload = format!(
-            "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}",
+            "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}|policy_timeline_transition_cutovers={}",
             "1",
             source_room,
             "1",
@@ -935,6 +1198,12 @@ mod tests {
             "strict_sha256_v1",
             policy_timeline.hash_hex,
             policy_timeline.cutover_lamport,
+            policy_timeline
+                .transition_cutovers
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<String>>()
+                .join(","),
         );
         let signature = sign_with.map(|signing_key| {
             let sig = signing_key.sign(payload.as_bytes());
@@ -954,6 +1223,7 @@ mod tests {
             "payload_digest_policy": "strict_sha256_v1",
             "policy_timeline_hash": policy_timeline.hash_hex,
             "policy_timeline_cutover_lamport": policy_timeline.cutover_lamport,
+            "policy_timeline_transition_cutovers": policy_timeline.transition_cutovers,
             "signature": signature,
         });
 
@@ -1083,9 +1353,9 @@ mod tests {
         let signer_b = SigningKey::from_bytes(&[0x34; 32]);
         write_external_manifest(&manifest_path, "source-room-signature", Some(&signer_a));
 
-        let policy_timeline = policy_timeline_metadata_for_policy(&nodalmerge_core::Policy::default());
+        let policy_timeline = crate::archive_export::policy_timeline_metadata_for_policy(&nodalmerge_core::Policy::default());
         let payload = format!(
-            "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}",
+            "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}|policy_timeline_transition_cutovers={}",
             "1",
             "source-room-signature",
             "1",
@@ -1093,6 +1363,12 @@ mod tests {
             "strict_sha256_v1",
             policy_timeline.hash_hex,
             policy_timeline.cutover_lamport,
+            policy_timeline
+                .transition_cutovers
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<String>>()
+                .join(","),
         );
         let forged_sig = signer_b.sign(payload.as_bytes());
         let forged_manifest = serde_json::json!({
@@ -1105,6 +1381,7 @@ mod tests {
             "payload_digest_policy": "strict_sha256_v1",
             "policy_timeline_hash": policy_timeline.hash_hex,
             "policy_timeline_cutover_lamport": policy_timeline.cutover_lamport,
+            "policy_timeline_transition_cutovers": policy_timeline.transition_cutovers,
             "signature": {
                 "public_key": hex_lower(&signer_a.verifying_key().to_bytes()),
                 "signature": hex_lower(&forged_sig.to_bytes())
@@ -1186,6 +1463,638 @@ mod tests {
         };
         assert_eq!(reject.reason_class, ArchiveReasonClass::UnsupportedFormat);
     }
+
+    #[test]
+    fn external_manifest_cache_reuses_and_invalidates_by_revision() {
+        let root = tmpdir();
+        let manifest_path = root.join("archives").join("cache-behavior.json");
+        let signer = SigningKey::from_bytes(&[0x44; 32]);
+
+        clear_external_manifest_cache();
+        write_external_manifest(&manifest_path, "cache-source-a", Some(&signer));
+
+        let first = load_external_manifest_source_room(
+            &manifest_path,
+            "cache-room",
+            &format!("file://{}", manifest_path.display()),
+        )
+        .expect("first load should succeed");
+        assert_eq!(first.source_room, "cache-source-a");
+
+        let revision_a = manifest_file_revision(&manifest_path)
+            .expect("first manifest revision should be available");
+        let cached_after_first = load_cached_external_manifest_metadata(
+            &manifest_path,
+            Some(revision_a),
+        )
+        .expect("cache should be populated after first load");
+        assert_eq!(cached_after_first.source_room, "cache-source-a");
+
+        let second = load_external_manifest_source_room(
+            &manifest_path,
+            "cache-room",
+            &format!("file://{}", manifest_path.display()),
+        )
+        .expect("second load should reuse cache");
+        assert_eq!(second.source_room, "cache-source-a");
+
+        write_external_manifest(&manifest_path, "cache-source-b-longer", Some(&signer));
+
+        let third = load_external_manifest_source_room(
+            &manifest_path,
+            "cache-room",
+            &format!("file://{}", manifest_path.display()),
+        )
+        .expect("third load should invalidate stale cache");
+        assert_eq!(third.source_room, "cache-source-b-longer");
+    }
+
+    #[tokio::test]
+    async fn archive_profile_001_operation_runtime_sections_reports_p50_p95() {
+        let iterations = 25usize;
+        let root = tmpdir();
+        let persistence: SharedPersistence = Arc::new(
+            DirPersistence::open(&root).expect("dir persistence should open"),
+        );
+        let source_room = Room::new("archive-profile-source".to_string(), Arc::clone(&persistence), 256);
+        seed_source_room(&source_room).await;
+
+        let control_room = Room::new("archive-profile-control".to_string(), Arc::clone(&persistence), 256);
+        let manifest_path = root.join("exports").join("archive-profile.json");
+        let archive_ref = format!("file://{}", manifest_path.display());
+        let export_signer = SigningKey::from_bytes(&[0x7Cu8; 32]);
+
+        let warmup_export = process_archive_export(
+            &source_room,
+            "archive-profile-control",
+            &serde_json::json!({
+                "type": "archive.export",
+                "source_room": "archive-profile-source",
+                "archive_ref": archive_ref.clone(),
+            }),
+            &export_signer,
+        )
+        .await;
+        let ArchiveWsResponse::ExportResult(_) = warmup_export else {
+            panic!("archive profile warmup export must succeed")
+        };
+
+        let mut operation_samples: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        let mut stage_samples: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+
+        for i in 0..iterations {
+            let export_start = Instant::now();
+            let export_response = process_archive_export(
+                &source_room,
+                "archive-profile-control",
+                &serde_json::json!({
+                    "type": "archive.export",
+                    "source_room": "archive-profile-source",
+                    "archive_ref": archive_ref.clone(),
+                }),
+                &export_signer,
+            )
+            .await;
+            let ArchiveWsResponse::ExportResult(_) = export_response else {
+                panic!("export operation sample must succeed")
+            };
+            operation_samples
+                .entry("export_total_ms".to_string())
+                .or_default()
+                .push(export_start.elapsed().as_secs_f64() * 1000.0);
+
+            let manifest_stage_start = Instant::now();
+            let metadata = load_external_manifest_source_room(
+                &manifest_path,
+                "archive-profile-control",
+                &archive_ref,
+            )
+            .expect("manifest load stage should succeed");
+            stage_samples
+                .entry("manifest_load_signature_ms".to_string())
+                .or_default()
+                .push(manifest_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let load_stage_start = Instant::now();
+            let loaded = load_archive_from_ref(
+                &control_room,
+                "archive-profile-control",
+                &archive_ref,
+                false,
+            )
+            .expect("archive load stage should succeed");
+            stage_samples
+                .entry("archive_data_load_ms".to_string())
+                .or_default()
+                .push(load_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let timeline_stage_start = Instant::now();
+            let timeline = current_room_policy_timeline_metadata(&control_room).await;
+            assert_eq!(metadata.policy_timeline_hash.as_deref(), Some(timeline.hash_hex.as_str()));
+            assert_eq!(
+                metadata.policy_timeline_cutover_lamport,
+                Some(timeline.cutover_lamport)
+            );
+            stage_samples
+                .entry("timeline_validation_ms".to_string())
+                .or_default()
+                .push(timeline_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let digest_stage_start = Instant::now();
+            let digest_ok = loaded
+                .blobs
+                .iter()
+                .all(|(expected_hash, bytes)| Hash::of(bytes) == *expected_hash);
+            assert!(digest_ok, "digest stage should pass");
+            stage_samples
+                .entry("digest_check_ms".to_string())
+                .or_default()
+                .push(digest_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let validate_start = Instant::now();
+            let validate_response = process_archive_validate(
+                &control_room,
+                "archive-profile-control",
+                &serde_json::json!({
+                    "type": "archive.validate",
+                    "archive_ref": archive_ref.clone(),
+                    "mode": "full_integrity",
+                }),
+            )
+            .await;
+            let ArchiveWsResponse::ValidateResult(validated) = validate_response else {
+                panic!("validate operation sample must succeed")
+            };
+            assert!(validated.accepted);
+            operation_samples
+                .entry("validate_total_ms".to_string())
+                .or_default()
+                .push(validate_start.elapsed().as_secs_f64() * 1000.0);
+
+            let import_stage_room = Room::new(
+                format!("archive-profile-stage-import-{i}"),
+                Arc::clone(&persistence),
+                256,
+            );
+            let import_apply_stage_start = Instant::now();
+            let (_, _, errors) = import_nodes(&import_stage_room, loaded.nodes.clone()).await;
+            assert!(errors.is_empty(), "import apply stage should not fail");
+            stage_samples
+                .entry("import_apply_ms".to_string())
+                .or_default()
+                .push(import_apply_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let import_operation_room = Room::new(
+                format!("archive-profile-op-import-{i}"),
+                Arc::clone(&persistence),
+                256,
+            );
+            let import_start = Instant::now();
+            let import_response = process_archive_import(
+                &import_operation_room,
+                &format!("archive-profile-op-import-{i}"),
+                &serde_json::json!({
+                    "type": "archive.import",
+                    "archive_ref": archive_ref.clone(),
+                    "import_mode": "full_apply",
+                }),
+            )
+            .await;
+            let ArchiveWsResponse::ImportCompleted(_) = import_response else {
+                panic!("import operation sample must succeed")
+            };
+            operation_samples
+                .entry("import_total_ms".to_string())
+                .or_default()
+                .push(import_start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        let mut operation_summary = serde_json::Map::new();
+        for (key, samples) in &operation_samples {
+            operation_summary.insert(key.clone(), summarize_ms(samples));
+        }
+        let mut stage_summary = serde_json::Map::new();
+        for (key, samples) in &stage_samples {
+            stage_summary.insert(key.clone(), summarize_ms(samples));
+        }
+
+        let summary = serde_json::json!({
+            "iterations": iterations,
+            "operation_runtime": operation_summary,
+            "stage_runtime": stage_summary
+        });
+        println!(
+            "ARCHIVE_PROFILE_RUN={}"
+            , serde_json::to_string(&summary).expect("profile summary must serialize")
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_profile_002_object_manifest_parity_reports_p50_p95() {
+        let iterations = 25usize;
+        let root = tmpdir();
+        let object_root = root.join("object-root");
+        std::env::set_var(
+            "NODALMERGE_ARCHIVE_OBJECT_ROOT",
+            object_root.display().to_string(),
+        );
+
+        let persistence: SharedPersistence = Arc::new(
+            DirPersistence::open(&root).expect("dir persistence should open"),
+        );
+        let source_room = Room::new(
+            "archive-profile-parity-source".to_string(),
+            Arc::clone(&persistence),
+            256,
+        );
+        seed_source_room(&source_room).await;
+
+        let control_room = Room::new(
+            "archive-profile-parity-control".to_string(),
+            Arc::clone(&persistence),
+            256,
+        );
+        let file_manifest_path = root.join("exports").join("archive-profile-parity-file.json");
+        let object_manifest_path = object_root.join("parity").join("archive-profile-parity-object.json");
+        let file_archive_ref = format!("file://{}", file_manifest_path.display());
+        let object_archive_ref = "object://parity/archive-profile-parity-object.json".to_string();
+        let export_signer = SigningKey::from_bytes(&[0x7Du8; 32]);
+
+        let warmup_export_file = process_archive_export(
+            &source_room,
+            "archive-profile-parity-control",
+            &serde_json::json!({
+                "type": "archive.export",
+                "source_room": "archive-profile-parity-source",
+                "archive_ref": file_archive_ref.clone(),
+            }),
+            &export_signer,
+        )
+        .await;
+        let ArchiveWsResponse::ExportResult(_) = warmup_export_file else {
+            panic!("archive parity warmup file export must succeed")
+        };
+
+        let warmup_export_object = process_archive_export(
+            &source_room,
+            "archive-profile-parity-control",
+            &serde_json::json!({
+                "type": "archive.export",
+                "source_room": "archive-profile-parity-source",
+                "archive_ref": object_archive_ref.clone(),
+            }),
+            &export_signer,
+        )
+        .await;
+        let ArchiveWsResponse::ExportResult(_) = warmup_export_object else {
+            panic!("archive parity warmup object export must succeed")
+        };
+
+        let mut file_operation_samples: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        let mut file_stage_samples: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        let mut object_operation_samples: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        let mut object_stage_samples: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+
+        for i in 0..iterations {
+            let file_export_start = Instant::now();
+            let file_export_response = process_archive_export(
+                &source_room,
+                "archive-profile-parity-control",
+                &serde_json::json!({
+                    "type": "archive.export",
+                    "source_room": "archive-profile-parity-source",
+                    "archive_ref": file_archive_ref.clone(),
+                }),
+                &export_signer,
+            )
+            .await;
+            let ArchiveWsResponse::ExportResult(_) = file_export_response else {
+                panic!("file export sample must succeed")
+            };
+            file_operation_samples
+                .entry("export_total_ms".to_string())
+                .or_default()
+                .push(file_export_start.elapsed().as_secs_f64() * 1000.0);
+
+            let file_manifest_stage_start = Instant::now();
+            let file_metadata = load_external_manifest_source_room(
+                &file_manifest_path,
+                "archive-profile-parity-control",
+                &file_archive_ref,
+            )
+            .expect("file manifest load stage should succeed");
+            file_stage_samples
+                .entry("manifest_load_signature_ms".to_string())
+                .or_default()
+                .push(file_manifest_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let file_load_stage_start = Instant::now();
+            let file_loaded = load_archive_from_ref(
+                &control_room,
+                "archive-profile-parity-control",
+                &file_archive_ref,
+                false,
+            )
+            .expect("file archive load stage should succeed");
+            file_stage_samples
+                .entry("archive_data_load_ms".to_string())
+                .or_default()
+                .push(file_load_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let file_timeline_stage_start = Instant::now();
+            let timeline = current_room_policy_timeline_metadata(&control_room).await;
+            assert_eq!(file_metadata.policy_timeline_hash.as_deref(), Some(timeline.hash_hex.as_str()));
+            assert_eq!(
+                file_metadata.policy_timeline_cutover_lamport,
+                Some(timeline.cutover_lamport)
+            );
+            file_stage_samples
+                .entry("timeline_validation_ms".to_string())
+                .or_default()
+                .push(file_timeline_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let file_digest_stage_start = Instant::now();
+            let file_digest_ok = file_loaded
+                .blobs
+                .iter()
+                .all(|(expected_hash, bytes)| Hash::of(bytes) == *expected_hash);
+            assert!(file_digest_ok, "file digest stage should pass");
+            file_stage_samples
+                .entry("digest_check_ms".to_string())
+                .or_default()
+                .push(file_digest_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let file_validate_start = Instant::now();
+            let file_validate_response = process_archive_validate(
+                &control_room,
+                "archive-profile-parity-control",
+                &serde_json::json!({
+                    "type": "archive.validate",
+                    "archive_ref": file_archive_ref.clone(),
+                    "mode": "full_integrity",
+                }),
+            )
+            .await;
+            let ArchiveWsResponse::ValidateResult(file_validated) = file_validate_response else {
+                panic!("file validate sample must succeed")
+            };
+            assert!(file_validated.accepted);
+            file_operation_samples
+                .entry("validate_total_ms".to_string())
+                .or_default()
+                .push(file_validate_start.elapsed().as_secs_f64() * 1000.0);
+
+            let file_import_stage_room = Room::new(
+                format!("archive-profile-file-stage-import-{i}"),
+                Arc::clone(&persistence),
+                256,
+            );
+            let file_import_apply_stage_start = Instant::now();
+            let (_, _, file_errors) = import_nodes(&file_import_stage_room, file_loaded.nodes.clone()).await;
+            assert!(file_errors.is_empty(), "file import apply stage should not fail");
+            file_stage_samples
+                .entry("import_apply_ms".to_string())
+                .or_default()
+                .push(file_import_apply_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let file_import_operation_room = Room::new(
+                format!("archive-profile-file-op-import-{i}"),
+                Arc::clone(&persistence),
+                256,
+            );
+            let file_import_start = Instant::now();
+            let file_import_response = process_archive_import(
+                &file_import_operation_room,
+                &format!("archive-profile-file-op-import-{i}"),
+                &serde_json::json!({
+                    "type": "archive.import",
+                    "archive_ref": file_archive_ref.clone(),
+                    "import_mode": "full_apply",
+                }),
+            )
+            .await;
+            let ArchiveWsResponse::ImportCompleted(_) = file_import_response else {
+                panic!("file import operation sample must succeed")
+            };
+            file_operation_samples
+                .entry("import_total_ms".to_string())
+                .or_default()
+                .push(file_import_start.elapsed().as_secs_f64() * 1000.0);
+
+            let object_export_start = Instant::now();
+            let object_export_response = process_archive_export(
+                &source_room,
+                "archive-profile-parity-control",
+                &serde_json::json!({
+                    "type": "archive.export",
+                    "source_room": "archive-profile-parity-source",
+                    "archive_ref": object_archive_ref.clone(),
+                }),
+                &export_signer,
+            )
+            .await;
+            let ArchiveWsResponse::ExportResult(_) = object_export_response else {
+                panic!("object export sample must succeed")
+            };
+            object_operation_samples
+                .entry("export_total_ms".to_string())
+                .or_default()
+                .push(object_export_start.elapsed().as_secs_f64() * 1000.0);
+
+            let object_manifest_stage_start = Instant::now();
+            let object_metadata = load_external_manifest_source_room(
+                &object_manifest_path,
+                "archive-profile-parity-control",
+                &object_archive_ref,
+            )
+            .expect("object manifest load stage should succeed");
+            object_stage_samples
+                .entry("manifest_load_signature_ms".to_string())
+                .or_default()
+                .push(object_manifest_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let object_load_stage_start = Instant::now();
+            let object_loaded = load_archive_from_ref(
+                &control_room,
+                "archive-profile-parity-control",
+                &object_archive_ref,
+                false,
+            )
+            .expect("object archive load stage should succeed");
+            object_stage_samples
+                .entry("archive_data_load_ms".to_string())
+                .or_default()
+                .push(object_load_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let object_timeline_stage_start = Instant::now();
+            let object_timeline = current_room_policy_timeline_metadata(&control_room).await;
+            assert_eq!(
+                object_metadata.policy_timeline_hash.as_deref(),
+                Some(object_timeline.hash_hex.as_str())
+            );
+            assert_eq!(
+                object_metadata.policy_timeline_cutover_lamport,
+                Some(object_timeline.cutover_lamport)
+            );
+            object_stage_samples
+                .entry("timeline_validation_ms".to_string())
+                .or_default()
+                .push(object_timeline_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let object_digest_stage_start = Instant::now();
+            let object_digest_ok = object_loaded
+                .blobs
+                .iter()
+                .all(|(expected_hash, bytes)| Hash::of(bytes) == *expected_hash);
+            assert!(object_digest_ok, "object digest stage should pass");
+            object_stage_samples
+                .entry("digest_check_ms".to_string())
+                .or_default()
+                .push(object_digest_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let object_validate_start = Instant::now();
+            let object_validate_response = process_archive_validate(
+                &control_room,
+                "archive-profile-parity-control",
+                &serde_json::json!({
+                    "type": "archive.validate",
+                    "archive_ref": object_archive_ref.clone(),
+                    "mode": "full_integrity",
+                }),
+            )
+            .await;
+            let ArchiveWsResponse::ValidateResult(object_validated) = object_validate_response else {
+                panic!("object validate sample must succeed")
+            };
+            assert!(object_validated.accepted);
+            object_operation_samples
+                .entry("validate_total_ms".to_string())
+                .or_default()
+                .push(object_validate_start.elapsed().as_secs_f64() * 1000.0);
+
+            let object_import_stage_room = Room::new(
+                format!("archive-profile-object-stage-import-{i}"),
+                Arc::clone(&persistence),
+                256,
+            );
+            let object_import_apply_stage_start = Instant::now();
+            let (_, _, object_errors) = import_nodes(&object_import_stage_room, object_loaded.nodes.clone()).await;
+            assert!(object_errors.is_empty(), "object import apply stage should not fail");
+            object_stage_samples
+                .entry("import_apply_ms".to_string())
+                .or_default()
+                .push(object_import_apply_stage_start.elapsed().as_secs_f64() * 1000.0);
+
+            let object_import_operation_room = Room::new(
+                format!("archive-profile-object-op-import-{i}"),
+                Arc::clone(&persistence),
+                256,
+            );
+            let object_import_start = Instant::now();
+            let object_import_response = process_archive_import(
+                &object_import_operation_room,
+                &format!("archive-profile-object-op-import-{i}"),
+                &serde_json::json!({
+                    "type": "archive.import",
+                    "archive_ref": object_archive_ref.clone(),
+                    "import_mode": "full_apply",
+                }),
+            )
+            .await;
+            let ArchiveWsResponse::ImportCompleted(_) = object_import_response else {
+                panic!("object import operation sample must succeed")
+            };
+            object_operation_samples
+                .entry("import_total_ms".to_string())
+                .or_default()
+                .push(object_import_start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        let mut file_operation_summary = serde_json::Map::new();
+        for (key, samples) in &file_operation_samples {
+            file_operation_summary.insert(key.clone(), summarize_ms(samples));
+        }
+        let mut file_stage_summary = serde_json::Map::new();
+        for (key, samples) in &file_stage_samples {
+            file_stage_summary.insert(key.clone(), summarize_ms(samples));
+        }
+
+        let mut object_operation_summary = serde_json::Map::new();
+        for (key, samples) in &object_operation_samples {
+            object_operation_summary.insert(key.clone(), summarize_ms(samples));
+        }
+        let mut object_stage_summary = serde_json::Map::new();
+        for (key, samples) in &object_stage_samples {
+            object_stage_summary.insert(key.clone(), summarize_ms(samples));
+        }
+
+        let export_p95_delta_ms = (percentile_ms(
+            object_operation_samples
+                .get("export_total_ms")
+                .expect("object export samples should exist"),
+            0.95,
+        ) - percentile_ms(
+            file_operation_samples
+                .get("export_total_ms")
+                .expect("file export samples should exist"),
+            0.95,
+        ))
+            .abs();
+        let validate_p95_delta_ms = (percentile_ms(
+            object_operation_samples
+                .get("validate_total_ms")
+                .expect("object validate samples should exist"),
+            0.95,
+        ) - percentile_ms(
+            file_operation_samples
+                .get("validate_total_ms")
+                .expect("file validate samples should exist"),
+            0.95,
+        ))
+            .abs();
+        let import_p95_delta_ms = (percentile_ms(
+            object_operation_samples
+                .get("import_total_ms")
+                .expect("object import samples should exist"),
+            0.95,
+        ) - percentile_ms(
+            file_operation_samples
+                .get("import_total_ms")
+                .expect("file import samples should exist"),
+            0.95,
+        ))
+            .abs();
+
+        let parity_threshold_ms = 5.0;
+        let summary = serde_json::json!({
+            "iterations": iterations,
+            "file": {
+                "operation_runtime": file_operation_summary,
+                "stage_runtime": file_stage_summary,
+            },
+            "object": {
+                "operation_runtime": object_operation_summary,
+                "stage_runtime": object_stage_summary,
+            },
+            "parity": {
+                "threshold_ms": parity_threshold_ms,
+                "export_p95_abs_delta_ms": (export_p95_delta_ms * 100.0).round() / 100.0,
+                "validate_p95_abs_delta_ms": (validate_p95_delta_ms * 100.0).round() / 100.0,
+                "import_p95_abs_delta_ms": (import_p95_delta_ms * 100.0).round() / 100.0,
+                "pass": {
+                    "export": export_p95_delta_ms <= parity_threshold_ms,
+                    "validate": validate_p95_delta_ms <= parity_threshold_ms,
+                    "import": import_p95_delta_ms <= parity_threshold_ms,
+                }
+            }
+        });
+        println!(
+            "ARCHIVE_OBJECT_PARITY_RUN={}"
+            , serde_json::to_string(&summary).expect("object parity summary must serialize")
+        );
+
+        std::env::remove_var("NODALMERGE_ARCHIVE_OBJECT_ROOT");
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1207,6 +2116,19 @@ struct ExternalManifestMetadata {
     source_room: String,
     policy_timeline_hash: Option<String>,
     policy_timeline_cutover_lamport: Option<u64>,
+    policy_timeline_transition_cutovers: Option<Vec<u64>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManifestCacheRevision {
+    len_bytes: u64,
+    modified_unix_nanos: u128,
+}
+
+#[derive(Debug, Clone)]
+struct CachedExternalManifestMetadata {
+    revision: ManifestCacheRevision,
+    metadata: ExternalManifestMetadata,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1217,6 +2139,8 @@ struct ExternalArchiveManifest {
     payload_digest_policy: String,
     policy_timeline_hash: String,
     policy_timeline_cutover_lamport: u64,
+    #[serde(default)]
+    policy_timeline_transition_cutovers: Vec<u64>,
     #[serde(default)]
     signature: Option<ExternalArchiveSignature>,
 }

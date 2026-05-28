@@ -1,0 +1,30 @@
+{
+  "artifact": "query-phasee-benchmark-baseline-run03",
+  "recorded_at": "2026-05-27T12:00:00.0000000-05:00",
+  "phase": "Phase E end-to-end replay + projection at fixed checkpoint",
+  "status": "completed",
+  "vector_family": "QUERY-PHASEE-REPLAY-E2E-001",
+  "summary": [
+    "Replay core graph to an explicit checkpoint (prefix of a longer history), then materialize the prefix projection and walk deterministic paged reads.",
+    "Assert canonical map hash parity and full-projection digest parity across two independent replays (core) or two room imports (server).",
+    "Paged reconstruction must match full row order and projection_digest(rebuilt) == projection_digest(full)."
+  ],
+  "commands": [
+    {
+      "command": "cargo test -p nodalmerge-core query_phasee_replay_003_e2e_checkpoint_pagination_digest_parity --test query_materialization_vectors",
+      "result": "passed"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server server_query_phasee_replay_003_e2e_checkpoint_pagination_digest_parity --test query_materialization_vectors",
+      "result": "passed"
+    }
+  ],
+  "implementation_refs": [
+    "core/tests/query_materialization_vectors.rs::query_phasee_replay_003_e2e_checkpoint_pagination_digest_parity",
+    "server/tests/query_materialization_vectors.rs::server_query_phasee_replay_003_e2e_checkpoint_pagination_digest_parity"
+  ],
+  "notes": [
+    "This run-03 lane intentionally complements run-01/02: those capture suite timing/Criterion pressure; run-03 pins semantic E2E behavior across replay boundary + pagination read path.",
+    "Sustained synthetic cardinality scaling remains an optional future benchmark expansion if product SLOs require it."
+  ]
+}

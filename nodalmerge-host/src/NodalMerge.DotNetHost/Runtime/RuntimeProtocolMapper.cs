@@ -763,6 +763,193 @@ public sealed class RuntimeProtocolMapper
             ]);
         }
 
+        if (string.Equals(type, "topology.create-child", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!IsControlPlaneAllowed(state, "topology.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=topology.create-child requires=topology.admin");
+            }
+
+            if (string.IsNullOrWhiteSpace(message.ChildRoomId))
+            {
+                return RuntimeMapResult.Failure("topology.create-child.child_room_id is required");
+            }
+
+            if (string.IsNullOrWhiteSpace(message.ChildPurpose))
+            {
+                return RuntimeMapResult.Failure("topology.create-child.child_purpose is required");
+            }
+
+            if (string.IsNullOrWhiteSpace(message.PromotionPolicyId))
+            {
+                return RuntimeMapResult.Failure("topology.create-child.promotion_policy_id is required");
+            }
+
+            if (message.ParentCheckpoint is null)
+            {
+                return RuntimeMapResult.Failure("topology.create-child.parent_checkpoint is required");
+            }
+
+            var parentRoomId = string.IsNullOrWhiteSpace(message.ParentRoomId)
+                ? state.RoomId
+                : message.ParentRoomId;
+
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(
+                    state.RoomId!,
+                    new JsonObject
+                    {
+                        ["CreateTopologyChild"] = new JsonObject
+                        {
+                            ["parent_room_id"] = parentRoomId,
+                            ["child_room_id"] = message.ChildRoomId,
+                            ["child_purpose"] = message.ChildPurpose,
+                            ["created_by"] = string.IsNullOrWhiteSpace(message.CreatedBy)
+                                ? "dotnet-host-stub"
+                                : message.CreatedBy,
+                            ["promotion_policy_id"] = message.PromotionPolicyId,
+                            ["parent_checkpoint"] = message.ParentCheckpoint.DeepClone()
+                        }
+                    }
+                )
+            ]);
+        }
+
+        if (string.Equals(type, "topology.describe-lineage", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!IsControlPlaneAllowed(state, "topology.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=topology.describe-lineage requires=topology.admin");
+            }
+
+            var targetRoom = string.IsNullOrWhiteSpace(message.TargetRoomId)
+                ? state.RoomId
+                : message.TargetRoomId;
+
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(
+                    state.RoomId!,
+                    new JsonObject
+                    {
+                        ["DescribeRoomLineage"] = new JsonObject
+                        {
+                            ["room_id"] = targetRoom
+                        }
+                    }
+                )
+            ]);
+        }
+
+        if (string.Equals(type, "topology.list-children", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!IsControlPlaneAllowed(state, "topology.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=topology.list-children requires=topology.admin");
+            }
+
+            var parentRoomId = string.IsNullOrWhiteSpace(message.ParentRoomId)
+                ? state.RoomId
+                : message.ParentRoomId;
+
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(
+                    state.RoomId!,
+                    new JsonObject
+                    {
+                        ["ListTopologyChildren"] = new JsonObject
+                        {
+                            ["parent_room_id"] = parentRoomId
+                        }
+                    }
+                )
+            ]);
+        }
+
+        if (string.Equals(type, "topology.propose-promotion", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!IsControlPlaneAllowed(state, "topology.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=topology.propose-promotion requires=topology.admin");
+            }
+
+            if (string.IsNullOrWhiteSpace(message.ParentRoomId)
+                || string.IsNullOrWhiteSpace(message.ChildRoomId)
+                || string.IsNullOrWhiteSpace(message.ChildCheckpointHash)
+                || string.IsNullOrWhiteSpace(message.PayloadRef))
+            {
+                return RuntimeMapResult.Failure("topology.propose-promotion requires parent_room_id, child_room_id, child_checkpoint_hash, payload_ref");
+            }
+
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(
+                    state.RoomId!,
+                    new JsonObject
+                    {
+                        ["ProposeTopologyPromotion"] = new JsonObject
+                        {
+                            ["parent_room_id"] = message.ParentRoomId,
+                            ["child_room_id"] = message.ChildRoomId,
+                            ["child_checkpoint_hash"] = message.ChildCheckpointHash,
+                            ["payload_ref"] = message.PayloadRef,
+                            ["idempotency_key"] = message.IdempotencyKey
+                        }
+                    }
+                )
+            ]);
+        }
+
+        if (string.Equals(type, "topology.validate-promotion", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!IsControlPlaneAllowed(state, "topology.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=topology.validate-promotion requires=topology.admin");
+            }
+
+            if (string.IsNullOrWhiteSpace(message.ProposalId))
+            {
+                return RuntimeMapResult.Failure("topology.validate-promotion.proposal_id is required");
+            }
+
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(
+                    state.RoomId!,
+                    new JsonObject
+                    {
+                        ["ValidateTopologyPromotion"] = new JsonObject
+                        {
+                            ["proposal_id"] = message.ProposalId
+                        }
+                    }
+                )
+            ]);
+        }
+
+        if (string.Equals(type, "topology.apply-promotion", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!IsControlPlaneAllowed(state, "topology.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=topology.apply-promotion requires=topology.admin");
+            }
+
+            if (string.IsNullOrWhiteSpace(message.ProposalId))
+            {
+                return RuntimeMapResult.Failure("topology.apply-promotion.proposal_id is required");
+            }
+
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(
+                    state.RoomId!,
+                    new JsonObject
+                    {
+                        ["ApplyTopologyPromotion"] = new JsonObject
+                        {
+                            ["proposal_id"] = message.ProposalId
+                        }
+                    }
+                )
+            ]);
+        }
+
         if (string.Equals(type, "pack", StringComparison.OrdinalIgnoreCase))
         {
             if (string.IsNullOrWhiteSpace(message.NodesB64))
@@ -1931,6 +2118,79 @@ public sealed class RuntimeProtocolMapper
                 continue;
             }
 
+            if (obj.TryGetPropertyValue("ChildRoomCreated", out var childRoomCreatedNode) && childRoomCreatedNode is JsonObject childRoomCreated)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "topology.create-child.completed",
+                    ["child_room_id"] = childRoomCreated["child_room_id"]?.GetValue<string>(),
+                    ["lineage"] = childRoomCreated["lineage"]?.DeepClone()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("RoomLineageDescribed", out var roomLineageDescribedNode) && roomLineageDescribedNode is JsonObject roomLineageDescribed)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "topology.describe-lineage.result",
+                    ["room_id"] = roomLineageDescribed["room_id"]?.GetValue<string>(),
+                    ["lineage"] = roomLineageDescribed["lineage"]?.DeepClone(),
+                    ["ancestors"] = roomLineageDescribed["ancestors"]?.DeepClone() ?? new JsonArray()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("ChildrenListed", out var childrenListedNode) && childrenListedNode is JsonObject childrenListed)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "topology.list-children.result",
+                    ["parent_room_id"] = childrenListed["parent_room_id"]?.GetValue<string>(),
+                    ["children"] = childrenListed["children"]?.DeepClone() ?? new JsonArray()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("PromotionProposed", out var promotionProposedNode) && promotionProposedNode is JsonObject promotionProposed)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "topology.propose-promotion.completed",
+                    ["proposal_id"] = promotionProposed["proposal_id"]?.GetValue<string>(),
+                    ["parent_room_id"] = promotionProposed["parent_room_id"]?.GetValue<string>(),
+                    ["child_room_id"] = promotionProposed["child_room_id"]?.GetValue<string>(),
+                    ["child_checkpoint_hash"] = promotionProposed["child_checkpoint_hash"]?.GetValue<string>(),
+                    ["payload_ref"] = promotionProposed["payload_ref"]?.GetValue<string>(),
+                    ["proposal_digest"] = promotionProposed["proposal_digest"]?.GetValue<string>()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("PromotionValidated", out var promotionValidatedNode) && promotionValidatedNode is JsonObject promotionValidated)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "topology.validate-promotion.completed",
+                    ["proposal_id"] = promotionValidated["proposal_id"]?.GetValue<string>(),
+                    ["validation_digest"] = promotionValidated["validation_digest"]?.GetValue<string>()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("PromotionApplied", out var promotionAppliedNode) && promotionAppliedNode is JsonObject promotionApplied)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "topology.apply-promotion.completed",
+                    ["proposal_id"] = promotionApplied["proposal_id"]?.GetValue<string>(),
+                    ["parent_room_id"] = promotionApplied["parent_room_id"]?.GetValue<string>(),
+                    ["parent_new_canonical_hash"] = promotionApplied["parent_new_canonical_hash"]?.GetValue<string>(),
+                    ["audit_key"] = promotionApplied["audit_key"]?.GetValue<string>()
+                }.ToJsonString());
+                continue;
+            }
+
             if (obj.TryGetPropertyValue("WelcomePrepared", out var welcomeNode) && welcomeNode is JsonObject welcome)
             {
                 var negotiated = welcome["negotiated"] as JsonObject;
@@ -2638,6 +2898,8 @@ public sealed class RuntimeConnectionState
     public HashSet<string> SessionCapabilities { get; } = new(StringComparer.Ordinal);
     public Dictionary<string, QuerySpecStubState> QuerySpecStubs { get; } = new(StringComparer.Ordinal);
     public Dictionary<string, ProjectionStubState> ProjectionStubs { get; } = new(StringComparer.Ordinal);
+    public Dictionary<string, List<TopologyChildStubState>> TopologyChildrenByParent { get; } = new(StringComparer.Ordinal);
+    public Dictionary<string, TopologyPromotionStubState> TopologyPromotions { get; } = new(StringComparer.Ordinal);
     public Dictionary<string, JsonNode?> CanonicalMapRows { get; } = new(StringComparer.Ordinal);
     public ulong CanonicalSequence { get; private set; }
     public Dictionary<ulong, CanonicalSnapshotState> CanonicalSnapshots { get; } = new();
@@ -3064,9 +3326,50 @@ public sealed class RuntimeInboundMessage
     public string? ImportMode { get; set; }
     [JsonPropertyName("expected_checkpoint")]
     public JsonNode? ExpectedCheckpoint { get; set; }
+    [JsonPropertyName("parent_room_id")]
+    public string? ParentRoomId { get; set; }
+    [JsonPropertyName("child_room_id")]
+    public string? ChildRoomId { get; set; }
+    [JsonPropertyName("child_purpose")]
+    public string? ChildPurpose { get; set; }
+    [JsonPropertyName("created_by")]
+    public string? CreatedBy { get; set; }
+    [JsonPropertyName("promotion_policy_id")]
+    public string? PromotionPolicyId { get; set; }
+    [JsonPropertyName("parent_checkpoint")]
+    public JsonNode? ParentCheckpoint { get; set; }
+    [JsonPropertyName("room_id")]
+    public string? TargetRoomId { get; set; }
+    [JsonPropertyName("child_checkpoint_hash")]
+    public string? ChildCheckpointHash { get; set; }
+    [JsonPropertyName("payload_ref")]
+    public string? PayloadRef { get; set; }
+    [JsonPropertyName("idempotency_key")]
+    public string? IdempotencyKey { get; set; }
+    [JsonPropertyName("proposal_id")]
+    public string? ProposalId { get; set; }
     [JsonPropertyName("blobs")]
     public RuntimeInboundBlob[]? Blobs { get; set; }
 }
+
+public sealed record TopologyChildStubState(
+    string ChildRoomId,
+    string ChildPurpose,
+    string PromotionPolicyId,
+    string CreatedBy,
+    JsonObject Lineage
+);
+
+public sealed record TopologyPromotionStubState(
+    string ProposalId,
+    string ParentRoomId,
+    string ChildRoomId,
+    string ChildCheckpointHash,
+    string PayloadRef,
+    string ProposalDigest,
+    bool Validated,
+    bool Applied
+);
 
 public sealed class RuntimeInboundBlob
 {

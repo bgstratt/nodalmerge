@@ -1,0 +1,36 @@
+[package]
+name = "nodalmerge-headless"
+version = "0.1.0"
+edition = "2021"
+description = "Headless NodalMerge peer worker (WS sync + peer-local persistence)"
+readme = "README.md"
+
+[[bin]]
+name = "nodalmerge-headless"
+path = "src/main.rs"
+
+[lib]
+name = "nodalmerge_headless"
+path = "src/lib.rs"
+
+[dependencies]
+nodalmerge-core = { path = "../core" }
+nodalmerge-runtime-local = { path = "../runtime-local" }
+base64 = "0.22"
+ed25519-dalek = { workspace = true }
+futures-util = { version = "0.3", features = ["sink"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = "0.24"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+axum = { version = "0.7", features = ["ws"] }
+nodalmerge-server = { path = "../server" }
+tempfile = "3"
+
+[[test]]
+name = "headless_run_vectors"
+path = "tests/headless_run_vectors.rs"

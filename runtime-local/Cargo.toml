@@ -1,0 +1,18 @@
+[package]
+name = "nodalmerge-runtime-local"
+version = "0.1.0"
+edition = "2021"
+description = "Peer-local persistence adapter contract and implementations for headless NodalMerge runtimes"
+readme = "README.md"
+
+[dependencies]
+nodalmerge-core = { path = "../core" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
+tempfile = "3"
+
+[[test]]
+name = "local_persist_vectors"
+path = "tests/local_persist_vectors.rs"

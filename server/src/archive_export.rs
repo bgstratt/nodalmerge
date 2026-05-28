@@ -51,6 +51,7 @@ pub struct ExportManifestDocument {
     pub payload_digest_policy: String,
     pub policy_timeline_hash: String,
     pub policy_timeline_cutover_lamport: u64,
+    pub policy_timeline_transition_cutovers: Vec<u64>,
     pub signature: ExportManifestSignature,
 }
 
@@ -65,6 +66,7 @@ pub fn build_external_manifest_document(
     signer: &SigningKey,
     policy_timeline_hash_hex: &str,
     policy_timeline_cutover_lamport: u64,
+    policy_timeline_transition_cutovers: &[u64],
 ) -> Result<ExportManifestDocument, String> {
     let mut nodes = persistence.load_room_nodes(source_room);
     if nodes.is_empty() {
@@ -90,6 +92,7 @@ pub fn build_external_manifest_document(
         &payload_digest_policy,
         policy_timeline_hash_hex,
         policy_timeline_cutover_lamport,
+        policy_timeline_transition_cutovers,
     );
     let signature = signer.sign(payload.as_bytes()).to_bytes();
 
@@ -108,6 +111,7 @@ pub fn build_external_manifest_document(
         payload_digest_policy,
         policy_timeline_hash: policy_timeline_hash_hex.to_string(),
         policy_timeline_cutover_lamport,
+        policy_timeline_transition_cutovers: policy_timeline_transition_cutovers.to_vec(),
         signature: ExportManifestSignature {
             public_key: hex_lower(&signer.verifying_key().to_bytes()),
             signature: hex_lower(&signature),
@@ -118,6 +122,7 @@ pub fn build_external_manifest_document(
 pub struct PolicyTimelineParityMetadata {
     pub hash_hex: String,
     pub cutover_lamport: u64,
+    pub transition_cutovers: Vec<u64>,
 }
 
 pub fn policy_timeline_hash_hex_for_policy(policy: &Policy) -> String {
@@ -129,9 +134,39 @@ pub fn policy_timeline_metadata_for_policy(policy: &Policy) -> PolicyTimelinePar
         effective_lamport: 0,
         policy: policy.clone(),
     }];
+    policy_timeline_metadata_for_timeline(&timeline)
+}
+
+pub fn policy_timeline_metadata_for_timeline(
+    timeline: &[PolicyTimelineEntry],
+) -> PolicyTimelineParityMetadata {
+    let mut sorted_timeline = if timeline.is_empty() {
+        vec![PolicyTimelineEntry {
+            effective_lamport: 0,
+            policy: Policy::default(),
+        }]
+    } else {
+        timeline.to_vec()
+    };
+    sorted_timeline.sort_by_key(|entry| entry.effective_lamport);
+    let cutover_lamport = policy_timeline_cutover_lamport(&sorted_timeline).unwrap_or(0);
+    let mut transition_cutovers = sorted_timeline
+        .iter()
+        .map(|entry| entry.effective_lamport)
+        .collect::<Vec<u64>>();
+    transition_cutovers.dedup();
+    if transition_cutovers.is_empty() {
+        transition_cutovers.push(0);
+    }
+    let transition_cutovers = if cutover_lamport == 0 {
+        vec![0]
+    } else {
+        transition_cutovers
+    };
     PolicyTimelineParityMetadata {
-        hash_hex: policy_timeline_hash(&timeline).to_hex(),
-        cutover_lamport: policy_timeline_cutover_lamport(&timeline).unwrap_or(0),
+        hash_hex: policy_timeline_hash(&sorted_timeline).to_hex(),
+        cutover_lamport,
+        transition_cutovers,
     }
 }
 
@@ -186,9 +221,15 @@ fn signature_payload(
     payload_digest_policy: &str,
     policy_timeline_hash_hex: &str,
     policy_timeline_cutover_lamport: u64,
+    policy_timeline_transition_cutovers: &[u64],
 ) -> String {
+    let transition_cutovers = policy_timeline_transition_cutovers
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<String>>()
+        .join(",");
     format!(
-        "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}",
+        "format_version={}|source_room={}|min_supported={}|max_supported={}|payload_digest_policy={}|policy_timeline_hash={}|policy_timeline_cutover_lamport={}|policy_timeline_transition_cutovers={}",
         format_version,
         source_room,
         compatibility_window.min_supported,
@@ -196,6 +237,7 @@ fn signature_payload(
         payload_digest_policy,
         policy_timeline_hash_hex,
         policy_timeline_cutover_lamport,
+        transition_cutovers,
     )
 }
 
@@ -274,6 +316,7 @@ mod tests {
             &signer,
             &policy_metadata.hash_hex,
             policy_metadata.cutover_lamport,
+            &policy_metadata.transition_cutovers,
         )
         .expect("manifest should build");
         let m2 = build_external_manifest_document(
@@ -282,6 +325,7 @@ mod tests {
             &signer,
             &policy_metadata.hash_hex,
             policy_metadata.cutover_lamport,
+            &policy_metadata.transition_cutovers,
         )
         .expect("manifest should build");
 
@@ -305,6 +349,7 @@ mod tests {
             &signer,
             &policy_metadata.hash_hex,
             policy_metadata.cutover_lamport,
+            &policy_metadata.transition_cutovers,
         )
         .expect("manifest should build");
 

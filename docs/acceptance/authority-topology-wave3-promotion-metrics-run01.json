@@ -1,0 +1,21 @@
+{
+  "artifact": "authority-topology-wave3-promotion-metrics-run01",
+  "recorded_at": "2026-05-27T21:00:00.0000000-05:00",
+  "wave": 3,
+  "phase": "Authority topology — promotion metrics",
+  "status": "recorded",
+  "source_plan": "docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md",
+  "deliverables": [
+    {
+      "id": "promotion-metrics",
+      "summary": "nodalmerge_topology_promotion_total (stage/outcome/reason) and nodalmerge_topology_promotion_seconds histogram on propose/validate/apply."
+    }
+  ],
+  "vectors": [
+    "instrumentation: server/src/promotion_metrics.rs wired from promotion.rs handlers"
+  ],
+  "completion_gate": {
+    "metrics_described_at_init": true,
+    "dashboards": "deferred"
+  }
+}

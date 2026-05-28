@@ -1,4 +1,5 @@
 import initBridge, { SyncStore } from "nodalmerge-bridge";
+import { resolvePeerLocalPersistence } from "./persistence/peer-local-indexeddb.js";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -316,6 +317,21 @@ export class NodalMergeSdk {
     this.offlinePersistenceKey = options.offline?.persistenceKey ?? null;
     this.transportPolicy = normalizeTransportMode(options.transport?.mode);
     this.activeTransportMode = "ws-only";
+    this.peerLocalPersistence = null;
+    this.peerLocalHydrateReport = null;
+  }
+
+  schedulePeerLocalPersist() {
+    if (this.peerLocalPersistence && this.store) {
+      this.peerLocalPersistence.schedulePersist(this.store, this.options.roomId);
+    }
+  }
+
+  async flushPeerLocalGraph() {
+    if (!this.peerLocalPersistence || !this.store) {
+      return null;
+    }
+    return this.peerLocalPersistence.flush(this.store, this.options.roomId);
   }
 
   ensureConnectedForRuntime(opName) {
@@ -374,6 +390,16 @@ export class NodalMergeSdk {
     if (this.options.tickIntervalMs && this.options.maxOpsPerTick) {
       this.store.set_tick_config(BigInt(this.options.tickIntervalMs), this.options.maxOpsPerTick);
     }
+
+    this.peerLocalPersistence = resolvePeerLocalPersistence(this.options);
+    if (this.peerLocalPersistence) {
+      await this.peerLocalPersistence.open();
+      this.peerLocalHydrateReport = await this.peerLocalPersistence.hydrate(
+        this.store,
+        this.options.roomId,
+        { migrateLegacyDemo: this.options.persistence?.migrateLegacyDemo === true }
+      );
+    }
   }
 
   room = {
@@ -420,6 +446,7 @@ export class NodalMergeSdk {
         if (msg.type === "pack" && typeof msg.nodes === "string") {
           this.store.import_pack(msg.nodes);
           this.emitState();
+          this.schedulePeerLocalPersist();
         }
 
         if (msg.type === "blob-pack" && Array.isArray(msg.blobs)) {
@@ -429,6 +456,7 @@ export class NodalMergeSdk {
             }
           }
           this.emitState();
+          this.schedulePeerLocalPersist();
         }
 
         if (shouldEmitPresenceEvent(msg)) {
@@ -475,6 +503,7 @@ export class NodalMergeSdk {
     disconnect: () => {
       this.manualDisconnect = true;
       this.clearReconnectTimer();
+      void this.flushPeerLocalGraph();
       if (this.ws) {
         this.ws.close();
       }
@@ -483,9 +512,32 @@ export class NodalMergeSdk {
     }
   };
 
+  persistence = {
+    isEnabled: () => this.peerLocalPersistence != null,
+    kind: () => this.peerLocalPersistence?.kind ?? null,
+    hydrateReport: () => this.peerLocalHydrateReport,
+    flush: () => this.flushPeerLocalGraph(),
+    recover: async () => {
+      if (!this.peerLocalPersistence || !this.store) {
+        throw new Error("persistence is not configured");
+      }
+      const report = await this.peerLocalPersistence.recover(this.store, this.options.roomId);
+      this.peerLocalHydrateReport = report;
+      this.schedulePeerLocalPersist();
+      return report;
+    },
+    clearRoom: async () => {
+      if (!this.peerLocalPersistence) {
+        throw new Error("persistence is not configured");
+      }
+      return this.peerLocalPersistence.clearRoom(this.options.roomId);
+    }
+  };
+
   sync = {
     set: (key, value) => {
       this.store.set(key, textEncoder.encode(value));
+      this.schedulePeerLocalPersist();
     },
 
     get: (key) => {
@@ -506,6 +558,7 @@ export class NodalMergeSdk {
 
     del: (key) => {
       this.store.delete(key);
+      this.schedulePeerLocalPersist();
     },
 
     insertTextAt: (key, pos, text) => {
@@ -516,6 +569,7 @@ export class NodalMergeSdk {
         throw new Error("insertTextAt pos must be a non-negative integer");
       }
       this.store.insert_text_range(key, pos, text);
+      this.schedulePeerLocalPersist();
     },
 
     deleteTextAt: (key, pos, len) => {
@@ -529,6 +583,7 @@ export class NodalMergeSdk {
         return;
       }
       this.store.delete_text_range(key, pos, len);
+      this.schedulePeerLocalPersist();
     },
 
     insertTextRange: (key, anchor, text) => {
@@ -552,6 +607,7 @@ export class NodalMergeSdk {
         default:
           throw new Error("Unsupported insert anchor kind");
       }
+      this.schedulePeerLocalPersist();
     },
 
     deleteTextRange: (key, anchor, len) => {
@@ -575,6 +631,7 @@ export class NodalMergeSdk {
         default:
           throw new Error("Unsupported delete anchor kind");
       }
+      this.schedulePeerLocalPersist();
     },
 
     push: () => {
@@ -582,6 +639,7 @@ export class NodalMergeSdk {
         type: "pack",
         nodes: this.store.export_all_nodes()
       });
+      this.schedulePeerLocalPersist();
     },
 
     pull: () => {
@@ -937,6 +995,11 @@ export class NodalMergeSdk {
     this.emit("state", this.topology.snapshot());
   }
 }
+
+export {
+  createPeerLocalIndexedDbPersistence,
+  resolvePeerLocalPersistence
+} from "./persistence/peer-local-indexeddb.js";
 
 export async function createNodalMergeSdk(options) {
   const client = new NodalMergeSdk(options);

@@ -437,6 +437,68 @@ public class RuntimeMessageProcessorTests
     }
 
     [Fact]
+    public void Topology_propose_without_capability_returns_control_plane_forbidden_error_envelope()
+    {
+        using var metrics = new ControlPlaneDenyMeterCapture();
+        var bridge = new FakeRuntimeCommandBridge();
+        var mapper = new RuntimeProtocolMapper();
+        var processor = new RuntimeMessageProcessor(bridge, mapper);
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "parent-a",
+            PeerPubkeyHex = "peer-a"
+        };
+
+        var result = processor.ProcessIncomingText(
+            "{\"type\":\"topology.propose-promotion\",\"parent_room_id\":\"parent-a\",\"child_room_id\":\"child-a\",\"child_checkpoint_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"payload_ref\":\"artifact://x\"}",
+            state
+        );
+
+        Assert.False(result.DispatchSucceeded);
+        Assert.Contains("reject.control_plane_forbidden: command=topology.propose-promotion requires=topology.admin", result.OutboundMessages[0]);
+        Assert.Empty(bridge.Commands);
+    }
+
+    [Fact]
+    public void Topology_promotion_stub_executes_propose_validate_apply_without_bridge_call()
+    {
+        var bridge = new FakeRuntimeCommandBridge();
+        var mapper = new RuntimeProtocolMapper();
+        var processor = new RuntimeMessageProcessor(bridge, mapper);
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "parent-a",
+            PeerPubkeyHex = "peer-a"
+        };
+        state.SessionCapabilities.Add("topology.admin");
+
+        var propose = processor.ProcessIncomingText(
+            "{\"type\":\"topology.propose-promotion\",\"parent_room_id\":\"parent-a\",\"child_room_id\":\"child-a\",\"child_checkpoint_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"payload_ref\":\"artifact://dotnet\",\"idempotency_key\":\"prop-dotnet\"}",
+            state
+        );
+        Assert.True(propose.DispatchSucceeded);
+        Assert.Contains("\"type\":\"topology.propose-promotion.completed\"", propose.OutboundMessages[0]);
+
+        var validate = processor.ProcessIncomingText(
+            "{\"type\":\"topology.validate-promotion\",\"proposal_id\":\"prop-dotnet\"}",
+            state
+        );
+        Assert.True(validate.DispatchSucceeded);
+        Assert.Contains("\"type\":\"topology.validate-promotion.completed\"", validate.OutboundMessages[0]);
+
+        var apply = processor.ProcessIncomingText(
+            "{\"type\":\"topology.apply-promotion\",\"proposal_id\":\"prop-dotnet\"}",
+            state
+        );
+        Assert.True(apply.DispatchSucceeded);
+        Assert.Contains("\"type\":\"topology.apply-promotion.completed\"", apply.OutboundMessages[0]);
+        Assert.Contains("\"audit_key\":\"_topology/promotion/prop-dotnet\"", apply.OutboundMessages[0]);
+        Assert.Empty(bridge.Commands);
+    }
+
+    [Fact]
     public void Archive_import_executes_local_stub_and_emits_import_completed_with_checkpoint_hash_without_bridge_call()
     {
         var bridge = new FakeRuntimeCommandBridge();

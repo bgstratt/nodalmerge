@@ -1,0 +1,47 @@
+---
+title: Introduction
+description: What NodalMerge is and why it exists
+---
+
+# NodalMerge
+
+NodalMerge is a distributed convergence runtime for building local-first, multi-user systems with deterministic replication.
+
+It combines:
+- CRDT-based state convergence
+- Content-addressed transactional history
+- Speculative execution with authoritative reconciliation
+- Replayable and forkable state graphs
+
+This enables systems where:
+- every client is offline-first
+- every mutation is replayable
+- every state is deterministic across peers
+
+---
+
+## Core Idea
+
+Traditional systems assume:
+
+> one server → many clients
+
+NodalMerge assumes:
+
+> many autonomous nodes → converging shared reality
+
+---
+
+## Key Properties
+
+- Deterministic replication
+- Offline-first by default
+- Replayable history graph (DAG)
+- Authoritative + speculative dual-lane execution
+- Forkable state timelines
+
+---
+
+## Start Here
+
+👉 Go to Quickstart to build your first replicated document.

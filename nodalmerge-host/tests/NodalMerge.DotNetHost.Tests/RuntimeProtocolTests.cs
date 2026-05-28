@@ -1767,4 +1767,74 @@ public class RuntimeProtocolTests
         Assert.Contains("\"type\":\"archive.import.rejected\"", result.OutboundMessages[4]);
         Assert.Contains("\"reason_class\":\"reject.archive_digest_mismatch\"", result.OutboundMessages[4]);
     }
+
+    [Fact]
+    public void Topology_create_child_maps_to_host_command_when_topology_admin_capability_present()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "parent-a",
+            PeerPubkeyHex = "peer-a"
+        };
+        state.SessionCapabilities.Add("topology.admin");
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"topology.create-child\",\"child_room_id\":\"child-a\",\"child_purpose\":\"task\",\"created_by\":\"mgr\",\"promotion_policy_id\":\"promotion-based\",\"parent_checkpoint\":{\"frontier\":[\"seq:1\"],\"canonical_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+            state
+        );
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.CommandJsons);
+        Assert.Contains("CreateTopologyChild", result.CommandJsons[0]);
+        Assert.Contains("\"child_room_id\":\"child-a\"", result.CommandJsons[0]);
+    }
+
+    [Fact]
+    public void Topology_propose_promotion_requires_topology_admin_capability()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "parent-a",
+            PeerPubkeyHex = "peer-a"
+        };
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"topology.propose-promotion\",\"parent_room_id\":\"parent-a\",\"child_room_id\":\"child-a\",\"child_checkpoint_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"payload_ref\":\"artifact://x\"}",
+            state
+        );
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("reject.control_plane_forbidden: command=topology.propose-promotion requires=topology.admin", result.Error);
+    }
+
+    [Fact]
+    public void Event_mapper_converts_topology_events_to_runtime_messages()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var eventsJson =
+            "[" +
+            "{\"ChildRoomCreated\":{\"child_room_id\":\"child-a\",\"lineage\":{\"parent_room_id\":\"parent-a\",\"promotion_policy_id\":\"promotion-based\"}}}," +
+            "{\"RoomLineageDescribed\":{\"room_id\":\"child-a\",\"lineage\":{\"parent_room_id\":\"parent-a\"},\"ancestors\":[]}}," +
+            "{\"ChildrenListed\":{\"parent_room_id\":\"parent-a\",\"children\":[{\"child_room_id\":\"child-a\"}]}}," +
+            "{\"PromotionProposed\":{\"proposal_id\":\"prop-1\",\"parent_room_id\":\"parent-a\",\"child_room_id\":\"child-a\",\"child_checkpoint_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"payload_ref\":\"artifact://x\",\"proposal_digest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}}," +
+            "{\"PromotionValidated\":{\"proposal_id\":\"prop-1\",\"validation_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}}," +
+            "{\"PromotionApplied\":{\"proposal_id\":\"prop-1\",\"parent_room_id\":\"parent-a\",\"parent_new_canonical_hash\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"audit_key\":\"_topology/promotion/prop-1\"}}" +
+            "]";
+
+        var result = mapper.MapEventsJsonToOutboundMessages(eventsJson);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(6, result.OutboundMessages.Count);
+        Assert.Contains("\"type\":\"topology.create-child.completed\"", result.OutboundMessages[0]);
+        Assert.Contains("\"type\":\"topology.describe-lineage.result\"", result.OutboundMessages[1]);
+        Assert.Contains("\"type\":\"topology.list-children.result\"", result.OutboundMessages[2]);
+        Assert.Contains("\"type\":\"topology.propose-promotion.completed\"", result.OutboundMessages[3]);
+        Assert.Contains("\"type\":\"topology.validate-promotion.completed\"", result.OutboundMessages[4]);
+        Assert.Contains("\"type\":\"topology.apply-promotion.completed\"", result.OutboundMessages[5]);
+        Assert.Contains("\"audit_key\":\"_topology/promotion/prop-1\"", result.OutboundMessages[5]);
+    }
 }

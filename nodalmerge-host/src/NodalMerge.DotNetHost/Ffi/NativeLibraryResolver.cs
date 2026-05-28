@@ -23,20 +23,44 @@ public static class NativeLibraryResolver
         _configured = true;
     }
 
-    private static nint ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
+    internal static nint ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
     {
-        if (!string.Equals(libraryName, NativeMethods.LibraryName, StringComparison.Ordinal))
+        if (string.Equals(libraryName, NativeMethods.LibraryName, StringComparison.Ordinal))
         {
-            return nint.Zero;
+            return LoadFromCandidates(
+                Environment.GetEnvironmentVariable("NODALMERGE_HOST_FFI_DLL"),
+                GetHostPlatformLibraryFileName(),
+                assembly,
+                searchPath
+            );
         }
 
-        var explicitPath = Environment.GetEnvironmentVariable("NODALMERGE_HOST_FFI_DLL");
+        if (string.Equals(libraryName, LocalNativeMethods.LibraryName, StringComparison.Ordinal))
+        {
+            return LoadFromCandidates(
+                Environment.GetEnvironmentVariable("NODALMERGE_LOCAL_FFI_DLL"),
+                GetLocalPlatformLibraryFileName(),
+                assembly,
+                searchPath
+            );
+        }
+
+        return nint.Zero;
+    }
+
+    private static nint LoadFromCandidates(
+        string? explicitPath,
+        string fileName,
+        Assembly assembly,
+        DllImportSearchPath? searchPath
+    )
+    {
         if (!string.IsNullOrWhiteSpace(explicitPath) && File.Exists(explicitPath))
         {
             return NativeLibrary.Load(explicitPath);
         }
 
-        foreach (var candidate in BuildCandidatePaths())
+        foreach (var candidate in BuildCandidatePaths(fileName))
         {
             if (!File.Exists(candidate))
             {
@@ -56,18 +80,16 @@ public static class NativeLibraryResolver
 
         try
         {
-            return NativeLibrary.Load(libraryName, assembly, searchPath);
+            return NativeLibrary.Load(fileName, assembly, searchPath);
         }
         catch
         {
             return nint.Zero;
         }
-
     }
 
-    private static IEnumerable<string> BuildCandidatePaths()
+    private static IEnumerable<string> BuildCandidatePaths(string fileName)
     {
-        var fileName = GetPlatformLibraryFileName();
         var baseDir = AppContext.BaseDirectory;
         var cwd = Directory.GetCurrentDirectory();
 
@@ -104,7 +126,7 @@ public static class NativeLibraryResolver
         }
     }
 
-    private static string GetPlatformLibraryFileName()
+    private static string GetHostPlatformLibraryFileName()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
@@ -117,5 +139,20 @@ public static class NativeLibraryResolver
         }
 
         return "libnodalmerge_host_ffi.so";
+    }
+
+    private static string GetLocalPlatformLibraryFileName()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return "nodalmerge_runtime_local_ffi.dll";
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            return "libnodalmerge_runtime_local_ffi.dylib";
+        }
+
+        return "libnodalmerge_runtime_local_ffi.so";
     }
 }

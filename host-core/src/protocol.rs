@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use nodalmerge_core::{ArchiveWsResponse, Ibf, MerkleSearchTree, NodeId, SyncCapabilities};
+use nodalmerge_core::{ArchiveWsResponse, Ibf, MerkleSearchTree, NodeId, SyncCapabilities, TopologyWsResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -366,6 +366,12 @@ pub fn serialize_archive_ws_response(
     serde_json::to_string(response)
 }
 
+pub fn serialize_topology_ws_response(
+    response: &TopologyWsResponse,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(response)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicySetEnvelope {
     #[serde(rename = "type")]
@@ -578,6 +584,11 @@ mod tests {
         ArchiveImported,
         ArchiveReasonClass,
         ArchiveRejected,
+        ChildRoomCreated,
+        ParentCheckpoint,
+        PromotionApplied,
+        RoomLineage,
+        TopologyWsResponse,
         Hash,
     };
 
@@ -804,6 +815,41 @@ mod tests {
     }
 
     #[test]
+    fn serialize_topology_create_child_completed_preserves_wire_type() {
+        let response = TopologyWsResponse::CreateChildCompleted(ChildRoomCreated {
+            child_room_id: "child-a".to_string(),
+            lineage: RoomLineage {
+                parent_room_id: "parent-a".to_string(),
+                parent_checkpoint: ParentCheckpoint {
+                    frontier: vec!["seq:1".to_string()],
+                    canonical_hash: "aa".repeat(32),
+                    policy_timeline_hash: None,
+                },
+                child_purpose: "task".to_string(),
+                created_by: "mgr".to_string(),
+                created_at_hlc: 1,
+                promotion_policy_id: "promotion-based".to_string(),
+            },
+        });
+        let json = serialize_topology_ws_response(&response).expect("topology response should serialize");
+        assert!(json.contains("\"type\":\"topology.create-child.completed\""));
+        assert!(json.contains("\"child_room_id\":\"child-a\""));
+    }
+
+    #[test]
+    fn serialize_topology_apply_promotion_completed_preserves_wire_type() {
+        let response = TopologyWsResponse::ApplyPromotionCompleted(PromotionApplied {
+            proposal_id: "prop-1".to_string(),
+            parent_room_id: "parent-a".to_string(),
+            parent_new_canonical_hash: "bb".repeat(32),
+            audit_key: "_topology/promotion/prop-1".to_string(),
+        });
+        let json = serialize_topology_ws_response(&response).expect("topology response should serialize");
+        assert!(json.contains("\"type\":\"topology.apply-promotion.completed\""));
+        assert!(json.contains("\"audit_key\":\"_topology/promotion/prop-1\""));
+    }
+
+    #[test]
     fn serialize_archive_export_result_envelope_preserves_wire_type() {
         let response = ArchiveWsResponse::ExportResult(ArchiveExported {
             room: "room-a".to_string(),
@@ -825,6 +871,7 @@ mod tests {
             payload_digest_policy: "strict_sha256_v1".to_string(),
             policy_timeline_hash: "bb".repeat(32),
             policy_timeline_cutover_lamport: 0,
+            policy_timeline_transition_cutovers: vec![0],
         });
 
         let json = serialize_archive_ws_response(&response)

@@ -1,8 +1,8 @@
 # Authority and Room Topology Execution Plan 
 
 Owner: Runtime + host + operator streams
-Status: Planned
-Last updated: 2026-05-25
+Status: ClosedForDeclaredSlice (Wave 2 Phases A–D; see authority-topology-phased-closeout.json)
+Last updated: 2026-05-27
 
 Companion guidance:
 
@@ -10,7 +10,7 @@ Companion guidance:
 
 ## 1. Why this plan exists
 
-ActiveSync already has per-room authority controls and replay/fork direction, but multi-room systems need a frozen contract for:
+NodalMerge already has per-room authority controls and replay/fork direction, but multi-room systems need a frozen contract for:
 
 1. what authority means in each room role
 2. how parent and child rooms are linked for replay and audit
@@ -112,6 +112,39 @@ Acceptance criteria:
 1. approved by runtime, host, and operator maintainers
 2. no ambiguity about parent checkpoint semantics
 
+Phase A working draft (2026-05-27) — evidence: `docs/acceptance/authority-topology-phasea-contract-freeze-run01.json`
+
+1. **Authority role matrix (terminology freeze v1)**
+
+| Role / lane | Mainline room | Child work room | Shared context room |
+|---|---|---|---|
+| Server authority | Validates policy/capability; accepts canonical ops | Same | Same; may restrict writes to subset of identities |
+| Owner authority | Control-plane policy changes for room family | Delegated per policy (often owner of parent family) | Typically parent-owner scoped |
+| Worker authority | Usually none for canonical promotion payloads | Intent/canonical scoped to child namespace; no silent parent mutation | Read-mostly default; writes only where policy allows |
+
+2. **Room lineage metadata schema (draft fields)**  
+   Immutable at child creation (corrections via new child room, not in-place rewrite):
+
+   | Field | Type (conceptual) | Required | Notes |
+   |---|---|:---:|---|
+   | `parent_room_id` | stable string id | yes | Parent room identifier in host catalog |
+   | `parent_checkpoint` | `{ frontier: FrontierToken, canonical_hash: HashHex, policy_timeline_hash?: HashHex }` | yes | Tie child to explicit parent cut; `policy_timeline_hash` optional but recommended when policy timelines are in use |
+   | `child_purpose` | bounded string code | yes | Task/workstream label for audit |
+   | `created_by` | identity id | yes | Principal that created the child |
+   | `created_at_hlc` | HLC | yes | Wall-free ordering for audit |
+   | `promotion_policy_id` | policy id | yes | Selects reference-only vs promotion-based convergence rules |
+
+3. **Promotion command/event draft (control plane)**  
+   Symmetric naming across host-core and server/ws (exact envelope mapping in Phase B):
+
+   | Operation | Request (conceptual) | Success result | Failure |
+   |---|---|---|---|
+   | Create child | `CreateChildRoomFromParentCheckpoint { parent_room_id, parent_checkpoint, child_purpose, promotion_policy_id, ... }` | `ChildRoomCreated { child_room_id, lineage }` | `reject.lineage_parent_checkpoint_mismatch`, `reject.lineage_policy_unknown` |
+   | Describe lineage | `DescribeRoomLineage { room_id }` | `RoomLineageDescribed { self, ancestors[] }` | `reject.room_not_found` |
+   | Propose | `ProposePromotion { parent_room_id, child_room_id, child_checkpoint_hash, payload_ref, ... }` | `PromotionProposed { proposal_id, digest }` | `reject.promotion_child_checkpoint_mismatch`, `reject.promotion_policy_denied` |
+   | Validate | `ValidatePromotion { proposal_id }` | `PromotionValidated { proposal_id, validation_digest }` | `reject.promotion_invalid_lineage`, bounded taxonomy |
+   | Apply | `ApplyPromotion { proposal_id }` | `PromotionApplied { parent_room_id, parent_new_canonical_hash, audit }` | `reject.promotion_stale_parent`, `reject.promotion_apply_conflict` |
+
 ### Phase B - Runtime lineage metadata
 
 Deliverables:
@@ -124,6 +157,14 @@ Acceptance criteria:
 
 1. new child rooms always carry lineage metadata
 2. lineage queries are deterministic and replay-stable
+
+Phase B execution record (2026-05-27):
+
+1. Shared types in `core/src/room_lineage.rs` (`RoomLineage`, `ParentCheckpoint`, `LineageReasonClass`, WS result envelopes).
+2. Server `lineage` module + `Room.lineage` + `Rooms.children_index`; `create_child_room` validates parent canonical hash at creation time.
+3. WS routes: `topology.create-child`, `topology.describe-lineage`, `topology.list-children` (requires `topology.admin` capability or server peer).
+4. Evidence: `docs/acceptance/authority-topology-phaseb-lineage-run01.json`.
+5. Next: `nodalmerge topology` CLI wiring (Phase D); host-core envelope parity for promotion commands.
 
 ### Phase C - Promotion pipeline
 
@@ -138,6 +179,14 @@ Acceptance criteria:
 1. promotion pass/fail behavior is deterministic under reconnect/replay
 2. parent canonical hash parity vectors pass
 
+Phase C execution record (2026-05-27):
+
+1. `PromotionReasonClass` / result types in `core/src/room_lineage.rs`.
+2. Server `promotion` module + `Rooms.promotion_proposals`; WS `topology.propose-promotion`, `topology.validate-promotion`, `topology.apply-promotion` (`topology.admin`).
+3. Apply commits canonical audit map entry `_topology/promotion/{proposal_id}` on parent; idempotent re-apply.
+4. Evidence: `docs/acceptance/authority-topology-phasec-promotion-run01.json` (AUTH-ROOM-003/004/005 slice).
+5. Deferred: durable proposal store across restart, host-core mapping, full multi-peer parity vectors.
+
 ### Phase D - CLI/operator workflows
 
 Deliverables:
@@ -150,6 +199,14 @@ Acceptance criteria:
 
 1. headless pod workflows run without browser SDK dependency
 2. operational drills pass for restart and retry scenarios
+
+Phase D execution record (2026-05-27):
+
+1. Crate `nodalmerge-cli` / binary `nodalmerge` with `topology` subcommands matching playbook §7a.
+2. WebSocket transport to `nodalmerge-server`; `topology.admin` token on locked rooms.
+3. Evidence: `docs/acceptance/authority-topology-phased-cli-run01.json` (`CLI-TOPOLOGY-001`, `CLI-TOPOLOGY-002`).
+4. Wave 2 topology track closeout: `docs/acceptance/authority-topology-phased-closeout.json`.
+5. Deferred: automated operator drill runner, promotion metrics dashboards (Phase E / Wave 3).
 
 ### Phase E - Hardening and scale
 

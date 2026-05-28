@@ -1,0 +1,8 @@
+{
+  "name": "archive_negative_compatibility_window_no_overlap",
+  "room_id": "parity-archive-neg-compat-no-overlap",
+  "scenario": "archive_negative_compatibility_window_no_overlap",
+  "expected_sequence": ["welcome", "archive.validate.rejected"],
+  "expected_pack_count": 0,
+  "notes": "External file manifest with compatibility window that does not overlap runtime support rejects deterministically as unsupported format."
+}

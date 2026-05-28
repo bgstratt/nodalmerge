@@ -304,10 +304,12 @@ fn archive_export_003_envelope_carries_policy_timeline_hash_and_cutover_metadata
         payload_digest_policy: "strict_sha256_v1".to_string(),
         policy_timeline_hash: "bb".repeat(32),
         policy_timeline_cutover_lamport: 0,
+        policy_timeline_transition_cutovers: vec![0],
     });
 
     let json = serde_json::to_string(&response).expect("archive export envelope should serialize");
     assert!(json.contains("\"type\":\"archive.export.result\""));
     assert!(json.contains("\"max_supported\":\"2\""));
     assert!(json.contains("\"policy_timeline_cutover_lamport\":0"));
+    assert!(json.contains("\"policy_timeline_transition_cutovers\":[0]"));
 }

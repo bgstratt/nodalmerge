@@ -456,6 +456,7 @@ public class RuntimeWebSocketLoopRunnerTests
             roomBroker,
             tokenValidationService: null,
             dagPersistenceService: null,
+            peerLocalPersistenceService: null,
             CancellationToken.None
         );
 

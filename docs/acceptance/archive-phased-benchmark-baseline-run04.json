@@ -1,0 +1,124 @@
+{
+  "artifact": "archive-phased-benchmark-baseline-run04",
+  "recorded_at": "2026-05-27T00:02:57.4601259-05:00",
+  "phase": "Phase D object-manifest parity profile",
+  "scope": [
+    "ARCHIVE-DRILL-001",
+    "ARCHIVE-DRILL-002"
+  ],
+  "measurement_method": {
+    "runtime_harness": "In-process repeated runtime harness test (`archive_profile_002_object_manifest_parity_reports_p50_p95`) comparing file:// and object:// archive refs over the same export/validate/import operation paths",
+    "parity_rule": "Absolute p95 delta between file and object lanes must remain <= 5.0 ms for export, validate, and import",
+    "memory_gate": "Process peak working set sampling for the parity harness cargo command"
+  },
+  "targets": {
+    "export_manifest_build_ms": 100,
+    "validate_full_integrity_ms": 100,
+    "import_full_apply_ms": 100,
+    "peak_memory_mb": 128,
+    "object_file_parity_abs_delta_ms": 5.0
+  },
+  "iterations": 25,
+  "file_operation_runtime_ms": {
+    "export_total": {
+      "p50_ms": 8.18,
+      "p95_ms": 9.41,
+      "min_ms": 7.99,
+      "max_ms": 9.71
+    },
+    "validate_total": {
+      "p50_ms": 0.3,
+      "p95_ms": 0.37,
+      "min_ms": 0.27,
+      "max_ms": 0.39
+    },
+    "import_total": {
+      "p50_ms": 10.24,
+      "p95_ms": 11.5,
+      "min_ms": 9.72,
+      "max_ms": 11.57
+    }
+  },
+  "object_operation_runtime_ms": {
+    "export_total": {
+      "p50_ms": 8.19,
+      "p95_ms": 9.46,
+      "min_ms": 8.01,
+      "max_ms": 14.08
+    },
+    "validate_total": {
+      "p50_ms": 0.3,
+      "p95_ms": 0.35,
+      "min_ms": 0.29,
+      "max_ms": 0.63
+    },
+    "import_total": {
+      "p50_ms": 10.17,
+      "p95_ms": 11.24,
+      "min_ms": 9.83,
+      "max_ms": 11.42
+    }
+  },
+  "parity_evaluation": {
+    "threshold_ms": 5.0,
+    "export_p95_abs_delta_ms": 0.05,
+    "validate_p95_abs_delta_ms": 0.02,
+    "import_p95_abs_delta_ms": 0.26,
+    "pass": {
+      "export": true,
+      "validate": true,
+      "import": true
+    }
+  },
+  "gate_evaluation": {
+    "file_export_manifest_build": {
+      "measured_ms": 9.41,
+      "target_ms": 100,
+      "pass": true
+    },
+    "file_validate_full_integrity": {
+      "measured_ms": 0.37,
+      "target_ms": 100,
+      "pass": true
+    },
+    "file_import_full_apply": {
+      "measured_ms": 11.5,
+      "target_ms": 100,
+      "pass": true
+    },
+    "object_export_manifest_build": {
+      "measured_ms": 9.46,
+      "target_ms": 100,
+      "pass": true
+    },
+    "object_validate_full_integrity": {
+      "measured_ms": 0.35,
+      "target_ms": 100,
+      "pass": true
+    },
+    "object_import_full_apply": {
+      "measured_ms": 11.24,
+      "target_ms": 100,
+      "pass": true
+    },
+    "peak_memory": {
+      "measured_mb": 13.0,
+      "target_mb": 128,
+      "pass": true
+    }
+  },
+  "memory_profile": {
+    "command": "cargo test -p nodalmerge-server archive_profile_002_object_manifest_parity_reports_p50_p95 --lib",
+    "duration_ms": 2395.56,
+    "peak_working_set_mb": 13.0,
+    "exit_code": 0
+  },
+  "validation": {
+    "archive_profile_002_object_manifest_parity_reports_p50_p95": "passed",
+    "archive_profile_001_operation_runtime_sections_reports_p50_p95": "passed"
+  },
+  "notes": [
+    "Object-manifest parity remains within 0.26 ms p95 absolute delta across export/validate/import operations, well inside the 5.0 ms threshold.",
+    "Run-04 completes the object-manifest parity checkpoint with latency and memory gates preserved for both file and object lanes."
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "archive_positive_policy_timeline_transition_non_zero",
+  "room_id": "parity-archive-pos-policy-transition",
+  "scenario": "archive_positive_policy_timeline_transition_non_zero",
+  "expected_sequence": ["welcome", "archive.export.result"],
+  "expected_pack_count": 0,
+  "notes": "Archive export emits non-zero policy timeline cutover progression after multiple policy updates in the source room."
+}

@@ -1,0 +1,70 @@
+---
+title: Mental Model
+---
+
+# Mental Model
+
+NodalMerge is built around deterministic replayable state graphs.
+
+Understanding several core primitives makes the entire system easier to reason about.
+
+## Room
+
+A room is an isolated convergence domain.
+
+A room contains:
+
+- Operations
+- Snapshots
+- Blobs
+- Presence state
+- Replay history
+- Branch lineage
+
+## Transaction
+
+A transaction is an immutable operation bundle.
+
+Transactions contain:
+
+- Author identity
+- Lamport timestamp
+- Parent references
+- Operations
+- Optional signatures
+
+Transactions are content-addressed and replayable.
+
+## Node
+
+A node wraps a transaction and participates in the room DAG.
+
+Nodes form the replayable history graph.
+
+## DAG
+
+Room history forms a directed acyclic graph.
+
+This allows:
+
+- Concurrent edits
+- Replay
+- Forking
+- Branching
+- Deterministic merge
+
+## Convergence
+
+Peers eventually resolve to identical state after receiving equivalent history.
+
+Deterministic ordering rules guarantee identical replay results.
+
+## Speculative execution
+
+Clients apply operations locally immediately.
+
+This provides:
+
+- Instant UI feedback
+- Offline operation
+Branches inherit deterministic state while diverging independently afterward.

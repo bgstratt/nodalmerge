@@ -1,0 +1,24 @@
+[package]
+name = "nodalmerge-runtime-local-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "C ABI wrapper for nodalmerge-runtime-local (peer-local persistence)"
+readme = "README.md"
+keywords = ["crdt", "sync", "ffi", "persistence"]
+categories = ["api-bindings"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "nodalmerge_runtime_local_ffi"
+
+[dependencies]
+nodalmerge-core = { path = "../core" }
+nodalmerge-runtime-local = { path = "../runtime-local" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+
+[dev-dependencies]
+base64 = "0.22"
+ed25519-dalek = { workspace = true }
+tempfile = "3"

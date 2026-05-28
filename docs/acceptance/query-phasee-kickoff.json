@@ -1,0 +1,35 @@
+{
+  "artifact": "query-phasee-kickoff",
+  "recorded_at": "2026-05-26T23:15:19.5840054-05:00",
+  "phase": "Phase E kickoff",
+  "summary": [
+    "Core/server pagination vectors now include deterministic multi-page ordering checks.",
+    "Core/server vectors now include pagination digest continuity checks against full projection digests.",
+    "Phase E baseline guardrails are active prior to benchmark/SLO expansion."
+  ],
+  "commands": [
+    {
+      "command": "cargo test -p nodalmerge-core query_ --test query_materialization_vectors",
+      "result": "passed",
+      "details": "includes query_det_003 + query_det_004"
+    },
+    {
+      "command": "cargo test -p nodalmerge-server server_query_ --test query_materialization_vectors",
+      "result": "passed",
+      "details": "includes server_query_det_003 + server_query_det_004"
+    }
+  ],
+  "phasee_targets": {
+    "latency": {
+      "projection_build_p95_ms": "TBD",
+      "projection_read_p95_ms": "TBD",
+      "projection_rebuild_p95_ms": "TBD"
+    },
+    "memory": {
+      "projection_cache_ceiling_mb": "TBD"
+    },
+    "determinism": {
+      "digest_drift_at_fixed_checkpoint": "must remain zero"
+    }
+  }
+}

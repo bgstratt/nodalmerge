@@ -1,0 +1,34 @@
+{
+  "artifact": "authority-topology-phaseb-lineage-run01",
+  "recorded_at": "2026-05-27T19:00:00.0000000-05:00",
+  "wave": 2,
+  "phase": "Authority and room topology Phase B (runtime lineage)",
+  "status": "completed",
+  "source_plan": "docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md",
+  "crate": "nodalmerge-core + nodalmerge-server",
+  "deliverables": [
+    "RoomLineage / ParentCheckpoint types in nodalmerge-core",
+    "server lineage module: create_child_room, describe_lineage, list_children",
+    "WS control-plane: topology.create-child, topology.describe-lineage, topology.list-children (topology.admin)"
+  ],
+  "vectors": [
+    {
+      "id": "AUTH-ROOM-002",
+      "test": "auth_room_002_child_rejects_parent_checkpoint_mismatch",
+      "result": "passed"
+    },
+    {
+      "id": "AUTH-ROOM-lineage-api",
+      "test": "auth_room_lineage_create_and_list_via_rooms_api",
+      "result": "passed"
+    },
+    {
+      "id": "AUTH-ROOM-ws",
+      "test": "auth_room_topology_create_child_ws_with_admin_cap",
+      "result": "passed"
+    }
+  ],
+  "commands": [
+    "cargo test -p nodalmerge-server --test authority_topology_vectors"
+  ]
+}

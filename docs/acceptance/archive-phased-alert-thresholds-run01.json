@@ -1,0 +1,49 @@
+{
+  "artifact": "archive-phased-alert-thresholds-run01",
+  "recorded_at": "2026-05-27T00:06:02.7068779-05:00",
+  "phase": "Phase D operator alert threshold definition",
+  "baseline_source": "docs/acceptance/archive-phased-benchmark-baseline-run04.json",
+  "cache_miss_ratio": {
+    "warn": {
+      "threshold": 0.10,
+      "window_minutes": 15,
+      "min_samples": 200
+    },
+    "critical": {
+      "threshold": 0.25,
+      "window_minutes": 15,
+      "min_samples": 200
+    },
+    "critical_fast_burn": {
+      "threshold": 0.40,
+      "window_minutes": 5,
+      "min_samples": 100
+    }
+  },
+  "object_file_parity_abs_delta_ms": {
+    "warn": {
+      "export_p95": 1.0,
+      "validate_p95": 1.0,
+      "import_p95": 2.0,
+      "window_minutes": 15
+    },
+    "critical": {
+      "any_operation_p95": 5.0,
+      "import_p95": 3.0,
+      "window_minutes": 10
+    }
+  },
+  "absolute_latency_safety_rail_ms": {
+    "warn_p95": 50,
+    "warn_window_minutes": 15,
+    "critical_p95": 100,
+    "critical_window_minutes": 10
+  },
+  "run04_reference": {
+    "export_p95_abs_delta_ms": 0.05,
+    "validate_p95_abs_delta_ms": 0.02,
+    "import_p95_abs_delta_ms": 0.26,
+    "peak_memory_mb": 13.0
+  },
+  "status": "thresholds_defined"
+}

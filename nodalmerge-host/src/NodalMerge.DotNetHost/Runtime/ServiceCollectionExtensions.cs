@@ -11,6 +11,10 @@ public static class ServiceCollectionExtensions
         IConfiguration? configuration = null)
     {
         var compactionOptions = BuildCompactionOptions(configuration);
+        var peerLocalOptions = BuildPeerLocalOptions(configuration);
+
+        services.AddSingleton(peerLocalOptions);
+        services.AddSingleton<RuntimePeerLocalPersistenceService>();
 
         services.AddSingleton<HostFfiClient>();
         services.AddSingleton<FfiBridgeProcessor>();
@@ -37,6 +41,22 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<RuntimeWebSocketLoopRunner>();
 
         return services;
+    }
+
+    private static RuntimePeerLocalPersistenceOptions BuildPeerLocalOptions(IConfiguration? configuration)
+    {
+        var section = GetConfigSection(configuration, RuntimePeerLocalPersistenceOptions.SectionName);
+        if (section is null || !section.Exists())
+        {
+            return RuntimePeerLocalPersistenceOptions.Disabled;
+        }
+
+        return new RuntimePeerLocalPersistenceOptions
+        {
+            Enabled = section.GetValue<bool?>("Enabled") ?? false,
+            Backend = section.GetValue<string>("Backend") ?? "memory",
+            DataDir = section.GetValue<string>("DataDir")
+        };
     }
 
     private static RuntimeDagCompactionOptions BuildCompactionOptions(IConfiguration? configuration)

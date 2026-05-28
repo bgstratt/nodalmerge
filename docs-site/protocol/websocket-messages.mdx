@@ -1,0 +1,49 @@
+---
+title: WebSocket Protocol
+---
+
+# WebSocket Protocol
+
+NodalMerge uses a message-based sync protocol over WebSockets.
+
+---
+
+## Client → Server
+
+- hello
+- pack
+- request
+- subscribe
+- presence
+- blob-upload
+- mst-request
+
+---
+
+## Server → Client
+
+- welcome
+- pack
+- peer-joined
+- peer-left
+- blob-available
+- snapshot-pack
+
+---
+
+## Design Goal
+
+> Minimize payloads, maximize convergence determinism.
+
+---
+
+## Sync Model
+
+Clients do not request state.
+
+They request *missing history*.
+
+Server responds with:
+
+- transactional deltas
+- or snapshot packs

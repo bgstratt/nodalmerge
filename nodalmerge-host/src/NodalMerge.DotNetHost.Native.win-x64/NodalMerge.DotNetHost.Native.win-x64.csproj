@@ -18,6 +18,10 @@
           Pack="true"
           PackagePath="runtimes/win-x64/native/"
           Visible="false" />
+    <None Include="..\..\..\target\release\nodalmerge_runtime_local_ffi.dll"
+          Pack="true"
+          PackagePath="runtimes/win-x64/native/"
+          Visible="false" />
   </ItemGroup>
 
 </Project>

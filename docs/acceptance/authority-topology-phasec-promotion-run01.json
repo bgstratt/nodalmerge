@@ -1,0 +1,28 @@
+{
+  "artifact": "authority-topology-phasec-promotion-run01",
+  "recorded_at": "2026-05-27T18:00:00.0000000-05:00",
+  "wave": 2,
+  "phase": "Authority and room topology Phase C",
+  "status": "recorded",
+  "source_plan": "docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md",
+  "deliverables": [
+    {
+      "id": "promotion-propose-validate-apply",
+      "summary": "In-memory proposal store; WS topology.propose-promotion, topology.validate-promotion, topology.apply-promotion (topology.admin); parent audit node at _topology/promotion/{proposal_id}."
+    },
+    {
+      "id": "promotion-rejection-taxonomy",
+      "summary": "PromotionReasonClass in core: child_checkpoint_mismatch, policy_denied, invalid_lineage, stale_parent, apply_conflict, not_found, not_validated."
+    }
+  ],
+  "vectors": [
+    "AUTH-ROOM-003 (auth_room_003_promotion_happy_path_via_rooms_api)",
+    "AUTH-ROOM-004 (auth_room_004_promotion_rejects_child_checkpoint_mismatch, auth_room_004_promotion_rejects_reference_only_policy)",
+    "AUTH-ROOM-005 (auth_room_005_parent_replay_includes_promotion_audit)"
+  ],
+  "completion_gate": {
+    "promotion_pass_fail_deterministic": true,
+    "parent_canonical_hash_parity_vectors": "partial_phase_c_slice",
+    "cli_topology_commands": "deferred_phase_d"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "artifact": "authority-topology-phased-closeout",
+  "recorded_at": "2026-05-27T20:00:00.0000000-05:00",
+  "wave": 2,
+  "track": "Authority and room topology",
+  "status": "closed_for_declared_slice",
+  "source_plan": "docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md",
+  "phases_closed": [
+    {
+      "phase": "A",
+      "evidence": "docs/acceptance/authority-topology-phasea-contract-freeze-run01.json",
+      "note": "Contract freeze draft; cross-stream maintainer sign-off tracked out of band."
+    },
+    {
+      "phase": "B",
+      "evidence": "docs/acceptance/authority-topology-phaseb-lineage-run01.json",
+      "deliverables": ["RoomLineage", "create_child_room", "topology.create-child", "topology.describe-lineage", "topology.list-children"]
+    },
+    {
+      "phase": "C",
+      "evidence": "docs/acceptance/authority-topology-phasec-promotion-run01.json",
+      "deliverables": ["topology.propose-promotion", "topology.validate-promotion", "topology.apply-promotion", "AUTH-ROOM-003/004/005 vectors"]
+    },
+    {
+      "phase": "D",
+      "evidence": "docs/acceptance/authority-topology-phased-cli-run01.json",
+      "deliverables": ["nodalmerge topology create-child", "list-children", "show-lineage", "propose-promotion", "validate-promotion", "apply-promotion"]
+    }
+  ],
+  "vectors_summary": {
+    "AUTH-ROOM-002": "server/tests/authority_topology_vectors.rs",
+    "AUTH-ROOM-003": "server + cli promotion happy path",
+    "AUTH-ROOM-004": "server promotion rejection taxonomy",
+    "AUTH-ROOM-005": "server parent replay includes audit key",
+    "CLI-TOPOLOGY-001": "cli/tests/topology_cli_vectors.rs",
+    "CLI-TOPOLOGY-002": "cli/tests/topology_cli_vectors.rs"
+  },
+  "deferred_to_wave3_or_later": [
+    "Phase E lineage index optimization and promotion queue backpressure",
+    "Durable promotion proposal store across server restart — done Wave 3 (authority-topology-wave3-durable-promotion-run01.json)",
+    "host-core envelope parity for topology commands — done Wave 3",
+    "Promotion throughput metrics — done Wave 3 (operator snippet; dashboards deferred)",
+    "See authority-topology-wave3-closeout.json for Wave 3 closeout and remaining deferrals"
+  ],
+  "completion_gate": {
+    "lineage_and_promotion_runnable_without_browser": true,
+    "operator_cli_frozen_surface_implemented": true,
+    "production_hardening_complete": false
+  }
+}

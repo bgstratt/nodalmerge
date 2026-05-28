@@ -1,0 +1,27 @@
+{
+  "artifact": "authority-topology-phasea-contract-freeze-run01",
+  "recorded_at": "2026-05-27T14:00:00.0000000-05:00",
+  "wave": 2,
+  "phase": "Authority and room topology Phase A",
+  "status": "draft_recorded",
+  "source_plan": "docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md",
+  "plan_anchor": "Phase A working draft (2026-05-27)",
+  "deliverables": [
+    {
+      "id": "authority-role-matrix",
+      "summary": "Frozen v1 matrix: server / owner / worker authority across mainline, child work, and shared context room types."
+    },
+    {
+      "id": "room-lineage-metadata-schema",
+      "summary": "Draft field table: parent_room_id, parent_checkpoint (frontier + canonical_hash + optional policy_timeline_hash), child_purpose, created_by, created_at_hlc, promotion_policy_id."
+    },
+    {
+      "id": "promotion-command-event-draft",
+      "summary": "CreateChildRoomFromParentCheckpoint, DescribeRoomLineage, ProposePromotion, ValidatePromotion, ApplyPromotion with conceptual success/failure rows."
+    }
+  ],
+  "completion_gate": {
+    "parent_checkpoint_semantics_unambiguous_in_plan": true,
+    "runtime_host_operator_maintainer_signoff": "pending_out_of_band"
+  }
+}

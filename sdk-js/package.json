@@ -6,13 +6,15 @@
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
-    "test": "node --test index.test.js",
+    "test": "node --test index.test.js persistence/peer-local-indexeddb.test.js",
     "smoke:demo": "npm --prefix ../web/smoke run smoke"
   },
   "files": [
     "index.js",
     "index.d.ts",
-    "README.md"
+    "persistence/",
+    "README.md",
+    "PERSISTENCE_MIGRATION.md"
   ],
   "keywords": [
     "nodalmerge",

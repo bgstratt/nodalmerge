@@ -18,6 +18,10 @@
           Pack="true"
           PackagePath="runtimes/linux-x64/native/"
           Visible="false" />
+    <None Include="..\..\..\target\release\libnodalmerge_runtime_local_ffi.so"
+          Pack="true"
+          PackagePath="runtimes/linux-x64/native/"
+          Visible="false" />
   </ItemGroup>
 
 </Project>

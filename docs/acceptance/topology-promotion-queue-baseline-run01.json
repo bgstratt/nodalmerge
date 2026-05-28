@@ -1,0 +1,35 @@
+{
+  "artifact": "topology-promotion-queue-baseline-run01",
+  "recorded_at": "2026-05-28T00:15:00.0000000-05:00",
+  "wave": 3,
+  "phase": "Authority topology Phase E preparatory queue controls",
+  "status": "recorded",
+  "source_plan": "docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md",
+  "deliverables": [
+    {
+      "id": "promotion-fair-queue",
+      "summary": "Topology promotion propose/validate/apply now uses bounded fair queue admission (`NODALMERGE_TOPOLOGY_PROMOTION_MAX_INFLIGHT`, `NODALMERGE_TOPOLOGY_PROMOTION_MAX_QUEUE`)."
+    },
+    {
+      "id": "lineage-index-retention-cap",
+      "summary": "Optional in-memory children index retention cap via `NODALMERGE_LINEAGE_CHILDREN_INDEX_MAX` to bound hot-parent memory."
+    }
+  ],
+  "verification": {
+    "commands": [
+      "cargo test -p nodalmerge-server promotion::tests -- --nocapture",
+      "cargo test -p nodalmerge-server auth_room_006 -- --nocapture"
+    ],
+    "result": "pass"
+  },
+  "metrics": [
+    "nodalmerge_topology_promotion_inflight",
+    "nodalmerge_topology_promotion_queue_depth",
+    "nodalmerge_topology_promotion_queued_total",
+    "nodalmerge_topology_promotion_queue_wait_seconds"
+  ],
+  "notes": [
+    "Queue-full and waiting-disabled rejection vectors are in unit tests.",
+    "Lineage/promotion restart durability vectors continue to pass with queue controls enabled."
+  ]
+}

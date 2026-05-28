@@ -5,6 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use nodalmerge_headless::metrics::{init as init_metrics, parse_metrics_arg, record_session};
 use nodalmerge_headless::{run_worker_session, WorkerConfig, WorkerSessionReport};
 use nodalmerge_runtime_local::{parse_backend_kind, PersistenceHandle, PeerLocalPersistence};
 use tracing_subscriber::EnvFilter;
@@ -47,6 +48,18 @@ fn run_from_env() -> Result<(), String> {
     let negotiate_ibf = env_bool("NODALMERGE_HEADLESS_NEGOTIATE_IBF", true);
     let negotiate_mst = env_bool("NODALMERGE_HEADLESS_NEGOTIATE_MST", true);
     let report_json = env_or_flag_opt(&args, "NODALMERGE_HEADLESS_REPORT_JSON", "--report-json");
+    let metrics_addr = std::env::var("NODALMERGE_HEADLESS_METRICS_ADDR")
+        .ok()
+        .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
+        .or_else(|| parse_metrics_arg(&args));
+
+    if let Some(addr) = metrics_addr {
+        if let Err(e) = init_metrics(addr) {
+            tracing::warn!(%addr, error = %e, "failed to initialize metrics exporter");
+        } else {
+            tracing::info!(%addr, "metrics endpoint listening on http://{addr}/metrics");
+        }
+    }
 
     let backend = parse_backend_kind(&backend_name, data_dir)?;
     let durable = PersistenceHandle::open(backend.clone())
@@ -82,8 +95,10 @@ fn run_from_env() -> Result<(), String> {
         report.timings_ms.total_ms,
     );
 
+    let session = WorkerSessionReport::from_session(&cfg_snapshot, &report, durable);
+    record_session(&session);
+
     if let Some(path) = report_json {
-        let session = WorkerSessionReport::from_session(&cfg_snapshot, &report, durable);
         let json = serde_json::to_string_pretty(&session).map_err(|e| e.to_string())?;
         if path == "-" {
             let mut stdout = std::io::stdout().lock();
@@ -164,8 +179,10 @@ Environment:
   NODALMERGE_HEADLESS_NEGOTIATE_IBF   1/true to send IBF in hello (default on)
   NODALMERGE_HEADLESS_NEGOTIATE_MST   1/true for MST descent after welcome (default on)
   NODALMERGE_HEADLESS_REPORT_JSON     write machine-readable session report (use - for stdout)
+  NODALMERGE_HEADLESS_METRICS_ADDR    optional Prometheus listener (e.g. 127.0.0.1:9191)
 
   --health                            print JSON backend/durable probe and exit 0
+  --metrics-addr <ip:port>            optional Prometheus listener (same as env var)
 
 Peer-local backends are configurable; built-in: memory, file, embedded, composite.
 Custom backends implement nodalmerge_runtime_local::PeerLocalPersistence.

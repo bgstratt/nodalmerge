@@ -17,7 +17,7 @@
     "Prometheus/Grafana dashboard panels for topology promotion metrics",
     "Dotnet native FFI topology backend (stub parity sufficient for CLI→Rust server path)",
     "Automated operator drill runner (playbook §7 manual outline remains)",
-    "Durable lineage metadata index across server restart (promotions durable; lineage in-memory on room)",
+    "Phase E: lineage index optimization and retention policy for large room families",
     "Phase E: lineage index optimization, promotion queue backpressure/fairness, large room-family benchmarks"
   ],
   "completion_gate": {

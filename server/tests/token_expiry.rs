@@ -18,13 +18,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::{routing::get, Router};
+use ed25519_dalek::SigningKey;
+use futures_util::{SinkExt, StreamExt};
 use nodalmerge_core::RoomToken;
 use nodalmerge_server::room::Rooms;
 use nodalmerge_server::store::{NoPersistence, SharedPersistence};
 use nodalmerge_server::ws_handler;
-use axum::{routing::get, Router};
-use ed25519_dalek::SigningKey;
-use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
 /// Spawn a server with a single locked room `locked-room` whose auth
@@ -93,7 +93,9 @@ async fn expired_token_closes_with_4002() {
     let token = RoomToken::sign("locked-room", &peer_pk, expiry, &[], &room_key);
 
     let url = format!("ws://{addr}/ws/locked-room");
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut ws_sink, mut ws_stream) = ws.split();
 
     let hello = serde_json::json!({
@@ -101,8 +103,12 @@ async fn expired_token_closes_with_4002() {
         "pubkey": peer_pk_hex,
         "frontier": [],
         "token": token_json(&token),
-    }).to_string();
-    ws_sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    })
+    .to_string();
+    ws_sink
+        .send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     // The server should send welcome, then later close with 4002.
     // Budget: token expires in 2 s; poll up to 6 s total.
@@ -113,7 +119,9 @@ async fn expired_token_closes_with_4002() {
         match tokio::time::timeout(Duration::from_millis(500), ws_stream.next()).await {
             Ok(Some(Ok(TMessage::Text(t)))) => {
                 let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
-                if v["type"] == "welcome" { saw_welcome = true; }
+                if v["type"] == "welcome" {
+                    saw_welcome = true;
+                }
                 if v["type"] == "error" {
                     panic!("unexpected server error during G6 happy-path: {t}");
                 }
@@ -126,8 +134,15 @@ async fn expired_token_closes_with_4002() {
         }
     }
 
-    assert!(saw_welcome, "handshake did not complete before token expired");
-    assert_eq!(close_code, Some(4002), "expected 4002 token expired close; got {close_code:?}");
+    assert!(
+        saw_welcome,
+        "handshake did not complete before token expired"
+    );
+    assert_eq!(
+        close_code,
+        Some(4002),
+        "expected 4002 token expired close; got {close_code:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -142,7 +157,9 @@ async fn valid_token_does_not_close_prematurely() {
     let token = RoomToken::sign("locked-room", &peer_pk, expiry, &[], &room_key);
 
     let url = format!("ws://{addr}/ws/locked-room");
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut ws_sink, mut ws_stream) = ws.split();
 
     let hello = serde_json::json!({
@@ -150,8 +167,12 @@ async fn valid_token_does_not_close_prematurely() {
         "pubkey": peer_pk_hex,
         "frontier": [],
         "token": token_json(&token),
-    }).to_string();
-    ws_sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    })
+    .to_string();
+    ws_sink
+        .send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     // Poll for 3 s. Must see a welcome; must NOT see any close frame.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -160,10 +181,16 @@ async fn valid_token_does_not_close_prematurely() {
         match tokio::time::timeout(Duration::from_millis(300), ws_stream.next()).await {
             Ok(Some(Ok(TMessage::Text(t)))) => {
                 let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
-                if v["type"] == "welcome" { saw_welcome = true; }
+                if v["type"] == "welcome" {
+                    saw_welcome = true;
+                }
             }
             Ok(Some(Ok(TMessage::Close(Some(cf))))) => {
-                panic!("server closed prematurely: code={} reason={:?}", u16::from(cf.code), cf.reason);
+                panic!(
+                    "server closed prematurely: code={} reason={:?}",
+                    u16::from(cf.code),
+                    cf.reason
+                );
             }
             Ok(Some(Ok(_))) | Ok(None) | Err(_) => continue,
             Ok(Some(Err(e))) => panic!("stream error: {e}"),

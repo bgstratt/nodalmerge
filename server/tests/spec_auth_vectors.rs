@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
-use nodalmerge_core::{Hash, MapOp, Op, StateGraph, canonical_hash};
-use nodalmerge_server::room::{Room, import_nodes};
+use nodalmerge_core::{canonical_hash, Hash, MapOp, Op, StateGraph};
+use nodalmerge_server::room::{import_nodes, Room};
 use nodalmerge_server::store::{NoPersistence, SharedPersistence};
 
 fn build_set_nodes(sk: &SigningKey, writes: &[(&str, &str)]) -> Vec<nodalmerge_core::SyncNode> {
@@ -125,13 +125,25 @@ async fn spec_auth_005_disposition_idempotent_reconnect_safe() {
 
     // Reconnect/replay order safety: child arrives before parent.
     let (accepted_count, _, errs) = import_nodes(&room, vec![accepted.clone(), pending]).await;
-    assert_eq!(accepted_count, 2, "SPEC-AUTH-005: out-of-order replay should converge");
-    assert!(errs.is_empty(), "SPEC-AUTH-005: out-of-order replay should not leave unresolved parents");
+    assert_eq!(
+        accepted_count, 2,
+        "SPEC-AUTH-005: out-of-order replay should converge"
+    );
+    assert!(
+        errs.is_empty(),
+        "SPEC-AUTH-005: out-of-order replay should not leave unresolved parents"
+    );
 
     // Idempotence: replay duplicate accepted node after convergence.
     let (dup_accepted, _, dup_errs) = import_nodes(&room, vec![accepted]).await;
-    assert_eq!(dup_accepted, 0, "SPEC-AUTH-005: duplicate replay should be idempotent");
-    assert!(dup_errs.is_empty(), "SPEC-AUTH-005: duplicate replay should not produce errors");
+    assert_eq!(
+        dup_accepted, 0,
+        "SPEC-AUTH-005: duplicate replay should be idempotent"
+    );
+    assert!(
+        dup_errs.is_empty(),
+        "SPEC-AUTH-005: duplicate replay should not produce errors"
+    );
 
     let state = room.graph.read().await.resolve();
     assert_eq!(

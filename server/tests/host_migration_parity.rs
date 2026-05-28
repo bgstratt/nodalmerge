@@ -10,26 +10,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nodalmerge_core::{
-    BlobStore,
-    MapOp,
-    Op,
-    Policy,
-    PolicyDefault,
-    PolicyRule,
-    RoomToken,
-    StateGraph,
-};
-use nodalmerge_server::lineage::{
-    snapshot_parent_checkpoint, snapshot_room_canonical_hash,
-};
-use nodalmerge_server::room::{import_nodes, Rooms};
-use nodalmerge_server::store::{DirPersistence, NoPersistence, SharedPersistence};
-use nodalmerge_server::ws_handler;
 use axum::{routing::get, Router};
 use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
+use nodalmerge_core::{
+    BlobStore, MapOp, Op, Policy, PolicyDefault, PolicyRule, RoomToken, StateGraph,
+};
+use nodalmerge_server::lineage::{snapshot_parent_checkpoint, snapshot_room_canonical_hash};
+use nodalmerge_server::room::{import_nodes, Rooms};
+use nodalmerge_server::store::{DirPersistence, NoPersistence, SharedPersistence};
+use nodalmerge_server::ws_handler;
 use serde::Deserialize;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
@@ -91,8 +82,7 @@ fn load_fixture(name: &str) -> GoldenFixture {
     let p = fixture_path(name);
     let s = std::fs::read_to_string(&p)
         .unwrap_or_else(|e| panic!("failed to read fixture {}: {e}", p.display()));
-    serde_json::from_str(&s)
-        .unwrap_or_else(|e| panic!("invalid fixture JSON {}: {e}", p.display()))
+    serde_json::from_str(&s).unwrap_or_else(|e| panic!("invalid fixture JSON {}: {e}", p.display()))
 }
 
 fn make_map_set_node(sk: &SigningKey, key: &str, value: &[u8]) -> nodalmerge_core::SyncNode {
@@ -149,9 +139,8 @@ async fn spawn_durable_locked_server(
     std::fs::create_dir_all(&tmp_root).expect("temp persistence root should be created");
 
     let server_key = SigningKey::from_bytes(&[0x51u8; 32]);
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&tmp_root).expect("dir persistence should open"),
-    );
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&tmp_root).expect("dir persistence should open"));
     let rooms = Rooms::new(server_key, persistence, 512, 0, 0);
 
     let app = Router::new()
@@ -231,10 +220,14 @@ async fn run_current_hello_catchup(fx: &GoldenFixture) -> CanonicalTrace {
     assert!(errs.is_empty());
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x31u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x31u8; 32])
+        .verifying_key()
+        .to_bytes();
     let peer_hex = hex_lower(&peer);
 
     let mut hello = serde_json::json!({
@@ -253,7 +246,9 @@ async fn run_current_hello_catchup(fx: &GoldenFixture) -> CanonicalTrace {
         hello["ibf"] = serde_json::json!(ibf_b64);
     }
     let hello = hello.to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let mut pack_count = 0usize;
@@ -322,13 +317,17 @@ async fn run_current_hello_catchup(fx: &GoldenFixture) -> CanonicalTrace {
 async fn run_current_token_expiry(fx: &GoldenFixture) -> CanonicalTrace {
     let (addr, _rooms, room_key) = spawn_locked_server(&fx.room_id).await;
 
-    let peer = SigningKey::from_bytes(&[0x41u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x41u8; 32])
+        .verifying_key()
+        .to_bytes();
     let peer_hex = hex_lower(&peer);
     let ttl = fx.token_ttl_secs.unwrap_or(2);
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + ttl, &[], &room_key);
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
     let hello = serde_json::json!({
@@ -338,7 +337,9 @@ async fn run_current_token_expiry(fx: &GoldenFixture) -> CanonicalTrace {
         "token": token_json(&token)
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let mut welcome_has_mst_root = None;
@@ -397,10 +398,14 @@ async fn run_current_blob_flow(fx: &GoldenFixture) -> CanonicalTrace {
     room.blobs.write().await.put(seeded_blob);
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x61u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x61u8; 32])
+        .verifying_key()
+        .to_bytes();
     let peer_hex = hex_lower(&peer);
 
     let hello = serde_json::json!({
@@ -415,7 +420,9 @@ async fn run_current_blob_flow(fx: &GoldenFixture) -> CanonicalTrace {
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let mut welcome_has_mst_root = None;
@@ -452,7 +459,9 @@ async fn run_current_blob_flow(fx: &GoldenFixture) -> CanonicalTrace {
         "content_type": "application/octet-stream"
     })
     .to_string();
-    sink.send(TMessage::Text(upload_req.into())).await.expect("send request-upload");
+    sink.send(TMessage::Text(upload_req.into()))
+        .await
+        .expect("send request-upload");
 
     let mut upload_denied_reason = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -465,7 +474,8 @@ async fn run_current_blob_flow(fx: &GoldenFixture) -> CanonicalTrace {
                 };
                 if v.get("type").and_then(|t| t.as_str()) == Some("upload-denied") {
                     sequence.push("upload-denied".to_string());
-                    upload_denied_reason = v.get("reason").and_then(|x| x.as_str()).map(str::to_string);
+                    upload_denied_reason =
+                        v.get("reason").and_then(|x| x.as_str()).map(str::to_string);
                     break;
                 }
             }
@@ -478,7 +488,9 @@ async fn run_current_blob_flow(fx: &GoldenFixture) -> CanonicalTrace {
         "hashes": [seeded_hash.to_hex()]
     })
     .to_string();
-    sink.send(TMessage::Text(blob_req.into())).await.expect("send blob-request");
+    sink.send(TMessage::Text(blob_req.into()))
+        .await
+        .expect("send blob-request");
 
     let mut blob_pack_count = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -528,10 +540,14 @@ async fn run_current_tick_compaction(fx: &GoldenFixture) -> CanonicalTrace {
     assert!(errs.is_empty());
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x73u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x73u8; 32])
+        .verifying_key()
+        .to_bytes();
     let peer_hex = hex_lower(&peer);
     let token = RoomToken::sign(
         &fx.room_id,
@@ -548,7 +564,9 @@ async fn run_current_tick_compaction(fx: &GoldenFixture) -> CanonicalTrace {
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let mut got_welcome = false;
@@ -573,7 +591,10 @@ async fn run_current_tick_compaction(fx: &GoldenFixture) -> CanonicalTrace {
             _ => continue,
         }
     }
-    assert!(got_welcome, "tick/compaction scenario did not receive welcome");
+    assert!(
+        got_welcome,
+        "tick/compaction scenario did not receive welcome"
+    );
 
     // Start tick.
     let start_tick = serde_json::json!({
@@ -582,7 +603,9 @@ async fn run_current_tick_compaction(fx: &GoldenFixture) -> CanonicalTrace {
         "intent_prefix": "intent/"
     })
     .to_string();
-    sink.send(TMessage::Text(start_tick.into())).await.expect("send start-tick");
+    sink.send(TMessage::Text(start_tick.into()))
+        .await
+        .expect("send start-tick");
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
@@ -603,7 +626,9 @@ async fn run_current_tick_compaction(fx: &GoldenFixture) -> CanonicalTrace {
 
     // Stop tick.
     let stop_tick = serde_json::json!({"type": "stop-tick"}).to_string();
-    sink.send(TMessage::Text(stop_tick.into())).await.expect("send stop-tick");
+    sink.send(TMessage::Text(stop_tick.into()))
+        .await
+        .expect("send stop-tick");
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
@@ -624,7 +649,9 @@ async fn run_current_tick_compaction(fx: &GoldenFixture) -> CanonicalTrace {
 
     // Trigger compaction and wait for both broadcast+ack in any order.
     let compact = serde_json::json!({"type": "compact-room"}).to_string();
-    sink.send(TMessage::Text(compact.into())).await.expect("send compact-room");
+    sink.send(TMessage::Text(compact.into()))
+        .await
+        .expect("send compact-room");
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
@@ -678,20 +705,18 @@ async fn run_current_archive_flow(fx: &GoldenFixture) -> CanonicalTrace {
         .persist_blob(&source_room.room_id, &source_blob_hash, &source_blob);
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
     // Use the server key identity (spawn_server uses [0x51;32]) so control-plane
     // authorization is deterministic without relying on capability profile expansion.
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let peer_hex = hex_lower(&peer);
-    let token = RoomToken::sign(
-        &fx.room_id,
-        &peer,
-        now_secs() + 300,
-        &[],
-        &room_key,
-    );
+    let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
 
     let hello = serde_json::json!({
         "type": "hello",
@@ -701,7 +726,9 @@ async fn run_current_archive_flow(fx: &GoldenFixture) -> CanonicalTrace {
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let mut describe_checkpoint = None;
@@ -841,10 +868,14 @@ async fn run_current_archive_export_roundtrip_file(fx: &GoldenFixture) -> Canoni
     assert!(errs.is_empty());
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let peer_hex = hex_lower(&peer);
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
 
@@ -856,7 +887,9 @@ async fn run_current_archive_export_roundtrip_file(fx: &GoldenFixture) -> Canoni
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
 
@@ -916,12 +949,11 @@ async fn run_current_archive_export_roundtrip_file(fx: &GoldenFixture) -> Canoni
                         v.get("payload_digest_policy").and_then(|p| p.as_str()),
                         Some("strict_sha256_v1")
                     );
-                    assert!(
-                        v.get("policy_timeline_hash")
-                            .and_then(|h| h.as_str())
-                            .map(|h| !h.is_empty())
-                            .unwrap_or(false)
-                    );
+                    assert!(v
+                        .get("policy_timeline_hash")
+                        .and_then(|h| h.as_str())
+                        .map(|h| !h.is_empty())
+                        .unwrap_or(false));
                     assert_eq!(
                         v.get("policy_timeline_cutover_lamport")
                             .and_then(|c| c.as_u64()),
@@ -1023,10 +1055,14 @@ async fn run_current_archive_positive_policy_timeline_transition_non_zero(
         .await;
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let peer_hex = hex_lower(&peer);
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
 
@@ -1038,7 +1074,9 @@ async fn run_current_archive_positive_policy_timeline_transition_non_zero(
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
 
@@ -1059,7 +1097,9 @@ async fn run_current_archive_positive_policy_timeline_transition_non_zero(
         }
     }
 
-    let manifest_path = tmp_root.join("archives").join("policy-transition-export.json");
+    let manifest_path = tmp_root
+        .join("archives")
+        .join("policy-transition-export.json");
     let archive_ref = format!("file://{}", manifest_path.display());
 
     let export = serde_json::json!({
@@ -1203,10 +1243,14 @@ async fn run_current_archive_negative_unsupported_format(fx: &GoldenFixture) -> 
     let (addr, _rooms, room_key, _tmp_root) = spawn_durable_locked_server(&fx.room_id).await;
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
     let hello = serde_json::json!({
         "type": "hello",
@@ -1216,7 +1260,9 @@ async fn run_current_archive_negative_unsupported_format(fx: &GoldenFixture) -> 
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1286,10 +1332,14 @@ async fn run_current_archive_negative_signature_invalid(fx: &GoldenFixture) -> C
     write_signed_external_manifest(&manifest_path, &source_room_id, &signer, true);
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
     let hello = serde_json::json!({
         "type": "hello",
@@ -1299,7 +1349,9 @@ async fn run_current_archive_negative_signature_invalid(fx: &GoldenFixture) -> C
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1376,15 +1428,20 @@ async fn run_current_archive_negative_payload_digest_policy_invalid(
         "1",
         "2",
         "legacy_md5_v0",
-        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default()).hash_hex,
+        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default())
+            .hash_hex,
         0,
     );
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
     let hello = serde_json::json!({
         "type": "hello",
@@ -1394,7 +1451,9 @@ async fn run_current_archive_negative_payload_digest_policy_invalid(
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1471,15 +1530,20 @@ async fn run_current_archive_negative_compatibility_window_unsupported(
         "2",
         "2",
         "strict_sha256_v1",
-        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default()).hash_hex,
+        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default())
+            .hash_hex,
         0,
     );
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
     let hello = serde_json::json!({
         "type": "hello",
@@ -1489,7 +1553,9 @@ async fn run_current_archive_negative_compatibility_window_unsupported(
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1566,15 +1632,20 @@ async fn run_current_archive_negative_compatibility_window_no_overlap(
         "3",
         "4",
         "strict_sha256_v1",
-        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default()).hash_hex,
+        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default())
+            .hash_hex,
         0,
     );
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
     let hello = serde_json::json!({
         "type": "hello",
@@ -1584,7 +1655,9 @@ async fn run_current_archive_negative_compatibility_window_no_overlap(
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1652,7 +1725,9 @@ async fn run_current_archive_positive_compatibility_window_edge_overlap_lower(
     let _ = import_nodes(&source_room, vec![source_node]).await;
 
     let signer = SigningKey::from_bytes(&[0x73u8; 32]);
-    let manifest_path = tmp_root.join("archives").join("edge-overlap-lower-window.json");
+    let manifest_path = tmp_root
+        .join("archives")
+        .join("edge-overlap-lower-window.json");
     write_signed_external_manifest_with_policy(
         &manifest_path,
         &source_room_id,
@@ -1661,15 +1736,20 @@ async fn run_current_archive_positive_compatibility_window_edge_overlap_lower(
         "0",
         "1",
         "strict_sha256_v1",
-        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default()).hash_hex,
+        &nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default())
+            .hash_hex,
         0,
     );
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
     let hello = serde_json::json!({
         "type": "hello",
@@ -1679,7 +1759,9 @@ async fn run_current_archive_positive_compatibility_window_edge_overlap_lower(
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1773,10 +1855,14 @@ async fn run_current_archive_negative_policy_timeline_hash_mismatch(
     );
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
     let hello = serde_json::json!({
         "type": "hello",
@@ -1786,7 +1872,9 @@ async fn run_current_archive_negative_policy_timeline_hash_mismatch(
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1855,7 +1943,9 @@ async fn run_current_archive_negative_policy_timeline_cutover_mismatch(
     let _ = import_nodes(&source_room, vec![source_node]).await;
 
     let signer = SigningKey::from_bytes(&[0x48u8; 32]);
-    let manifest_path = tmp_root.join("archives").join("policy-cutover-mismatch.json");
+    let manifest_path = tmp_root
+        .join("archives")
+        .join("policy-cutover-mismatch.json");
     let default_policy_timeline =
         nodalmerge_server::archive_export::policy_timeline_metadata_for_policy(&Policy::default());
     write_signed_external_manifest_with_policy(
@@ -1871,10 +1961,14 @@ async fn run_current_archive_negative_policy_timeline_cutover_mismatch(
     );
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
     let hello = serde_json::json!({
         "type": "hello",
@@ -1884,7 +1978,9 @@ async fn run_current_archive_negative_policy_timeline_cutover_mismatch(
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1956,10 +2052,14 @@ async fn run_current_archive_negative_checkpoint_not_found_external(
     );
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    let peer = SigningKey::from_bytes(&[0x51u8; 32]).verifying_key().to_bytes();
+    let peer = SigningKey::from_bytes(&[0x51u8; 32])
+        .verifying_key()
+        .to_bytes();
     let token = RoomToken::sign(&fx.room_id, &peer, now_secs() + 300, &[], &room_key);
     let hello = serde_json::json!({
         "type": "hello",
@@ -1969,7 +2069,9 @@ async fn run_current_archive_negative_checkpoint_not_found_external(
         "subscribe": ["**"]
     })
     .to_string();
-    sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    sink.send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     let mut sequence = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -2090,7 +2192,9 @@ async fn run_current_topology_promotion_workflow(fx: &GoldenFixture) -> Canonica
     let child_hash = snapshot_room_canonical_hash(&child).await.unwrap();
 
     let url = format!("ws://{addr}/ws/{parent_id}");
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
     let peer = SigningKey::from_bytes(&[0xC2u8; 32]);
@@ -2223,14 +2327,31 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 fn assert_trace_against_fixture(baseline: &CanonicalTrace, fx: &GoldenFixture) {
-    assert_eq!(baseline.sequence, fx.expected_sequence, "message sequence mismatch");
-    assert_eq!(baseline.pack_count, fx.expected_pack_count, "pack node count mismatch");
-    assert_eq!(baseline.close_code, fx.expected_close_code, "close code mismatch");
+    assert_eq!(
+        baseline.sequence, fx.expected_sequence,
+        "message sequence mismatch"
+    );
+    assert_eq!(
+        baseline.pack_count, fx.expected_pack_count,
+        "pack node count mismatch"
+    );
+    assert_eq!(
+        baseline.close_code, fx.expected_close_code,
+        "close code mismatch"
+    );
     if let Some(expected) = fx.expected_blob_pack_count {
-        assert_eq!(baseline.blob_pack_count, Some(expected), "blob-pack count mismatch");
+        assert_eq!(
+            baseline.blob_pack_count,
+            Some(expected),
+            "blob-pack count mismatch"
+        );
     }
     if let Some(expected) = &fx.expected_upload_denied_reason {
-        assert_eq!(baseline.upload_denied_reason.as_deref(), Some(expected.as_str()), "upload-denied reason mismatch");
+        assert_eq!(
+            baseline.upload_denied_reason.as_deref(),
+            Some(expected.as_str()),
+            "upload-denied reason mismatch"
+        );
     }
     if let Some(expected) = fx.expected_welcome_has_mst_root {
         assert_eq!(
@@ -2240,10 +2361,18 @@ fn assert_trace_against_fixture(baseline: &CanonicalTrace, fx: &GoldenFixture) {
         );
     }
     if let Some(expected) = fx.expected_has_snapshot_pack {
-        assert_eq!(baseline.has_snapshot_pack, Some(expected), "snapshot-pack presence mismatch");
+        assert_eq!(
+            baseline.has_snapshot_pack,
+            Some(expected),
+            "snapshot-pack presence mismatch"
+        );
     }
     if let Some(expected) = fx.expected_has_compact_ack {
-        assert_eq!(baseline.has_compact_ack, Some(expected), "compact-ack presence mismatch");
+        assert_eq!(
+            baseline.has_compact_ack,
+            Some(expected),
+            "compact-ack presence mismatch"
+        );
     }
 }
 
@@ -2335,7 +2464,10 @@ async fn parity_archive_export_runtime_fixture() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parity_archive_positive_policy_timeline_transition_non_zero_fixture() {
     let fx = load_fixture("archive_positive_policy_timeline_transition_non_zero.json");
-    assert_eq!(fx.name, "archive_positive_policy_timeline_transition_non_zero");
+    assert_eq!(
+        fx.name,
+        "archive_positive_policy_timeline_transition_non_zero"
+    );
 
     let baseline = run_current_path(&fx).await;
     let shadow = run_shadow_path(&fx).await;
@@ -2407,7 +2539,10 @@ async fn parity_archive_negative_compatibility_window_no_overlap_fixture() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parity_archive_positive_compatibility_window_edge_overlap_lower_fixture() {
     let fx = load_fixture("archive_positive_compatibility_window_edge_overlap_lower.json");
-    assert_eq!(fx.name, "archive_positive_compatibility_window_edge_overlap_lower");
+    assert_eq!(
+        fx.name,
+        "archive_positive_compatibility_window_edge_overlap_lower"
+    );
 
     let baseline = run_current_path(&fx).await;
     let shadow = run_shadow_path(&fx).await;
@@ -2463,4 +2598,3 @@ async fn parity_topology_promotion_workflow_fixture() {
     assert_eq!(baseline, shadow, "baseline and shadow traces diverged");
     assert_trace_against_fixture(&baseline, &fx);
 }
-

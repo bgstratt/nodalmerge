@@ -1,0 +1,40 @@
+{
+  "artifact": "repo-boundary-parity-phaseb-tools-artifact-link-check",
+  "run_id": "repo-boundary-parity-phaseb-tools-artifact-link-check-run01",
+  "date": "2026-05-27",
+  "status": "rehearsal-simulated",
+  "scope": "Phase B execution kickoff: verify tools workflow reference strategy for core-owned parity acceptance artifacts",
+  "source_contract": "docs/acceptance/repo-boundary-parity-phaseb-tools-split-readiness-run01.json#tools_split_003_artifact_contract_v1",
+  "checks": [
+    {
+      "id": "ART-LINK-001",
+      "description": "Core acceptance artifacts remain source of truth",
+      "status": "pass"
+    },
+    {
+      "id": "ART-LINK-002",
+      "description": "Tools workflow reference format defined (core SHA + file path immutable links)",
+      "status": "pass"
+    },
+    {
+      "id": "ART-LINK-003",
+      "description": "No duplicate parity acceptance namespace planned in tools repo",
+      "status": "pass"
+    }
+  ],
+  "next_actions": [
+    "Implement tools workflow summary output with immutable links once tools repo exists",
+    "Record first post-split link verification run with workflow run IDs"
+  ],
+  "notes": [
+    "Execution kickoff artifact created before repo split to lock expected reference behavior.",
+    "Reference format captured in docs/release/tools-version-pin-template.md"
+  ],
+  "simulation_artifacts": [
+    "docs/release/tools-version-pin-template.md"
+  ],
+  "remaining_for_real_run": [
+    "Emit immutable core SHA + acceptance paths in actual tools CI summary",
+    "Attach first post-split tools workflow run IDs"
+  ]
+}

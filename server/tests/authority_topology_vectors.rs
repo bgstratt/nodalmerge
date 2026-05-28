@@ -6,8 +6,8 @@ use std::time::Duration;
 use axum::{routing::get, Router};
 use ed25519_dalek::SigningKey;
 use futures_util::{SinkExt, StreamExt};
-use nodalmerge_core::{MapOp, Op, RoomToken, StateGraph};
 use nodalmerge_core::{canonical_hash, replay};
+use nodalmerge_core::{MapOp, Op, RoomToken, StateGraph};
 use nodalmerge_server::lineage::{snapshot_parent_checkpoint, snapshot_room_canonical_hash};
 use nodalmerge_server::promotion::{
     process_topology_apply_promotion, process_topology_propose_promotion,
@@ -97,7 +97,8 @@ async fn auth_room_002_child_rejects_parent_checkpoint_mismatch() {
 
     let bad_checkpoint = nodalmerge_core::ParentCheckpoint {
         frontier: vec!["seq:1".to_string()],
-        canonical_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        canonical_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            .to_string(),
         policy_timeline_hash: None,
     };
 
@@ -176,28 +177,42 @@ async fn auth_room_topology_create_child_ws_with_admin_cap() {
     );
 
     let url = format!("ws://{addr}/ws/{parent_id}");
-    let (ws, _) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
 
-    sink.send(TMessage::Text(serde_json::json!({
-        "type": "hello",
-        "pubkey": hex_lower(&peer_pk),
-        "frontier": [],
-        "token": token_json(&token),
-        "subscribe": ["**"]
-    }).to_string().into())).await.unwrap();
+    sink.send(TMessage::Text(
+        serde_json::json!({
+            "type": "hello",
+            "pubkey": hex_lower(&peer_pk),
+            "frontier": [],
+            "token": token_json(&token),
+            "subscribe": ["**"]
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
 
     drain_until_welcome(&mut stream).await;
 
-    sink.send(TMessage::Text(serde_json::json!({
-        "type": "topology.create-child",
-        "parent_room_id": parent_id,
-        "child_room_id": child_id,
-        "child_purpose": "ws-task",
-        "created_by": "operator",
-        "promotion_policy_id": "reference-only",
-        "parent_checkpoint": checkpoint,
-    }).to_string().into())).await.unwrap();
+    sink.send(TMessage::Text(
+        serde_json::json!({
+            "type": "topology.create-child",
+            "parent_room_id": parent_id,
+            "child_room_id": child_id,
+            "child_purpose": "ws-task",
+            "created_by": "operator",
+            "promotion_policy_id": "reference-only",
+            "parent_checkpoint": checkpoint,
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
 
     let mut completed = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -214,7 +229,10 @@ async fn auth_room_topology_create_child_ws_with_admin_cap() {
             }
         }
     }
-    assert!(completed, "expected topology.create-child.completed over WS");
+    assert!(
+        completed,
+        "expected topology.create-child.completed over WS"
+    );
 }
 
 /// AUTH-ROOM-003: propose → validate → apply yields stable parent canonical hash.
@@ -226,7 +244,11 @@ async fn auth_room_003_promotion_happy_path_via_rooms_api() {
 
     let author = SigningKey::from_bytes(&[0xA1u8; 32]);
     let parent = rooms.get_or_create(parent_id).await;
-    import_nodes(&parent, vec![make_map_set_node(&author, "world/p", b"parent")]).await;
+    import_nodes(
+        &parent,
+        vec![make_map_set_node(&author, "world/p", b"parent")],
+    )
+    .await;
     let parent_hash_before = snapshot_room_canonical_hash(&parent).await.unwrap();
 
     let checkpoint = snapshot_parent_checkpoint(&parent).await.unwrap();
@@ -442,13 +464,13 @@ async fn auth_room_005_parent_replay_includes_promotion_audit() {
     };
     let replayed = replay(&nodes, None).unwrap();
     assert!(replayed.map.contains_key(&applied.audit_key));
-    assert_eq!(canonical_hash(&replayed.map).to_hex(), applied.parent_new_canonical_hash);
+    assert_eq!(
+        canonical_hash(&replayed.map).to_hex(),
+        applied.parent_new_canonical_hash
+    );
 }
 
-async fn wait_for_canonical_hash(
-    room: &nodalmerge_server::room::Room,
-    expected: &str,
-) {
+async fn wait_for_canonical_hash(room: &nodalmerge_server::room::Room, expected: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         if snapshot_room_canonical_hash(room).await.ok().as_deref() == Some(expected) {
@@ -477,13 +499,7 @@ async fn auth_room_006_promotion_survives_store_restart() {
     let persistence: SharedPersistence =
         Arc::new(DirPersistence::open(&dir).expect("dir persistence"));
 
-    let rooms_before = Rooms::new(
-        server_key.clone(),
-        Arc::clone(&persistence),
-        512,
-        0,
-        0,
-    );
+    let rooms_before = Rooms::new(server_key.clone(), Arc::clone(&persistence), 512, 0, 0);
 
     let author = SigningKey::from_bytes(&[0xA6u8; 32]);
     let parent = rooms_before.get_or_create(parent_id).await;
@@ -547,6 +563,86 @@ async fn auth_room_006_promotion_survives_store_restart() {
     assert_ne!(applied.parent_new_canonical_hash, parent_hash);
     assert!(applied.audit_key.contains("prop-006"));
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AUTH-ROOM-006 (lineage durability): room lineage metadata survives restart
+/// with durable store and remains usable for describe/list/propose workflows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_room_006_lineage_survives_store_restart() {
+    let parent_id = "auth-parent-lineage-006";
+    let child_id = "auth-child-lineage-006";
+    let server_key = SigningKey::from_bytes(&[0xB1u8; 32]);
+
+    let dir = std::env::temp_dir().join(format!(
+        "nodalmerge-auth-lineage-006-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&dir).expect("dir persistence"));
+
+    let rooms_before = Rooms::new(server_key.clone(), Arc::clone(&persistence), 512, 0, 0);
+
+    let author = SigningKey::from_bytes(&[0xB2u8; 32]);
+    let parent = rooms_before.get_or_create(parent_id).await;
+    import_nodes(&parent, vec![make_map_set_node(&author, "world/p6l", b"p")]).await;
+    let checkpoint = snapshot_parent_checkpoint(&parent).await.unwrap();
+    rooms_before
+        .create_child_room(
+            parent_id,
+            child_id,
+            checkpoint,
+            "lineage-test".to_string(),
+            "mgr".to_string(),
+            "promotion-based".to_string(),
+        )
+        .await
+        .unwrap();
+
+    let child = rooms_before.get_or_create(child_id).await;
+    import_nodes(&child, vec![make_map_set_node(&author, "world/c6l", b"c")]).await;
+    let child_hash = snapshot_room_canonical_hash(&child).await.unwrap();
+    drop(rooms_before);
+
+    let rooms_after = Rooms::new(server_key.clone(), persistence, 512, 0, 0);
+    let parent_after = rooms_after.get_or_create(parent_id).await;
+    let child_after = rooms_after.get_or_create(child_id).await;
+    wait_for_canonical_hash(&child_after, &child_hash).await;
+
+    let described = rooms_after
+        .describe_lineage(child_id)
+        .await
+        .expect("describe-lineage after restart");
+    let lineage = described.lineage.expect("lineage exists");
+    assert_eq!(lineage.parent_room_id, parent_id);
+    assert_eq!(lineage.child_purpose, "lineage-test");
+
+    let listed = rooms_after
+        .list_children(parent_id)
+        .await
+        .expect("list-children after restart");
+    assert!(listed.children.iter().any(|c| c.child_room_id == child_id));
+
+    let proposed = process_topology_propose_promotion(
+        &rooms_after,
+        &serde_json::json!({
+            "parent_room_id": parent_id,
+            "child_room_id": child_id,
+            "child_checkpoint_hash": child_hash,
+            "payload_ref": "artifact://lineage-restart",
+            "idempotency_key": "prop-006-lineage",
+        }),
+    )
+    .await
+    .expect("propose after restart uses durable lineage");
+    assert_eq!(proposed.child_room_id, child_id);
+    assert_eq!(proposed.parent_room_id, parent_id);
+
+    drop(parent_after);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

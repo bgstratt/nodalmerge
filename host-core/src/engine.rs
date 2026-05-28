@@ -1594,6 +1594,76 @@ impl HostEngine {
                     }],
                 })
             }
+            HostCommand::CreateTopologyChild {
+                parent_room_id,
+                child_room_id,
+                child_purpose,
+                created_by,
+                promotion_policy_id,
+                parent_checkpoint,
+            } => {
+                if child_room_id.is_empty()
+                    || child_purpose.is_empty()
+                    || promotion_policy_id.is_empty()
+                {
+                    return Err(HostCoreError::InvalidCommand);
+                }
+                if !self.rooms.contains(&parent_room_id) {
+                    return Err(HostCoreError::RoomNotFound);
+                }
+                self.rooms.insert(child_room_id.clone());
+                self.room_maps.entry(child_room_id.clone()).or_default();
+                self.room_texts.entry(child_room_id.clone()).or_default();
+                self.room_lists.entry(child_room_id.clone()).or_default();
+                self.room_blobs.entry(child_room_id.clone()).or_default();
+                self.room_presence.entry(child_room_id.clone()).or_default();
+                self.room_subscriptions.entry(child_room_id.clone()).or_default();
+                self.room_policies.entry(child_room_id.clone()).or_default();
+                self.room_sync_graphs.entry(child_room_id.clone()).or_default();
+                self.room_conflict_fingerprints
+                    .entry(child_room_id.clone())
+                    .or_default();
+                self.room_conflict_history
+                    .entry(child_room_id.clone())
+                    .or_default();
+
+                let lineage = serde_json::json!({
+                    "parent_room_id": parent_room_id,
+                    "parent_checkpoint": parent_checkpoint,
+                    "child_purpose": child_purpose,
+                    "created_by": created_by,
+                    "created_at_hlc": 1,
+                    "promotion_policy_id": promotion_policy_id
+                });
+                self.room_maps
+                    .entry(child_room_id.clone())
+                    .or_default()
+                    .insert("_topology/lineage".to_string(), lineage.clone());
+                Ok(CommandResult {
+                    events: vec![HostEvent::ChildRoomCreated {
+                        child_room_id,
+                        lineage,
+                    }],
+                })
+            }
+            HostCommand::DescribeRoomLineage { room_id } => {
+                if !self.rooms.contains(&room_id) {
+                    return Err(HostCoreError::RoomNotFound);
+                }
+                let lineage = self
+                    .room_maps
+                    .entry(room_id.clone())
+                    .or_default()
+                    .get("_topology/lineage")
+                    .cloned();
+                Ok(CommandResult {
+                    events: vec![HostEvent::RoomLineageDescribed {
+                        room_id,
+                        lineage,
+                        ancestors: Vec::new(),
+                    }],
+                })
+            }
             HostCommand::Noop => Ok(CommandResult {
                 events: vec![HostEvent::NoopAck],
             }),

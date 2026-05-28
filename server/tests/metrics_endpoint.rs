@@ -13,16 +13,23 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ed25519_dalek::SigningKey;
 use nodalmerge_core::{MapOp, Op, StateGraph};
 use nodalmerge_server::metrics as server_metrics;
 use nodalmerge_server::room::{import_nodes, Rooms};
 use nodalmerge_server::store::{NoPersistence, SharedPersistence};
-use ed25519_dalek::SigningKey;
 
 fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> nodalmerge_core::SyncNode {
     let mut g = StateGraph::new();
     let id = g
-        .apply_local(sk, 0, vec![Op::Map(MapOp::Set { key: key.into(), value: val.to_vec() })])
+        .apply_local(
+            sk,
+            0,
+            vec![Op::Map(MapOp::Set {
+                key: key.into(),
+                value: val.to_vec(),
+            })],
+        )
         .unwrap();
     g.get_nodes(&[id]).into_iter().next().unwrap().clone()
 }
@@ -36,9 +43,8 @@ fn scrape(addr: SocketAddr) -> String {
         match TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
             Ok(mut sock) => {
                 sock.set_read_timeout(Some(Duration::from_secs(2))).ok();
-                let req = format!(
-                    "GET /metrics HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
-                );
+                let req =
+                    format!("GET /metrics HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
                 if let Err(e) = sock.write_all(req.as_bytes()) {
                     last_err = Some(format!("write: {e}"));
                     std::thread::sleep(Duration::from_millis(50));
@@ -80,7 +86,10 @@ async fn metrics_endpoint_exposes_baseline_series() {
     let peer_key = SigningKey::from_bytes(&[0x55u8; 32]);
     let n = make_node(&peer_key, "k", b"v");
     let (accepted, _, errs) = import_nodes(&room, vec![n]).await;
-    assert_eq!(accepted, 1, "import_nodes should accept 1 node (errors: {errs:?})");
+    assert_eq!(
+        accepted, 1,
+        "import_nodes should accept 1 node (errors: {errs:?})"
+    );
 
     room.deregister_peer("deadbeef").await;
 
@@ -94,7 +103,10 @@ async fn metrics_endpoint_exposes_baseline_series() {
         .expect("scrape task panicked");
 
     // Status line.
-    assert!(body.starts_with("HTTP/1.1 200"), "expected 200 OK, got: {body:?}");
+    assert!(
+        body.starts_with("HTTP/1.1 200"),
+        "expected 200 OK, got: {body:?}"
+    );
 
     // Baseline metrics must appear. We check for metric *names* rather than
     // specific values to stay robust to exporter formatting changes.
@@ -114,7 +126,10 @@ async fn metrics_endpoint_exposes_baseline_series() {
         );
     }
     // `# HELP` lines come from the describe_* calls.
-    assert!(body.contains("# HELP"), "expected HELP lines in /metrics body");
+    assert!(
+        body.contains("# HELP"),
+        "expected HELP lines in /metrics body"
+    );
 }
 
 #[test]
@@ -150,7 +165,9 @@ fn parse_arg_accepts_flag_and_equals_form() {
 
 #[test]
 fn peer_label_truncates_to_12_chars() {
-    assert_eq!(server_metrics::peer_label("0123456789abcdef0123"), "0123456789ab");
+    assert_eq!(
+        server_metrics::peer_label("0123456789abcdef0123"),
+        "0123456789ab"
+    );
     assert_eq!(server_metrics::peer_label("short"), "short");
 }
-

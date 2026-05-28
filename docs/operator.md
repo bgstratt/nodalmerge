@@ -588,6 +588,8 @@ Operational notes:
 
 1. Distinguish `reject.checkpoint_selector_invalid` from `reject.checkpoint_not_found` during triage.
 2. For replay mismatch incidents, capture `checkpoint` and `digest` from build/read responses in incident notes.
+3. `reject.query_backpressure` indicates runtime guardrails rejected the build (row limit, saturated inflight with `NODALMERGE_QUERY_BUILD_MAX_QUEUE=0`, or full wait queue); tune `NODALMERGE_QUERY_BUILD_MAX_ROWS`, `NODALMERGE_QUERY_BUILD_MAX_INFLIGHT`, and `NODALMERGE_QUERY_BUILD_MAX_QUEUE` for the host if sustained.
+4. Observe pressure and degradation through `nodalmerge_query_build_total{outcome,reason}`, `nodalmerge_query_build_seconds{outcome}`, `nodalmerge_query_build_inflight{room}`, `nodalmerge_query_build_queue_depth{room}`, `nodalmerge_query_build_queued_total`, and `nodalmerge_query_build_queue_wait_seconds`.
 
 ### `projection.read`
 
@@ -748,12 +750,33 @@ Never point peer-local `NODALMERGE_HEADLESS_DATA_DIR` at the server persistence 
 | `NODALMERGE_HEADLESS_NEGOTIATE_IBF` | no | `0`/`false` disables IBF in hello |
 | `NODALMERGE_HEADLESS_NEGOTIATE_MST` | no | `0`/`false` disables MST descent |
 | `NODALMERGE_HEADLESS_REPORT_JSON` | no | Path for session report JSON (`-` = stdout) |
+| `NODALMERGE_HEADLESS_METRICS_ADDR` | no | Optional Prometheus listener (e.g. `127.0.0.1:9191`) |
 
 Container image: `docker build -f headless/Dockerfile -t nodalmerge-headless .`
 
 ### Session report JSON
 
 Use `--report-json /path/report.json` (or env above) after each run for dashboards and acceptance baselines. Fields include `backend`, `durable`, sync counters (`packs_applied`, `mst_requests`), `canonical_hash_hex`, and `timings_ms` (`hydrate_ms`, `websocket_sync_ms`, `flush_ms`, `checkpoint_ms`, `total_ms`).
+
+### Headless metrics endpoint
+
+`nodalmerge-headless` now supports a dedicated Prometheus listener via `--metrics-addr <ip:port>` or `NODALMERGE_HEADLESS_METRICS_ADDR`.
+
+Example:
+
+```bash
+NODALMERGE_HEADLESS_METRICS_ADDR=127.0.0.1:9191 nodalmerge-headless
+curl http://127.0.0.1:9191/metrics
+```
+
+Session-level metrics include:
+
+1. `nodalmerge_headless_sessions_total` (labels: `backend`, `durable`, `outcome`)
+2. `nodalmerge_headless_packs_applied_total`
+3. `nodalmerge_headless_mst_requests_total`
+4. `nodalmerge_headless_mst_nodes_fetched_total`
+5. `nodalmerge_headless_websocket_sync_seconds`
+6. `nodalmerge_headless_session_total_seconds`
 
 ### Failure triage
 

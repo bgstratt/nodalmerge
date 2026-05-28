@@ -3,18 +3,20 @@
 //! external embedders. The `nodalmerge-server` binary (see `main.rs`) is the
 //! canonical consumer.
 
-pub mod keypair;
-pub mod metrics;
-pub mod gc_adapter;
+pub mod adapter_context;
 pub mod archive_adapter;
 pub mod archive_export;
-pub mod adapter_context;
 pub mod capability_profile;
+pub mod gc_adapter;
+pub mod keypair;
 pub mod lineage;
+pub mod lineage_store;
+pub mod metrics;
 pub mod promotion;
 pub mod promotion_metrics;
 pub mod promotion_store;
-pub mod topology_adapter;
+pub mod query_control;
 pub mod room;
 pub mod store;
+pub mod topology_adapter;
 pub mod ws_handler;

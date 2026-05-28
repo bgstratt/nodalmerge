@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
+use ed25519_dalek::SigningKey;
+use nodalmerge_core::RoomToken;
 use nodalmerge_cli::{
     run_archive_command, run_query_command, run_topology_command, run_worker, ArchiveCommand,
     ArchiveCliError, QueryCommand, QueryCliError, RunWorkerOpts, TopologyCommand,
@@ -51,6 +54,28 @@ enum Commands {
     Query {
         #[command(subcommand)]
         command: QuerySub,
+    },
+    /// Token helper utilities.
+    Token {
+        #[command(subcommand)]
+        command: TokenSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum TokenSub {
+    /// Mint `NODALMERGE_TOKEN_JSON` from room + key seeds.
+    Mint {
+        #[arg(long)]
+        room: String,
+        #[arg(long)]
+        room_key_seed_hex: String,
+        #[arg(long)]
+        peer_seed_hex: String,
+        #[arg(long, value_delimiter = ',', default_value = "")]
+        caps: Vec<String>,
+        #[arg(long, default_value_t = 3600)]
+        ttl_secs: u64,
     },
 }
 
@@ -362,6 +387,19 @@ async fn main() -> ExitCode {
             let (globals, cmd) = map_query(command, peer_seed);
             print_json_result(run_query_command(&globals, cmd).await.map_err(query_err))
         }
+        Commands::Token { command } => match command {
+            TokenSub::Mint {
+                room,
+                room_key_seed_hex,
+                peer_seed_hex,
+                caps,
+                ttl_secs,
+            } => {
+                let minted = mint_token_json(&room, &room_key_seed_hex, &peer_seed_hex, &caps, ttl_secs)
+                    .map_err(|e| format!("token mint failed: {e}"));
+                print_json_result(minted)
+            }
+        },
     }
 }
 
@@ -706,4 +744,57 @@ fn map_topology(
             TopologyCommand::ApplyPromotion { proposal_id },
         ),
     }
+}
+
+fn mint_token_json(
+    room: &str,
+    room_key_seed_hex: &str,
+    peer_seed_hex: &str,
+    caps: &[String],
+    ttl_secs: u64,
+) -> Result<serde_json::Value, String> {
+    if room.trim().is_empty() {
+        return Err("room must not be empty".to_string());
+    }
+    let room_seed = parse_seed_hex(room_key_seed_hex, "room_key_seed_hex")?;
+    let peer_seed = parse_seed_hex(peer_seed_hex, "peer_seed_hex")?;
+
+    let room_key = SigningKey::from_bytes(&room_seed);
+    let peer_key = SigningKey::from_bytes(&peer_seed);
+    let peer_pub = peer_key.verifying_key().to_bytes();
+    let expiry = now_secs().saturating_add(ttl_secs.max(1));
+    let capabilities: Vec<String> = caps
+        .iter()
+        .filter(|c| !c.trim().is_empty())
+        .cloned()
+        .collect();
+
+    let token = RoomToken::sign(room, &peer_pub, expiry, &capabilities, &room_key);
+    Ok(serde_json::json!({
+        "peer_pubkey": nodalmerge_cli::hex_lower(&token.peer_pubkey),
+        "expiry": token.expiry_secs,
+        "caps": token.capabilities,
+        "sig": nodalmerge_cli::hex_lower(&token.signature),
+    }))
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn parse_seed_hex(value: &str, field: &str) -> Result<[u8; 32], String> {
+    let normalized = value.trim();
+    if normalized.len() != 64 {
+        return Err(format!("{field} must be 64 hex chars (32 bytes)"));
+    }
+    let mut out = [0u8; 32];
+    for (idx, chunk) in normalized.as_bytes().chunks(2).enumerate() {
+        let s = std::str::from_utf8(chunk).map_err(|_| format!("{field} contains non-utf8"))?;
+        out[idx] = u8::from_str_radix(s, 16)
+            .map_err(|_| format!("{field} has invalid hex at byte {idx}"))?;
+    }
+    Ok(out)
 }

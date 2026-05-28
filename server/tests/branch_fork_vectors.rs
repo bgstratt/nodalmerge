@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
-use nodalmerge_core::{Hash, MapOp, Op, StateGraph, canonical_hash};
-use nodalmerge_server::room::{Room, import_nodes};
+use nodalmerge_core::{canonical_hash, Hash, MapOp, Op, StateGraph};
+use nodalmerge_server::room::{import_nodes, Room};
 use nodalmerge_server::store::{NoPersistence, SharedPersistence};
 
 fn build_set_nodes(sk: &SigningKey, writes: &[(&str, &str)]) -> Vec<nodalmerge_core::SyncNode> {
@@ -32,15 +32,24 @@ fn build_set_nodes(sk: &SigningKey, writes: &[(&str, &str)]) -> Vec<nodalmerge_c
 }
 
 fn canonical_hash_for_room(state: &std::collections::HashMap<String, Vec<u8>>) -> Hash {
-    let canonical: BTreeMap<String, Vec<u8>> = state.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let canonical: BTreeMap<String, Vec<u8>> =
+        state.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     canonical_hash(&canonical)
 }
 
 #[tokio::test]
 async fn branch_fork_003_target_writes_isolated() {
     let persistence: SharedPersistence = Arc::new(NoPersistence);
-    let source = Room::new("branch-fork-003-source".to_string(), Arc::clone(&persistence), 512);
-    let target = Room::new("branch-fork-003-target".to_string(), Arc::clone(&persistence), 512);
+    let source = Room::new(
+        "branch-fork-003-source".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
+    let target = Room::new(
+        "branch-fork-003-target".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
     let signer = SigningKey::from_bytes(&[0x71u8; 32]);
 
     let fork_payload = build_set_nodes(
@@ -82,8 +91,16 @@ async fn branch_fork_003_target_writes_isolated() {
 #[tokio::test]
 async fn branch_fork_004_source_writes_isolated() {
     let persistence: SharedPersistence = Arc::new(NoPersistence);
-    let source = Room::new("branch-fork-004-source".to_string(), Arc::clone(&persistence), 512);
-    let target = Room::new("branch-fork-004-target".to_string(), Arc::clone(&persistence), 512);
+    let source = Room::new(
+        "branch-fork-004-source".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
+    let target = Room::new(
+        "branch-fork-004-target".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
     let signer = SigningKey::from_bytes(&[0x72u8; 32]);
 
     let fork_payload = build_set_nodes(

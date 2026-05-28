@@ -3,28 +3,16 @@ use std::sync::Arc;
 
 use ed25519_dalek::{Signer, SigningKey};
 use nodalmerge_core::{
-    ArchiveCheckpoint,
-    ArchiveCompatibilityWindow,
-    ArchiveDescribed,
-    ArchiveImported,
-    ArchivePayloadDigestSet,
-    ArchiveProvenance,
-    ArchiveReasonClass,
-    ArchiveValidated,
-    ArchiveWsResponse,
-    Hash,
-    MapOp,
-    Op,
-    Policy,
-    PolicyDefault,
-    PolicyRule,
-    StateGraph,
-    SyncNode,
-    canonical_hash,
+    canonical_hash, ArchiveCheckpoint, ArchiveCompatibilityWindow, ArchiveDescribed,
+    ArchiveImported, ArchivePayloadDigestSet, ArchiveProvenance, ArchiveReasonClass,
+    ArchiveValidated, ArchiveWsResponse, Hash, MapOp, Op, Policy, PolicyDefault, PolicyRule,
+    StateGraph, SyncNode,
 };
-use nodalmerge_server::room::{Room, import_nodes};
+use nodalmerge_server::archive_adapter::{
+    process_archive_export, process_archive_import, process_archive_validate,
+};
+use nodalmerge_server::room::{import_nodes, Room};
 use nodalmerge_server::store::{DirPersistence, NoPersistence, SharedPersistence};
-use nodalmerge_server::archive_adapter::{process_archive_export, process_archive_import, process_archive_validate};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ArchiveManifest {
@@ -100,10 +88,17 @@ fn validate_archive_format(version: &str, supported: &[&str]) -> Result<(), Arch
 }
 
 fn encode_hash(hash: Hash) -> String {
-    hash.0.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    hash.0
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 
-fn describe_archive_stub(room_id: &str, archive_ref: &str, checkpoint_hash: Hash) -> ArchiveWsResponse {
+fn describe_archive_stub(
+    room_id: &str,
+    archive_ref: &str,
+    checkpoint_hash: Hash,
+) -> ArchiveWsResponse {
     ArchiveWsResponse::DescribeResult(ArchiveDescribed {
         room: room_id.to_string(),
         archive_ref: archive_ref.to_string(),
@@ -154,10 +149,12 @@ fn import_archive_stub(archive_ref: &str) -> Result<ArchiveWsResponse, ArchiveRe
         Ok(ArchiveWsResponse::ImportCompleted(ArchiveImported {
             room: "room-a".to_string(),
             archive_ref: archive_ref.to_string(),
-            canonical_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            canonical_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string(),
             checkpoint: ArchiveCheckpoint {
                 frontier: vec!["seq:0".to_string()],
-                canonical_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                canonical_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_string(),
             },
             imported_nodes: 10,
             imported_blobs: 2,
@@ -255,8 +252,16 @@ fn write_signed_manifest_with_policy_and_transitions(
 #[tokio::test]
 async fn archive_roundtrip_001_full_clone_canonical_hash_parity_server_path() {
     let persistence: SharedPersistence = Arc::new(NoPersistence);
-    let source_room = Room::new("archive-roundtrip-source".to_string(), Arc::clone(&persistence), 512);
-    let target_room = Room::new("archive-roundtrip-target".to_string(), Arc::clone(&persistence), 512);
+    let source_room = Room::new(
+        "archive-roundtrip-source".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
+    let target_room = Room::new(
+        "archive-roundtrip-target".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
 
     let signer = SigningKey::from_bytes(&[0x4Bu8; 32]);
     let export_nodes = build_set_nodes(
@@ -274,12 +279,21 @@ async fn archive_roundtrip_001_full_clone_canonical_hash_parity_server_path() {
     let source_state = source_room.graph.read().await.resolve();
     let target_state = target_room.graph.read().await.resolve();
 
-    let source_hash = canonical_hash(&source_state.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
-    let target_hash = canonical_hash(&target_state.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    let source_hash = canonical_hash(
+        &source_state
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    );
+    let target_hash = canonical_hash(
+        &target_state
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    );
 
     assert_eq!(
-        source_hash,
-        target_hash,
+        source_hash, target_hash,
         "ARCHIVE-ROUNDTRIP-001: server import path must preserve canonical hash parity"
     );
 }
@@ -287,7 +301,11 @@ async fn archive_roundtrip_001_full_clone_canonical_hash_parity_server_path() {
 #[tokio::test]
 async fn archive_det_001_manifest_digest_equality_at_fixed_checkpoint_server_path() {
     let persistence: SharedPersistence = Arc::new(NoPersistence);
-    let room = Room::new("archive-det-room".to_string(), Arc::clone(&persistence), 512);
+    let room = Room::new(
+        "archive-det-room".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
     let signer = SigningKey::from_bytes(&[0x4Cu8; 32]);
 
     let nodes = build_set_nodes(&signer, &[("world/a", "1"), ("world/b", "2")]);
@@ -296,7 +314,8 @@ async fn archive_det_001_manifest_digest_equality_at_fixed_checkpoint_server_pat
     assert!(errs.is_empty());
 
     let state = room.graph.read().await.resolve();
-    let checkpoint_hash = canonical_hash(&state.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    let checkpoint_hash =
+        canonical_hash(&state.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
 
     let manifest_a = ArchiveManifest {
         format_version: "archive/v1".to_string(),
@@ -371,12 +390,23 @@ fn archive_import_reject_001_digest_mismatch_uses_deterministic_reason_class_ser
 #[tokio::test]
 async fn archive_roundtrip_002_generated_file_manifest_import_parity_server_path() {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let source_room = Room::new(
+        "archive-rt-file-source".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let source_room = Room::new("archive-rt-file-source".to_string(), Arc::clone(&persistence), 256);
-    let target_room_a = Room::new("archive-rt-file-target-a".to_string(), Arc::clone(&persistence), 256);
-    let target_room_b = Room::new("archive-rt-file-target-b".to_string(), Arc::clone(&persistence), 256);
+    let target_room_a = Room::new(
+        "archive-rt-file-target-a".to_string(),
+        Arc::clone(&persistence),
+        256,
+    );
+    let target_room_b = Room::new(
+        "archive-rt-file-target-b".to_string(),
+        Arc::clone(&persistence),
+        256,
+    );
 
     let source_signer = SigningKey::from_bytes(&[0x5Au8; 32]);
     let source_nodes = build_set_nodes(&source_signer, &[("world/a", "10"), ("world/b", "20")]);
@@ -454,11 +484,18 @@ async fn archive_roundtrip_003_generated_object_manifest_import_parity_server_pa
         object_root.display().to_string(),
     );
 
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let source_room = Room::new(
+        "archive-rt-object-source".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let source_room = Room::new("archive-rt-object-source".to_string(), Arc::clone(&persistence), 256);
-    let target_room = Room::new("archive-rt-object-target".to_string(), Arc::clone(&persistence), 256);
+    let target_room = Room::new(
+        "archive-rt-object-target".to_string(),
+        Arc::clone(&persistence),
+        256,
+    );
 
     let source_signer = SigningKey::from_bytes(&[0x5Cu8; 32]);
     let source_nodes = build_set_nodes(&source_signer, &[("world/x", "7"), ("world/y", "8")]);
@@ -512,12 +549,16 @@ async fn archive_roundtrip_003_generated_object_manifest_import_parity_server_pa
 }
 
 #[tokio::test]
-async fn archive_export_002_manifest_contains_compatibility_window_and_payload_digest_policy_server_path() {
+async fn archive_export_002_manifest_contains_compatibility_window_and_payload_digest_policy_server_path(
+) {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let source_room = Room::new(
+        "archive-export-meta-source".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let source_room = Room::new("archive-export-meta-source".to_string(), Arc::clone(&persistence), 256);
 
     let signer = SigningKey::from_bytes(&[0x5Eu8; 32]);
     let nodes = build_set_nodes(&signer, &[("world/meta", "1")]);
@@ -567,16 +608,22 @@ async fn archive_export_002_manifest_contains_compatibility_window_and_payload_d
     );
     assert!(written["policy_timeline_hash"].as_str().is_some());
     assert_eq!(written["policy_timeline_cutover_lamport"].as_u64(), Some(0));
-    assert_eq!(written["policy_timeline_transition_cutovers"], serde_json::json!([0]));
+    assert_eq!(
+        written["policy_timeline_transition_cutovers"],
+        serde_json::json!([0])
+    );
 }
 
 #[tokio::test]
 async fn archive_export_003_policy_timeline_transition_progression_non_zero_server_path() {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let source_room = Room::new(
+        "archive-export-policy-transition-source".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let source_room = Room::new("archive-export-policy-transition-source".to_string(), Arc::clone(&persistence), 256);
 
     let signer = SigningKey::from_bytes(&[0x74u8; 32]);
     let nodes = build_set_nodes(&signer, &[("world/meta", "1")]);
@@ -641,10 +688,13 @@ async fn archive_export_003_policy_timeline_transition_progression_non_zero_serv
 #[tokio::test]
 async fn archive_validate_accept_010_policy_timeline_transition_progression_non_zero_server_path() {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let room = Room::new(
+        "archive-validate-policy-transition-non-zero".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let room = Room::new("archive-validate-policy-transition-non-zero".to_string(), Arc::clone(&persistence), 256);
 
     let signer = SigningKey::from_bytes(&[0x7Au8; 32]);
     let nodes = build_set_nodes(&signer, &[("world/meta", "1")]);
@@ -652,31 +702,31 @@ async fn archive_validate_accept_010_policy_timeline_transition_progression_non_
     assert_eq!(accepted, 1);
     assert!(errors.is_empty());
 
-    room
-        .set_policy(Policy {
-            rules: vec![PolicyRule {
-                path_glob: "world/**".to_string(),
-                can_write: vec![],
-                can_read: vec![],
-                can_derive: vec![],
-            }],
-            default: PolicyDefault::DenyAll,
-        })
-        .await;
-    room
-        .set_policy(Policy {
-            rules: vec![PolicyRule {
-                path_glob: "world/**".to_string(),
-                can_write: vec![signer.verifying_key().to_bytes()],
-                can_read: vec![],
-                can_derive: vec![],
-            }],
-            default: PolicyDefault::AllowAll,
-        })
-        .await;
+    room.set_policy(Policy {
+        rules: vec![PolicyRule {
+            path_glob: "world/**".to_string(),
+            can_write: vec![],
+            can_read: vec![],
+            can_derive: vec![],
+        }],
+        default: PolicyDefault::DenyAll,
+    })
+    .await;
+    room.set_policy(Policy {
+        rules: vec![PolicyRule {
+            path_glob: "world/**".to_string(),
+            can_write: vec![signer.verifying_key().to_bytes()],
+            can_read: vec![],
+            can_derive: vec![],
+        }],
+        default: PolicyDefault::AllowAll,
+    })
+    .await;
 
     let export_signer = SigningKey::from_bytes(&[0x7Bu8; 32]);
-    let file_manifest = root.join("exports").join("validate-policy-transition-non-zero.json");
+    let file_manifest = root
+        .join("exports")
+        .join("validate-policy-transition-non-zero.json");
     let export_response = process_archive_export(
         &room,
         "archive-validate-policy-transition-non-zero",
@@ -712,13 +762,21 @@ async fn archive_validate_accept_010_policy_timeline_transition_progression_non_
 }
 
 #[tokio::test]
-async fn archive_validate_reject_002_payload_digest_policy_invalid_uses_deterministic_reason_class_server_path() {
+async fn archive_validate_reject_002_payload_digest_policy_invalid_uses_deterministic_reason_class_server_path(
+) {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let target_room = Room::new(
+        "archive-validate-policy-target".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let target_room = Room::new("archive-validate-policy-target".to_string(), Arc::clone(&persistence), 256);
-    let source_room = Room::new("archive-validate-policy-source".to_string(), Arc::clone(&persistence), 256);
+    let source_room = Room::new(
+        "archive-validate-policy-source".to_string(),
+        Arc::clone(&persistence),
+        256,
+    );
     let source_signer = SigningKey::from_bytes(&[0x60u8; 32]);
     let nodes = build_set_nodes(&source_signer, &[("world/a", "1")]);
     let _ = import_nodes(&source_room, nodes).await;
@@ -749,17 +807,28 @@ async fn archive_validate_reject_002_payload_digest_policy_invalid_uses_determin
     let ArchiveWsResponse::ValidateRejected(reject) = response else {
         panic!("expected archive.validate.rejected response")
     };
-    assert_eq!(reject.reason_class, ArchiveReasonClass::PolicyTimelineMismatch);
+    assert_eq!(
+        reject.reason_class,
+        ArchiveReasonClass::PolicyTimelineMismatch
+    );
 }
 
 #[tokio::test]
-async fn archive_validate_reject_003_compatibility_window_unsupported_uses_deterministic_reason_class_server_path() {
+async fn archive_validate_reject_003_compatibility_window_unsupported_uses_deterministic_reason_class_server_path(
+) {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let target_room = Room::new(
+        "archive-validate-compat-target".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let target_room = Room::new("archive-validate-compat-target".to_string(), Arc::clone(&persistence), 256);
-    let source_room = Room::new("archive-validate-compat-source".to_string(), Arc::clone(&persistence), 256);
+    let source_room = Room::new(
+        "archive-validate-compat-source".to_string(),
+        Arc::clone(&persistence),
+        256,
+    );
     let source_signer = SigningKey::from_bytes(&[0x62u8; 32]);
     let nodes = build_set_nodes(&source_signer, &[("world/a", "1")]);
     let _ = import_nodes(&source_room, nodes).await;
@@ -796,11 +865,18 @@ async fn archive_validate_reject_003_compatibility_window_unsupported_uses_deter
 #[tokio::test]
 async fn archive_validate_accept_005_compatibility_window_range_overlaps_runtime_server_path() {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let target_room = Room::new(
+        "archive-validate-compat-range-target".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let target_room = Room::new("archive-validate-compat-range-target".to_string(), Arc::clone(&persistence), 256);
-    let source_room = Room::new("archive-validate-compat-range-source".to_string(), Arc::clone(&persistence), 256);
+    let source_room = Room::new(
+        "archive-validate-compat-range-source".to_string(),
+        Arc::clone(&persistence),
+        256,
+    );
     let source_signer = SigningKey::from_bytes(&[0x66u8; 32]);
     let nodes = build_set_nodes(&source_signer, &[("world/a", "1")]);
     let _ = import_nodes(&source_room, nodes).await;
@@ -835,12 +911,16 @@ async fn archive_validate_accept_005_compatibility_window_range_overlaps_runtime
 }
 
 #[tokio::test]
-async fn archive_validate_reject_004_policy_timeline_hash_mismatch_uses_deterministic_reason_class_server_path() {
+async fn archive_validate_reject_004_policy_timeline_hash_mismatch_uses_deterministic_reason_class_server_path(
+) {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let target_room = Room::new(
+        "archive-validate-policy-hash-target".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let target_room = Room::new("archive-validate-policy-hash-target".to_string(), Arc::clone(&persistence), 256);
     target_room
         .set_policy(Policy {
             rules: vec![PolicyRule {
@@ -852,7 +932,11 @@ async fn archive_validate_reject_004_policy_timeline_hash_mismatch_uses_determin
             default: PolicyDefault::DenyAll,
         })
         .await;
-    let source_room = Room::new("archive-validate-policy-hash-source".to_string(), Arc::clone(&persistence), 256);
+    let source_room = Room::new(
+        "archive-validate-policy-hash-source".to_string(),
+        Arc::clone(&persistence),
+        256,
+    );
     let source_signer = SigningKey::from_bytes(&[0x64u8; 32]);
     let nodes = build_set_nodes(&source_signer, &[("world/a", "1")]);
     let _ = import_nodes(&source_room, nodes).await;
@@ -883,17 +967,28 @@ async fn archive_validate_reject_004_policy_timeline_hash_mismatch_uses_determin
     let ArchiveWsResponse::ValidateRejected(reject) = response else {
         panic!("expected archive.validate.rejected response")
     };
-    assert_eq!(reject.reason_class, ArchiveReasonClass::PolicyTimelineMismatch);
+    assert_eq!(
+        reject.reason_class,
+        ArchiveReasonClass::PolicyTimelineMismatch
+    );
 }
 
 #[tokio::test]
-async fn archive_validate_reject_006_policy_timeline_cutover_mismatch_uses_deterministic_reason_class_server_path() {
+async fn archive_validate_reject_006_policy_timeline_cutover_mismatch_uses_deterministic_reason_class_server_path(
+) {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let target_room = Room::new(
+        "archive-validate-policy-cutover-target".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let target_room = Room::new("archive-validate-policy-cutover-target".to_string(), Arc::clone(&persistence), 256);
-    let source_room = Room::new("archive-validate-policy-cutover-source".to_string(), Arc::clone(&persistence), 256);
+    let source_room = Room::new(
+        "archive-validate-policy-cutover-source".to_string(),
+        Arc::clone(&persistence),
+        256,
+    );
     let source_signer = SigningKey::from_bytes(&[0x68u8; 32]);
     let nodes = build_set_nodes(&source_signer, &[("world/a", "1")]);
     let _ = import_nodes(&source_room, nodes).await;
@@ -924,17 +1019,28 @@ async fn archive_validate_reject_006_policy_timeline_cutover_mismatch_uses_deter
     let ArchiveWsResponse::ValidateRejected(reject) = response else {
         panic!("expected archive.validate.rejected response")
     };
-    assert_eq!(reject.reason_class, ArchiveReasonClass::PolicyTimelineMismatch);
+    assert_eq!(
+        reject.reason_class,
+        ArchiveReasonClass::PolicyTimelineMismatch
+    );
 }
 
 #[tokio::test]
-async fn archive_validate_reject_007_policy_timeline_transition_progression_invalid_uses_deterministic_reason_class_server_path() {
+async fn archive_validate_reject_007_policy_timeline_transition_progression_invalid_uses_deterministic_reason_class_server_path(
+) {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let target_room = Room::new(
+        "archive-validate-policy-transition-target".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let target_room = Room::new("archive-validate-policy-transition-target".to_string(), Arc::clone(&persistence), 256);
-    let source_room = Room::new("archive-validate-policy-transition-source".to_string(), Arc::clone(&persistence), 256);
+    let source_room = Room::new(
+        "archive-validate-policy-transition-source".to_string(),
+        Arc::clone(&persistence),
+        256,
+    );
     let source_signer = SigningKey::from_bytes(&[0x6Au8; 32]);
     let nodes = build_set_nodes(&source_signer, &[("world/a", "1")]);
     let _ = import_nodes(&source_room, nodes).await;
@@ -970,13 +1076,21 @@ async fn archive_validate_reject_007_policy_timeline_transition_progression_inva
 }
 
 #[tokio::test]
-async fn archive_validate_reject_008_compatibility_window_no_overlap_uses_deterministic_reason_class_server_path() {
+async fn archive_validate_reject_008_compatibility_window_no_overlap_uses_deterministic_reason_class_server_path(
+) {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let target_room = Room::new(
+        "archive-validate-compat-no-overlap-target".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let target_room = Room::new("archive-validate-compat-no-overlap-target".to_string(), Arc::clone(&persistence), 256);
-    let source_room = Room::new("archive-validate-compat-no-overlap-source".to_string(), Arc::clone(&persistence), 256);
+    let source_room = Room::new(
+        "archive-validate-compat-no-overlap-source".to_string(),
+        Arc::clone(&persistence),
+        256,
+    );
     let source_signer = SigningKey::from_bytes(&[0x6Cu8; 32]);
     let nodes = build_set_nodes(&source_signer, &[("world/a", "1")]);
     let _ = import_nodes(&source_room, nodes).await;
@@ -1013,11 +1127,18 @@ async fn archive_validate_reject_008_compatibility_window_no_overlap_uses_determ
 #[tokio::test]
 async fn archive_validate_accept_009_compatibility_window_edge_overlap_lower_bound_server_path() {
     let root = tmpdir();
-    let persistence: SharedPersistence = Arc::new(
-        DirPersistence::open(&root).expect("dir persistence should open"),
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
+    let target_room = Room::new(
+        "archive-validate-compat-edge-lower-target".to_string(),
+        Arc::clone(&persistence),
+        256,
     );
-    let target_room = Room::new("archive-validate-compat-edge-lower-target".to_string(), Arc::clone(&persistence), 256);
-    let source_room = Room::new("archive-validate-compat-edge-lower-source".to_string(), Arc::clone(&persistence), 256);
+    let source_room = Room::new(
+        "archive-validate-compat-edge-lower-source".to_string(),
+        Arc::clone(&persistence),
+        256,
+    );
     let source_signer = SigningKey::from_bytes(&[0x6Eu8; 32]);
     let nodes = build_set_nodes(&source_signer, &[("world/a", "1")]);
     let _ = import_nodes(&source_room, nodes).await;

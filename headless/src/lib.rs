@@ -1,6 +1,7 @@
 //! Headless peer worker: websocket sync to a reflector + [`PeerLocalPersistence`](nodalmerge_runtime_local::PeerLocalPersistence).
 
 mod config;
+pub mod metrics;
 mod report;
 mod sync;
 mod worker;

@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use nodalmerge_core::{unpack_nodes, pack_nodes, Hash, SyncNode};
+use nodalmerge_core::{pack_nodes, unpack_nodes, Hash, SyncNode};
 use rusqlite::{params, Connection};
 
 /// F6 — a presigned URL plus its absolute Unix-second expiration.
@@ -47,7 +47,10 @@ impl PresignedUrl {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        Self { url: url.into(), expires_at_unix: now.saturating_add(ttl.as_secs()) }
+        Self {
+            url: url.into(),
+            expires_at_unix: now.saturating_add(ttl.as_secs()),
+        }
     }
 }
 
@@ -63,12 +66,16 @@ pub trait NodePersistence: Send + Sync + std::fmt::Debug {
     /// [`persist_node`]; backends with transactional semantics should
     /// override to amortize fsync / commit cost across the whole batch.
     fn persist_nodes(&self, room_id: &str, nodes: &[&SyncNode]) {
-        for n in nodes { self.persist_node(room_id, n); }
+        for n in nodes {
+            self.persist_node(room_id, n);
+        }
     }
     /// `true` if this backend survives process restarts. See
     /// [`ServerPersistence::is_durable`] for the combined durability used
     /// by the idle-eviction sweeper.
-    fn nodes_durable(&self) -> bool { true }
+    fn nodes_durable(&self) -> bool {
+        true
+    }
 }
 
 /// Blob-side persistence. See module docs for rationale.
@@ -94,7 +101,9 @@ pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
         _room_id: &str,
         _live: &std::collections::HashSet<Hash>,
         _grace: Duration,
-    ) -> usize { 0 }
+    ) -> usize {
+        0
+    }
 
     /// F6 — redirect target for blob *downloads*.
     ///
@@ -113,7 +122,9 @@ pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
         _room_id: &str,
         _hash: &Hash,
         _size_hint: Option<u64>,
-    ) -> Option<PresignedUrl> { None }
+    ) -> Option<PresignedUrl> {
+        None
+    }
 
     /// F6 — direct-upload target for blob *uploads*.
     ///
@@ -130,7 +141,9 @@ pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
         _hash: &Hash,
         _size: u64,
         _content_type: Option<&str>,
-    ) -> Option<PresignedUrl> { None }
+    ) -> Option<PresignedUrl> {
+        None
+    }
 
     /// F6 — verify a presigned upload completed. Called when the SDK
     /// sends `blob-uploaded`. Backends with server-side visibility (S3
@@ -139,14 +152,14 @@ pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
     ///
     /// Returning `Err` causes the server to reject the `blob-uploaded`
     /// message and ignore the blob; the client falls back to WS.
-    fn verify_uploaded(
-        &self,
-        _room_id: &str,
-        _hash: &Hash,
-    ) -> Result<(), String> { Ok(()) }
+    fn verify_uploaded(&self, _room_id: &str, _hash: &Hash) -> Result<(), String> {
+        Ok(())
+    }
 
     /// `true` if this backend survives process restarts.
-    fn blobs_durable(&self) -> bool { true }
+    fn blobs_durable(&self) -> bool {
+        true
+    }
 }
 
 /// The whole-persistence surface — everything `Rooms` needs. Existing call
@@ -194,7 +207,9 @@ pub struct Composite<N, B> {
 }
 
 impl<N, B> Composite<N, B> {
-    pub fn new(nodes: N, blobs: B) -> Self { Self { nodes, blobs } }
+    pub fn new(nodes: N, blobs: B) -> Self {
+        Self { nodes, blobs }
+    }
 }
 
 impl<N: NodePersistence, B: BlobPersistence> NodePersistence for Composite<N, B> {
@@ -227,11 +242,23 @@ impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B>
     ) -> usize {
         self.blobs.blob_gc_sweep(room_id, live, grace)
     }
-    fn resolve_get_url(&self, room_id: &str, hash: &Hash, size_hint: Option<u64>) -> Option<PresignedUrl> {
+    fn resolve_get_url(
+        &self,
+        room_id: &str,
+        hash: &Hash,
+        size_hint: Option<u64>,
+    ) -> Option<PresignedUrl> {
         self.blobs.resolve_get_url(room_id, hash, size_hint)
     }
-    fn resolve_put_url(&self, room_id: &str, hash: &Hash, size: u64, content_type: Option<&str>) -> Option<PresignedUrl> {
-        self.blobs.resolve_put_url(room_id, hash, size, content_type)
+    fn resolve_put_url(
+        &self,
+        room_id: &str,
+        hash: &Hash,
+        size: u64,
+        content_type: Option<&str>,
+    ) -> Option<PresignedUrl> {
+        self.blobs
+            .resolve_put_url(room_id, hash, size, content_type)
     }
     fn verify_uploaded(&self, room_id: &str, hash: &Hash) -> Result<(), String> {
         self.blobs.verify_uploaded(room_id, hash)
@@ -241,7 +268,6 @@ impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B>
     }
 }
 
-
 // ─── NoPersistence ──────────────────────────────────────────────────────────
 
 /// In-memory only. The default — matches pre-F4 behavior.
@@ -249,15 +275,23 @@ impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B>
 pub struct NoPersistence;
 
 impl NodePersistence for NoPersistence {
-    fn load_room_nodes(&self, _room_id: &str) -> Vec<SyncNode> { Vec::new() }
+    fn load_room_nodes(&self, _room_id: &str) -> Vec<SyncNode> {
+        Vec::new()
+    }
     fn persist_node(&self, _room_id: &str, _node: &SyncNode) {}
-    fn nodes_durable(&self) -> bool { false }
+    fn nodes_durable(&self) -> bool {
+        false
+    }
 }
 
 impl BlobPersistence for NoPersistence {
-    fn load_room_blobs(&self, _room_id: &str) -> Vec<(Hash, Vec<u8>)> { Vec::new() }
+    fn load_room_blobs(&self, _room_id: &str) -> Vec<(Hash, Vec<u8>)> {
+        Vec::new()
+    }
     fn persist_blob(&self, _room_id: &str, _hash: &Hash, _bytes: &[u8]) {}
-    fn blobs_durable(&self) -> bool { false }
+    fn blobs_durable(&self) -> bool {
+        false
+    }
 }
 
 // ─── DirPersistence ─────────────────────────────────────────────────────────
@@ -310,8 +344,12 @@ impl DirPersistence {
                UNIQUE(room_id, node_id)
              );
              CREATE INDEX IF NOT EXISTS idx_nodes_room ON nodes(room_id, seq);",
-        ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        Ok(Self { root, conn: Mutex::new(conn) })
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        Ok(Self {
+            root,
+            conn: Mutex::new(conn),
+        })
     }
 
     fn blobs_dir_for(&self, room_id: &str) -> PathBuf {
@@ -328,12 +366,14 @@ impl DirPersistence {
 impl NodePersistence for DirPersistence {
     fn load_room_nodes(&self, room_id: &str) -> Vec<SyncNode> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare(
-            "SELECT bytes FROM nodes WHERE room_id = ?1 ORDER BY seq ASC",
-        ) {
-            Ok(s) => s,
-            Err(e) => { tracing::warn!(?e, "prepare load_room_nodes failed"); return Vec::new(); }
-        };
+        let mut stmt =
+            match conn.prepare("SELECT bytes FROM nodes WHERE room_id = ?1 ORDER BY seq ASC") {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(?e, "prepare load_room_nodes failed");
+                    return Vec::new();
+                }
+            };
         let rows = stmt.query_map(params![room_id], |r| r.get::<_, Vec<u8>>(0));
         let mut out = Vec::new();
         if let Ok(iter) = rows {
@@ -367,7 +407,9 @@ impl NodePersistence for DirPersistence {
     }
 
     fn persist_nodes(&self, room_id: &str, nodes: &[&SyncNode]) {
-        if nodes.is_empty() { return; }
+        if nodes.is_empty() {
+            return;
+        }
         let t0 = Instant::now();
         // Pre-encode outside the lock so we hold the connection mutex for the
         // minimum possible time. Each row is still one postcard pack, same as
@@ -434,12 +476,18 @@ impl NodePersistence for DirPersistence {
 impl BlobPersistence for DirPersistence {
     fn load_room_blobs(&self, room_id: &str) -> Vec<(Hash, Vec<u8>)> {
         let dir = self.blobs_dir_for(room_id);
-        let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new(); };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         for entry in rd.flatten() {
             let path = entry.path();
-            let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
-            let Some(hash) = hash_from_hex(name) else { continue };
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Some(hash) = hash_from_hex(name) else {
+                continue;
+            };
             match std::fs::read(&path) {
                 Ok(bytes) => {
                     // Verify integrity — reject tampered files.
@@ -464,7 +512,9 @@ impl BlobPersistence for DirPersistence {
             return;
         }
         let path = dir.join(hash.to_hex());
-        if path.exists() { return; }
+        if path.exists() {
+            return;
+        }
         // Write+rename = atomic on POSIX; on Windows it's a best-effort replace.
         let tmp = dir.join(format!("{}.tmp", hash.to_hex()));
         if let Err(e) = std::fs::write(&tmp, bytes) {
@@ -490,16 +540,24 @@ impl BlobPersistence for DirPersistence {
     ) -> usize {
         let blobs_dir = self.blobs_dir_for(room_id);
         let tombs_dir = self.tombstones_dir_for(room_id);
-        let Ok(rd) = std::fs::read_dir(&blobs_dir) else { return 0; };
+        let Ok(rd) = std::fs::read_dir(&blobs_dir) else {
+            return 0;
+        };
 
         let now = SystemTime::now();
         let mut deleted = 0usize;
         for entry in rd.flatten() {
             let path = entry.path();
-            let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
             // Skip stray `.tmp` writes from a crashed persist_blob.
-            if name.ends_with(".tmp") { continue; }
-            let Some(hash) = hash_from_hex(name) else { continue };
+            if name.ends_with(".tmp") {
+                continue;
+            }
+            let Some(hash) = hash_from_hex(name) else {
+                continue;
+            };
             let tomb_path = tombs_dir.join(name);
 
             if live.contains(&hash) {
@@ -515,7 +573,9 @@ impl BlobPersistence for DirPersistence {
             // Not live — consult tombstone.
             match std::fs::metadata(&tomb_path) {
                 Ok(md) => {
-                    let aged = md.modified().ok()
+                    let aged = md
+                        .modified()
+                        .ok()
                         .and_then(|t| now.duration_since(t).ok())
                         .map(|age| age >= grace)
                         .unwrap_or(false);
@@ -570,7 +630,9 @@ fn sanitize(room_id: &str) -> String {
 }
 
 fn hash_from_hex(s: &str) -> Option<Hash> {
-    if s.len() != 64 { return None; }
+    if s.len() != 64 {
+        return None;
+    }
     let mut out = [0u8; 32];
     let bytes = s.as_bytes();
     for i in 0..32 {
@@ -603,8 +665,8 @@ pub fn topology_store_root(persistence: &SharedPersistence) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodalmerge_core::{Op, MapOp, StateGraph};
     use ed25519_dalek::SigningKey;
+    use nodalmerge_core::{MapOp, Op, StateGraph};
 
     fn tmpdir() -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -623,7 +685,16 @@ mod tests {
         // Build one signed node via StateGraph::apply_local.
         let sk = SigningKey::from_bytes(&[0x11u8; 32]);
         let mut g = StateGraph::new();
-        let id = g.apply_local(&sk, 0, vec![Op::Map(MapOp::Set{ key: "k".into(), value: b"v".to_vec()})]).unwrap();
+        let id = g
+            .apply_local(
+                &sk,
+                0,
+                vec![Op::Map(MapOp::Set {
+                    key: "k".into(),
+                    value: b"v".to_vec(),
+                })],
+            )
+            .unwrap();
         let node = g.get_nodes(&[id]).into_iter().next().unwrap().clone();
         store.persist_node("room-x", &node);
         let loaded = store.load_room_nodes("room-x");
@@ -639,7 +710,16 @@ mod tests {
         let store = DirPersistence::open(&dir).unwrap();
         let sk = SigningKey::from_bytes(&[0x22u8; 32]);
         let mut g = StateGraph::new();
-        let id = g.apply_local(&sk, 0, vec![Op::Map(MapOp::Set{ key: "k".into(), value: b"v".to_vec()})]).unwrap();
+        let id = g
+            .apply_local(
+                &sk,
+                0,
+                vec![Op::Map(MapOp::Set {
+                    key: "k".into(),
+                    value: b"v".to_vec(),
+                })],
+            )
+            .unwrap();
         let node = g.get_nodes(&[id]).into_iter().next().unwrap().clone();
         store.persist_node("room-x", &node);
         store.persist_node("room-x", &node);

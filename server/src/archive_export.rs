@@ -3,15 +3,8 @@ use std::path::Path;
 
 use ed25519_dalek::{Signer, SigningKey};
 use nodalmerge_core::{
-    Hash,
-    Policy,
-    PolicyTimelineEntry,
-    SyncNode,
-    canonical_hash,
-    pack_nodes,
-    policy_timeline_cutover_lamport,
-    policy_timeline_hash,
-    replay,
+    canonical_hash, pack_nodes, policy_timeline_cutover_lamport, policy_timeline_hash, replay,
+    Hash, Policy, PolicyTimelineEntry, SyncNode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -189,7 +182,8 @@ pub fn write_object_manifest(
 }
 
 fn checkpoint_hash_for_nodes(nodes: &[SyncNode]) -> Result<String, String> {
-    let replayed = replay(nodes, None).map_err(|_| "persisted nodes could not be replayed".to_string())?;
+    let replayed =
+        replay(nodes, None).map_err(|_| "persisted nodes could not be replayed".to_string())?;
     let hash = canonical_hash(
         &replayed
             .map
@@ -259,7 +253,7 @@ mod tests {
     use nodalmerge_core::{BlobStore, MapOp, Op, StateGraph};
 
     use super::*;
-    use crate::room::{Room, import_nodes};
+    use crate::room::{import_nodes, Room};
     use crate::store::{DirPersistence, SharedPersistence};
 
     fn tmpdir() -> std::path::PathBuf {
@@ -302,9 +296,8 @@ mod tests {
     #[tokio::test]
     async fn deterministic_manifest_builder_is_stable_for_same_checkpoint() {
         let root = tmpdir();
-        let persistence: SharedPersistence = Arc::new(
-            DirPersistence::open(&root).expect("dir persistence should open"),
-        );
+        let persistence: SharedPersistence =
+            Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
         let source_room = Room::new("export-source".to_string(), Arc::clone(&persistence), 64);
         seed_room(&source_room).await;
 
@@ -335,9 +328,8 @@ mod tests {
     #[tokio::test]
     async fn manifest_writers_emit_file_and_object_paths() {
         let root = tmpdir();
-        let persistence: SharedPersistence = Arc::new(
-            DirPersistence::open(&root).expect("dir persistence should open"),
-        );
+        let persistence: SharedPersistence =
+            Arc::new(DirPersistence::open(&root).expect("dir persistence should open"));
         let source_room = Room::new("export-source-2".to_string(), Arc::clone(&persistence), 64);
         seed_room(&source_room).await;
 

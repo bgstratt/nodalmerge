@@ -17,12 +17,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nodalmerge_server::room::Rooms;
-use nodalmerge_server::store::{NoPersistence, SharedPersistence};
-use nodalmerge_server::ws_handler;
 use axum::{routing::get, Router};
 use ed25519_dalek::SigningKey;
 use futures_util::{SinkExt, StreamExt};
+use nodalmerge_server::room::Rooms;
+use nodalmerge_server::store::{NoPersistence, SharedPersistence};
+use nodalmerge_server::ws_handler;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
 /// Spawn an axum server bound to an ephemeral loopback port with the given
@@ -53,7 +53,9 @@ async fn lagged_broadcast_closes_with_4001() {
 
     // --- client connects ----------------------------------------------------
     let url = format!("ws://{addr}/ws/laggy");
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut ws_sink, mut ws_stream) = ws.split();
 
     // Minimal hello — open room, no IBF, no subscription filter.
@@ -64,7 +66,10 @@ async fn lagged_broadcast_closes_with_4001() {
         "frontier": [],
     })
     .to_string();
-    ws_sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    ws_sink
+        .send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     // Read welcome (+ peer-joined broadcast) — drain until we see welcome.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -121,7 +126,10 @@ async fn lagged_broadcast_closes_with_4001() {
     .expect("timed out waiting for close frame")
     .expect("stream ended without a close frame");
 
-    assert_eq!(close_code, 4001, "expected 4001 resync required, got {close_code}");
+    assert_eq!(
+        close_code, 4001,
+        "expected 4001 resync required, got {close_code}"
+    );
 
     // Cleanup should have run: peer count returns to 0.
     // Give the server task a brief moment to deregister after the close frame.

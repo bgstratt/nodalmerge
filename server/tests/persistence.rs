@@ -5,10 +5,10 @@
 use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 
-use nodalmerge_core::{Hash, MapOp, Op, StateGraph, canonical_hash};
+use ed25519_dalek::SigningKey;
+use nodalmerge_core::{canonical_hash, Hash, MapOp, Op, StateGraph};
 use nodalmerge_server::room::{import_nodes, Room, Rooms};
 use nodalmerge_server::store::{DirPersistence, SharedPersistence};
-use ed25519_dalek::SigningKey;
 
 fn init_test_tracing() {
     static INIT: Once = Once::new();
@@ -25,7 +25,9 @@ fn init_test_tracing() {
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let p = std::env::temp_dir().join(format!("nodalmerge-itest-{tag}-{nanos}"));
     std::fs::create_dir_all(&p).unwrap();
     p
@@ -33,9 +35,16 @@ fn tmpdir(tag: &str) -> std::path::PathBuf {
 
 fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> nodalmerge_core::SyncNode {
     let mut g = StateGraph::new();
-    let id = g.apply_local(sk, 0, vec![Op::Map(MapOp::Set {
-        key: key.into(), value: val.to_vec(),
-    })]).unwrap();
+    let id = g
+        .apply_local(
+            sk,
+            0,
+            vec![Op::Map(MapOp::Set {
+                key: key.into(),
+                value: val.to_vec(),
+            })],
+        )
+        .unwrap();
     g.get_nodes(&[id]).into_iter().next().unwrap().clone()
 }
 
@@ -54,7 +63,8 @@ async fn room_survives_restart_with_nodes_and_blobs() {
         let n1 = make_node(&sk, "hello", b"world");
         let n2 = make_node(&sk, "answer", b"42");
         let n3 = make_node(&sk, "rust", b"ferris");
-        let (accepted, _, errs) = import_nodes(&room, vec![n1.clone(), n2.clone(), n3.clone()]).await;
+        let (accepted, _, errs) =
+            import_nodes(&room, vec![n1.clone(), n2.clone(), n3.clone()]).await;
         assert_eq!(accepted, 3);
         assert!(errs.is_empty());
         // Also persist a blob.
@@ -127,16 +137,25 @@ async fn large_room_hydrates_quickly() {
     {
         let stage_start = Instant::now();
         let room = Room::new(room_id.clone(), Arc::clone(&persistence), 512);
-        println!("[timing] stage=create_room elapsed_ms={}", stage_start.elapsed().as_millis());
+        println!(
+            "[timing] stage=create_room elapsed_ms={}",
+            stage_start.elapsed().as_millis()
+        );
 
         let mut batch = Vec::with_capacity(n);
         let mut g = StateGraph::new();
         let build_start = Instant::now();
         for i in 0..n {
-            let id = g.apply_local(&sk, 0, vec![Op::Map(MapOp::Set {
-                key: format!("k/{i}"),
-                value: format!("v{i}").into_bytes(),
-            })]).unwrap();
+            let id = g
+                .apply_local(
+                    &sk,
+                    0,
+                    vec![Op::Map(MapOp::Set {
+                        key: format!("k/{i}"),
+                        value: format!("v{i}").into_bytes(),
+                    })],
+                )
+                .unwrap();
             let node = g.get_nodes(&[id]).into_iter().next().unwrap().clone();
             batch.push(node);
         }
@@ -157,10 +176,8 @@ async fn large_room_hydrates_quickly() {
 
         let expected_hash_start = Instant::now();
         let graph = room.graph.read().await;
-        let expected_state: std::collections::BTreeMap<String, Vec<u8>> = graph
-            .resolve()
-            .into_iter()
-            .collect();
+        let expected_state: std::collections::BTreeMap<String, Vec<u8>> =
+            graph.resolve().into_iter().collect();
         let expected = canonical_hash(&expected_state);
         drop(graph);
         expected_hash = expected;
@@ -216,10 +233,8 @@ async fn large_room_hydrates_quickly() {
 
     let actual_hash_start = Instant::now();
     let graph = room.graph.read().await;
-    let actual_state: std::collections::BTreeMap<String, Vec<u8>> = graph
-        .resolve()
-        .into_iter()
-        .collect();
+    let actual_state: std::collections::BTreeMap<String, Vec<u8>> =
+        graph.resolve().into_iter().collect();
     let actual_hash = canonical_hash(&actual_state);
     drop(graph);
     println!(
@@ -227,15 +242,23 @@ async fn large_room_hydrates_quickly() {
         actual_hash_start.elapsed().as_millis()
     );
 
-    assert_eq!(expected_hash, actual_hash, "rehydrated canonical hash mismatch");
+    assert_eq!(
+        expected_hash, actual_hash,
+        "rehydrated canonical hash mismatch"
+    );
 
     println!("[startup_replay] hydrated {n} nodes in {:.2?}", elapsed);
     // The exit criterion is 500 ms, but CI hosts vary wildly.  Assert a loose
     // 5 s ceiling so the test still catches an O(n²) regression without
     // flaking on slow runners.
-    assert!(elapsed.as_secs() < 5, "hydrate took {elapsed:?}, expected <5s");
-    println!("[timing] stage=test_total elapsed_ms={}", test_start.elapsed().as_millis());
+    assert!(
+        elapsed.as_secs() < 5,
+        "hydrate took {elapsed:?}, expected <5s"
+    );
+    println!(
+        "[timing] stage=test_total elapsed_ms={}",
+        test_start.elapsed().as_millis()
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
-

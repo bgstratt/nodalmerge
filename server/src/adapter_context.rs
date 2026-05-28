@@ -1,9 +1,6 @@
 use nodalmerge_host_core::engine::{
-    ClientMessageParseClassification,
-    WebRtcRelayBranchClassification,
-    classify_webrtc_relay_branch,
-    classify_client_message_json,
-    extract_client_message_type_text,
+    classify_client_message_json, classify_webrtc_relay_branch, extract_client_message_type_text,
+    ClientMessageParseClassification, WebRtcRelayBranchClassification,
 };
 use serde_json::Value;
 
@@ -29,6 +26,11 @@ pub enum ClientDispatchCommand {
     ArchiveValidate,
     ArchiveImport,
     ArchiveExport,
+    QueryRegister,
+    ProjectionBuild,
+    ProjectionRead,
+    ProjectionInvalidate,
+    ProjectionList,
     TopologyCreateChild,
     TopologyDescribeLineage,
     TopologyListChildren,
@@ -99,6 +101,11 @@ pub fn route_client_dispatch_command(message_type: &str) -> ClientDispatchComman
         "archive.validate" => ClientDispatchCommand::ArchiveValidate,
         "archive.import" => ClientDispatchCommand::ArchiveImport,
         "archive.export" => ClientDispatchCommand::ArchiveExport,
+        "query.register" => ClientDispatchCommand::QueryRegister,
+        "projection.build" => ClientDispatchCommand::ProjectionBuild,
+        "projection.read" => ClientDispatchCommand::ProjectionRead,
+        "projection.invalidate" => ClientDispatchCommand::ProjectionInvalidate,
+        "projection.list" => ClientDispatchCommand::ProjectionList,
         "topology.create-child" => ClientDispatchCommand::TopologyCreateChild,
         "topology.describe-lineage" => ClientDispatchCommand::TopologyDescribeLineage,
         "topology.list-children" => ClientDispatchCommand::TopologyListChildren,
@@ -106,7 +113,10 @@ pub fn route_client_dispatch_command(message_type: &str) -> ClientDispatchComman
         "topology.validate-promotion" => ClientDispatchCommand::TopologyValidatePromotion,
         "topology.apply-promotion" => ClientDispatchCommand::TopologyApplyPromotion,
         _ if classify_webrtc_relay_branch(message_type)
-            == WebRtcRelayBranchClassification::Relay => ClientDispatchCommand::Relay,
+            == WebRtcRelayBranchClassification::Relay =>
+        {
+            ClientDispatchCommand::Relay
+        }
         _ => ClientDispatchCommand::Unknown,
     }
 }
@@ -148,6 +158,30 @@ mod tests {
         assert_eq!(
             ctx.message["archive_ref"].as_str(),
             Some("s3://bucket/a.nmar")
+        );
+    }
+
+    #[test]
+    fn route_query_commands_to_control_plane_variants() {
+        assert_eq!(
+            route_client_dispatch_command("query.register"),
+            ClientDispatchCommand::QueryRegister
+        );
+        assert_eq!(
+            route_client_dispatch_command("projection.build"),
+            ClientDispatchCommand::ProjectionBuild
+        );
+        assert_eq!(
+            route_client_dispatch_command("projection.read"),
+            ClientDispatchCommand::ProjectionRead
+        );
+        assert_eq!(
+            route_client_dispatch_command("projection.invalidate"),
+            ClientDispatchCommand::ProjectionInvalidate
+        );
+        assert_eq!(
+            route_client_dispatch_command("projection.list"),
+            ClientDispatchCommand::ProjectionList
         );
     }
 }

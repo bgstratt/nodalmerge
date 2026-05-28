@@ -208,6 +208,8 @@ Wave 1 initial stub evidence (2026-05-27):
 20. Phase E benchmark baseline profile run-02 is now recorded in `docs/acceptance/query-phasee-benchmark-baseline-run02.json` with pressure-cardinality projection build/read/rebuild loop evidence and operation-level memory ceiling validation.
 21. Phase E benchmark baseline profile run-03 is now recorded in `docs/acceptance/query-phasee-benchmark-baseline-run03.json`: end-to-end replay to a fixed checkpoint, prefix projection materialization, and paginated read digest continuity (`QUERY-PHASEE-REPLAY-E2E-001` / `query_phasee_replay_003_*` and `server_query_phasee_replay_003_*` in core/server vector suites).
 22. Phase E minimal slice closeout is recorded in `docs/acceptance/query-phasee-closeout.json`. Cooperative backpressure for long-running projection builds remains explicitly deferred to Wave 3 / FSE-03 (scheduler/backpressure) rather than blocking this Wave 1 exit.
+23. Wave 3 FSE-03 initial slice is now recorded in `docs/acceptance/query-wave3-backpressure-run01.json`: Rust server query control plane enforces configurable projection-build row/inflight backpressure guards with deterministic `projection.build.rejected` / `reject.query_backpressure` behavior.
+24. Wave 3 FSE-03 follow-up slice is now recorded in `docs/acceptance/query-wave3-backpressure-run02.json`: query build backpressure observability metrics (`nodalmerge_query_build_total`, `nodalmerge_query_build_seconds`, `nodalmerge_query_build_inflight`) and deterministic contention/recovery vector coverage are in place.
 
 ## 7. Risks and mitigations
 

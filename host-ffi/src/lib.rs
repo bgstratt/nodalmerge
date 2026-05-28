@@ -117,6 +117,8 @@ fn command_label(command: &HostCommand) -> &'static str {
         HostCommand::MstDone { .. } => "mst-done",
         HostCommand::GetRecentConflicts { .. } => "recent-conflicts",
         HostCommand::RelayPeerSignal { .. } => "relay-peer-signal",
+        HostCommand::CreateTopologyChild { .. } => "topology.create-child",
+        HostCommand::DescribeRoomLineage { .. } => "topology.describe-lineage",
         HostCommand::Noop => "noop",
     }
 }
@@ -125,6 +127,8 @@ fn capability_label_for_command(command: &HostCommand) -> &'static str {
     match command {
         HostCommand::SetPolicy { .. } => "policy.admin",
         HostCommand::SetRoomKey { .. } => "room.admin",
+        HostCommand::CreateTopologyChild { .. } => "topology.admin",
+        HostCommand::DescribeRoomLineage { .. } => "topology.admin",
         _ => "unknown",
     }
 }

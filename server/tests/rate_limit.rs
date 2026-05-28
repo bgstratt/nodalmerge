@@ -15,20 +15,26 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nodalmerge_core::{MapOp, Op, StateGraph, SyncNode, pack_nodes};
-use nodalmerge_server::room::Rooms;
-use nodalmerge_server::store::{NoPersistence, SharedPersistence};
-use nodalmerge_server::ws_handler;
 use axum::{routing::get, Router};
 use ed25519_dalek::SigningKey;
 use futures_util::{SinkExt, StreamExt};
+use nodalmerge_core::{pack_nodes, MapOp, Op, StateGraph, SyncNode};
+use nodalmerge_server::room::Rooms;
+use nodalmerge_server::store::{NoPersistence, SharedPersistence};
+use nodalmerge_server::ws_handler;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
 async fn spawn_server(peer_rate_nodes: u32, peer_rate_bytes: u32) -> std::net::SocketAddr {
     let server_key = SigningKey::from_bytes(&[9u8; 32]);
     let persistence: SharedPersistence = Arc::new(NoPersistence);
     // Broadcast capacity doesn't matter for this test; 512 is the prod default.
-    let rooms = Rooms::new(server_key, persistence, 512, peer_rate_nodes, peer_rate_bytes);
+    let rooms = Rooms::new(
+        server_key,
+        persistence,
+        512,
+        peer_rate_nodes,
+        peer_rate_bytes,
+    );
 
     let app = Router::new()
         .route("/ws/:room_id", get(ws_handler::handler))
@@ -51,15 +57,21 @@ async fn spawn_server(peer_rate_nodes: u32, peer_rate_bytes: u32) -> std::net::S
 fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> SyncNode {
     let mut g = StateGraph::new();
     let id = g
-        .apply_local(sk, 0, vec![Op::Map(MapOp::Set { key: key.into(), value: val.to_vec() })])
+        .apply_local(
+            sk,
+            0,
+            vec![Op::Map(MapOp::Set {
+                key: key.into(),
+                value: val.to_vec(),
+            })],
+        )
         .unwrap();
     g.get_nodes(&[id]).into_iter().next().unwrap().clone()
 }
 
 fn base64_encode(data: &[u8]) -> String {
     // Copy of ws_handler::base64_encode's behaviour (standard alphabet, pad).
-    const ALPHA: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     let mut i = 0;
     while i + 3 <= data.len() {
@@ -98,7 +110,9 @@ async fn oversized_pack_closes_with_4008() {
     let addr = spawn_server(/* nodes/s */ 2, /* bytes/s */ 0).await;
 
     let url = format!("ws://{addr}/ws/ratey");
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut ws_sink, mut ws_stream) = ws.split();
 
     let peer_sk = SigningKey::from_bytes(&[0xAB; 32]);
@@ -110,7 +124,10 @@ async fn oversized_pack_closes_with_4008() {
         "frontier": [],
     })
     .to_string();
-    ws_sink.send(TMessage::Text(hello.into())).await.expect("send hello");
+    ws_sink
+        .send(TMessage::Text(hello.into()))
+        .await
+        .expect("send hello");
 
     // Drain to welcome.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -136,7 +153,10 @@ async fn oversized_pack_closes_with_4008() {
     let refs: Vec<&SyncNode> = nodes.iter().collect();
     let pack_b64 = base64_encode(&pack_nodes(&refs));
     let env = serde_json::json!({ "type": "pack", "nodes": pack_b64 }).to_string();
-    ws_sink.send(TMessage::Text(env.into())).await.expect("send pack");
+    ws_sink
+        .send(TMessage::Text(env.into()))
+        .await
+        .expect("send pack");
 
     // Assert Close{4008} within 5 s.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

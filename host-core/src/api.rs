@@ -187,6 +187,17 @@ pub enum HostCommand {
         to_peer_pubkey: String,
         payload: Value,
     },
+    CreateTopologyChild {
+        parent_room_id: String,
+        child_room_id: String,
+        child_purpose: String,
+        created_by: String,
+        promotion_policy_id: String,
+        parent_checkpoint: Value,
+    },
+    DescribeRoomLineage {
+        room_id: String,
+    },
     Noop,
 }
 
@@ -410,6 +421,15 @@ pub enum HostEvent {
         msg_type: String,
         to_peer_pubkey: String,
         payload: Value,
+    },
+    ChildRoomCreated {
+        child_room_id: String,
+        lineage: Value,
+    },
+    RoomLineageDescribed {
+        room_id: String,
+        lineage: Option<Value>,
+        ancestors: Vec<Value>,
     },
     NoopAck,
 }

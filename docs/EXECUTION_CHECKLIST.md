@@ -45,8 +45,24 @@ target dates, and acceptance evidence artifacts.
 - Evidence artifacts:
   1. `docs/acceptance/archive-phased-post-closeout-monitoring-run01.json`
   2. `docs/acceptance/archive-phased-threshold-recalibration-run01.json` (only if thresholds change)
+  3. `docs/acceptance/archive-phased-post-closeout-monitoring-run02-template.json` (template for 2026-06-03 review execution)
 - Completion gate:
   1. Monitoring cadence is recorded and next review date is explicitly scheduled (met — next review 2026-06-03).
+
+### 1.3 Rust server query control-plane parity smoke
+
+- Status: **Completed** (2026-05-27)
+- Owner: Runtime + CLI
+- Target date: 2026-05-27 (met)
+- Source plans: `docs/QUERY_MATERIALIZATION_EXECUTION_PLAN.md`, `docs/roadmap.md` (Wave 1 query/materialization)
+- Required outputs:
+  1. Live CLI `query` flow against Rust server WS path (`/ws/:room`) without relying on .NET host runtime endpoint
+  2. Acceptance artifact with register/build/read/list/invalidate outputs
+- Evidence artifacts:
+  1. `docs/acceptance/query-rust-server-control-plane-smoke-run01.json`
+- Completion gate:
+  1. Register/build/read/list/invalidate all return deterministic success envelopes in one smoke run (met).
+  2. Post-invalidate state transitions from `active` to `invalidated` in list output (met).
 
 ## 2. Next wave kickoff (Wave 2)
 
@@ -133,16 +149,60 @@ target dates, and acceptance evidence artifacts.
 - Completion gate:
   1. CLI + server + Rust host-core + dotnet stub parity + host_migration golden fixture (met).
   2. Operator metrics snippet in `docs/operator.md` (met). Dashboard visualization deferred.
-  3. Durable lineage across restart and Phase E scale items explicitly deferred.
+  3. Durable lineage across restart is implemented (`AUTH-ROOM-006` lineage + promotion restart vectors).
+  4. Promotion fair-queue controls and lineage index retention cap baseline are recorded (`docs/acceptance/topology-promotion-queue-baseline-run01.json`); large-family scale and retention policy hardening remain deferred.
 
 ### 3.2 Reliability and performance baseline package
 
-- Status: Planned
+- Status: **Completed** (2026-05-27)
 - Owner: Platform performance + operators
-- Target date: 2026-06-19
+- Target date: 2026-06-19 (met early)
 - Source plan: `docs/roadmap.md` (Wave 3)
 - Evidence artifacts:
   1. `docs/acceptance/wave3-reliability-performance-baseline-run01.json`
+- Completion gate:
+  1. Reliability command pack is green across query/server/archive/topology/headless/CLI vectors (met).
+  2. Representative performance lane benchmark is recorded (`resolve_1k`) with reproducible command evidence (met).
+
+### 3.3 Repo boundary and parity tier adoption
+
+- Status: **In progress** (Phase A/B planning complete; execution kickoff artifacts created)
+- Owner: Platform/runtime + host maintainers
+- Target date: 2026-06-05
+- Source plan: `docs/REPO_BOUNDARY_AND_PARITY_MATRIX.md`
+- Required outputs:
+  1. Tiered parity policy adopted (Tier 1 host parity, Tier 2 SDK/headless parity, Tier 3 legacy compatibility parity)
+  2. Core-vs-tools boundary freeze decision recorded for `headless` + `cli` split preparation
+  3. CI lane mapping updated to reference parity tiers
+- Evidence artifacts:
+  1. `docs/acceptance/repo-boundary-parity-adoption-run01.json`
+  2. `docs/acceptance/repo-boundary-parity-phaseb-tools-split-readiness-run01.json`
+  3. `docs/acceptance/repo-boundary-parity-phaseb-tools-artifact-link-check-run01.json`
+  4. `docs/acceptance/repo-boundary-parity-phaseb-packaging-docs-split-run01.json`
+  5. `docs/release/core-release-manifest-template.json`
+  6. `docs/release/tools-version-pin-template.md`
+  7. `docs/release/TOOLS_SPLIT_FIRST_REAL_REHEARSAL_RUNBOOK.md`
+- Completion gate:
+  1. Roadmap canonical source plans include boundary/parity doc (met in docs update).
+  2. Immediate next items reference boundary/parity adoption (met in docs update).
+  3. First acceptance artifact records parity tier status and open deltas (met).
+  4. First release-handoff simulation assets are present (met); real split rehearsal run IDs remain.
+
+### 3.4 FSE-03 query projection-build backpressure (through fair queue slice)
+
+- Status: **Completed** (2026-05-27)
+- Owner: Runtime
+- Target date: 2026-06-19
+- Source plan: `docs/QUERY_MATERIALIZATION_EXECUTION_PLAN.md` (Phase E deferred item -> Wave 3 / FSE-03)
+- Evidence artifacts:
+  1. `docs/acceptance/query-wave3-backpressure-run01.json`
+  2. `docs/acceptance/query-wave3-backpressure-run02.json`
+  3. `docs/acceptance/query-wave3-backpressure-run03.json`
+- Completion gate:
+  1. Configurable row/inflight build guardrails are enforced in Rust server query control plane (met).
+  2. Deterministic rejection contract (`projection.build.rejected` + `reject.query_backpressure`) is covered by tests (met).
+  3. Backpressure observability metrics and contention/recovery vector are recorded (met).
+  4. Bounded fair FIFO wait queue (`NODALMERGE_QUERY_BUILD_MAX_QUEUE`) with queue-depth/wait metrics is implemented and tested (met).
 
 ## 4. Tracking policy
 

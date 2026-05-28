@@ -8,6 +8,7 @@ Operator CLI for NodalMerge — no hand-written WebSocket clients required.
 | `nodalmerge topology` | Parent/child rooms, lineage, promotion |
 | `nodalmerge archive` | Describe, validate, export, import archives |
 | `nodalmerge query` | Register specs, build/read/list/invalidate projections |
+| `nodalmerge token` | Mint `NODALMERGE_TOKEN_JSON` for locked-room workflows |
 
 Connects to a running `nodalmerge-server` WebSocket endpoint. Locked rooms require capability tokens (`topology.admin`, `archive.admin`, etc.) or use an open room for local development.
 
@@ -34,6 +35,12 @@ nodalmerge topology list-children --parent-room parent-room
 
 nodalmerge archive describe --archive-ref room://parent-room --room parent-room
 nodalmerge query list-projections --room my-room
+nodalmerge token mint \
+  --room parent-room \
+  --room-key-seed-hex <64-hex-secret> \
+  --peer-seed-hex <64-hex-peer-seed> \
+  --caps topology.admin,archive.read \
+  --ttl-secs 3600
 nodalmerge topology show-lineage --room child-room
 nodalmerge topology create-child \
   --parent-room parent-room \

@@ -93,7 +93,9 @@ async fn connect_topology_peer(
     >,
 ) {
     let url = format!("ws://{addr}/ws/{room_id}");
-    let (ws, _) = tokio_tungstenite::connect_async(url).await.expect("connect");
+    let (ws, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
     let (mut sink, mut stream) = ws.split();
     let token = RoomToken::sign(
         room_id,
@@ -150,8 +152,7 @@ async fn expect_topology_response(
         if let Ok(Some(Ok(TMessage::Text(t)))) =
             tokio::time::timeout(Duration::from_millis(500), stream.next()).await
         {
-            let v: serde_json::Value =
-                serde_json::from_str(&t).expect("ws text should be json");
+            let v: serde_json::Value = serde_json::from_str(&t).expect("ws text should be json");
             if v.get("type").and_then(|x| x.as_str()) == Some(expected_type) {
                 return v;
             }
@@ -176,11 +177,7 @@ async fn auth_topology_007_two_peer_promotion_workflow() {
     let parent = rooms.get_or_create(parent_id).await;
     *parent.auth_key.write().await = Some(room_key.verifying_key());
     let author = SigningKey::from_bytes(&[0xB5u8; 32]);
-    import_nodes(
-        &parent,
-        vec![make_map_set_node(&author, "world/mp", b"p")],
-    )
-    .await;
+    import_nodes(&parent, vec![make_map_set_node(&author, "world/mp", b"p")]).await;
     let checkpoint = nodalmerge_server::lineage::snapshot_parent_checkpoint(&parent)
         .await
         .unwrap();
@@ -197,11 +194,7 @@ async fn auth_topology_007_two_peer_promotion_workflow() {
         .unwrap();
 
     let child = rooms.get_or_create(child_id).await;
-    import_nodes(
-        &child,
-        vec![make_map_set_node(&author, "world/mc", b"c")],
-    )
-    .await;
+    import_nodes(&child, vec![make_map_set_node(&author, "world/mc", b"c")]).await;
     let child_hash = snapshot_room_canonical_hash(&child).await.unwrap();
 
     let (mut sink_a, mut stream_a) =
@@ -249,10 +242,9 @@ async fn auth_topology_007_two_peer_promotion_workflow() {
         TopologyWsResponse::ValidatePromotionCompleted(v) => v,
         other => panic!("expected validate completed, got {:?}", other.wire_type()),
     };
-    let golden_validate = serialize_topology_ws_response(&validate_promotion_completed(
-        validated.clone(),
-    ))
-    .expect("golden validate");
+    let golden_validate =
+        serialize_topology_ws_response(&validate_promotion_completed(validated.clone()))
+            .expect("golden validate");
     assert!(golden_validate.contains("\"validation_digest\""));
 
     let apply_msg = serde_json::json!({
@@ -265,15 +257,13 @@ async fn auth_topology_007_two_peer_promotion_workflow() {
         .expect("apply");
     let applied_json =
         expect_topology_response(&mut stream_b, "topology.apply-promotion.completed").await;
-    let applied = match serde_json::from_value::<TopologyWsResponse>(applied_json)
-        .expect("apply envelope")
-    {
-        TopologyWsResponse::ApplyPromotionCompleted(a) => a,
-        other => panic!("expected apply completed, got {:?}", other.wire_type()),
-    };
-    let golden_apply =
-        serialize_topology_ws_response(&apply_promotion_completed(applied.clone()))
-            .expect("golden apply");
+    let applied =
+        match serde_json::from_value::<TopologyWsResponse>(applied_json).expect("apply envelope") {
+            TopologyWsResponse::ApplyPromotionCompleted(a) => a,
+            other => panic!("expected apply completed, got {:?}", other.wire_type()),
+        };
+    let golden_apply = serialize_topology_ws_response(&apply_promotion_completed(applied.clone()))
+        .expect("golden apply");
     assert!(golden_apply.contains("\"audit_key\":\"_topology/promotion/prop-007\""));
     assert!(applied.audit_key.contains("prop-007"));
 }

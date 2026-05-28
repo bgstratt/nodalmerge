@@ -71,14 +71,21 @@ impl fmt::Display for CapabilityProfileError {
             Self::Parse(msg) => write!(f, "parse error: {msg}"),
             Self::InvalidProfileVersion => write!(f, "invalid profile version"),
             Self::DuplicateCapability(cap) => write!(f, "duplicate capability in profile: {cap}"),
-            Self::UnknownCapability(cap) => write!(f, "unknown capability in profile expansion input: {cap}"),
+            Self::UnknownCapability(cap) => {
+                write!(f, "unknown capability in profile expansion input: {cap}")
+            }
             Self::InvalidCapabilityToken(cap) => write!(f, "invalid capability token: {cap}"),
             Self::TooManyEdges { capability, max } => {
-                write!(f, "capability '{capability}' exceeds max edges per node: {max}")
+                write!(
+                    f,
+                    "capability '{capability}' exceeds max edges per node: {max}"
+                )
             }
             Self::CycleDetected(cap) => write!(f, "cycle detected at capability: {cap}"),
             Self::DepthExceeded { max } => write!(f, "capability graph depth exceeded max: {max}"),
-            Self::CountExceeded { max } => write!(f, "flattened capability count exceeded max: {max}"),
+            Self::CountExceeded { max } => {
+                write!(f, "flattened capability count exceeded max: {max}")
+            }
             Self::PayloadExceeded { max } => {
                 write!(f, "flattened capability payload bytes exceeded max: {max}")
             }
@@ -88,22 +95,29 @@ impl fmt::Display for CapabilityProfileError {
 
 impl std::error::Error for CapabilityProfileError {}
 
-pub fn load_capability_profile_from_path(path: &Path) -> Result<CapabilityProfile, CapabilityProfileError> {
-    let raw = fs::read_to_string(path)
-        .map_err(|e| CapabilityProfileError::Io(format!("failed to read {}: {e}", path.display())))?;
+pub fn load_capability_profile_from_path(
+    path: &Path,
+) -> Result<CapabilityProfile, CapabilityProfileError> {
+    let raw = fs::read_to_string(path).map_err(|e| {
+        CapabilityProfileError::Io(format!("failed to read {}: {e}", path.display()))
+    })?;
     load_capability_profile_from_json(&raw)
 }
 
-pub fn load_capability_profile_from_json(raw: &str) -> Result<CapabilityProfile, CapabilityProfileError> {
+pub fn load_capability_profile_from_json(
+    raw: &str,
+) -> Result<CapabilityProfile, CapabilityProfileError> {
     let profile: CapabilityProfile =
         serde_json::from_str(raw).map_err(|e| CapabilityProfileError::Parse(e.to_string()))?;
     validate_profile_shape(&profile)?;
     Ok(profile)
 }
 
-pub fn load_capability_profile_from_value(value: &Value) -> Result<CapabilityProfile, CapabilityProfileError> {
-    let profile: CapabilityProfile =
-        serde_json::from_value(value.clone()).map_err(|e| CapabilityProfileError::Parse(e.to_string()))?;
+pub fn load_capability_profile_from_value(
+    value: &Value,
+) -> Result<CapabilityProfile, CapabilityProfileError> {
+    let profile: CapabilityProfile = serde_json::from_value(value.clone())
+        .map_err(|e| CapabilityProfileError::Parse(e.to_string()))?;
     validate_profile_shape(&profile)?;
     Ok(profile)
 }
@@ -119,7 +133,10 @@ pub fn flatten_capabilities(
         let cap = canonicalize_capability(&node.capability, limits.max_capability_length)?;
         let mut inherits = Vec::with_capacity(node.inherits.len());
         for parent in &node.inherits {
-            inherits.push(canonicalize_capability(parent, limits.max_capability_length)?);
+            inherits.push(canonicalize_capability(
+                parent,
+                limits.max_capability_length,
+            )?);
         }
         if inherits.len() > limits.max_edges_per_node {
             return Err(CapabilityProfileError::TooManyEdges {
@@ -267,11 +284,15 @@ fn resolved_limits(profile: &CapabilityProfile) -> CapabilityProfileLimits {
 fn canonicalize_capability(raw: &str, max_len: usize) -> Result<String, CapabilityProfileError> {
     let token = raw.trim().to_ascii_lowercase();
     if token.is_empty() || token.len() > max_len {
-        return Err(CapabilityProfileError::InvalidCapabilityToken(raw.to_string()));
+        return Err(CapabilityProfileError::InvalidCapabilityToken(
+            raw.to_string(),
+        ));
     }
 
     if !is_valid_capability_token(&token) {
-        return Err(CapabilityProfileError::InvalidCapabilityToken(raw.to_string()));
+        return Err(CapabilityProfileError::InvalidCapabilityToken(
+            raw.to_string(),
+        ));
     }
 
     Ok(token)

@@ -1521,6 +1521,86 @@ fn set_policy_rejects_invalid_can_write_pubkey_hex() {
     );
 }
 
+#[test]
+fn create_topology_child_emits_lineage_event_and_persists_lineage_for_describe() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("parent-a", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+
+    let create = engine
+        .apply(CommandEnvelope::new(
+            "parent-a",
+            HostCommand::CreateTopologyChild {
+                parent_room_id: "parent-a".to_string(),
+                child_room_id: "child-a".to_string(),
+                child_purpose: "task".to_string(),
+                created_by: "mgr".to_string(),
+                promotion_policy_id: "promotion-based".to_string(),
+                parent_checkpoint: serde_json::json!({
+                    "frontier": ["seq:1"],
+                    "canonical_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }),
+            },
+        ))
+        .expect("create topology child should succeed");
+
+    assert_eq!(create.events.len(), 1);
+    assert!(matches!(
+        &create.events[0],
+        HostEvent::ChildRoomCreated {
+            child_room_id,
+            lineage
+        } if child_room_id == "child-a"
+            && lineage["parent_room_id"] == "parent-a"
+            && lineage["promotion_policy_id"] == "promotion-based"
+    ));
+
+    let describe = engine
+        .apply(CommandEnvelope::new(
+            "parent-a",
+            HostCommand::DescribeRoomLineage {
+                room_id: "child-a".to_string(),
+            },
+        ))
+        .expect("describe room lineage should succeed");
+
+    assert_eq!(describe.events.len(), 1);
+    assert!(matches!(
+        &describe.events[0],
+        HostEvent::RoomLineageDescribed {
+            room_id,
+            lineage: Some(lineage),
+            ancestors
+        } if room_id == "child-a"
+            && lineage["parent_room_id"] == "parent-a"
+            && ancestors.is_empty()
+    ));
+}
+
+#[test]
+fn create_topology_child_rejects_unknown_parent_room() {
+    let mut engine = HostEngine::new();
+    let err = engine
+        .apply(CommandEnvelope::new(
+            "parent-missing",
+            HostCommand::CreateTopologyChild {
+                parent_room_id: "parent-missing".to_string(),
+                child_room_id: "child-a".to_string(),
+                child_purpose: "task".to_string(),
+                created_by: "mgr".to_string(),
+                promotion_policy_id: "promotion-based".to_string(),
+                parent_checkpoint: serde_json::json!({
+                    "frontier": ["seq:1"],
+                    "canonical_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }),
+            },
+        ))
+        .expect_err("create topology child should fail for unknown parent");
+
+    assert_eq!(err, HostCoreError::RoomNotFound);
+}
+
 fn signed_single_node_pack_b64() -> String {
     let mut graph = StateGraph::new();
     let signing_key = SigningKey::from_bytes(&[7u8; 32]);

@@ -461,6 +461,46 @@ public class RuntimeMessageProcessorTests
     }
 
     [Fact]
+    public void Topology_create_child_and_describe_lineage_route_through_bridge_commands()
+    {
+        var bridge = new FakeRuntimeCommandBridge(
+            FfiJsonBridgeResult.Success(
+                "[{\"ChildRoomCreated\":{\"child_room_id\":\"child-a\",\"lineage\":{\"parent_room_id\":\"parent-a\",\"promotion_policy_id\":\"promotion-based\"}}}]"
+            ),
+            FfiJsonBridgeResult.Success(
+                "[{\"RoomLineageDescribed\":{\"room_id\":\"child-a\",\"lineage\":{\"parent_room_id\":\"parent-a\",\"promotion_policy_id\":\"promotion-based\"},\"ancestors\":[]}}]"
+            )
+        );
+        var mapper = new RuntimeProtocolMapper();
+        var processor = new RuntimeMessageProcessor(bridge, mapper);
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "parent-a",
+            PeerPubkeyHex = "peer-a"
+        };
+        state.SessionCapabilities.Add("topology.admin");
+
+        var create = processor.ProcessIncomingText(
+            "{\"type\":\"topology.create-child\",\"child_room_id\":\"child-a\",\"child_purpose\":\"task\",\"created_by\":\"mgr\",\"promotion_policy_id\":\"promotion-based\",\"parent_checkpoint\":{\"frontier\":[\"seq:1\"],\"canonical_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+            state
+        );
+        Assert.True(create.DispatchSucceeded);
+        Assert.Contains("\"type\":\"topology.create-child.completed\"", create.OutboundMessages[0]);
+
+        var describe = processor.ProcessIncomingText(
+            "{\"type\":\"topology.describe-lineage\",\"target_room_id\":\"child-a\"}",
+            state
+        );
+        Assert.True(describe.DispatchSucceeded);
+        Assert.Contains("\"type\":\"topology.describe-lineage.result\"", describe.OutboundMessages[0]);
+
+        Assert.Equal(2, bridge.Commands.Count);
+        Assert.Contains("\"CreateTopologyChild\":", bridge.Commands[0]);
+        Assert.Contains("\"DescribeRoomLineage\":", bridge.Commands[1]);
+    }
+
+    [Fact]
     public void Topology_promotion_stub_executes_propose_validate_apply_without_bridge_call()
     {
         var bridge = new FakeRuntimeCommandBridge();

@@ -9,8 +9,8 @@
 //! # File format
 //! Raw 32-byte seed, no framing.  Simple and unambiguous.
 
-use std::{fs, io};
 use ed25519_dalek::SigningKey;
+use std::{fs, io};
 
 const KEY_FILE: &str = "server.key";
 
@@ -34,7 +34,10 @@ pub fn load_or_generate() -> SigningKey {
 fn load() -> io::Result<SigningKey> {
     let bytes = fs::read(KEY_FILE)?;
     if bytes.len() != 32 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "key file must be 32 bytes"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "key file must be 32 bytes",
+        ));
     }
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&bytes);

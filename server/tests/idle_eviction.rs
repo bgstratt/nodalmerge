@@ -11,14 +11,16 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ed25519_dalek::SigningKey;
 use nodalmerge_core::{MapOp, Op, StateGraph};
 use nodalmerge_server::room::{import_nodes, Rooms};
 use nodalmerge_server::store::{DirPersistence, NoPersistence, SharedPersistence};
-use ed25519_dalek::SigningKey;
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let p = std::env::temp_dir().join(format!("nodalmerge-idle-{tag}-{nanos}"));
     std::fs::create_dir_all(&p).unwrap();
     p
@@ -26,9 +28,16 @@ fn tmpdir(tag: &str) -> std::path::PathBuf {
 
 fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> nodalmerge_core::SyncNode {
     let mut g = StateGraph::new();
-    let id = g.apply_local(sk, 0, vec![Op::Map(MapOp::Set {
-        key: key.into(), value: val.to_vec(),
-    })]).unwrap();
+    let id = g
+        .apply_local(
+            sk,
+            0,
+            vec![Op::Map(MapOp::Set {
+                key: key.into(),
+                value: val.to_vec(),
+            })],
+        )
+        .unwrap();
     g.get_nodes(&[id]).into_iter().next().unwrap().clone()
 }
 
@@ -69,7 +78,8 @@ async fn durable_idle_room_is_evicted_and_rehydrates() {
     let mut found = false;
     for _ in 0..20 {
         let graph = room.graph.read().await;
-        let state: std::collections::HashMap<String, Vec<u8>> = graph.resolve().into_iter().collect();
+        let state: std::collections::HashMap<String, Vec<u8>> =
+            graph.resolve().into_iter().collect();
         if state.get("hello").map(|v| v.as_slice()) == Some(b"world".as_slice()) {
             found = true;
             break;
@@ -77,7 +87,10 @@ async fn durable_idle_room_is_evicted_and_rehydrates() {
         drop(graph);
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(found, "rehydrated room should contain persisted key after async hydrate");
+    assert!(
+        found,
+        "rehydrated room should contain persisted key after async hydrate"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -95,7 +108,10 @@ async fn in_memory_rooms_are_never_evicted() {
     }
 
     let evicted = rooms.sweep_idle(Duration::ZERO, Instant::now()).await;
-    assert!(evicted.is_empty(), "NoPersistence rooms must not be evicted (data loss)");
+    assert!(
+        evicted.is_empty(),
+        "NoPersistence rooms must not be evicted (data loss)"
+    );
 }
 
 #[tokio::test]
@@ -110,7 +126,10 @@ async fn connected_room_is_not_evicted() {
     // Still connected; also we're holding an extra Arc -> strong_count > 1.
 
     let evicted = rooms.sweep_idle(Duration::ZERO, Instant::now()).await;
-    assert!(evicted.is_empty(), "room with a live peer must not be evicted");
+    assert!(
+        evicted.is_empty(),
+        "room with a live peer must not be evicted"
+    );
 
     room.deregister_peer("peer-c").await;
     drop(room);
@@ -128,4 +147,3 @@ async fn connected_room_is_not_evicted() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
-

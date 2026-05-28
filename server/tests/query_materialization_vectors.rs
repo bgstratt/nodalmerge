@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
-use nodalmerge_core::{Hash, MapOp, Op, StateGraph, canonical_hash};
-use nodalmerge_server::room::{Room, import_nodes};
+use nodalmerge_core::{canonical_hash, Hash, MapOp, Op, StateGraph};
+use nodalmerge_server::room::{import_nodes, Room};
 use nodalmerge_server::store::{NoPersistence, SharedPersistence};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,12 +32,7 @@ fn paginate_projection_entries(
         .and_then(|raw| raw.parse::<usize>().ok())
         .unwrap_or(0);
 
-    let page: Vec<(String, Vec<u8>)> = entries
-        .iter()
-        .skip(start)
-        .take(limit)
-        .cloned()
-        .collect();
+    let page: Vec<(String, Vec<u8>)> = entries.iter().skip(start).take(limit).cloned().collect();
 
     let next = if start + page.len() < entries.len() {
         Some(format!("offset:{}", start + page.len()))
@@ -48,7 +43,10 @@ fn paginate_projection_entries(
     (page, next)
 }
 
-fn projection_rows(state: &std::collections::HashMap<String, Vec<u8>>, prefix: &str) -> Vec<(String, Vec<u8>)> {
+fn projection_rows(
+    state: &std::collections::HashMap<String, Vec<u8>>,
+    prefix: &str,
+) -> Vec<(String, Vec<u8>)> {
     let mut rows: Vec<(String, Vec<u8>)> = state
         .iter()
         .filter(|(k, _)| k.starts_with(prefix))
@@ -200,8 +198,16 @@ async fn server_query_replay_001_live_vs_replay_parity_at_checkpoint() {
     let persistence: SharedPersistence = Arc::new(NoPersistence);
     let signer = SigningKey::from_bytes(&[0x79u8; 32]);
 
-    let checkpoint_room = Room::new("query-replay-checkpoint".to_string(), Arc::clone(&persistence), 512);
-    let replay_room = Room::new("query-replay-materialized".to_string(), Arc::clone(&persistence), 512);
+    let checkpoint_room = Room::new(
+        "query-replay-checkpoint".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
+    let replay_room = Room::new(
+        "query-replay-materialized".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
 
     let checkpoint_nodes = build_set_nodes(
         &signer,
@@ -222,7 +228,10 @@ async fn server_query_replay_001_live_vs_replay_parity_at_checkpoint() {
     let replay_rows = projection_rows(&replay_state, "world/");
 
     assert_eq!(checkpoint_rows, replay_rows);
-    assert_eq!(projection_digest(&checkpoint_rows), projection_digest(&replay_rows));
+    assert_eq!(
+        projection_digest(&checkpoint_rows),
+        projection_digest(&replay_rows)
+    );
 }
 
 /// Phase E run-03 (server lane): materialize the same checkpoint twice via `import_nodes`,
@@ -233,8 +242,16 @@ async fn server_query_phasee_replay_003_e2e_checkpoint_pagination_digest_parity(
     let persistence: SharedPersistence = Arc::new(NoPersistence);
     let signer = SigningKey::from_bytes(&[0x7au8; 32]);
 
-    let room_a = Room::new("query-phasee-replay-a".to_string(), Arc::clone(&persistence), 512);
-    let room_b = Room::new("query-phasee-replay-b".to_string(), Arc::clone(&persistence), 512);
+    let room_a = Room::new(
+        "query-phasee-replay-a".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
+    let room_b = Room::new(
+        "query-phasee-replay-b".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
 
     let checkpoint_nodes = build_set_nodes(
         &signer,
@@ -280,16 +297,13 @@ async fn server_query_phasee_replay_003_e2e_checkpoint_pagination_digest_parity(
 
 #[test]
 fn server_query_compat_reject_001_selector_payload_validation_bounded_taxonomy() {
-    let known_hashes = BTreeSet::from(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]);
+    let known_hashes = BTreeSet::from([
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+    ]);
 
-    let malformed_frontier = validate_selector_payload(
-        "frontier",
-        None,
-        None,
-        Some(&["bad:1"]),
-        &known_hashes,
-    )
-    .expect_err("malformed frontier must reject");
+    let malformed_frontier =
+        validate_selector_payload("frontier", None, None, Some(&["bad:1"]), &known_hashes)
+            .expect_err("malformed frontier must reject");
 
     let mixed_fields = validate_selector_payload(
         "seq",
@@ -300,8 +314,9 @@ fn server_query_compat_reject_001_selector_payload_validation_bounded_taxonomy()
     )
     .expect_err("mixed selector fields must reject");
 
-    let invalid_hash_format = validate_selector_payload("hash", None, Some("1234"), None, &known_hashes)
-        .expect_err("invalid hash format must reject");
+    let invalid_hash_format =
+        validate_selector_payload("hash", None, Some("1234"), None, &known_hashes)
+            .expect_err("invalid hash format must reject");
 
     let unknown_hash = validate_selector_payload(
         "hash",

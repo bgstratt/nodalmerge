@@ -26,6 +26,16 @@
 //! | `nodalmerge_token_expired_disconnects_total` | counter | `room` | G6 |
 //! | `nodalmerge_topology_promotion_total` | counter | `stage`, `outcome`, `reason`? | Wave 3 |
 //! | `nodalmerge_topology_promotion_seconds` | histogram | `stage`, `outcome` | Wave 3 |
+//! | `nodalmerge_topology_promotion_inflight` | gauge | — | Wave 3 / Phase E |
+//! | `nodalmerge_topology_promotion_queue_depth` | gauge | — | Wave 3 / Phase E |
+//! | `nodalmerge_topology_promotion_queued_total` | counter | `outcome` | Wave 3 / Phase E |
+//! | `nodalmerge_topology_promotion_queue_wait_seconds` | histogram | — | Wave 3 / Phase E |
+//! | `nodalmerge_query_build_total` | counter | `outcome`, `reason`? | Wave 3 / FSE-03 |
+//! | `nodalmerge_query_build_seconds` | histogram | `outcome` | Wave 3 / FSE-03 |
+//! | `nodalmerge_query_build_inflight` | gauge | `room` | Wave 3 / FSE-03 |
+//! | `nodalmerge_query_build_queue_depth` | gauge | `room` | Wave 3 / FSE-03 slice 3 |
+//! | `nodalmerge_query_build_queued_total` | counter | `outcome` | Wave 3 / FSE-03 slice 3 |
+//! | `nodalmerge_query_build_queue_wait_seconds` | histogram | — | Wave 3 / FSE-03 slice 3 |
 //!
 //! All Phase G gaps now have metrics instrumentation registered at their
 //! instrumentation sites; describing the whole list here keeps the doc in
@@ -47,24 +57,21 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
     // sub-millisecond single-node packs up through the 10k-node catchup
     // bench (~31 ms on the reference machine).
     let merge_buckets = [
-        0.000_05, 0.000_1, 0.000_25, 0.000_5,
-        0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+        0.000_05, 0.000_1, 0.000_25, 0.000_5, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+        0.5, 1.0, 2.5,
     ];
     // Persistence writes: typically <1 ms for a node INSERT, slightly more
     // for a blob rename. Reuse merge-ish buckets; anything >100 ms is an
     // alerting signal.
     let persist_buckets = [
-        0.000_1, 0.000_25, 0.000_5,
-        0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+        0.000_1, 0.000_25, 0.000_5, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
     ];
     let archive_buckets = [
-        0.000_1, 0.000_25, 0.000_5,
-        0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.4, 0.8,
+        0.000_1, 0.000_25, 0.000_5, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.4, 0.8,
     ];
     let cache_lookup_buckets = [
-        0.000_001, 0.000_0025, 0.000_005,
-        0.000_01, 0.000_025, 0.000_05, 0.000_1, 0.000_25, 0.000_5,
-        0.001, 0.0025, 0.005,
+        0.000_001, 0.000_0025, 0.000_005, 0.000_01, 0.000_025, 0.000_05, 0.000_1, 0.000_25,
+        0.000_5, 0.001, 0.0025, 0.005,
     ];
 
     PrometheusBuilder::new()
@@ -98,18 +105,34 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
     // Describe the baseline set up front so they appear in `/metrics` before
     // the first sample is recorded. Gap-specific metrics (G1/G3/…) describe
     // themselves at their instrumentation sites.
-    describe_gauge!("nodalmerge_rooms_total", "Number of rooms currently held in the registry (including idle).");
+    describe_gauge!(
+        "nodalmerge_rooms_total",
+        "Number of rooms currently held in the registry (including idle)."
+    );
     describe_gauge!("nodalmerge_peers_total", "Connected WS peers per room.");
-    describe_counter!("nodalmerge_nodes_accepted_total", "Total nodes accepted by `import_nodes` (post-verify, post-policy).");
-    describe_histogram!("nodalmerge_merge_batch_seconds", Unit::Seconds, "Wall time spent inside `import_nodes` per call (one call = one pack).");
+    describe_counter!(
+        "nodalmerge_nodes_accepted_total",
+        "Total nodes accepted by `import_nodes` (post-verify, post-policy)."
+    );
+    describe_histogram!(
+        "nodalmerge_merge_batch_seconds",
+        Unit::Seconds,
+        "Wall time spent inside `import_nodes` per call (one call = one pack)."
+    );
     describe_histogram!("nodalmerge_persistence_write_seconds", Unit::Seconds, "Wall time spent in `ServerPersistence::persist_*`. Labeled by `kind` (`node`/`nodes_batch`/`blob`).");
     describe_histogram!("nodalmerge_archive_operation_seconds", Unit::Seconds, "Wall time spent in archive operation sections. Labels: `operation` (`describe`|`validate`|`import`|`export`) and `stage` (`manifest_load`|`digest_check`|`timeline_validation`|`import_apply`|`manifest_build`|`manifest_write`|`total`).");
     describe_counter!("nodalmerge_archive_manifest_cache_lookup_total", "External manifest metadata cache lookup count. Labels: `outcome` (`hit`|`miss`) and `source` (`file`|`object`).");
     describe_histogram!("nodalmerge_archive_manifest_cache_lookup_seconds", Unit::Seconds, "External manifest metadata cache lookup latency. Labels: `outcome` (`hit`|`miss`) and `source` (`file`|`object`).");
-    describe_counter!("nodalmerge_eviction_total", "Rooms evicted by the idle sweeper (F4 follow-up).");
+    describe_counter!(
+        "nodalmerge_eviction_total",
+        "Rooms evicted by the idle sweeper (F4 follow-up)."
+    );
     // G1 — backpressure & slow-client policy.
     describe_counter!("nodalmerge_broadcast_lagged_total", "Peers disconnected with close code 4001 after falling behind the per-room broadcast ring buffer.");
-    describe_counter!("nodalmerge_ws_send_timeout_total", "Peers disconnected with close code 1011 after a WS send exceeded the 5-second timeout.");
+    describe_counter!(
+        "nodalmerge_ws_send_timeout_total",
+        "Peers disconnected with close code 1011 after a WS send exceeded the 5-second timeout."
+    );
     // G3 — per-peer rate limiting.
     describe_counter!("nodalmerge_rate_limit_drops_total", "Peers disconnected with close code 4008 after tripping the per-peer nodes/sec or bytes/sec rate limit.");
     // G4 — blob GC.
@@ -126,6 +149,49 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
         "nodalmerge_topology_promotion_seconds",
         Unit::Seconds,
         "Wall time for topology promotion handlers. Labels: `stage`, `outcome`."
+    );
+    describe_gauge!(
+        "nodalmerge_topology_promotion_inflight",
+        "Current number of in-flight topology promotion operations."
+    );
+    describe_gauge!(
+        "nodalmerge_topology_promotion_queue_depth",
+        "Topology promotion operations waiting for fair-queue admission."
+    );
+    describe_counter!(
+        "nodalmerge_topology_promotion_queued_total",
+        "Topology promotion operations admitted after waiting in the fair queue. Label: `outcome` (`admitted`)."
+    );
+    describe_histogram!(
+        "nodalmerge_topology_promotion_queue_wait_seconds",
+        Unit::Seconds,
+        "Time spent waiting for topology promotion operation admission when immediate slot acquisition fails."
+    );
+    describe_counter!(
+        "nodalmerge_query_build_total",
+        "Projection build outcomes. Labels: `outcome` (`ok`|`rejected`) and optional `reason` (`row_limit`|`concurrency_limit`|`queue_full`)."
+    );
+    describe_histogram!(
+        "nodalmerge_query_build_seconds",
+        Unit::Seconds,
+        "Wall time for projection.build processing. Labels: `outcome` (`ok`|`rejected`)."
+    );
+    describe_gauge!(
+        "nodalmerge_query_build_inflight",
+        "Current number of in-flight projection builds. Label: `room`."
+    );
+    describe_gauge!(
+        "nodalmerge_query_build_queue_depth",
+        "Projection builds waiting for a fair-queue slot. Label: `room`."
+    );
+    describe_counter!(
+        "nodalmerge_query_build_queued_total",
+        "Projection builds admitted after waiting in the fair queue. Label: `outcome` (`admitted`)."
+    );
+    describe_histogram!(
+        "nodalmerge_query_build_queue_wait_seconds",
+        Unit::Seconds,
+        "Time spent waiting for a projection build slot after the immediate try_acquire failed."
     );
     // Scoped replication (Phase A): filtering/catch-up observability.
     describe_counter!("nodalmerge_filtered_nodes_total", "Total nodes removed by subscription filtering before relay/catch-up send. Labels: `room`, `stage` (`catchup`|`broadcast`).");

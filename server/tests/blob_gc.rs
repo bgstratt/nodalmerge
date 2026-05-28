@@ -16,14 +16,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ed25519_dalek::SigningKey;
 use nodalmerge_core::{BlobStore, Hash, MapOp, Op, StateGraph};
 use nodalmerge_server::room::{import_nodes, Rooms};
 use nodalmerge_server::store::{DirPersistence, SharedPersistence};
-use ed25519_dalek::SigningKey;
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let p = std::env::temp_dir().join(format!("nodalmerge-g4-{tag}-{nanos}"));
     std::fs::create_dir_all(&p).unwrap();
     p
@@ -34,10 +36,16 @@ fn tmpdir(tag: &str) -> std::path::PathBuf {
 /// the node.
 fn make_setblob_node(sk: &SigningKey, key: &str, blob_hash: Hash) -> nodalmerge_core::SyncNode {
     let mut g = StateGraph::new();
-    let id = g.apply_local(sk, 0, vec![Op::Map(MapOp::SetBlob {
-        key: key.into(),
-        blob_hash,
-    })]).unwrap();
+    let id = g
+        .apply_local(
+            sk,
+            0,
+            vec![Op::Map(MapOp::SetBlob {
+                key: key.into(),
+                blob_hash,
+            })],
+        )
+        .unwrap();
     g.get_nodes(&[id]).into_iter().next().unwrap().clone()
 }
 
@@ -82,9 +90,15 @@ async fn blob_gc_two_phase_deletes_orphans_only() {
     assert_eq!(deleted, 0, "first sweep must only tombstone, not delete");
     let live_path = dir.join("blobs").join(&room_id).join(live_hash.to_hex());
     let orphan_path = dir.join("blobs").join(&room_id).join(orphan_hash.to_hex());
-    let orphan_tomb = dir.join("blob-tombstones").join(&room_id).join(orphan_hash.to_hex());
+    let orphan_tomb = dir
+        .join("blob-tombstones")
+        .join(&room_id)
+        .join(orphan_hash.to_hex());
     assert!(live_path.exists(), "live blob must survive phase 1");
-    assert!(orphan_path.exists(), "orphan still on disk before grace elapses");
+    assert!(
+        orphan_path.exists(),
+        "orphan still on disk before grace elapses"
+    );
     assert!(orphan_tomb.exists(), "orphan must be tombstoned in phase 1");
 
     // Wait for grace to elapse.
@@ -95,7 +109,10 @@ async fn blob_gc_two_phase_deletes_orphans_only() {
     assert_eq!(deleted, 1, "second sweep must delete exactly the orphan");
     assert!(live_path.exists(), "live blob must still survive phase 2");
     assert!(!orphan_path.exists(), "orphan must be gone after phase 2");
-    assert!(!orphan_tomb.exists(), "tombstone is cleaned up after delete");
+    assert!(
+        !orphan_tomb.exists(),
+        "tombstone is cleaned up after delete"
+    );
 
     // --- Phase 3: idempotent — another sweep changes nothing. -------------
     let deleted = rooms.sweep_blobs(grace).await;
@@ -132,8 +149,14 @@ async fn blob_gc_clears_tombstone_when_blob_becomes_live_again() {
 
     // No SetBlob yet → sweep with grace=1h tombstones the blob.
     let _ = rooms.sweep_blobs(Duration::from_secs(3600)).await;
-    let tomb = dir.join("blob-tombstones").join(&room_id).join(hash.to_hex());
-    assert!(tomb.exists(), "blob should be tombstoned while unreferenced");
+    let tomb = dir
+        .join("blob-tombstones")
+        .join(&room_id)
+        .join(hash.to_hex());
+    assert!(
+        tomb.exists(),
+        "blob should be tombstoned while unreferenced"
+    );
 
     // Now install a SetBlob op referencing it.
     let node = make_setblob_node(&sk, "k", hash);
@@ -146,7 +169,10 @@ async fn blob_gc_clears_tombstone_when_blob_becomes_live_again() {
     assert_eq!(deleted, 0);
     let blob_path = dir.join("blobs").join(&room_id).join(hash.to_hex());
     assert!(blob_path.exists(), "blob must survive once it's live again");
-    assert!(!tomb.exists(), "tombstone must be cleared once blob is live");
+    assert!(
+        !tomb.exists(),
+        "tombstone must be cleared once blob is live"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -165,4 +191,3 @@ async fn blob_gc_is_noop_on_in_memory_persistence() {
     let deleted = rooms.sweep_blobs(Duration::ZERO).await;
     assert_eq!(deleted, 0, "NoPersistence must never report deletions");
 }
-

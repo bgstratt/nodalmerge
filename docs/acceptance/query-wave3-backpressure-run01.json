@@ -1,0 +1,29 @@
+{
+  "artifact": "query-wave3-backpressure-run01",
+  "recorded_at": "2026-05-27T23:05:00.0000000-05:00",
+  "wave": 3,
+  "track": "FSE-03 scheduler/backpressure (initial query projection-build slice)",
+  "status": "recorded",
+  "scope": {
+    "implemented_in": "server/src/query_control.rs",
+    "controls": [
+      "NODALMERGE_QUERY_BUILD_MAX_ROWS (default 50000; 0 disables row guard)",
+      "NODALMERGE_QUERY_BUILD_MAX_INFLIGHT (default 8; 0 disables inflight guard)"
+    ],
+    "rejection_contract": {
+      "type": "projection.build.rejected",
+      "reason_class": "reject.query_backpressure"
+    }
+  },
+  "verification": {
+    "commands": [
+      "cargo test -p nodalmerge-server --test query_materialization_vectors",
+      "cargo test -p nodalmerge-server query_control::tests -- --nocapture"
+    ],
+    "result": "pass"
+  },
+  "notes": [
+    "This is an initial cooperative backpressure guardrail slice for projection.build.",
+    "Full runtime scheduler fairness and queue policy remain in Wave 3 / FSE-03 scope."
+  ]
+}

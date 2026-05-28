@@ -1,29 +1,23 @@
 //! Per-room shared state: a StateGraph, a BlobStore, and a broadcast channel.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use nodalmerge_core::{
-    MemoryBlobStore,
-    BlobStore,
-    Op,
-    MapOp,
-    Policy,
-    PolicyTimelineEntry,
-    RoomLineage,
-    StateGraph,
-    SyncNode,
-    pack_nodes,
+    pack_nodes, BlobStore, MapOp, MemoryBlobStore, Op, Policy, PolicyTimelineEntry, RoomLineage,
+    StateGraph, SyncNode,
 };
 use nodalmerge_host_core::engine::{
-    PeerCountGaugeUpdate,
-    plan_deregister_peer_membership,
-    plan_register_peer_membership,
+    plan_deregister_peer_membership, plan_register_peer_membership, PeerCountGaugeUpdate,
 };
-use ed25519_dalek::{SigningKey, VerifyingKey};
-use tokio::sync::{broadcast, RwLock};
+use serde_json::Value;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        atomic::AtomicUsize,
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
+use tokio::sync::{broadcast, RwLock, Semaphore};
 
 use crate::store::SharedPersistence;
 
@@ -44,6 +38,24 @@ pub struct IntentEntry {
 pub struct CanonicalWrite {
     pub key: String,
     pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuerySpecState {
+    pub query_spec_id: String,
+    pub version: String,
+    pub descriptor: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectionState {
+    pub projection_id: String,
+    pub query_spec_id: String,
+    pub checkpoint: Value,
+    pub rows: Vec<Value>,
+    pub digest: String,
+    pub invalidated: bool,
+    pub invalidation_reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -76,10 +88,22 @@ pub struct Room {
     pub idle_since: Mutex<Option<Instant>>,
     /// Wave 2 topology: set once for child work rooms; `None` for mainline rooms.
     pub lineage: RwLock<Option<RoomLineage>>,
+    /// Query control-plane registered specs (in-memory runtime state).
+    pub query_specs: RwLock<HashMap<String, QuerySpecState>>,
+    /// Query control-plane built projections (in-memory runtime state).
+    pub projections: RwLock<HashMap<String, ProjectionState>>,
+    /// Fair FIFO admission for projection.build (FSE-03 slice 3).
+    pub(crate) projection_build_semaphore: Mutex<Option<(usize, Arc<Semaphore>)>>,
+    /// Waiters blocked on `projection_build_semaphore` (bounded by env max queue).
+    pub(crate) projection_build_waiting: AtomicUsize,
 }
 
 impl Room {
-    pub fn new(room_id: String, persistence: SharedPersistence, broadcast_capacity: usize) -> Arc<Self> {
+    pub fn new(
+        room_id: String,
+        persistence: SharedPersistence,
+        broadcast_capacity: usize,
+    ) -> Arc<Self> {
         // G1: channel capacity plumbed from the CLI. Smaller = faster
         // divergence detection on slow clients; larger = more slack for
         // brief stalls. Zero is rejected at arg-parse time.
@@ -94,19 +118,23 @@ impl Room {
         }];
         let blobs = MemoryBlobStore::new();
         Arc::new(Room {
-            graph:           RwLock::new(graph),
+            graph: RwLock::new(graph),
             policy_timeline: RwLock::new(policy_timeline),
-            blobs:           RwLock::new(blobs),
-            auth_key:        RwLock::new(None),
+            blobs: RwLock::new(blobs),
+            auth_key: RwLock::new(None),
             tx,
-            tick_abort:      Mutex::new(None),
+            tick_abort: Mutex::new(None),
             connected_peers: RwLock::new(HashSet::new()),
             persistence,
             room_id,
             // Brand-new room has no peers yet, so the idle clock starts now.
             // The first `register_peer` call will clear it.
-            idle_since:      Mutex::new(Some(Instant::now())),
-            lineage:         RwLock::new(None),
+            idle_since: Mutex::new(Some(Instant::now())),
+            lineage: RwLock::new(None),
+            query_specs: RwLock::new(HashMap::new()),
+            projections: RwLock::new(HashMap::new()),
+            projection_build_semaphore: Mutex::new(None),
+            projection_build_waiting: AtomicUsize::new(0),
         })
     }
 
@@ -118,8 +146,10 @@ impl Room {
             *self.idle_since.lock().expect("idle_since poisoned") = None;
         }
         if plan.gauge_update == PeerCountGaugeUpdate::Increment {
-            metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone()).increment(1.0);
-            metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone()).increment(1.0);
+            metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone())
+                .increment(1.0);
+            metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone())
+                .increment(1.0);
         }
     }
 
@@ -133,8 +163,10 @@ impl Room {
             *self.idle_since.lock().expect("idle_since poisoned") = Some(Instant::now());
         }
         if plan.gauge_update == PeerCountGaugeUpdate::Decrement {
-            metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone()).decrement(1.0);
-            metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone()).decrement(1.0);
+            metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone())
+                .decrement(1.0);
+            metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone())
+                .decrement(1.0);
         }
     }
 
@@ -164,7 +196,12 @@ impl Room {
     /// Returns `true` on first start, `false` if a loop was already running.
     /// The loop runs at `interval_ms` ms per tick, reading intent keys under
     /// `intent_prefix` and emitting canonical state under `world/…`.
-    pub fn start_tick(self: &Arc<Self>, server_key: Arc<SigningKey>, interval_ms: u64, intent_prefix: String) -> bool {
+    pub fn start_tick(
+        self: &Arc<Self>,
+        server_key: Arc<SigningKey>,
+        interval_ms: u64,
+        intent_prefix: String,
+    ) -> bool {
         let mut guard = self.tick_abort.lock().expect("tick_abort mutex poisoned");
         if guard.is_some() {
             return false;
@@ -176,7 +213,12 @@ impl Room {
 
     /// E1: Stop the tick loop if it is running.
     pub fn stop_tick(&self) {
-        if let Some(handle) = self.tick_abort.lock().expect("tick_abort mutex poisoned").take() {
+        if let Some(handle) = self
+            .tick_abort
+            .lock()
+            .expect("tick_abort mutex poisoned")
+            .take()
+        {
             handle.abort();
         }
     }
@@ -206,7 +248,8 @@ impl Room {
         // 1. Collect intent entries under the given prefix.
         let intents: Vec<IntentEntry> = {
             let graph = self.graph.read().await;
-            graph.resolve()
+            graph
+                .resolve()
                 .into_iter()
                 .filter(|(k, _)| k.starts_with(intent_prefix))
                 .map(|(key, value)| IntentEntry { key, value })
@@ -220,13 +263,22 @@ impl Room {
         }
 
         // 3. Commit canonical writes as a single signed node.
-        let ops: Vec<Op> = writes.into_iter().map(|w| {
-            Op::Map(MapOp::Set { key: w.key, value: w.value })
-        }).collect();
+        let ops: Vec<Op> = writes
+            .into_iter()
+            .map(|w| {
+                Op::Map(MapOp::Set {
+                    key: w.key,
+                    value: w.value,
+                })
+            })
+            .collect();
 
         let node_id = {
             let mut graph = self.graph.write().await;
-            match graph.apply_local(server_key, 0 /* wall_ms=0, lamport drives ordering */, ops) {
+            match graph.apply_local(
+                server_key, 0, /* wall_ms=0, lamport drives ordering */
+                ops,
+            ) {
                 Ok(id) => id,
                 Err(_) => return None,
             }
@@ -253,9 +305,21 @@ impl Room {
 /// handler can sign authoritative nodes.
 #[derive(Clone)]
 pub struct Rooms {
-    pub(crate) rooms:  Arc<RwLock<HashMap<String, Arc<Room>>>>,
+    pub(crate) rooms: Arc<RwLock<HashMap<String, Arc<Room>>>>,
     /// Parent room id → child room ids (topology list-children).
     pub(crate) children_index: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// Bounded topology promotion fair-queue semaphore.
+    pub(crate) promotion_semaphore: Arc<Mutex<Option<(usize, Arc<Semaphore>)>>>,
+    /// Waiters currently queued for topology promotion operations.
+    pub(crate) promotion_waiting: Arc<AtomicUsize>,
+    /// Max concurrent topology promotion operations.
+    pub(crate) promotion_max_inflight: usize,
+    /// Max queued topology promotion waiters before rejection.
+    pub(crate) promotion_max_queue: usize,
+    /// Optional retention cap per parent for in-memory children index.
+    pub(crate) lineage_children_index_cap: Option<usize>,
+    /// Room lineage metadata — volatile or SQLite-backed durability.
+    pub(crate) lineage_store: Arc<crate::lineage_store::LineageStoreHandle>,
     /// Promotion proposals — volatile or SQLite-backed (topology Phase C / Wave 3).
     pub(crate) promotion_store: Arc<crate::promotion_store::PromotionStoreHandle>,
     /// Persistent server keypair generated/loaded at startup.
@@ -281,12 +345,27 @@ impl Rooms {
         peer_rate_nodes: u32,
         peer_rate_bytes: u32,
     ) -> Self {
+        let promotion_queue_concurrency =
+            parse_env_usize("NODALMERGE_TOPOLOGY_PROMOTION_MAX_INFLIGHT", 4);
+        let promotion_queue_max = parse_env_usize("NODALMERGE_TOPOLOGY_PROMOTION_MAX_QUEUE", 32);
+        let lineage_children_index_cap =
+            parse_optional_env_usize("NODALMERGE_LINEAGE_CHILDREN_INDEX_MAX");
+        let store_root = crate::store::topology_store_root(&persistence);
+        let lineage_store = Arc::new(crate::lineage_store::LineageStoreHandle::open(
+            store_root.clone(),
+        ));
         let promotion_store = Arc::new(crate::promotion_store::PromotionStoreHandle::open(
-            crate::store::topology_store_root(&persistence),
+            store_root,
         ));
         Rooms {
             rooms: Arc::new(RwLock::new(HashMap::new())),
             children_index: Arc::new(RwLock::new(HashMap::new())),
+            promotion_semaphore: Arc::new(Mutex::new(None)),
+            promotion_waiting: Arc::new(AtomicUsize::new(0)),
+            promotion_max_inflight: promotion_queue_concurrency,
+            promotion_max_queue: promotion_queue_max,
+            lineage_children_index_cap,
+            lineage_store,
             promotion_store,
             server_key: Arc::new(server_key),
             persistence,
@@ -305,10 +384,15 @@ impl Rooms {
         }
         let mut w = self.rooms.write().await;
         let mut created = false;
-        let room = w.entry(id.to_string())
+        let room = w
+            .entry(id.to_string())
             .or_insert_with(|| {
                 created = true;
-                Room::new(id.to_string(), Arc::clone(&self.persistence), self.broadcast_capacity)
+                Room::new(
+                    id.to_string(),
+                    Arc::clone(&self.persistence),
+                    self.broadcast_capacity,
+                )
             })
             .clone();
         if created {
@@ -318,6 +402,8 @@ impl Rooms {
             // block on potentially slow persistence I/O (e.g. Mongo).
             let room_clone = Arc::clone(&room);
             let persistence = Arc::clone(&self.persistence);
+            let lineage_store = Arc::clone(&self.lineage_store);
+            let children_index = Arc::clone(&self.children_index);
             tokio::spawn(async move {
                 if persistence.is_durable() {
                     let hydrate_start = Instant::now();
@@ -373,6 +459,17 @@ impl Rooms {
                             elapsed_ms = apply_blobs_elapsed.as_millis(),
                             "async persistence hydrate stage: apply_blobs"
                         );
+                    }
+
+                    // Load topology lineage metadata for this room and rebuild
+                    // parent→child index entries opportunistically on demand.
+                    if let Some(lineage) = lineage_store.get_lineage(&room_clone.room_id).await {
+                        *room_clone.lineage.write().await = Some(lineage.clone());
+                        let mut index = children_index.write().await;
+                        let children = index.entry(lineage.parent_room_id).or_default();
+                        if !children.iter().any(|id| id == &room_clone.room_id) {
+                            children.push(room_clone.room_id.clone());
+                        }
                     }
                     tracing::info!(
                         room = %room_clone.room_id,
@@ -464,7 +561,9 @@ impl Rooms {
         // reading per-room graphs.
         let rooms: Vec<(String, Arc<Room>)> = {
             let map = self.rooms.read().await;
-            map.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect()
+            map.iter()
+                .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                .collect()
         };
         let mut total = 0;
         for (id, room) in rooms {
@@ -512,10 +611,26 @@ impl Rooms {
     }
 }
 
+fn parse_env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_optional_env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+}
+
 /// G4 helper — union of every `SetBlob.blob_hash` across all nodes in the
 /// room's DAG. Called with a read lock on the graph; does no I/O.
-async fn collect_live_blob_hashes(room: &Arc<Room>) -> std::collections::HashSet<nodalmerge_core::Hash> {
-    use nodalmerge_core::{Op, MapOp};
+async fn collect_live_blob_hashes(
+    room: &Arc<Room>,
+) -> std::collections::HashSet<nodalmerge_core::Hash> {
+    use nodalmerge_core::{MapOp, Op};
     let mut live = std::collections::HashSet::new();
     let graph = room.graph.read().await;
     let ids = graph.all_node_ids();
@@ -601,7 +716,10 @@ pub fn default_tick_fn(intents: Vec<IntentEntry>) -> Vec<CanonicalWrite> {
         .into_iter()
         .filter_map(|e| {
             let rest = e.key.strip_prefix("intent/")?;
-            Some(CanonicalWrite { key: format!("world/{rest}"), value: e.value })
+            Some(CanonicalWrite {
+                key: format!("world/{rest}"),
+                value: e.value,
+            })
         })
         .collect()
 }
@@ -630,7 +748,10 @@ pub fn spawn_tick_loop(
         loop {
             ticker.tick().await;
             let prefix = intent_prefix.clone();
-            if let Some(pack_b64) = room.process_tick(&server_key, &prefix, default_tick_fn).await {
+            if let Some(pack_b64) = room
+                .process_tick(&server_key, &prefix, default_tick_fn)
+                .await
+            {
                 let msg = serde_json::json!({
                     "type":  "pack",
                     "from":  "server-tick",
@@ -673,7 +794,9 @@ pub async fn import_nodes(
         .unwrap_or(0);
 
     loop {
-        if pending.is_empty() { break; }
+        if pending.is_empty() {
+            break;
+        }
         let before = pending.len();
 
         // Index pending by id so we can resurrect MissingParent rejects for
@@ -715,37 +838,48 @@ pub async fn import_nodes(
                     metrics::counter!(
                         "nodalmerge_lamport_rejected_total",
                         "reason" => "ceiling"
-                    ).increment(1);
+                    )
+                    .increment(1);
                     metrics::counter!(
                         "nodalmerge_lamport_rejected_total",
                         "reason" => "ceiling"
-                    ).increment(1);
+                    )
+                    .increment(1);
                     errors.push(e.to_string());
                 }
                 e @ nodalmerge_core::SyncError::WallClockSkew { .. } => {
                     metrics::counter!(
                         "nodalmerge_lamport_rejected_total",
                         "reason" => "wall_skew"
-                    ).increment(1);
+                    )
+                    .increment(1);
                     metrics::counter!(
                         "nodalmerge_lamport_rejected_total",
                         "reason" => "wall_skew"
-                    ).increment(1);
+                    )
+                    .increment(1);
                     errors.push(e.to_string());
                 }
-                e => { errors.push(e.to_string()); }
+                e => {
+                    errors.push(e.to_string());
+                }
             }
         }
 
         pending = still_pending;
-        if pending.len() == before { break; } // no progress
+        if pending.len() == before {
+            break;
+        } // no progress
     }
 
     // Anything still in `pending` at this point is MissingParent — couldn't
     // resolve within this pack. Surface the count so the caller can log it;
     // a sustained non-zero here means the client isn't catching the server up.
     if !pending.is_empty() {
-        errors.push(format!("missing_parent: {} node(s) unresolved", pending.len()));
+        errors.push(format!(
+            "missing_parent: {} node(s) unresolved",
+            pending.len()
+        ));
     }
 
     // F4: write-through persistence for accepted nodes. Batched so the
@@ -786,7 +920,9 @@ pub async fn import_nodes(
             total
         };
         const NODE_EST_BYTES: u64 = 512;
-        let resident = node_count.saturating_mul(NODE_EST_BYTES).saturating_add(blob_bytes);
+        let resident = node_count
+            .saturating_mul(NODE_EST_BYTES)
+            .saturating_add(blob_bytes);
         metrics::gauge!(
             "nodalmerge_room_bytes_resident",
             "room" => room.room_id.clone()
@@ -815,8 +951,16 @@ pub fn base64_encode(data: &[u8]) -> String {
         let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
         out.push(CHARS[b0 >> 2] as char);
         out.push(CHARS[((b0 & 3) << 4) | (b1 >> 4)] as char);
-        if chunk.len() > 1 { out.push(CHARS[((b1 & 0xf) << 2) | (b2 >> 6)] as char); } else { out.push('='); }
-        if chunk.len() > 2 { out.push(CHARS[b2 & 0x3f] as char); } else { out.push('='); }
+        if chunk.len() > 1 {
+            out.push(CHARS[((b1 & 0xf) << 2) | (b2 >> 6)] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[b2 & 0x3f] as char);
+        } else {
+            out.push('=');
+        }
     }
     out
 }
@@ -856,7 +1000,8 @@ pub fn spawn_snapshot_sweeper(
 
     Some(tokio::spawn(async move {
         // Per-room snapshot state: (last_node_count, chain_depth, last_snapshot_id).
-        let mut room_state: HashMap<String, (usize, usize, Option<nodalmerge_core::NodeId>)> = HashMap::new();
+        let mut room_state: HashMap<String, (usize, usize, Option<nodalmerge_core::NodeId>)> =
+            HashMap::new();
 
         let mut ticker = tokio::time::interval(check_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -868,7 +1013,9 @@ pub fn spawn_snapshot_sweeper(
             // Snapshot the room list so we don't hold the outer lock during compaction.
             let room_list: Vec<(String, Arc<Room>)> = {
                 let map = rooms.rooms.read().await;
-                map.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect()
+                map.iter()
+                    .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                    .collect()
             };
 
             for (room_id, room) in room_list {

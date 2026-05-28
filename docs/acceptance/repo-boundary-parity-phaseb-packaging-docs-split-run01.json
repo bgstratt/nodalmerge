@@ -1,0 +1,46 @@
+{
+  "artifact": "repo-boundary-parity-phaseb-packaging-docs-split",
+  "run_id": "repo-boundary-parity-phaseb-packaging-docs-split-run01",
+  "date": "2026-05-27",
+  "status": "rehearsal-simulated",
+  "scope": "Phase B execution kickoff: packaging/docs ownership handoff for optional nodalmerge-tools split",
+  "source_contract": "docs/acceptance/repo-boundary-parity-phaseb-tools-split-readiness-run01.json#tools_split_004_packaging_docs_contract_v1",
+  "ownership_checks": [
+    {
+      "id": "PKG-DOC-001",
+      "description": "Packaging ownership boundaries are explicitly documented",
+      "status": "pass"
+    },
+    {
+      "id": "PKG-DOC-002",
+      "description": "Docs ownership and cross-link policy are explicitly documented",
+      "status": "pass"
+    },
+    {
+      "id": "PKG-DOC-003",
+      "description": "Release handoff checklist (PKG-HANDOFF-001..004) is executable",
+      "status": "pass"
+    }
+  ],
+  "handoff_readiness": {
+    "core_release_manifest_ready": "pass",
+    "tools_version_pin_template_ready": "pass",
+    "cross_repo_ci_gate_mapping_ready": "pass"
+  },
+  "next_actions": [
+    "When tools repo is created, add release note templates with mandatory core version pins",
+    "Run first pinned-version cross-repo release rehearsal and attach CI run IDs"
+  ],
+  "notes": [
+    "Kickoff artifact records execution start; completion will require at least one real handoff rehearsal.",
+    "Simulation assets added: docs/release/core-release-manifest-template.json and docs/release/tools-version-pin-template.md"
+  ],
+  "simulation_artifacts": [
+    "docs/release/core-release-manifest-template.json",
+    "docs/release/tools-version-pin-template.md"
+  ],
+  "remaining_for_real_run": [
+    "Capture actual core release tag/SHA and replace placeholders",
+    "Attach real core/tools CI run IDs from first split rehearsal"
+  ]
+}

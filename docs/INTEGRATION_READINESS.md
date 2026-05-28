@@ -71,7 +71,7 @@ cargo test -p nodalmerge-core query_ --test query_materialization_vectors
 cargo test -p nodalmerge-server server_query_ --test query_materialization_vectors
 ```
 
-**Evidence:** `docs/acceptance/query-phasee-closeout.json`
+**Evidence:** `docs/acceptance/query-phasee-closeout.json`, `docs/acceptance/query-rust-server-control-plane-smoke-run01.json`
 
 ## 5. Export / import (archive portability)
 
@@ -139,13 +139,13 @@ Engine semantics are shared (`nodalmerge-core`); packaging is what differs.
 
 | Area | In place | Still missing / deferred |
 |------|----------|---------------------------|
-| Headless sync + persist | Yes | Prometheus metrics on headless |
+| Headless sync + persist | Yes | Criterion backend baselines |
 | .NET peer-local FFI | Yes (`runtime-local-ffi`, `LocalPersistFfiClient`, `RuntimePeerLocalPersistenceService`) | Production enablement + `cargo build -p nodalmerge-runtime-local-ffi --release` before NuGet pack |
-| CLI topology / archive / run | Yes | Locked-room token mint helper (`NODALMERGE_TOKEN_JSON` manual today) |
-| CLI query | Yes (commands wired) | **Requires `NodalMerge.DotNetHost` `/ws/runtime`** — not `nodalmerge-server` Rust WS |
-| Query/materialization | Yes (core/server vectors + SDK) | Hosted query on Rust server WS (use .NET host or SDK) |
+| CLI topology / archive / run | Yes | — |
+| CLI query | Yes (commands wired) | Cursor/token ergonomics polish only (functional lane now runs on Rust WS + .NET host runtime) |
+| Query/materialization | Yes (core/server vectors + SDK) | Extended replay/load/perf hardening in Wave 3 |
 | Export/import | Yes (server + CLI import/describe/validate/export) | — |
-| Durable promotion lineage on server restart | Partial | Lineage metadata not fully durable across restart |
+| Durable promotion lineage on server restart | Yes (promotion records + lineage metadata durable) | Phase E lineage index optimization and large-room-family scale baselines |
 | Hosted dashboards | — | Deferred by product choice |
 
 **Pre–AI workspace closeout:** `docs/acceptance/pre-ai-workspace-integration-closeout.json`

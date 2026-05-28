@@ -7,12 +7,30 @@ use nodalmerge_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Instant;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::lineage::snapshot_room_canonical_hash;
 use crate::promotion_metrics::PromotionTimer;
 use crate::room::{Room, Rooms};
 
 const AUDIT_KEY_PREFIX: &str = "_topology/promotion/";
+
+struct PromotionQueueGuard {
+    rooms: Rooms,
+    active: bool,
+    _permit: Option<OwnedSemaphorePermit>,
+}
+
+impl Drop for PromotionQueueGuard {
+    fn drop(&mut self) {
+        if self.active {
+            record_promotion_queue_inflight(&self.rooms);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotionRecord {
@@ -34,6 +52,9 @@ pub async fn process_topology_propose_promotion(
     msg: &Value,
 ) -> Result<PromotionProposed, PromotionRejected> {
     let timer = PromotionTimer::start("propose");
+    let _queue = acquire_promotion_queue_slot(rooms)
+        .await
+        .map_err(queue_rejection)?;
     let result = process_topology_propose_promotion_inner(rooms, msg).await;
     match &result {
         Ok(_) => timer.finish("ok", None),
@@ -141,10 +162,7 @@ async fn process_topology_propose_promotion_inner(
             proposal_digest: existing.proposal_digest.clone(),
         });
     }
-    rooms
-        .promotion_store
-        .insert(&proposal_id, record)
-        .await;
+    rooms.promotion_store.insert(&proposal_id, record).await;
 
     Ok(PromotionProposed {
         proposal_id,
@@ -161,6 +179,9 @@ pub async fn process_topology_validate_promotion(
     msg: &Value,
 ) -> Result<PromotionValidated, PromotionRejected> {
     let timer = PromotionTimer::start("validate");
+    let _queue = acquire_promotion_queue_slot(rooms)
+        .await
+        .map_err(queue_rejection)?;
     let result = process_topology_validate_promotion_inner(rooms, msg).await;
     match &result {
         Ok(_) => timer.finish("ok", None),
@@ -228,10 +249,7 @@ async fn process_topology_validate_promotion_inner(
     record.parent_canonical_hash_at_validate = Some(parent_hash);
     record.validation_digest = Some(validation_digest.clone());
 
-    rooms
-        .promotion_store
-        .update(&proposal_id, record)
-        .await;
+    rooms.promotion_store.update(&proposal_id, record).await;
 
     Ok(PromotionValidated {
         proposal_id,
@@ -245,6 +263,9 @@ pub async fn process_topology_apply_promotion(
     msg: &Value,
 ) -> Result<PromotionApplied, PromotionRejected> {
     let timer = PromotionTimer::start("apply");
+    let _queue = acquire_promotion_queue_slot(rooms)
+        .await
+        .map_err(queue_rejection)?;
     let result = process_topology_apply_promotion_inner(rooms, server_key, msg).await;
     match &result {
         Ok(_) => timer.finish("ok", None),
@@ -317,8 +338,13 @@ async fn process_topology_apply_promotion_inner(
         "proposal_digest": record_snapshot.proposal_digest,
         "validation_digest": record_snapshot.validation_digest,
     });
-    commit_audit_node(&parent, server_key, &audit_key, audit_payload.to_string().into_bytes())
-        .await?;
+    commit_audit_node(
+        &parent,
+        server_key,
+        &audit_key,
+        audit_payload.to_string().into_bytes(),
+    )
+    .await?;
 
     let parent_new_canonical_hash = snapshot_room_canonical_hash(&parent)
         .await
@@ -346,23 +372,20 @@ async fn load_child_lineage(
     child_room_id: &str,
     parent_room_id: &str,
 ) -> Result<nodalmerge_core::RoomLineage, PromotionRejected> {
-    let child = {
-        let r = rooms.rooms.read().await;
-        r.get(child_room_id)
-            .cloned()
-            .ok_or_else(|| rejected(PromotionReasonClass::InvalidLineage, "child room not found"))?
-    };
-    let lineage = child
-        .lineage
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| {
-            rejected(
-                PromotionReasonClass::InvalidLineage,
-                "child room has no lineage metadata",
-            )
-        })?;
+    let child = rooms.get_or_create(child_room_id).await;
+    let mut lineage = child.lineage.read().await.clone();
+    if lineage.is_none() {
+        lineage = rooms.lineage_store.get_lineage(child_room_id).await;
+        if let Some(lin) = lineage.as_ref() {
+            *child.lineage.write().await = Some(lin.clone());
+        }
+    }
+    let lineage = lineage.ok_or_else(|| {
+        rejected(
+            PromotionReasonClass::InvalidLineage,
+            "child room has no lineage metadata",
+        )
+    })?;
     if lineage.parent_room_id != parent_room_id {
         return Err(rejected(
             PromotionReasonClass::InvalidLineage,
@@ -421,11 +444,101 @@ fn parse_checkpoint_hash(msg: &Value, field: &str) -> Result<String, PromotionRe
     Ok(hash.to_ascii_lowercase())
 }
 
-fn rejected(reason_class: PromotionReasonClass, reason_message: impl Into<String>) -> PromotionRejected {
+fn rejected(
+    reason_class: PromotionReasonClass,
+    reason_message: impl Into<String>,
+) -> PromotionRejected {
     PromotionRejected {
         reason_class,
         reason_message: reason_message.into(),
     }
+}
+
+fn room_promotion_semaphore(rooms: &Rooms) -> Arc<Semaphore> {
+    let mut guard = rooms
+        .promotion_semaphore
+        .lock()
+        .expect("promotion_semaphore poisoned");
+    let refresh = guard
+        .as_ref()
+        .map(|(cap, _)| *cap != rooms.promotion_max_inflight)
+        .unwrap_or(true);
+    if refresh {
+        *guard = Some((
+            rooms.promotion_max_inflight,
+            Arc::new(Semaphore::new(rooms.promotion_max_inflight)),
+        ));
+    }
+    Arc::clone(&guard.as_ref().expect("promotion semaphore initialized").1)
+}
+
+fn record_promotion_queue_inflight(rooms: &Rooms) {
+    let inflight = if rooms.promotion_max_inflight == 0 {
+        0
+    } else {
+        let sem = room_promotion_semaphore(rooms);
+        rooms
+            .promotion_max_inflight
+            .saturating_sub(sem.available_permits())
+    };
+    metrics::gauge!("nodalmerge_topology_promotion_inflight").set(inflight as f64);
+}
+
+fn record_promotion_queue_depth(rooms: &Rooms) {
+    let depth = rooms.promotion_waiting.load(Ordering::Acquire) as f64;
+    metrics::gauge!("nodalmerge_topology_promotion_queue_depth").set(depth);
+}
+
+async fn acquire_promotion_queue_slot(rooms: &Rooms) -> Result<PromotionQueueGuard, &'static str> {
+    if rooms.promotion_max_inflight == 0 {
+        return Ok(PromotionQueueGuard {
+            rooms: rooms.clone(),
+            active: false,
+            _permit: None,
+        });
+    }
+    let sem = room_promotion_semaphore(rooms);
+    if let Ok(permit) = sem.clone().try_acquire_owned() {
+        record_promotion_queue_inflight(rooms);
+        return Ok(PromotionQueueGuard {
+            rooms: rooms.clone(),
+            active: true,
+            _permit: Some(permit),
+        });
+    }
+    if rooms.promotion_max_queue == 0 {
+        return Err("topology promotion queue disabled and inflight saturated");
+    }
+
+    let prev_waiting = rooms.promotion_waiting.fetch_add(1, Ordering::AcqRel);
+    record_promotion_queue_depth(rooms);
+    if prev_waiting >= rooms.promotion_max_queue {
+        rooms.promotion_waiting.fetch_sub(1, Ordering::AcqRel);
+        record_promotion_queue_depth(rooms);
+        return Err("topology promotion queue is full");
+    }
+    let queue_started = Instant::now();
+    let permit = sem.acquire_owned().await.map_err(|_| {
+        rooms.promotion_waiting.fetch_sub(1, Ordering::AcqRel);
+        record_promotion_queue_depth(rooms);
+        "topology promotion queue unavailable"
+    })?;
+    rooms.promotion_waiting.fetch_sub(1, Ordering::AcqRel);
+    record_promotion_queue_depth(rooms);
+    record_promotion_queue_inflight(rooms);
+    metrics::histogram!("nodalmerge_topology_promotion_queue_wait_seconds")
+        .record(queue_started.elapsed().as_secs_f64());
+    metrics::counter!("nodalmerge_topology_promotion_queued_total", "outcome" => "admitted")
+        .increment(1);
+    Ok(PromotionQueueGuard {
+        rooms: rooms.clone(),
+        active: true,
+        _permit: Some(permit),
+    })
+}
+
+fn queue_rejection(message: &'static str) -> PromotionRejected {
+    rejected(PromotionReasonClass::ApplyConflict, message)
 }
 
 fn lineage_to_promotion(err: nodalmerge_core::LineageRejected) -> PromotionRejected {
@@ -433,4 +546,50 @@ fn lineage_to_promotion(err: nodalmerge_core::LineageRejected) -> PromotionRejec
         PromotionReasonClass::InvalidLineage,
         format!("{}: {}", err.reason_class.as_str(), err.reason_message),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{NoPersistence, SharedPersistence};
+
+    #[tokio::test]
+    async fn promotion_queue_rejects_when_queue_is_full() {
+        let persistence: SharedPersistence = Arc::new(NoPersistence);
+        let mut rooms = Rooms::new(SigningKey::from_bytes(&[0x11; 32]), persistence, 512, 0, 0);
+        rooms.promotion_max_inflight = 1;
+        rooms.promotion_max_queue = 1;
+
+        let held = acquire_promotion_queue_slot(&rooms)
+            .await
+            .expect("first slot acquired");
+        let waiter_rooms = rooms.clone();
+        let waiter = tokio::spawn(async move {
+            acquire_promotion_queue_slot(&waiter_rooms)
+                .await
+                .expect("waiter queued")
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let rejected = acquire_promotion_queue_slot(&rooms).await;
+        assert!(rejected.is_err(), "third waiter should be rejected");
+
+        drop(held);
+        let _ = waiter.await.expect("waiter task joined");
+    }
+
+    #[tokio::test]
+    async fn promotion_queue_rejects_when_waiting_disabled() {
+        let persistence: SharedPersistence = Arc::new(NoPersistence);
+        let mut rooms = Rooms::new(SigningKey::from_bytes(&[0x12; 32]), persistence, 512, 0, 0);
+        rooms.promotion_max_inflight = 1;
+        rooms.promotion_max_queue = 0;
+
+        let held = acquire_promotion_queue_slot(&rooms)
+            .await
+            .expect("first slot acquired");
+        let rejected = acquire_promotion_queue_slot(&rooms).await;
+        assert!(rejected.is_err(), "waiting disabled should reject immediately");
+        drop(held);
+    }
 }

@@ -1,0 +1,32 @@
+{
+  "artifact": "authority-topology-wave3-durable-lineage-run01",
+  "recorded_at": "2026-05-27T23:58:00.0000000-05:00",
+  "wave": 3,
+  "phase": "Authority topology — durable lineage metadata store",
+  "status": "recorded",
+  "source_plan": "docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md",
+  "deliverables": [
+    {
+      "id": "lineage-store-sqlite",
+      "summary": "When server uses --store (DirPersistence), lineage metadata persists in {store_root}/topology-lineage.db; in-memory map when store is disabled."
+    },
+    {
+      "id": "lineage-hydration-and-index",
+      "summary": "Room hydration loads durable lineage metadata and rebuilds parent->child index entries on demand for describe/list/propose parity after restart."
+    }
+  ],
+  "vectors": [
+    "AUTH-ROOM-006 lineage slice (auth_room_006_lineage_survives_store_restart)",
+    "AUTH-ROOM-006 promotion slice (auth_room_006_promotion_survives_store_restart)"
+  ],
+  "verification": {
+    "commands": [
+      "cargo test -p nodalmerge-server auth_room_006 -- --nocapture"
+    ],
+    "result": "pass"
+  },
+  "completion_gate": {
+    "lineage_metadata_survives_restart_for_describe_list_propose": true,
+    "promotion_store_restart_survival": true
+  }
+}

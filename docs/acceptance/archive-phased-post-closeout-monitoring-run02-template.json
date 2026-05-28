@@ -1,0 +1,66 @@
+{
+  "artifact": "archive-phased-post-closeout-monitoring-run02",
+  "recorded_at": "REPLACE_WITH_ISO8601_TIMESTAMP",
+  "phase": "Export/import post-closeout monitoring cadence",
+  "status": "completed",
+  "source_plan": "docs/EXPORT_IMPORT_PORTABILITY_EXECUTION_PLAN.md",
+  "threshold_source": "docs/acceptance/archive-phased-alert-thresholds-run01.json",
+  "runbook": "docs/acceptance/archive-phased-operator-alert-runbook-run01.json",
+  "cadence": {
+    "frequency": "weekly",
+    "owner": "runtime on-call + platform performance",
+    "review_date": "2026-06-03",
+    "timezone": "America/Chicago"
+  },
+  "sample_window": {
+    "start_utc": "REPLACE_WITH_WINDOW_START_UTC",
+    "end_utc": "REPLACE_WITH_WINDOW_END_UTC",
+    "sample_count": 0
+  },
+  "threshold_snapshot": {
+    "cache_miss_ratio": {
+      "warn": 0.1,
+      "critical": 0.25,
+      "critical_fast_burn": 0.4
+    },
+    "object_file_parity_abs_delta_ms": {
+      "warn_export_p95": 1.0,
+      "warn_validate_p95": 1.0,
+      "warn_import_p95": 2.0,
+      "critical_any_operation_p95": 5.0,
+      "critical_import_p95": 3.0
+    },
+    "absolute_latency_safety_rail_ms": {
+      "warn_p95": 50,
+      "critical_p95": 100
+    }
+  },
+  "observed_metrics": {
+    "cache_miss_ratio_max": "REPLACE_WITH_DECIMAL",
+    "parity_abs_delta_p95_ms": {
+      "export": "REPLACE_WITH_DECIMAL",
+      "validate": "REPLACE_WITH_DECIMAL",
+      "import": "REPLACE_WITH_DECIMAL"
+    },
+    "absolute_latency_p95_ms": {
+      "export": "REPLACE_WITH_DECIMAL",
+      "validate": "REPLACE_WITH_DECIMAL",
+      "import": "REPLACE_WITH_DECIMAL"
+    }
+  },
+  "assessment": {
+    "cache_miss_ratio": "pass|warn|critical",
+    "parity_delta": "pass|warn|critical",
+    "absolute_latency": "pass|warn|critical",
+    "overall": "pass|action_required"
+  },
+  "decision": {
+    "threshold_recalibration_required": false,
+    "recalibration_artifact": null,
+    "owner_acknowledgement": "REPLACE_WITH_NAME_OR_ROLE",
+    "notes": [
+      "Record no-change rationale, or link the recalibration artifact if thresholds change."
+    ]
+  },
+  "next_review_date": "2026-06-10"
+}

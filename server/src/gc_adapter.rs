@@ -11,7 +11,10 @@ use nodalmerge_gc::{GcCoordinator, GcCoordinatorConfig, GcResult};
 /// Compatibility bridge for PR-05: run the shared GC coordinator in MarkOnly
 /// mode from the server's existing per-room sweep loop without changing delete
 /// behavior. Deletion still flows through legacy `BlobPersistence::blob_gc_sweep`.
-pub fn run_mark_only_preflight(room_id: &str, live_hashes: &HashSet<nodalmerge_core::Hash>) -> GcResult<GcRunDelta> {
+pub fn run_mark_only_preflight(
+    room_id: &str,
+    live_hashes: &HashSet<nodalmerge_core::Hash>,
+) -> GcResult<GcRunDelta> {
     let live = Arc::new(LiveFromSet {
         hashes: live_hashes.iter().map(|h| h.to_hex()).collect(),
     });

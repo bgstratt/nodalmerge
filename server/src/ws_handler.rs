@@ -23,171 +23,109 @@
 //!   presence  { type, from, data:{...} }
 //!   error     { type, msg }
 
-use std::sync::{Arc, OnceLock};
-use std::path::PathBuf;
-use std::collections::HashSet;
 use axum::{
-    extract::{Path, State, WebSocketUpgrade, ws::{CloseFrame, Message, WebSocket}},
+    extract::{
+        ws::{CloseFrame, Message, WebSocket},
+        Path, State, WebSocketUpgrade,
+    },
     response::Response,
 };
-use futures_util::{SinkExt, StreamExt, stream::SplitSink};
-use serde_json::Value;
-use nodalmerge_core::{ArchiveWsResponse, BlobStore, MerkleSearchTree, Policy, PolicyDefault, PolicyRule,
-                      RoomToken, SyncCapabilities, SyncNode, pack_nodes, unpack_nodes,
-                      compact, rebuild_from_snapshot, pack_snapshot_pack, verify_snapshot};
-use nodalmerge_host_core::protocol::{
-    BlobPackEntry,
-    BlobRedirectEntry,
-    assemble_blob_available_envelope,
-    assemble_blob_pack_envelope,
-    assemble_error_envelope,
-    assemble_mst_response_envelope,
-    assemble_blob_redirect_envelope,
-    assemble_normalized_peer_stamped_relay_envelope,
-    assemble_presence_envelope,
-    assemble_peer_pack_relay_envelope,
-    assemble_peer_joined_envelope,
-    assemble_peer_left_envelope,
-    assemble_rate_limit_exceeded_close_frame,
-    assemble_resync_required_close_frame,
-    assemble_room_locked_envelope,
-    assemble_server_overload_close_frame,
-    assemble_server_pack_reply_envelope,
-    assemble_server_info_envelope,
-    assemble_set_room_key_rejected_envelope,
-    assemble_token_expired_close_frame,
-    assemble_tick_start_envelope,
-    assemble_tick_stopped_envelope,
-    assemble_snapshot_pack_envelope,
-    assemble_compact_ack_envelope,
-    assemble_policy_set_envelope,
-    assemble_subscribe_ack_envelope,
-    assemble_upload_denied_envelope,
-    assemble_upload_granted_envelope,
-    assemble_upload_rejected_envelope,
-    negotiate_capabilities,
-    welcome_mst_root_hex,
-    decide_sync_diff,
-    ClientIbfInput,
-    CloseFrameSpec,
-    SyncDiffInput,
-    serialize_archive_ws_response,
-    serialize_topology_ws_response,
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use futures_util::{stream::SplitSink, SinkExt, StreamExt};
+use governor::{
+    clock::DefaultClock,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
 };
 use nodalmerge_core::TopologyWsResponse;
-use nodalmerge_host_core::engine::{
-    assemble_welcome_catchup_package,
-    classify_hello_payload,
-    parse_client_capabilities,
-    parse_client_frontier_node_ids,
-    parse_client_ibf_input,
-    classify_request_upload_resolve_put_url_outcome,
-    plan_direct_blob_io_bad_hash_gate,
-    plan_direct_blob_io_negotiation_gate,
-    classify_direct_blob_io_verify_outcome,
-    DirectBlobIoVerifyOutcome,
-    RequestUploadResolvePutUrlOutcome,
-    PackImportMutationAction,
-    BlobStoreMutationAction,
-    plan_has_catchup,
-    plan_pack_import_mutation,
-    plan_blob_store_mutation,
-    plan_peer_rate_limiters,
-    plan_token_deadline_remaining_secs,
-    plan_filtered_catchup_send_payload,
-    serialize_catchup_pack_envelope_json,
-    should_break_main_loop_after_push_send,
-    should_terminate_after_blob_upload_verify_failure_reply_send,
-    should_terminate_after_compact_room_ack_send,
-    should_terminate_after_filtered_catchup_send,
-    should_ignore_unknown_client_message_type,
-    should_terminate_after_server_info_reply_send,
-    should_terminate_after_set_policy_reply_send,
-    should_terminate_after_set_room_key_locked_ack_send,
-    should_terminate_after_start_tick_reply_send,
-    should_terminate_after_stop_tick_reply_send,
-    should_terminate_after_subscribe_ack_send,
-    should_terminate_after_mst_request_reply_send,
-    should_terminate_after_mst_done_server_pack_send,
-    should_terminate_after_request_server_pack_send,
-    should_terminate_after_blob_request_redirect_reply_send,
-    should_terminate_after_blob_request_blob_pack_reply_send,
-    should_terminate_after_request_upload_reply_send,
-    should_terminate_after_welcome_send,
-    classify_set_room_key_lock_state,
-    classify_set_room_key_parse_result,
-    extract_blob_upload_entry_data_b64,
-    extract_blob_upload_entry_hash_text,
-    extract_blob_uploaded_hash_text,
-    extract_blob_request_hashes,
-    extract_hello_pubkey_text,
-    extract_pack_nodes_payload_b64,
-    extract_mst_done_ids,
-    extract_mst_request_paths,
-    extract_request_upload_content_type,
-    extract_request_upload_hash_text,
-    extract_request_upload_size,
-    extract_presence_data_payload,
-    extract_set_room_key_pubkey_text,
-    extract_set_policy_can_write_hex_text,
-    extract_set_policy_can_write_values,
-    extract_set_policy_default_text,
-    extract_set_policy_rule_values,
-    extract_start_tick_interval_ms,
-    extract_start_tick_intent_prefix,
-    extract_webrtc_relay_fields,
-    SetRoomKeyLockStateResult,
-    SetRoomKeyParseResult,
-    shape_set_room_key_already_locked_rejection_reason,
-    shape_set_room_key_invalid_pubkey_rejection_reason,
-    classify_set_policy_default,
-    classify_set_policy_parse_result,
-    shape_set_policy_unknown_default_error,
-    SetPolicyDefaultParseResult,
-    SetPolicyParseResult,
-    classify_compact_room_compaction_result,
-    classify_compact_room_verify_result,
-    classify_compact_room_rebuild_result,
-    shape_compact_room_compaction_failed_error,
-    shape_compact_room_verify_failed_error,
-    shape_compact_room_rebuild_failed_error,
-    CompactRoomCompactionResult,
-    CompactRoomVerifyResult,
-    CompactRoomRebuildResult,
-    shape_blob_uploaded_verify_failure_rejection_payload,
-    shape_client_known_id_set,
-    shape_request_known_id_set,
-    shape_blob_uploaded_available_hashes,
-    shape_catchup_pack_payload_b64,
-    shape_welcome_missing_hex,
-    shape_welcome_peer_list,
-    shape_welcome_root_hex,
-    shape_welcome_server_frontier_hex,
-    should_skip_self_echo_broadcast_envelope,
-    HelloPayloadClassification,
+use nodalmerge_core::{
+    compact, pack_nodes, pack_snapshot_pack, rebuild_from_snapshot, unpack_nodes, verify_snapshot,
+    ArchiveWsResponse, BlobStore, MerkleSearchTree, Policy, PolicyDefault, PolicyRule, RoomToken,
+    SyncCapabilities, SyncNode,
 };
-use ed25519_dalek::{SigningKey, VerifyingKey};
-use governor::{Quota, RateLimiter, clock::DefaultClock, state::{InMemoryState, NotKeyed}};
+use nodalmerge_host_core::engine::{
+    assemble_welcome_catchup_package, classify_compact_room_compaction_result,
+    classify_compact_room_rebuild_result, classify_compact_room_verify_result,
+    classify_direct_blob_io_verify_outcome, classify_hello_payload,
+    classify_request_upload_resolve_put_url_outcome, classify_set_policy_default,
+    classify_set_policy_parse_result, classify_set_room_key_lock_state,
+    classify_set_room_key_parse_result, extract_blob_request_hashes,
+    extract_blob_upload_entry_data_b64, extract_blob_upload_entry_hash_text,
+    extract_blob_uploaded_hash_text, extract_hello_pubkey_text, extract_mst_done_ids,
+    extract_mst_request_paths, extract_pack_nodes_payload_b64, extract_presence_data_payload,
+    extract_request_upload_content_type, extract_request_upload_hash_text,
+    extract_request_upload_size, extract_set_policy_can_write_hex_text,
+    extract_set_policy_can_write_values, extract_set_policy_default_text,
+    extract_set_policy_rule_values, extract_set_room_key_pubkey_text,
+    extract_start_tick_intent_prefix, extract_start_tick_interval_ms, extract_webrtc_relay_fields,
+    parse_client_capabilities, parse_client_frontier_node_ids, parse_client_ibf_input,
+    plan_blob_store_mutation, plan_direct_blob_io_bad_hash_gate,
+    plan_direct_blob_io_negotiation_gate, plan_filtered_catchup_send_payload, plan_has_catchup,
+    plan_pack_import_mutation, plan_peer_rate_limiters, plan_token_deadline_remaining_secs,
+    serialize_catchup_pack_envelope_json, shape_blob_uploaded_available_hashes,
+    shape_blob_uploaded_verify_failure_rejection_payload, shape_catchup_pack_payload_b64,
+    shape_client_known_id_set, shape_compact_room_compaction_failed_error,
+    shape_compact_room_rebuild_failed_error, shape_compact_room_verify_failed_error,
+    shape_request_known_id_set, shape_set_policy_unknown_default_error,
+    shape_set_room_key_already_locked_rejection_reason,
+    shape_set_room_key_invalid_pubkey_rejection_reason, shape_welcome_missing_hex,
+    shape_welcome_peer_list, shape_welcome_root_hex, shape_welcome_server_frontier_hex,
+    should_break_main_loop_after_push_send, should_ignore_unknown_client_message_type,
+    should_skip_self_echo_broadcast_envelope,
+    should_terminate_after_blob_request_blob_pack_reply_send,
+    should_terminate_after_blob_request_redirect_reply_send,
+    should_terminate_after_blob_upload_verify_failure_reply_send,
+    should_terminate_after_compact_room_ack_send, should_terminate_after_filtered_catchup_send,
+    should_terminate_after_mst_done_server_pack_send,
+    should_terminate_after_mst_request_reply_send, should_terminate_after_request_server_pack_send,
+    should_terminate_after_request_upload_reply_send,
+    should_terminate_after_server_info_reply_send, should_terminate_after_set_policy_reply_send,
+    should_terminate_after_set_room_key_locked_ack_send,
+    should_terminate_after_start_tick_reply_send, should_terminate_after_stop_tick_reply_send,
+    should_terminate_after_subscribe_ack_send, should_terminate_after_welcome_send,
+    BlobStoreMutationAction, CompactRoomCompactionResult, CompactRoomRebuildResult,
+    CompactRoomVerifyResult, DirectBlobIoVerifyOutcome, HelloPayloadClassification,
+    PackImportMutationAction, RequestUploadResolvePutUrlOutcome, SetPolicyDefaultParseResult,
+    SetPolicyParseResult, SetRoomKeyLockStateResult, SetRoomKeyParseResult,
+};
+use nodalmerge_host_core::protocol::{
+    assemble_blob_available_envelope, assemble_blob_pack_envelope, assemble_blob_redirect_envelope,
+    assemble_compact_ack_envelope, assemble_error_envelope, assemble_mst_response_envelope,
+    assemble_normalized_peer_stamped_relay_envelope, assemble_peer_joined_envelope,
+    assemble_peer_left_envelope, assemble_peer_pack_relay_envelope, assemble_policy_set_envelope,
+    assemble_presence_envelope, assemble_rate_limit_exceeded_close_frame,
+    assemble_resync_required_close_frame, assemble_room_locked_envelope,
+    assemble_server_info_envelope, assemble_server_overload_close_frame,
+    assemble_server_pack_reply_envelope, assemble_set_room_key_rejected_envelope,
+    assemble_snapshot_pack_envelope, assemble_subscribe_ack_envelope, assemble_tick_start_envelope,
+    assemble_tick_stopped_envelope, assemble_token_expired_close_frame,
+    assemble_upload_denied_envelope, assemble_upload_granted_envelope,
+    assemble_upload_rejected_envelope, decide_sync_diff, negotiate_capabilities,
+    serialize_archive_ws_response, serialize_topology_ws_response, welcome_mst_root_hex,
+    BlobPackEntry, BlobRedirectEntry, ClientIbfInput, CloseFrameSpec, SyncDiffInput,
+};
+use serde_json::Value;
+use std::collections::HashSet;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 
 use crate::adapter_context::{
-    ClientDispatchBuild,
-    ClientDispatchCommand,
-    build_client_dispatch_context,
+    build_client_dispatch_context, ClientDispatchBuild, ClientDispatchCommand,
 };
 use crate::archive_adapter::{
-    process_archive_describe,
-    process_archive_export,
-    process_archive_import,
+    process_archive_describe, process_archive_export, process_archive_import,
     process_archive_validate,
 };
 use crate::capability_profile::{
+    flatten_capabilities, load_capability_profile_from_path, profile_supports_version,
     CapabilityProfile,
-    flatten_capabilities,
-    load_capability_profile_from_path,
-    profile_supports_version,
 };
-use crate::room::{Rooms, Room, import_nodes};
+use crate::query_control::{
+    process_projection_build, process_projection_invalidate, process_projection_list,
+    process_projection_read, process_query_register,
+};
+use crate::room::{import_nodes, Room, Rooms};
 
 /// G3: per-peer direct rate limiter. `None` = limit disabled for this
 /// session (either the CLI default is `0`, or the peer is the server
@@ -215,7 +153,10 @@ struct Subscription {
 
 impl Subscription {
     fn everything() -> Self {
-        Self { matchers: vec![], patterns: vec!["**".to_string()] }
+        Self {
+            matchers: vec![],
+            patterns: vec!["**".to_string()],
+        }
     }
 
     fn from_patterns(patterns: Vec<String>) -> Self {
@@ -231,7 +172,8 @@ impl Subscription {
     fn from_hello_value(v: &Value) -> Self {
         match v.as_array() {
             Some(arr) => {
-                let patterns: Vec<String> = arr.iter()
+                let patterns: Vec<String> = arr
+                    .iter()
                     .filter_map(|x| x.as_str().map(str::to_string))
                     .collect();
                 Self::from_patterns(patterns)
@@ -242,11 +184,15 @@ impl Subscription {
 
     /// Returns true when every node passes (i.e. `**`).
     #[inline]
-    fn matches_everything(&self) -> bool { self.matchers.is_empty() }
+    fn matches_everything(&self) -> bool {
+        self.matchers.is_empty()
+    }
 
     /// Does any compiled pattern match this path?
     fn matches_path(&self, path: &str) -> bool {
-        if self.matches_everything() { return true; }
+        if self.matches_everything() {
+            return true;
+        }
         self.matchers.iter().any(|m| m.is_match(path))
     }
 
@@ -258,13 +204,24 @@ impl Subscription {
     ///     silently corrupt encrypted rooms.
     ///   - otherwise: at least one op's key must match the subscription.
     fn accepts_node(&self, node: &SyncNode) -> bool {
-        if self.matches_everything() { return true; }
+        if self.matches_everything() {
+            return true;
+        }
         let ops = &node.transaction.ops;
-        if ops.is_empty() { return true; }
+        if ops.is_empty() {
+            return true;
+        }
         for op in ops {
-            let k = match op.key() { Some(k) => k, None => continue };
-            if k.as_bytes().first().copied() == Some(0u8) { return true; }
-            if self.matches_path(k) { return true; }
+            let k = match op.key() {
+                Some(k) => k,
+                None => continue,
+            };
+            if k.as_bytes().first().copied() == Some(0u8) {
+                return true;
+            }
+            if self.matches_path(k) {
+                return true;
+            }
         }
         false
     }
@@ -284,11 +241,15 @@ struct GlobMatcher {
 
 impl GlobMatcher {
     fn compile(pattern: &str) -> Self {
-        Self { pattern: pattern.as_bytes().to_vec() }
+        Self {
+            pattern: pattern.as_bytes().to_vec(),
+        }
     }
 
     fn is_match(&self, s: &str) -> bool {
-        if self.pattern == b"**" { return true; }
+        if self.pattern == b"**" {
+            return true;
+        }
         glob_match(&self.pattern, s.as_bytes())
     }
 }
@@ -303,12 +264,20 @@ fn glob_match(mut pattern: &[u8], mut path: &[u8]) -> bool {
         // then match `rest` at every subsequent segment boundary.
         if pattern.starts_with(b"/**/") {
             let rest = &pattern[4..];
-            if !path.starts_with(b"/") { return false; }
+            if !path.starts_with(b"/") {
+                return false;
+            }
             let mut idx = 1usize;
             loop {
-                if glob_match(rest, &path[idx..]) { return true; }
-                while idx < path.len() && path[idx] != b'/' { idx += 1; }
-                if idx >= path.len() { return false; }
+                if glob_match(rest, &path[idx..]) {
+                    return true;
+                }
+                while idx < path.len() && path[idx] != b'/' {
+                    idx += 1;
+                }
+                if idx >= path.len() {
+                    return false;
+                }
                 idx += 1;
             }
         }
@@ -317,15 +286,21 @@ fn glob_match(mut pattern: &[u8], mut path: &[u8]) -> bool {
         if pattern.starts_with(b"**/") {
             let rest = &pattern[3..];
             // Zero-segment case: the `**/` consumes nothing.
-            if glob_match(rest, path) { return true; }
+            if glob_match(rest, path) {
+                return true;
+            }
             // One-or-more-segments case: fall through to the generic `**` handler.
         }
         // `**` — match any substring (including empty, including slashes).
         if pattern.starts_with(b"**") {
             let rest = &pattern[2..];
-            if rest.is_empty() { return true; }
+            if rest.is_empty() {
+                return true;
+            }
             for i in 0..=path.len() {
-                if glob_match(rest, &path[i..]) { return true; }
+                if glob_match(rest, &path[i..]) {
+                    return true;
+                }
             }
             return false;
         }
@@ -333,15 +308,25 @@ fn glob_match(mut pattern: &[u8], mut path: &[u8]) -> bool {
         if pattern.first() == Some(&b'*') {
             let rest = &pattern[1..];
             for i in 0..=path.len() {
-                if glob_match(rest, &path[i..]) { return true; }
-                if i < path.len() && path[i] == b'/' { return false; }
+                if glob_match(rest, &path[i..]) {
+                    return true;
+                }
+                if i < path.len() && path[i] == b'/' {
+                    return false;
+                }
             }
             return false;
         }
         // Literal char.
-        if pattern.is_empty() { return path.is_empty(); }
-        if path.is_empty() { return false; }
-        if pattern[0] != path[0] { return false; }
+        if pattern.is_empty() {
+            return path.is_empty();
+        }
+        if path.is_empty() {
+            return false;
+        }
+        if pattern[0] != path[0] {
+            return false;
+        }
         pattern = &pattern[1..];
         path = &path[1..];
     }
@@ -460,16 +445,16 @@ fn scoped_catchup_budget() -> ScopeCatchupBudget {
             "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_NODES",
             "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_NODES",
         )
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(4096),
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(4096),
         max_filtered_payload_bytes: env_var_primary_legacy(
             "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_BYTES",
             "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_BYTES",
         )
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(1024 * 1024),
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1024 * 1024),
     })
 }
 
@@ -553,7 +538,12 @@ pub async fn handler(
     })
 }
 
-async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_key: Arc<SigningKey>) {
+async fn handle_socket(
+    socket: WebSocket,
+    room_id: String,
+    rooms: Rooms,
+    server_key: Arc<SigningKey>,
+) {
     let room = rooms.get_or_create(&room_id).await;
     let server_pubkey_hex = crate::keypair::pubkey_hex(&server_key);
     let (mut sink, mut stream) = socket.split();
@@ -565,26 +555,22 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     // Handshake: wait for hello (longer timeout so slower demo boots don't
     // get dropped while the WASM bundle or browser is still coming up).
     // -------------------------------------------------------------------------
-    let hello_result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        stream.next(),
-    ).await;
+    let hello_result =
+        tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()).await;
 
     let hello = match hello_result {
         Err(_) => {
             tracing::warn!(%room_id, "hello timeout (15s) — closing");
             return;
         }
-        Ok(Some(Ok(Message::Text(t)))) => {
-            match classify_hello_payload(&t) {
-                HelloPayloadClassification::ValidHello(v) => v,
-                HelloPayloadClassification::ProtocolErrorExpectedHello => {
-                    tracing::warn!("invalid/non-hello handshake payload — closing");
-                    send_error(&mut sink, "expected hello").await;
-                    return;
-                }
+        Ok(Some(Ok(Message::Text(t)))) => match classify_hello_payload(&t) {
+            HelloPayloadClassification::ValidHello(v) => v,
+            HelloPayloadClassification::ProtocolErrorExpectedHello => {
+                tracing::warn!("invalid/non-hello handshake payload — closing");
+                send_error(&mut sink, "expected hello").await;
+                return;
             }
-        }
+        },
         Ok(Some(Ok(m))) => {
             tracing::warn!("expected text hello, got binary/other — closing");
             let _ = m;
@@ -608,11 +594,8 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     // authoritative tick writes are never throttled. Zero disables the
     // corresponding limiter outright.
     let is_server_peer = pubkey_hex == server_pubkey_hex;
-    let limiter_plan = plan_peer_rate_limiters(
-        is_server_peer,
-        rooms.peer_rate_nodes,
-        rooms.peer_rate_bytes,
-    );
+    let limiter_plan =
+        plan_peer_rate_limiters(is_server_peer, rooms.peer_rate_nodes, rooms.peer_rate_bytes);
     let node_limiter: Option<PeerLimiter> = if limiter_plan.enable_node_limiter {
         NonZeroU32::new(rooms.peer_rate_nodes).map(|nz| RateLimiter::direct(Quota::per_second(nz)))
     } else {
@@ -626,9 +609,9 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
 
     // F3b: parse this peer's subscription from hello. Defaults to everything.
     // Updated at runtime via the `subscribe` client message.
-    let subscription = Arc::new(std::sync::RwLock::new(
-        Subscription::from_hello_value(&hello["subscribe"]),
-    ));
+    let subscription = Arc::new(std::sync::RwLock::new(Subscription::from_hello_value(
+        &hello["subscribe"],
+    )));
 
     // C3: if the room is locked, verify the capability token before proceeding.
     // G6: record the token's expiry so the main loop can disconnect the
@@ -674,7 +657,10 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     let (server_ids, missing_from_us) = {
         let graph = room.graph.read().await;
         let client_known_set = shape_client_known_id_set(&client_known);
-        (graph.all_node_ids(), graph.missing_hashes(&client_known_set))
+        (
+            graph.all_node_ids(),
+            graph.missing_hashes(&client_known_set),
+        )
     };
 
     // IBF set-reconciliation (B1): when both peers support IBF and the client
@@ -707,13 +693,8 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
 
         // D2: collect currently-connected peers for the welcome message so the
         // new peer knows who to initiate WebRTC connections with immediately.
-        let connected_peers: Vec<String> = room
-            .connected_peers
-            .read()
-            .await
-            .iter()
-            .cloned()
-            .collect();
+        let connected_peers: Vec<String> =
+            room.connected_peers.read().await.iter().cloned().collect();
         let current_peers: Vec<String> = shape_welcome_peer_list(&connected_peers, &pubkey_hex);
 
         assemble_welcome_catchup_package(
@@ -740,8 +721,8 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let peer_joined = assemble_peer_joined_envelope(pubkey_hex.clone());
-    let peer_joined_json = serde_json::to_string(&peer_joined)
-        .expect("peer-joined envelope should always serialize");
+    let peer_joined_json =
+        serde_json::to_string(&peer_joined).expect("peer-joined envelope should always serialize");
     emit_room_broadcast(&room, peer_joined_json);
 
     let welcome_send_ok = emit_single_send(&mut sink, &room_id, welcome_json).await;
@@ -907,8 +888,8 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms, server_
     // WebRTC connections.
     room.deregister_peer(&pubkey_hex).await;
     let peer_left = assemble_peer_left_envelope(pubkey_hex.clone());
-    let peer_left_json = serde_json::to_string(&peer_left)
-        .expect("peer-left envelope should always serialize");
+    let peer_left_json =
+        serde_json::to_string(&peer_left).expect("peer-left envelope should always serialize");
     emit_room_broadcast(&room, peer_left_json);
     tracing::debug!(peer = %short, "handler fully exited");
 }
@@ -940,7 +921,6 @@ async fn handle_client_message(
     let message_type = dispatch_ctx.message_type;
 
     match &dispatch_ctx.command {
-
         // F3b: update this peer's subscription at runtime -------------------
         ClientDispatchCommand::Subscribe => {
             let sub = Subscription::from_hello_value(&msg["patterns"]);
@@ -948,7 +928,11 @@ async fn handle_client_message(
             let reply_env = assemble_subscribe_ack_envelope();
             let reply = serde_json::to_string(&reply_env)
                 .expect("subscribe-ack envelope should always serialize");
-            if should_terminate_after_subscribe_ack_send(emit_single_send(sink, room_id, reply).await) { return false; }
+            if should_terminate_after_subscribe_ack_send(
+                emit_single_send(sink, room_id, reply).await,
+            ) {
+                return false;
+            }
         }
 
         // Client pushes a pack of new nodes --------------------------------
@@ -956,11 +940,17 @@ async fn handle_client_message(
             let nodes_b64 = extract_pack_nodes_payload_b64(&msg);
             let decoded = match base64_decode(&nodes_b64) {
                 Ok(b) => b,
-                Err(_) => { send_error(sink, "invalid pack: bad base64").await; return true; }
+                Err(_) => {
+                    send_error(sink, "invalid pack: bad base64").await;
+                    return true;
+                }
             };
             let nodes: Vec<SyncNode> = match unpack_nodes(&decoded) {
                 Ok(n) => n,
-                Err(_) => { send_error(sink, "invalid pack: bad postcard").await; return true; }
+                Err(_) => {
+                    send_error(sink, "invalid pack: bad postcard").await;
+                    return true;
+                }
             };
             let incoming = nodes.len();
             let incoming_bytes = decoded.len();
@@ -971,14 +961,20 @@ async fn handle_client_message(
             // and surfaces it to the app (unlike 4001 resync-required).
             if let Some(lim) = node_limiter {
                 if let Some(n) = NonZeroU32::new(incoming as u32) {
-                    if check_peer_rate(lim, n, pubkey_hex, room_id, sink, "nodes").await.is_err() {
+                    if check_peer_rate(lim, n, pubkey_hex, room_id, sink, "nodes")
+                        .await
+                        .is_err()
+                    {
                         return false;
                     }
                 }
             }
             if let Some(lim) = byte_limiter {
                 if let Some(n) = NonZeroU32::new(incoming_bytes.min(u32::MAX as usize) as u32) {
-                    if check_peer_rate(lim, n, pubkey_hex, room_id, sink, "bytes").await.is_err() {
+                    if check_peer_rate(lim, n, pubkey_hex, room_id, sink, "bytes")
+                        .await
+                        .is_err()
+                    {
                         return false;
                     }
                 }
@@ -993,7 +989,8 @@ async fn handle_client_message(
                 let _ = sink.send(Message::Text(err.into())).await;
             }
             if plan_pack_import_mutation(accepted)
-                == PackImportMutationAction::BroadcastAcceptedLeafPack {
+                == PackImportMutationAction::BroadcastAcceptedLeafPack
+            {
                 // Broadcast exactly the accepted nodes from this import pass.
                 // Using current leafs can drop required parent ops (e.g. map
                 // sidecar before list insert), which breaks downstream convergence.
@@ -1005,7 +1002,8 @@ async fn handle_client_message(
                         pubkey_hex.to_string(),
                         nodes_b64,
                         graph.merkle_root().to_hex(),
-                    )).expect("peer pack relay envelope should always serialize")
+                    ))
+                    .expect("peer pack relay envelope should always serialize")
                 };
                 emit_room_broadcast(room, bcast);
             }
@@ -1018,12 +1016,14 @@ async fn handle_client_message(
             let all_ids = graph.all_node_ids();
             let mst = MerkleSearchTree::from_ids(&all_ids);
             drop(graph);
-            let nodes: Vec<_> = paths.iter()
-                .filter_map(|p| mst.get_node_wire(p))
-                .collect();
+            let nodes: Vec<_> = paths.iter().filter_map(|p| mst.get_node_wire(p)).collect();
             let reply = serde_json::to_string(&assemble_mst_response_envelope(nodes))
                 .expect("mst-response envelope should always serialize");
-            if should_terminate_after_mst_request_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
+            if should_terminate_after_mst_request_reply_send(
+                emit_single_send(sink, room_id, reply).await,
+            ) {
+                return false;
+            }
         }
 
         // Client completed MST descent, requests specific missing nodes -------
@@ -1033,14 +1033,16 @@ async fn handle_client_message(
                 let graph = room.graph.read().await;
                 let nodes = graph.get_nodes(&ids);
                 let nodes_b64 = base64_encode(&pack_nodes(&nodes));
-                let reply_env = assemble_server_pack_reply_envelope(
-                    nodes_b64,
-                    graph.merkle_root().to_hex(),
-                );
+                let reply_env =
+                    assemble_server_pack_reply_envelope(nodes_b64, graph.merkle_root().to_hex());
                 let reply = serde_json::to_string(&reply_env)
                     .expect("server pack reply envelope should always serialize");
                 drop(graph);
-                if should_terminate_after_mst_done_server_pack_send(emit_single_send(sink, room_id, reply).await) { return false; }
+                if should_terminate_after_mst_done_server_pack_send(
+                    emit_single_send(sink, room_id, reply).await,
+                ) {
+                    return false;
+                }
             }
         }
 
@@ -1051,13 +1053,15 @@ async fn handle_client_message(
             let missing = graph.missing_hashes(&known_set);
             let nodes = graph.get_nodes(&missing);
             let nodes_b64 = base64_encode(&pack_nodes(&nodes));
-            let reply_env = assemble_server_pack_reply_envelope(
-                nodes_b64,
-                graph.merkle_root().to_hex(),
-            );
+            let reply_env =
+                assemble_server_pack_reply_envelope(nodes_b64, graph.merkle_root().to_hex());
             let reply = serde_json::to_string(&reply_env)
                 .expect("server pack reply envelope should always serialize");
-            if should_terminate_after_request_server_pack_send(emit_single_send(sink, room_id, reply).await) { return false; }
+            if should_terminate_after_request_server_pack_send(
+                emit_single_send(sink, room_id, reply).await,
+            ) {
+                return false;
+            }
         }
 
         // Client uploads blobs ---------------------------------------------
@@ -1077,7 +1081,8 @@ async fn handle_client_message(
                     let actual = nodalmerge_core::Hash::of(&bytes);
                     if actual == expected {
                         // F4: write-through persistence for accepted blobs.
-                        room.persistence.persist_blob(&room.room_id, &actual, &bytes);
+                        room.persistence
+                            .persist_blob(&room.room_id, &actual, &bytes);
                         blob_store.put(bytes);
                         stored += 1;
                     }
@@ -1086,9 +1091,9 @@ async fn handle_client_message(
             // Blobs are served on-demand via blob-request.
             // Broadcast a lightweight notification so peers know new blobs are
             // available and can request them without waiting for the next delta.
-            if plan_blob_store_mutation(stored)
-                == BlobStoreMutationAction::BroadcastBlobAvailable {
-                let available: Vec<String> = blobs.iter()
+            if plan_blob_store_mutation(stored) == BlobStoreMutationAction::BroadcastBlobAvailable {
+                let available: Vec<String> = blobs
+                    .iter()
                     .filter_map(|e| e["hash"].as_str())
                     .map(str::to_string)
                     .collect();
@@ -1108,7 +1113,10 @@ async fn handle_client_message(
             let mut fallthrough: Vec<String> = Vec::new();
             if negotiated_caps.supports_direct_blob_io {
                 for h in &hashes {
-                    let Some(hash) = parse_hex_hash(h) else { fallthrough.push(h.clone()); continue };
+                    let Some(hash) = parse_hex_hash(h) else {
+                        fallthrough.push(h.clone());
+                        continue;
+                    };
                     match room.persistence.resolve_get_url(&room.room_id, &hash, None) {
                         Some(p) => redirects.push(BlobRedirectEntry {
                             hash: h.clone(),
@@ -1125,25 +1133,36 @@ async fn handle_client_message(
                 let reply_env = assemble_blob_redirect_envelope(redirects);
                 let reply = serde_json::to_string(&reply_env)
                     .expect("blob-redirect envelope should always serialize");
-                if should_terminate_after_blob_request_redirect_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
+                if should_terminate_after_blob_request_redirect_reply_send(
+                    emit_single_send(sink, room_id, reply).await,
+                ) {
+                    return false;
+                }
             }
 
             // For everything not redirected, fall through to bytes-over-WS.
             let blob_store = room.blobs.read().await;
-            let entries: Vec<BlobPackEntry> = fallthrough.iter().filter_map(|h| {
-                let hash = parse_hex_hash(h)?;
-                let data = blob_store.get(&hash)?;
-                Some(BlobPackEntry {
-                    hash: h.clone(),
-                    data: base64_encode(&data),
+            let entries: Vec<BlobPackEntry> = fallthrough
+                .iter()
+                .filter_map(|h| {
+                    let hash = parse_hex_hash(h)?;
+                    let data = blob_store.get(&hash)?;
+                    Some(BlobPackEntry {
+                        hash: h.clone(),
+                        data: base64_encode(&data),
+                    })
                 })
-            }).collect();
+                .collect();
             // Always reply including the originally requested hashes so the
             // client can clear its pending set even for unavailable blobs.
             let reply_env = assemble_blob_pack_envelope(entries, fallthrough);
             let reply = serde_json::to_string(&reply_env)
                 .expect("blob-pack envelope should always serialize");
-            if should_terminate_after_blob_request_blob_pack_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
+            if should_terminate_after_blob_request_blob_pack_reply_send(
+                emit_single_send(sink, room_id, reply).await,
+            ) {
+                return false;
+            }
         }
 
         // F6: client wants a presigned PUT URL ----------------------------
@@ -1162,32 +1181,39 @@ async fn handle_client_message(
             let size = extract_request_upload_size(&msg);
             let content_type = extract_request_upload_content_type(&msg);
             let hash_opt = parse_hex_hash(&hash_hex);
-            if let Some(plan) = plan_direct_blob_io_bad_hash_gate(
-                hash_opt.is_some(),
-                "request-upload",
-            ) {
+            if let Some(plan) =
+                plan_direct_blob_io_bad_hash_gate(hash_opt.is_some(), "request-upload")
+            {
                 send_error(sink, plan.error_message).await;
                 return plan.keep_connection_open;
             };
             let hash = hash_opt.expect("hash should be valid after bad-hash gate");
-            let put_url = room
-                .persistence
-                .resolve_put_url(&room.room_id, &hash, size, content_type.as_deref());
+            let put_url = room.persistence.resolve_put_url(
+                &room.room_id,
+                &hash,
+                size,
+                content_type.as_deref(),
+            );
             let reply = match classify_request_upload_resolve_put_url_outcome(put_url.is_some()) {
                 RequestUploadResolvePutUrlOutcome::GrantUpload => {
                     let p = put_url.expect("put-url should be present when outcome grants upload");
                     serde_json::to_string(&assemble_upload_granted_envelope(
-                    hash_hex.to_string(),
-                    p.url,
-                    p.expires_at_unix,
-                )).expect("upload-granted envelope should always serialize")
+                        hash_hex.to_string(),
+                        p.url,
+                        p.expires_at_unix,
+                    ))
+                    .expect("upload-granted envelope should always serialize")
                 }
-                RequestUploadResolvePutUrlOutcome::DenyUseWs => serde_json::to_string(&assemble_upload_denied_envelope(
-                    hash_hex.to_string(),
-                    "use-ws".to_string(),
-                )).expect("upload-denied envelope should always serialize"),
+                RequestUploadResolvePutUrlOutcome::DenyUseWs => serde_json::to_string(
+                    &assemble_upload_denied_envelope(hash_hex.to_string(), "use-ws".to_string()),
+                )
+                .expect("upload-denied envelope should always serialize"),
             };
-            if should_terminate_after_request_upload_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
+            if should_terminate_after_request_upload_reply_send(
+                emit_single_send(sink, room_id, reply).await,
+            ) {
+                return false;
+            }
         }
 
         // F6: client claims a presigned PUT completed --------------------
@@ -1204,10 +1230,9 @@ async fn handle_client_message(
             }
             let hash_hex = extract_blob_uploaded_hash_text(&msg);
             let hash_opt = parse_hex_hash(&hash_hex);
-            if let Some(plan) = plan_direct_blob_io_bad_hash_gate(
-                hash_opt.is_some(),
-                "blob-uploaded",
-            ) {
+            if let Some(plan) =
+                plan_direct_blob_io_bad_hash_gate(hash_opt.is_some(), "blob-uploaded")
+            {
                 send_error(sink, plan.error_message).await;
                 return plan.keep_connection_open;
             };
@@ -1215,27 +1240,34 @@ async fn handle_client_message(
             match room.persistence.verify_uploaded(&room.room_id, &hash) {
                 Ok(()) => match classify_direct_blob_io_verify_outcome(true) {
                     DirectBlobIoVerifyOutcome::BroadcastAvailable => {
-                    let available_hashes = shape_blob_uploaded_available_hashes(&hash_hex);
-                    let bcast = serde_json::to_string(&assemble_blob_available_envelope(
-                        available_hashes,
-                    )).expect("blob-available envelope should always serialize");
-                    emit_room_broadcast(room, bcast);
+                        let available_hashes = shape_blob_uploaded_available_hashes(&hash_hex);
+                        let bcast = serde_json::to_string(&assemble_blob_available_envelope(
+                            available_hashes,
+                        ))
+                        .expect("blob-available envelope should always serialize");
+                        emit_room_broadcast(room, bcast);
                     }
                     DirectBlobIoVerifyOutcome::SendUploadRejected => {}
                 },
                 Err(e) => match classify_direct_blob_io_verify_outcome(false) {
                     DirectBlobIoVerifyOutcome::BroadcastAvailable => {}
                     DirectBlobIoVerifyOutcome::SendUploadRejected => {
-                    tracing::warn!(?e, hash = %hash_hex, "blob-uploaded verify failed");
-                    let rejection_payload =
-                        shape_blob_uploaded_verify_failure_rejection_payload(&hash_hex, &e.to_string());
-                    let reply = serde_json::to_string(&assemble_upload_rejected_envelope(
-                        rejection_payload.hash,
-                        rejection_payload.reason,
-                    )).expect("upload-rejected envelope should always serialize");
-                    if should_terminate_after_blob_upload_verify_failure_reply_send(
-                        emit_single_send(sink, room_id, reply).await,
-                    ) { return false; }
+                        tracing::warn!(?e, hash = %hash_hex, "blob-uploaded verify failed");
+                        let rejection_payload =
+                            shape_blob_uploaded_verify_failure_rejection_payload(
+                                &hash_hex,
+                                &e.to_string(),
+                            );
+                        let reply = serde_json::to_string(&assemble_upload_rejected_envelope(
+                            rejection_payload.hash,
+                            rejection_payload.reason,
+                        ))
+                        .expect("upload-rejected envelope should always serialize");
+                        if should_terminate_after_blob_upload_verify_failure_reply_send(
+                            emit_single_send(sink, room_id, reply).await,
+                        ) {
+                            return false;
+                        }
                     }
                 },
             }
@@ -1246,7 +1278,8 @@ async fn handle_client_message(
             let bcast = serde_json::to_string(&assemble_presence_envelope(
                 pubkey_hex.to_string(),
                 extract_presence_data_payload(&msg),
-            )).expect("presence envelope should always serialize");
+            ))
+            .expect("presence envelope should always serialize");
             emit_room_broadcast(room, bcast);
         }
 
@@ -1255,27 +1288,40 @@ async fn handle_client_message(
         // Once set, the key cannot be changed without restarting the server.
         ClientDispatchCommand::SetRoomKey => {
             if !is_control_plane_allowed(is_server_peer, session_caps, "room.admin") {
-                send_error(sink, "reject.control_plane_forbidden: command=set-room-key requires=room.admin").await;
+                send_error(
+                    sink,
+                    "reject.control_plane_forbidden: command=set-room-key requires=room.admin",
+                )
+                .await;
                 return true;
             }
             let vk_hex = extract_set_room_key_pubkey_text(&msg);
             let parsed_vk = parse_verifying_key(&vk_hex);
             match classify_set_room_key_parse_result(parsed_vk.is_some()) {
                 SetRoomKeyParseResult::Parsed => {
-                    let vk = parsed_vk.expect("verifying key should be present when parse succeeds");
+                    let vk =
+                        parsed_vk.expect("verifying key should be present when parse succeeds");
                     let mut auth_key = room.auth_key.write().await;
                     match classify_set_room_key_lock_state(auth_key.is_none()) {
                         SetRoomKeyLockStateResult::LockRoom => {
                             *auth_key = Some(vk);
                             let reply = serde_json::to_string(&assemble_room_locked_envelope(
                                 vk_hex.to_string(),
-                            )).expect("room-locked envelope should always serialize");
-                            if should_terminate_after_set_room_key_locked_ack_send(emit_single_send(sink, room_id, reply).await) { return false; }
+                            ))
+                            .expect("room-locked envelope should always serialize");
+                            if should_terminate_after_set_room_key_locked_ack_send(
+                                emit_single_send(sink, room_id, reply).await,
+                            ) {
+                                return false;
+                            }
                         }
                         SetRoomKeyLockStateResult::RejectAlreadyLocked => {
-                            let reply = serde_json::to_string(&assemble_set_room_key_rejected_envelope(
-                                shape_set_room_key_already_locked_rejection_reason().to_string(),
-                            )).expect("set-room-key rejected envelope should always serialize");
+                            let reply =
+                                serde_json::to_string(&assemble_set_room_key_rejected_envelope(
+                                    shape_set_room_key_already_locked_rejection_reason()
+                                        .to_string(),
+                                ))
+                                .expect("set-room-key rejected envelope should always serialize");
                             let _ = sink.send(Message::Text(reply.into())).await;
                         }
                     }
@@ -1283,7 +1329,8 @@ async fn handle_client_message(
                 SetRoomKeyParseResult::InvalidPubkeyHex => {
                     let reply = serde_json::to_string(&assemble_set_room_key_rejected_envelope(
                         shape_set_room_key_invalid_pubkey_rejection_reason().to_string(),
-                    )).expect("set-room-key rejected envelope should always serialize");
+                    ))
+                    .expect("set-room-key rejected envelope should always serialize");
                     let _ = sink.send(Message::Text(reply.into())).await;
                 }
             }
@@ -1300,7 +1347,11 @@ async fn handle_client_message(
         // authority for a protected path (Authoritative mode).
         ClientDispatchCommand::SetPolicy => {
             if !is_control_plane_allowed(is_server_peer, session_caps, "policy.admin") {
-                send_error(sink, "reject.control_plane_forbidden: command=set-policy requires=policy.admin").await;
+                send_error(
+                    sink,
+                    "reject.control_plane_forbidden: command=set-policy requires=policy.admin",
+                )
+                .await;
                 return true;
             }
             let policy = parse_policy(&msg, sink).await;
@@ -1310,7 +1361,11 @@ async fn handle_client_message(
                     room.set_policy(p).await;
                     let reply = serde_json::to_string(&assemble_policy_set_envelope())
                         .expect("policy-set envelope should always serialize");
-                    if should_terminate_after_set_policy_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
+                    if should_terminate_after_set_policy_reply_send(
+                        emit_single_send(sink, room_id, reply).await,
+                    ) {
+                        return false;
+                    }
                 }
                 SetPolicyParseResult::ParseFailed => {} // parse_policy already sent the error
             }
@@ -1322,7 +1377,11 @@ async fn handle_client_message(
             let vk_hex = hex_from_bytes(&server_key.verifying_key().to_bytes());
             let reply = serde_json::to_string(&assemble_server_info_envelope(vk_hex))
                 .expect("server-info envelope should always serialize");
-            if should_terminate_after_server_info_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
+            if should_terminate_after_server_info_reply_send(
+                emit_single_send(sink, room_id, reply).await,
+            ) {
+                return false;
+            }
         }
 
         // E1: start the Authoritative tick loop for this room -----------------
@@ -1339,7 +1398,11 @@ async fn handle_client_message(
         // (idempotent: a loop is already active for this room).
         ClientDispatchCommand::StartTick => {
             if !is_control_plane_allowed(is_server_peer, session_caps, "tick.admin") {
-                send_error(sink, "reject.control_plane_forbidden: command=start-tick requires=tick.admin").await;
+                send_error(
+                    sink,
+                    "reject.control_plane_forbidden: command=start-tick requires=tick.admin",
+                )
+                .await;
                 return true;
             }
             let interval_ms = extract_start_tick_interval_ms(&msg);
@@ -1347,25 +1410,39 @@ async fn handle_client_message(
             let started = room.start_tick(Arc::clone(server_key), interval_ms, intent_prefix);
             let reply = serde_json::to_string(&assemble_tick_start_envelope(started, interval_ms))
                 .expect("tick start envelope should always serialize");
-            if should_terminate_after_start_tick_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
+            if should_terminate_after_start_tick_reply_send(
+                emit_single_send(sink, room_id, reply).await,
+            ) {
+                return false;
+            }
         }
 
         // E1: stop the tick loop for this room --------------------------------
         ClientDispatchCommand::StopTick => {
             if !is_control_plane_allowed(is_server_peer, session_caps, "tick.admin") {
-                send_error(sink, "reject.control_plane_forbidden: command=stop-tick requires=tick.admin").await;
+                send_error(
+                    sink,
+                    "reject.control_plane_forbidden: command=stop-tick requires=tick.admin",
+                )
+                .await;
                 return true;
             }
             room.stop_tick();
             let reply = serde_json::to_string(&assemble_tick_stopped_envelope())
                 .expect("tick-stopped envelope should always serialize");
-            if should_terminate_after_stop_tick_reply_send(emit_single_send(sink, room_id, reply).await) { return false; }
+            if should_terminate_after_stop_tick_reply_send(
+                emit_single_send(sink, room_id, reply).await,
+            ) {
+                return false;
+            }
         }
 
         ClientDispatchCommand::ArchiveDescribe => {
-            if let Err(rejection) =
-                evaluate_control_plane_authorization(is_server_peer, session_caps, "archive.describe")
-            {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "archive.describe",
+            ) {
                 send_error(sink, &rejection).await;
                 return true;
             }
@@ -1379,7 +1456,11 @@ async fn handle_client_message(
                 Err(rejected) => {
                     send_error(
                         sink,
-                        &format!("{}: {}", rejected.reason_class.as_str(), rejected.reason_message),
+                        &format!(
+                            "{}: {}",
+                            rejected.reason_class.as_str(),
+                            rejected.reason_message
+                        ),
                     )
                     .await;
                 }
@@ -1387,9 +1468,11 @@ async fn handle_client_message(
         }
 
         ClientDispatchCommand::ArchiveValidate => {
-            if let Err(rejection) =
-                evaluate_control_plane_authorization(is_server_peer, session_caps, "archive.validate")
-            {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "archive.validate",
+            ) {
                 send_error(sink, &rejection).await;
                 return true;
             }
@@ -1428,6 +1511,79 @@ async fn handle_client_message(
             }
         }
 
+        ClientDispatchCommand::QueryRegister => {
+            if let Err(rejection) =
+                evaluate_control_plane_authorization(is_server_peer, session_caps, "query.register")
+            {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let response = process_query_register(room.as_ref(), msg).await;
+            if !emit_query_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
+        ClientDispatchCommand::ProjectionBuild => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "projection.build",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let response = process_projection_build(Arc::clone(room), msg).await;
+            if !emit_query_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
+        ClientDispatchCommand::ProjectionRead => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "projection.read",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let response = process_projection_read(room.as_ref(), msg).await;
+            if !emit_query_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
+        ClientDispatchCommand::ProjectionInvalidate => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "projection.invalidate",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let response = process_projection_invalidate(room.as_ref(), msg).await;
+            if !emit_query_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
+        ClientDispatchCommand::ProjectionList => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "projection.list",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let response = process_projection_list(room.as_ref(), msg).await;
+            if !emit_query_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
         ClientDispatchCommand::TopologyCreateChild => {
             if let Err(rejection) = evaluate_control_plane_authorization(
                 is_server_peer,
@@ -1443,8 +1599,7 @@ async fn handle_client_message(
                 .unwrap_or(room_id);
             match crate::lineage::process_topology_create_child(rooms, parent_room_id, msg).await {
                 Ok(created) => {
-                    let response =
-                        crate::topology_adapter::create_child_completed(created);
+                    let response = crate::topology_adapter::create_child_completed(created);
                     if !emit_topology_response(sink, room_id, &response).await {
                         return false;
                     }
@@ -1478,8 +1633,7 @@ async fn handle_client_message(
                 .unwrap_or(room_id);
             match crate::lineage::process_topology_describe_lineage(rooms, target_room).await {
                 Ok(described) => {
-                    let response =
-                        crate::topology_adapter::describe_lineage_result(described);
+                    let response = crate::topology_adapter::describe_lineage_result(described);
                     if !emit_topology_response(sink, room_id, &response).await {
                         return false;
                     }
@@ -1543,8 +1697,7 @@ async fn handle_client_message(
             }
             match crate::promotion::process_topology_propose_promotion(rooms, msg).await {
                 Ok(proposed) => {
-                    let response =
-                        crate::topology_adapter::propose_promotion_completed(proposed);
+                    let response = crate::topology_adapter::propose_promotion_completed(proposed);
                     if !emit_topology_response(sink, room_id, &response).await {
                         return false;
                     }
@@ -1574,8 +1727,7 @@ async fn handle_client_message(
             }
             match crate::promotion::process_topology_validate_promotion(rooms, msg).await {
                 Ok(validated) => {
-                    let response =
-                        crate::topology_adapter::validate_promotion_completed(validated);
+                    let response = crate::topology_adapter::validate_promotion_completed(validated);
                     if !emit_topology_response(sink, room_id, &response).await {
                         return false;
                     }
@@ -1603,12 +1755,15 @@ async fn handle_client_message(
                 send_error(sink, &rejection).await;
                 return true;
             }
-            match crate::promotion::process_topology_apply_promotion(rooms, server_key.as_ref(), msg)
-                .await
+            match crate::promotion::process_topology_apply_promotion(
+                rooms,
+                server_key.as_ref(),
+                msg,
+            )
+            .await
             {
                 Ok(applied) => {
-                    let response =
-                        crate::topology_adapter::apply_promotion_completed(applied);
+                    let response = crate::topology_adapter::apply_promotion_completed(applied);
                     if !emit_topology_response(sink, room_id, &response).await {
                         return false;
                     }
@@ -1652,7 +1807,11 @@ async fn handle_client_message(
                         let err = compact_result
                             .err()
                             .expect("compaction error should be present when compaction fails");
-                        send_error(sink, &shape_compact_room_compaction_failed_error(&err.to_string())).await;
+                        send_error(
+                            sink,
+                            &shape_compact_room_compaction_failed_error(&err.to_string()),
+                        )
+                        .await;
                         return true;
                     }
                 }
@@ -1661,14 +1820,17 @@ async fn handle_client_message(
             // 2. Verify and extract metadata.
             let verify_result = verify_snapshot(&snap);
             let meta = match classify_compact_room_verify_result(verify_result.is_ok()) {
-                CompactRoomVerifyResult::UseVerifiedSnapshot => {
-                    verify_result.expect("verified snapshot metadata should be present when verify succeeds")
-                }
+                CompactRoomVerifyResult::UseVerifiedSnapshot => verify_result
+                    .expect("verified snapshot metadata should be present when verify succeeds"),
                 CompactRoomVerifyResult::SendVerifyFailed => {
                     let err = verify_result
                         .err()
                         .expect("verify error should be present when verify fails");
-                    send_error(sink, &shape_compact_room_verify_failed_error(&err.to_string())).await;
+                    send_error(
+                        sink,
+                        &shape_compact_room_verify_failed_error(&err.to_string()),
+                    )
+                    .await;
                     return true;
                 }
             };
@@ -1684,7 +1846,11 @@ async fn handle_client_message(
                     let err = rebuild_result
                         .err()
                         .expect("rebuild error should be present when rebuild fails");
-                    send_error(sink, &shape_compact_room_rebuild_failed_error(&err.to_string())).await;
+                    send_error(
+                        sink,
+                        &shape_compact_room_rebuild_failed_error(&err.to_string()),
+                    )
+                    .await;
                     return true;
                 }
             };
@@ -1693,16 +1859,19 @@ async fn handle_client_message(
             // 4. Pack the snapshot node and broadcast to all peers.
             let pack_bytes = pack_snapshot_pack(&snap, &[]);
             let pack_b64 = base64_encode(&pack_bytes);
-            let bcast = serde_json::to_string(&assemble_snapshot_pack_envelope(
-                pack_b64,
-                hash_hex.clone(),
-            )).expect("snapshot-pack envelope should always serialize");
+            let bcast =
+                serde_json::to_string(&assemble_snapshot_pack_envelope(pack_b64, hash_hex.clone()))
+                    .expect("snapshot-pack envelope should always serialize");
             emit_room_broadcast(room, bcast);
 
             // Confirm to the requesting client.
             let reply = serde_json::to_string(&assemble_compact_ack_envelope(hash_hex))
                 .expect("compact-ack envelope should always serialize");
-            if should_terminate_after_compact_room_ack_send(emit_single_send(sink, room_id, reply).await) { return false; }
+            if should_terminate_after_compact_room_ack_send(
+                emit_single_send(sink, room_id, reply).await,
+            ) {
+                return false;
+            }
         }
 
         // D2: WebRTC signaling relay ----------------------------------------
@@ -1724,7 +1893,8 @@ async fn handle_client_message(
             let relay = serde_json::to_string(&assemble_normalized_peer_stamped_relay_envelope(
                 pubkey_hex.to_string(),
                 relay_fields,
-            )).expect("webrtc relay envelope should always serialize");
+            ))
+            .expect("webrtc relay envelope should always serialize");
             emit_room_broadcast(room, relay);
         }
 
@@ -1776,6 +1946,20 @@ async fn emit_topology_response(
     }
 }
 
+async fn emit_query_response(
+    sink: &mut SplitSink<WebSocket, Message>,
+    room_id: &str,
+    response: &Value,
+) -> bool {
+    match serde_json::to_string(response) {
+        Ok(payload) => emit_single_send(sink, room_id, payload).await,
+        Err(_) => {
+            send_error(sink, "query adapter response serialization failed").await;
+            true
+        }
+    }
+}
+
 #[inline]
 fn is_control_plane_allowed(
     is_server_peer: bool,
@@ -1793,6 +1977,8 @@ pub fn required_capability_for_control_plane_command(command: &str) -> Option<&'
         "start-tick" | "stop-tick" => Some("tick.admin"),
         "archive.describe" => Some("archive.read"),
         "archive.validate" | "archive.import" | "archive.export" => Some("archive.admin"),
+        "query.register" | "projection.build" | "projection.invalidate" => Some("query.admin"),
+        "projection.read" | "projection.list" => Some("query.read"),
         "topology.create-child"
         | "topology.describe-lineage"
         | "topology.list-children"
@@ -1840,10 +2026,7 @@ fn emit_room_broadcast(room: &Arc<Room>, envelope: String) {
 }
 
 /// Shared adapter emitter for session close frames.
-async fn emit_close_frame(
-    sink: &mut SplitSink<WebSocket, Message>,
-    spec: CloseFrameSpec,
-) {
+async fn emit_close_frame(sink: &mut SplitSink<WebSocket, Message>, spec: CloseFrameSpec) {
     send_close_with_timeout(sink, spec).await;
 }
 
@@ -1866,11 +2049,7 @@ async fn emit_close_frame(
 const WS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const WS_CLOSE_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-async fn ws_send(
-    sink: &mut SplitSink<WebSocket, Message>,
-    room_id: &str,
-    text: String,
-) -> bool {
+async fn ws_send(sink: &mut SplitSink<WebSocket, Message>, room_id: &str, text: String) -> bool {
     match tokio::time::timeout(WS_SEND_TIMEOUT, sink.send(Message::Text(text.into()))).await {
         Ok(Ok(())) => true,
         Ok(Err(_)) => false,
@@ -1878,11 +2057,13 @@ async fn ws_send(
             metrics::counter!(
                 "nodalmerge_ws_send_timeout_total",
                 "room" => room_id.to_string(),
-            ).increment(1);
+            )
+            .increment(1);
             metrics::counter!(
                 "nodalmerge_ws_send_timeout_total",
                 "room" => room_id.to_string(),
-            ).increment(1);
+            )
+            .increment(1);
             tracing::warn!(room = %room_id, "ws send timed out — closing with 1011 server overload");
             emit_close_frame(sink, assemble_server_overload_close_frame()).await;
             false
@@ -1897,14 +2078,12 @@ fn close_message_from_spec(spec: CloseFrameSpec) -> Message {
     }))
 }
 
-async fn send_close_with_timeout(
-    sink: &mut SplitSink<WebSocket, Message>,
-    spec: CloseFrameSpec,
-) {
+async fn send_close_with_timeout(sink: &mut SplitSink<WebSocket, Message>, spec: CloseFrameSpec) {
     let _ = tokio::time::timeout(
         WS_CLOSE_FRAME_TIMEOUT,
         sink.send(close_message_from_spec(spec)),
-    ).await;
+    )
+    .await;
 }
 
 // G3 — per-peer rate limiting.
@@ -1957,11 +2136,13 @@ async fn deny_peer_rate(
     metrics::counter!(
         "nodalmerge_rate_limit_drops_total",
         "peer" => peer_label.clone(),
-    ).increment(1);
+    )
+    .increment(1);
     metrics::counter!(
         "nodalmerge_rate_limit_drops_total",
         "peer" => peer_label.clone(),
-    ).increment(1);
+    )
+    .increment(1);
     tracing::warn!(
         peer = %peer_label,
         room = %room_id,
@@ -1974,10 +2155,7 @@ async fn deny_peer_rate(
 
 /// Parse a `set-policy` JSON message into a `Policy`.
 /// Sends an error and returns `None` on any parse failure.
-async fn parse_policy(
-    msg: &Value,
-    sink: &mut SplitSink<WebSocket, Message>,
-) -> Option<Policy> {
+async fn parse_policy(msg: &Value, sink: &mut SplitSink<WebSocket, Message>) -> Option<Policy> {
     let default_raw = extract_set_policy_default_text(msg);
     let default = match classify_set_policy_default(&default_raw) {
         SetPolicyDefaultParseResult::DenyAll => PolicyDefault::DenyAll,
@@ -2010,7 +2188,12 @@ async fn parse_policy(
             }
         }
         let can_write = keys;
-        rules.push(PolicyRule { path_glob, can_write, can_read: vec![], can_derive: vec![] });
+        rules.push(PolicyRule {
+            path_glob,
+            can_write,
+            can_read: vec![],
+            can_derive: vec![],
+        });
     }
 
     Some(Policy { rules, default })
@@ -2019,7 +2202,6 @@ async fn parse_policy(
 fn hex_from_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-
 
 /// Verify the capability token in a `hello` message against the room's key (C3).
 ///
@@ -2030,7 +2212,11 @@ struct VerifiedToken {
     capabilities: Vec<String>,
 }
 
-fn validate_identity_continuity_v1(tok: &Value, current_peer: &[u8; 32], now_secs: u64) -> Result<(), String> {
+fn validate_identity_continuity_v1(
+    tok: &Value,
+    current_peer: &[u8; 32],
+    now_secs: u64,
+) -> Result<(), String> {
     let Some(continuity) = tok.get("continuity") else {
         return Ok(());
     };
@@ -2070,7 +2256,8 @@ fn validate_identity_continuity_v1(tok: &Value, current_peer: &[u8; 32], now_sec
     Ok(())
 }
 
-static CAPABILITY_PROFILE_CACHE: OnceLock<Result<Option<CapabilityProfile>, String>> = OnceLock::new();
+static CAPABILITY_PROFILE_CACHE: OnceLock<Result<Option<CapabilityProfile>, String>> =
+    OnceLock::new();
 
 fn configured_capability_profile() -> Result<Option<&'static CapabilityProfile>, String> {
     let loaded = CAPABILITY_PROFILE_CACHE.get_or_init(|| {
@@ -2109,11 +2296,13 @@ fn expand_profile_capabilities_with_profile(
     caps: &[String],
     token_profile_version: Option<&str>,
 ) -> Result<Vec<String>, String> {
-
     let presented = token_profile_version
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| "missing token.capability_profile_version while capability composition is enabled".to_string())?;
+        .ok_or_else(|| {
+            "missing token.capability_profile_version while capability composition is enabled"
+                .to_string()
+        })?;
 
     if !profile_supports_version(profile, presented) {
         return Err(format!(
@@ -2132,10 +2321,14 @@ fn verify_hello_token(
     peer_pubkey_hex: &str,
     room_id: &str,
 ) -> Result<VerifiedToken, String> {
-    let tok = hello.get("token").ok_or("room is locked — include a capability token in hello")?;
-    let peer_hex   = tok["peer_pubkey"].as_str().ok_or("missing token.peer_pubkey")?;
-    let expiry     = tok["expiry"].as_u64().ok_or("missing token.expiry")?;
-    let sig_hex    = tok["sig"].as_str().ok_or("missing token.sig")?;
+    let tok = hello
+        .get("token")
+        .ok_or("room is locked — include a capability token in hello")?;
+    let peer_hex = tok["peer_pubkey"]
+        .as_str()
+        .ok_or("missing token.peer_pubkey")?;
+    let expiry = tok["expiry"].as_u64().ok_or("missing token.expiry")?;
+    let sig_hex = tok["sig"].as_str().ok_or("missing token.sig")?;
     let token_profile_version = tok["capability_profile_version"]
         .as_str()
         .or_else(|| tok["profile_version"].as_str());
@@ -2147,21 +2340,22 @@ fn verify_hello_token(
         .filter_map(|v| v.as_str().map(str::to_string))
         .collect();
 
-    let peer_bytes = parse_hex_32(peer_pubkey_hex)
-        .ok_or_else(|| "invalid peer pubkey in hello".to_string())?;
+    let peer_bytes =
+        parse_hex_32(peer_pubkey_hex).ok_or_else(|| "invalid peer pubkey in hello".to_string())?;
 
-    let token = RoomToken::from_wire(peer_hex, expiry, caps, sig_hex)
-        .map_err(|e| e.to_string())?;
+    let token = RoomToken::from_wire(peer_hex, expiry, caps, sig_hex).map_err(|e| e.to_string())?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    token.verify(room_id, room_vk, &peer_bytes, now)
+    token
+        .verify(room_id, room_vk, &peer_bytes, now)
         .map_err(|e| e.to_string())?;
     validate_identity_continuity_v1(tok, &peer_bytes, now)?;
-    let flattened_caps = maybe_expand_profile_capabilities(&token.capabilities, token_profile_version)?;
+    let flattened_caps =
+        maybe_expand_profile_capabilities(&token.capabilities, token_profile_version)?;
 
     Ok(VerifiedToken {
         expiry_secs: expiry,
@@ -2177,7 +2371,9 @@ fn parse_verifying_key(hex: &str) -> Option<VerifyingKey> {
 
 /// Parse 32 raw bytes from a 64-char hex string.
 fn parse_hex_32(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 { return None; }
+    if hex.len() != 64 {
+        return None;
+    }
     let mut bytes = [0u8; 32];
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
         let hi = hex_nibble(chunk[0])?;
@@ -2188,7 +2384,9 @@ fn parse_hex_32(hex: &str) -> Option<[u8; 32]> {
 }
 
 fn parse_hex_hash(hex: &str) -> Option<nodalmerge_core::Hash> {
-    if hex.len() != 64 { return None; }
+    if hex.len() != 64 {
+        return None;
+    }
     let mut bytes = [0u8; 32];
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
         let hi = hex_nibble(chunk[0])?;
@@ -2223,20 +2421,28 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, ()> {
     while i < bytes.len() {
         let b0 = *bytes.get(i).ok_or(())?;
         let b1 = *bytes.get(i + 1).ok_or(())?;
-        if b0 == b'=' { break; }
+        if b0 == b'=' {
+            break;
+        }
         let v0 = *TABLE.get(b0 as usize).ok_or(())? as u32;
         let v1 = *TABLE.get(b1 as usize).ok_or(())? as u32;
-        if v0 == 0xff || v1 == 0xff { return Err(()); }
+        if v0 == 0xff || v1 == 0xff {
+            return Err(());
+        }
         out.push(((v0 << 2) | (v1 >> 4)) as u8);
         let b2 = bytes.get(i + 2).copied().unwrap_or(b'=');
         if b2 != b'=' {
             let v2 = *TABLE.get(b2 as usize).ok_or(())? as u32;
-            if v2 == 0xff { return Err(()); }
+            if v2 == 0xff {
+                return Err(());
+            }
             out.push(((v1 << 4) | (v2 >> 2)) as u8);
             let b3 = bytes.get(i + 3).copied().unwrap_or(b'=');
             if b3 != b'=' {
                 let v3 = *TABLE.get(b3 as usize).ok_or(())? as u32;
-                if v3 == 0xff { return Err(()); }
+                if v3 == 0xff {
+                    return Err(());
+                }
                 out.push(((v2 << 6) | v3) as u8);
             }
         }
@@ -2254,18 +2460,27 @@ fn base64_encode(data: &[u8]) -> String {
         let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
         out.push(CHARS[b0 >> 2] as char);
         out.push(CHARS[((b0 & 3) << 4) | (b1 >> 4)] as char);
-        if chunk.len() > 1 { out.push(CHARS[((b1 & 0xf) << 2) | (b2 >> 6)] as char); } else { out.push('='); }
-        if chunk.len() > 2 { out.push(CHARS[b2 & 0x3f] as char); } else { out.push('='); }
+        if chunk.len() > 1 {
+            out.push(CHARS[((b1 & 0xf) << 2) | (b2 >> 6)] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[b2 & 0x3f] as char);
+        } else {
+            out.push('=');
+        }
     }
     out
 }
-
 
 #[cfg(test)]
 mod subscription_tests {
     use super::*;
 
-    fn m(p: &str, s: &str) -> bool { glob_match(p.as_bytes(), s.as_bytes()) }
+    fn m(p: &str, s: &str) -> bool {
+        glob_match(p.as_bytes(), s.as_bytes())
+    }
 
     #[test]
     fn trailing_slash_star_star_is_optional_subtree() {
@@ -2406,6 +2621,26 @@ mod control_plane_auth_tests {
             required_capability_for_control_plane_command("archive.export"),
             Some("archive.admin")
         );
+        assert_eq!(
+            required_capability_for_control_plane_command("query.register"),
+            Some("query.admin")
+        );
+        assert_eq!(
+            required_capability_for_control_plane_command("projection.build"),
+            Some("query.admin")
+        );
+        assert_eq!(
+            required_capability_for_control_plane_command("projection.read"),
+            Some("query.read")
+        );
+        assert_eq!(
+            required_capability_for_control_plane_command("projection.invalidate"),
+            Some("query.admin")
+        );
+        assert_eq!(
+            required_capability_for_control_plane_command("projection.list"),
+            Some("query.read")
+        );
     }
 
     #[test]
@@ -2427,6 +2662,17 @@ mod control_plane_auth_tests {
         assert_eq!(
             rejection,
             "reject.control_plane_forbidden: command=archive.export requires=archive.admin"
+        );
+    }
+
+    #[test]
+    fn query_read_forbidden_message_uses_required_capability() {
+        let caps = HashSet::new();
+        let rejection = evaluate_control_plane_authorization(false, &caps, "projection.read")
+            .expect_err("missing query.read capability should reject");
+        assert_eq!(
+            rejection,
+            "reject.control_plane_forbidden: command=projection.read requires=query.read"
         );
     }
 }

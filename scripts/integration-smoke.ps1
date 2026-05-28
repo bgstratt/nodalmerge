@@ -63,6 +63,7 @@ try {
     cargo test -p nodalmerge-cli --test archive_cli_vectors 2>&1 | Out-Host
 
     cargo test -p nodalmerge-headless --test headless_run_vectors 2>&1 | Out-Host
+    cargo test -p nodalmerge-server auth_room_006 -- --nocapture 2>&1 | Out-Host
 
 
 
@@ -141,6 +142,18 @@ try {
             Write-Warning "query list-projections failed — query control plane may require NodalMerge.DotNetHost /ws/runtime"
 
         }
+
+        $tmpQueryDir = Join-Path $env:TEMP "nodalmerge-smoke-query"
+        New-Item -ItemType Directory -Force -Path $tmpQueryDir | Out-Null
+        $descriptorPath = Join-Path $tmpQueryDir "descriptor.json"
+        @'
+{ "prefix": "world/" }
+'@ | Set-Content -Path $descriptorPath -Encoding UTF8
+
+        Write-Host "== CLI query queue contention smoke (register/build/read) =="
+        cargo run -p nodalmerge-cli -- query register-spec --room $Room --query-spec-id q.smoke --version v1 --descriptor-file $descriptorPath 2>&1 | Out-Host
+        cargo run -p nodalmerge-cli -- query build-projection --room $Room --projection-id p.smoke --query-spec-id q.smoke --selector latest 2>&1 | Out-Host
+        cargo run -p nodalmerge-cli -- query read-projection --room $Room --projection-id p.smoke --limit 5 2>&1 | Out-Host
 
     }
 

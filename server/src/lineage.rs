@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, HashSet};
 
 use nodalmerge_core::{
-    canonical_hash, policy_timeline_hash, replay, ChildRoomCreated, ChildRoomSummary, ChildrenListed,
-    LineageReasonClass, LineageRejected, ParentCheckpoint, RoomLineage, RoomLineageDescribed,
+    canonical_hash, policy_timeline_hash, replay, ChildRoomCreated, ChildRoomSummary,
+    ChildrenListed, LineageReasonClass, LineageRejected, ParentCheckpoint, RoomLineage,
+    RoomLineageDescribed,
 };
 use nodalmerge_host_core::engine::shape_welcome_server_frontier_hex;
 use serde_json::Value;
@@ -14,10 +15,12 @@ use crate::room::{Room, Rooms};
 const KNOWN_PROMOTION_POLICIES: &[&str] = &["reference-only", "promotion-based"];
 
 pub fn parse_parent_checkpoint(msg: &Value) -> Result<ParentCheckpoint, LineageRejected> {
-    let cp = msg.get("parent_checkpoint").ok_or_else(|| rejected(
-        LineageReasonClass::InvalidCheckpoint,
-        "parent_checkpoint is required",
-    ))?;
+    let cp = msg.get("parent_checkpoint").ok_or_else(|| {
+        rejected(
+            LineageReasonClass::InvalidCheckpoint,
+            "parent_checkpoint is required",
+        )
+    })?;
 
     let frontier = cp
         .get("frontier")
@@ -144,7 +147,12 @@ pub async fn process_topology_create_child(
         .get("child_purpose")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| rejected(LineageReasonClass::InvalidCheckpoint, "child_purpose is required"))?
+        .ok_or_else(|| {
+            rejected(
+                LineageReasonClass::InvalidCheckpoint,
+                "child_purpose is required",
+            )
+        })?
         .to_string();
 
     let created_by = msg
@@ -159,7 +167,10 @@ pub async fn process_topology_create_child(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            rejected(LineageReasonClass::PolicyUnknown, "promotion_policy_id is required")
+            rejected(
+                LineageReasonClass::PolicyUnknown,
+                "promotion_policy_id is required",
+            )
         })?
         .to_string();
 
@@ -268,13 +279,22 @@ impl Rooms {
             }
             *slot = Some(lineage.clone());
         }
+        self.lineage_store
+            .upsert_lineage(child_room_id, lineage.clone())
+            .await;
 
         {
             let mut index = self.children_index.write().await;
-            index
+            let children = index
                 .entry(parent_room_id.to_string())
-                .or_default()
-                .push(child_room_id.to_string());
+                .or_default();
+            children.push(child_room_id.to_string());
+            if let Some(cap) = self.lineage_children_index_cap {
+                if children.len() > cap {
+                    let drop_count = children.len() - cap;
+                    children.drain(0..drop_count);
+                }
+            }
         }
 
         Ok(ChildRoomCreated {
@@ -283,7 +303,10 @@ impl Rooms {
         })
     }
 
-    pub async fn describe_lineage(&self, room_id: &str) -> Result<RoomLineageDescribed, LineageRejected> {
+    pub async fn describe_lineage(
+        &self,
+        room_id: &str,
+    ) -> Result<RoomLineageDescribed, LineageRejected> {
         let room = {
             let r = self.rooms.read().await;
             r.get(room_id)
@@ -318,7 +341,10 @@ impl Rooms {
         })
     }
 
-    pub async fn list_children(&self, parent_room_id: &str) -> Result<ChildrenListed, LineageRejected> {
+    pub async fn list_children(
+        &self,
+        parent_room_id: &str,
+    ) -> Result<ChildrenListed, LineageRejected> {
         {
             let r = self.rooms.read().await;
             if r.get(parent_room_id).is_none() {
@@ -333,14 +359,36 @@ impl Rooms {
             let index = self.children_index.read().await;
             index.get(parent_room_id).cloned().unwrap_or_default()
         };
+        let child_ids = if child_ids.is_empty() {
+            let from_store = self.lineage_store.list_children(parent_room_id).await;
+            if !from_store.is_empty() {
+                let mut index = self.children_index.write().await;
+                let bounded = if let Some(cap) = self.lineage_children_index_cap {
+                    if from_store.len() > cap {
+                        from_store[from_store.len() - cap..].to_vec()
+                    } else {
+                        from_store.clone()
+                    }
+                } else {
+                    from_store.clone()
+                };
+                index.insert(parent_room_id.to_string(), bounded);
+            }
+            from_store
+        } else {
+            child_ids
+        };
 
         let mut children = Vec::new();
-        let rooms = self.rooms.read().await;
         for child_id in child_ids {
-            let Some(room) = rooms.get(&child_id) else {
-                continue;
-            };
-            let lineage = room.lineage.read().await.clone();
+            let room = self.get_or_create(&child_id).await;
+            let mut lineage = room.lineage.read().await.clone();
+            if lineage.is_none() {
+                lineage = self.lineage_store.get_lineage(&child_id).await;
+                if let Some(lin) = lineage.as_ref() {
+                    *room.lineage.write().await = Some(lin.clone());
+                }
+            }
             if let Some(lin) = lineage {
                 children.push(ChildRoomSummary {
                     child_room_id: child_id,
@@ -358,7 +406,10 @@ impl Rooms {
     }
 }
 
-fn rejected(reason_class: LineageReasonClass, reason_message: impl Into<String>) -> LineageRejected {
+fn rejected(
+    reason_class: LineageReasonClass,
+    reason_message: impl Into<String>,
+) -> LineageRejected {
     LineageRejected {
         reason_class,
         reason_message: reason_message.into(),

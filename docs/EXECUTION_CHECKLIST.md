@@ -2,7 +2,7 @@
 
 Owner: Platform/runtime
 Status: Active
-Last updated: 2026-05-27
+Last updated: 2026-05-28
 
 This checklist tracks not-yet-done roadmap work with explicit owners,
 target dates, and acceptance evidence artifacts.
@@ -147,7 +147,7 @@ target dates, and acceptance evidence artifacts.
   6. `docs/acceptance/wave3-topology-cli-readiness-run01.json`
   7. `docs/acceptance/authority-topology-wave3-closeout.json`
 - Completion gate:
-  1. CLI + server + Rust host-core + dotnet stub parity + host_migration golden fixture (met).
+  1. CLI + server + Rust host-core + dotnet native-FFI topology parity + host_migration golden fixture (met).
   2. Operator metrics snippet in `docs/operator.md` (met). Dashboard visualization deferred.
   3. Durable lineage across restart is implemented (`AUTH-ROOM-006` lineage + promotion restart vectors).
   4. Promotion fair-queue controls and lineage index retention cap baseline are recorded (`docs/acceptance/topology-promotion-queue-baseline-run01.json`); large-family scale and retention policy hardening remain deferred.
@@ -203,6 +203,24 @@ target dates, and acceptance evidence artifacts.
   2. Deterministic rejection contract (`projection.build.rejected` + `reject.query_backpressure`) is covered by tests (met).
   3. Backpressure observability metrics and contention/recovery vector are recorded (met).
   4. Bounded fair FIFO wait queue (`NODALMERGE_QUERY_BUILD_MAX_QUEUE`) with queue-depth/wait metrics is implemented and tested (met).
+
+### 3.5 Dotnet native topology FFI parity closure
+
+- Status: **Completed** (2026-05-28)
+- Owner: Runtime + host maintainers
+- Target date: 2026-05-28 (met)
+- Source plans: `docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md`, `docs/REPO_BOUNDARY_AND_PARITY_MATRIX.md`
+- Required outputs:
+  1. Topology command path in `.NET` runtime message processor routes through native host-core/FFI for create/describe/list/propose/validate/apply.
+  2. Host-core command/event parity coverage for topology command group.
+  3. Dotnet runtime tests prove bridge routing (non-stub) for topology command group.
+- Evidence artifacts:
+  1. `docs/acceptance/authority-topology-wave3-dotnet-host-parity-run01.json`
+  2. `docs/acceptance/authority-topology-wave3-closeout.json`
+- Completion gate:
+  1. `RuntimeMessageProcessor` no longer owns local stub execution for topology admin command group (met).
+  2. Topology admin command group emits deterministic topology envelopes through native host-core/FFI bridge (met).
+  3. Focused host-core + dotnet tests for create/describe/list/propose/validate/apply bridge routing are green (met).
 
 ## 4. Tracking policy
 

@@ -198,6 +198,22 @@ pub enum HostCommand {
     DescribeRoomLineage {
         room_id: String,
     },
+    ListTopologyChildren {
+        parent_room_id: String,
+    },
+    ProposeTopologyPromotion {
+        parent_room_id: String,
+        child_room_id: String,
+        child_checkpoint_hash: String,
+        payload_ref: String,
+        idempotency_key: Option<String>,
+    },
+    ValidateTopologyPromotion {
+        proposal_id: String,
+    },
+    ApplyTopologyPromotion {
+        proposal_id: String,
+    },
     Noop,
 }
 
@@ -430,6 +446,28 @@ pub enum HostEvent {
         room_id: String,
         lineage: Option<Value>,
         ancestors: Vec<Value>,
+    },
+    ChildrenListed {
+        parent_room_id: String,
+        children: Vec<Value>,
+    },
+    PromotionProposed {
+        proposal_id: String,
+        parent_room_id: String,
+        child_room_id: String,
+        child_checkpoint_hash: String,
+        payload_ref: String,
+        proposal_digest: String,
+    },
+    PromotionValidated {
+        proposal_id: String,
+        validation_digest: String,
+    },
+    PromotionApplied {
+        proposal_id: String,
+        parent_room_id: String,
+        parent_new_canonical_hash: String,
+        audit_key: String,
     },
     NoopAck,
 }

@@ -119,6 +119,10 @@ fn command_label(command: &HostCommand) -> &'static str {
         HostCommand::RelayPeerSignal { .. } => "relay-peer-signal",
         HostCommand::CreateTopologyChild { .. } => "topology.create-child",
         HostCommand::DescribeRoomLineage { .. } => "topology.describe-lineage",
+        HostCommand::ListTopologyChildren { .. } => "topology.list-children",
+        HostCommand::ProposeTopologyPromotion { .. } => "topology.propose-promotion",
+        HostCommand::ValidateTopologyPromotion { .. } => "topology.validate-promotion",
+        HostCommand::ApplyTopologyPromotion { .. } => "topology.apply-promotion",
         HostCommand::Noop => "noop",
     }
 }
@@ -129,6 +133,10 @@ fn capability_label_for_command(command: &HostCommand) -> &'static str {
         HostCommand::SetRoomKey { .. } => "room.admin",
         HostCommand::CreateTopologyChild { .. } => "topology.admin",
         HostCommand::DescribeRoomLineage { .. } => "topology.admin",
+        HostCommand::ListTopologyChildren { .. } => "topology.admin",
+        HostCommand::ProposeTopologyPromotion { .. } => "topology.admin",
+        HostCommand::ValidateTopologyPromotion { .. } => "topology.admin",
+        HostCommand::ApplyTopologyPromotion { .. } => "topology.admin",
         _ => "unknown",
     }
 }

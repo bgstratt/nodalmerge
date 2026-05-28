@@ -1601,6 +1601,112 @@ fn create_topology_child_rejects_unknown_parent_room() {
     assert_eq!(err, HostCoreError::RoomNotFound);
 }
 
+#[test]
+fn list_topology_children_returns_created_children_for_parent() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("parent-a", HostCommand::EnsureRoom))
+        .expect("ensure parent should succeed");
+
+    for child in ["child-a", "child-b"] {
+        engine
+            .apply(CommandEnvelope::new(
+                "parent-a",
+                HostCommand::CreateTopologyChild {
+                    parent_room_id: "parent-a".to_string(),
+                    child_room_id: child.to_string(),
+                    child_purpose: "task".to_string(),
+                    created_by: "mgr".to_string(),
+                    promotion_policy_id: "promotion-based".to_string(),
+                    parent_checkpoint: json!({
+                        "frontier": ["seq:1"],
+                        "canonical_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }),
+                },
+            ))
+            .expect("create topology child should succeed");
+    }
+
+    let listed = engine
+        .apply(CommandEnvelope::new(
+            "parent-a",
+            HostCommand::ListTopologyChildren {
+                parent_room_id: "parent-a".to_string(),
+            },
+        ))
+        .expect("list topology children should succeed");
+
+    assert_eq!(listed.events.len(), 1);
+    assert!(matches!(
+        &listed.events[0],
+        HostEvent::ChildrenListed {
+            parent_room_id,
+            children
+        } if parent_room_id == "parent-a"
+            && children.len() == 2
+            && children[0]["child_room_id"] == "child-a"
+            && children[1]["child_room_id"] == "child-b"
+    ));
+}
+
+#[test]
+fn topology_promotion_roundtrip_emits_proposed_validated_applied() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("parent-a", HostCommand::EnsureRoom))
+        .expect("ensure parent should succeed");
+    engine
+        .apply(CommandEnvelope::new("child-a", HostCommand::EnsureRoom))
+        .expect("ensure child should succeed");
+
+    let proposed = engine
+        .apply(CommandEnvelope::new(
+            "parent-a",
+            HostCommand::ProposeTopologyPromotion {
+                parent_room_id: "parent-a".to_string(),
+                child_room_id: "child-a".to_string(),
+                child_checkpoint_hash:
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                payload_ref: "artifact://dotnet".to_string(),
+                idempotency_key: Some("prop-dotnet".to_string()),
+            },
+        ))
+        .expect("propose should succeed");
+
+    assert!(matches!(
+        &proposed.events[0],
+        HostEvent::PromotionProposed { proposal_id, .. } if proposal_id == "prop-dotnet"
+    ));
+
+    let validated = engine
+        .apply(CommandEnvelope::new(
+            "parent-a",
+            HostCommand::ValidateTopologyPromotion {
+                proposal_id: "prop-dotnet".to_string(),
+            },
+        ))
+        .expect("validate should succeed");
+    assert!(matches!(
+        &validated.events[0],
+        HostEvent::PromotionValidated { proposal_id, .. } if proposal_id == "prop-dotnet"
+    ));
+
+    let applied = engine
+        .apply(CommandEnvelope::new(
+            "parent-a",
+            HostCommand::ApplyTopologyPromotion {
+                proposal_id: "prop-dotnet".to_string(),
+            },
+        ))
+        .expect("apply should succeed");
+    assert!(matches!(
+        &applied.events[0],
+        HostEvent::PromotionApplied { proposal_id, audit_key, .. }
+            if proposal_id == "prop-dotnet" && audit_key == "_topology/promotion/prop-dotnet"
+    ));
+}
+
 fn signed_single_node_pack_b64() -> String {
     let mut graph = StateGraph::new();
     let signing_key = SigningKey::from_bytes(&[7u8; 32]);

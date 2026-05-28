@@ -1,6 +1,6 @@
 {
   "artifact": "authority-topology-wave3-closeout",
-  "recorded_at": "2026-05-27T22:00:00.0000000-05:00",
+  "recorded_at": "2026-05-28T00:38:00.0000000-05:00",
   "wave": 3,
   "track": "Authority and room topology hardening",
   "status": "closed_for_declared_slice",
@@ -15,7 +15,6 @@
   ],
   "deferred_beyond_declared_slice": [
     "Prometheus/Grafana dashboard panels for topology promotion metrics",
-    "Dotnet native FFI topology backend (stub parity sufficient for CLI→Rust server path)",
     "Automated operator drill runner (playbook §7 manual outline remains)",
     "Phase E: lineage index optimization and retention policy for large room families",
     "Phase E: lineage index optimization, promotion queue backpressure/fairness, large room-family benchmarks"

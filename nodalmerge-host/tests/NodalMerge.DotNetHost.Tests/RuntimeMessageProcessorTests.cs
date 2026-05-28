@@ -501,9 +501,48 @@ public class RuntimeMessageProcessorTests
     }
 
     [Fact]
-    public void Topology_promotion_stub_executes_propose_validate_apply_without_bridge_call()
+    public void Topology_list_children_routes_through_bridge_command()
     {
-        var bridge = new FakeRuntimeCommandBridge();
+        var bridge = new FakeRuntimeCommandBridge(
+            FfiJsonBridgeResult.Success(
+                "[{\"ChildrenListed\":{\"parent_room_id\":\"parent-a\",\"children\":[{\"child_room_id\":\"child-a\",\"child_purpose\":\"task\",\"promotion_policy_id\":\"promotion-based\",\"created_by\":\"mgr\"}]}}]"
+            )
+        );
+        var mapper = new RuntimeProtocolMapper();
+        var processor = new RuntimeMessageProcessor(bridge, mapper);
+        var state = new RuntimeConnectionState(1)
+        {
+            IsInitialized = true,
+            RoomId = "parent-a",
+            PeerPubkeyHex = "peer-a"
+        };
+        state.SessionCapabilities.Add("topology.admin");
+
+        var list = processor.ProcessIncomingText(
+            "{\"type\":\"topology.list-children\",\"parent_room_id\":\"parent-a\"}",
+            state
+        );
+
+        Assert.True(list.DispatchSucceeded);
+        Assert.Contains("\"type\":\"topology.list-children.result\"", list.OutboundMessages[0]);
+        Assert.Single(bridge.Commands);
+        Assert.Contains("\"ListTopologyChildren\":", bridge.Commands[0]);
+    }
+
+    [Fact]
+    public void Topology_promotion_routes_through_bridge_commands()
+    {
+        var bridge = new FakeRuntimeCommandBridge(
+            FfiJsonBridgeResult.Success(
+                "[{\"PromotionProposed\":{\"proposal_id\":\"prop-dotnet\",\"parent_room_id\":\"parent-a\",\"child_room_id\":\"child-a\",\"child_checkpoint_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"payload_ref\":\"artifact://dotnet\",\"proposal_digest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}}]"
+            ),
+            FfiJsonBridgeResult.Success(
+                "[{\"PromotionValidated\":{\"proposal_id\":\"prop-dotnet\",\"validation_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}}]"
+            ),
+            FfiJsonBridgeResult.Success(
+                "[{\"PromotionApplied\":{\"proposal_id\":\"prop-dotnet\",\"parent_room_id\":\"parent-a\",\"parent_new_canonical_hash\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"audit_key\":\"_topology/promotion/prop-dotnet\"}}]"
+            )
+        );
         var mapper = new RuntimeProtocolMapper();
         var processor = new RuntimeMessageProcessor(bridge, mapper);
         var state = new RuntimeConnectionState(1)
@@ -535,7 +574,10 @@ public class RuntimeMessageProcessorTests
         Assert.True(apply.DispatchSucceeded);
         Assert.Contains("\"type\":\"topology.apply-promotion.completed\"", apply.OutboundMessages[0]);
         Assert.Contains("\"audit_key\":\"_topology/promotion/prop-dotnet\"", apply.OutboundMessages[0]);
-        Assert.Empty(bridge.Commands);
+        Assert.Equal(3, bridge.Commands.Count);
+        Assert.Contains("\"ProposeTopologyPromotion\":", bridge.Commands[0]);
+        Assert.Contains("\"ValidateTopologyPromotion\":", bridge.Commands[1]);
+        Assert.Contains("\"ApplyTopologyPromotion\":", bridge.Commands[2]);
     }
 
     [Fact]

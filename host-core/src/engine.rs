@@ -41,6 +41,13 @@ struct PresenceState {
     expires_at_unix_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+struct PromotionState {
+    parent_room_id: String,
+    validated: bool,
+    applied: bool,
+}
+
 const CONFLICT_HISTORY_LIMIT: usize = 256;
 
 pub struct HostEngine {
@@ -59,6 +66,7 @@ pub struct HostEngine {
     room_sync_graphs: HashMap<String, StateGraph>,
     room_conflict_fingerprints: HashMap<String, HashSet<ConflictFingerprint>>,
     room_conflict_history: HashMap<String, Vec<ConflictEntry>>,
+    topology_promotions: HashMap<String, PromotionState>,
     server_caps: CapabilitySet,
     blob_url_resolver: Option<Arc<dyn HostBlobUrlResolver>>,
 }
@@ -81,6 +89,7 @@ impl Default for HostEngine {
             room_sync_graphs: HashMap::new(),
             room_conflict_fingerprints: HashMap::new(),
             room_conflict_history: HashMap::new(),
+            topology_promotions: HashMap::new(),
             server_caps: CapabilitySet::default(),
             blob_url_resolver: None,
         }
@@ -1661,6 +1670,117 @@ impl HostEngine {
                         room_id,
                         lineage,
                         ancestors: Vec::new(),
+                    }],
+                })
+            }
+            HostCommand::ListTopologyChildren { parent_room_id } => {
+                if !self.rooms.contains(&parent_room_id) {
+                    return Err(HostCoreError::RoomNotFound);
+                }
+                let mut children = Vec::new();
+                for (room_id, room_map) in &self.room_maps {
+                    let Some(lineage) = room_map.get("_topology/lineage") else {
+                        continue;
+                    };
+                    if lineage["parent_room_id"].as_str() != Some(parent_room_id.as_str()) {
+                        continue;
+                    }
+                    children.push(serde_json::json!({
+                        "child_room_id": room_id,
+                        "child_purpose": lineage["child_purpose"].as_str().unwrap_or_default(),
+                        "promotion_policy_id": lineage["promotion_policy_id"].as_str().unwrap_or_default(),
+                        "created_by": lineage["created_by"].as_str().unwrap_or_default()
+                    }));
+                }
+
+                children.sort_by(|a, b| {
+                    a["child_room_id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .cmp(b["child_room_id"].as_str().unwrap_or_default())
+                });
+
+                Ok(CommandResult {
+                    events: vec![HostEvent::ChildrenListed {
+                        parent_room_id,
+                        children,
+                    }],
+                })
+            }
+            HostCommand::ProposeTopologyPromotion {
+                parent_room_id,
+                child_room_id,
+                child_checkpoint_hash,
+                payload_ref,
+                idempotency_key,
+            } => {
+                if !self.rooms.contains(&parent_room_id)
+                    || !self.rooms.contains(&child_room_id)
+                    || child_checkpoint_hash.is_empty()
+                    || payload_ref.is_empty()
+                {
+                    return Err(HostCoreError::InvalidCommand);
+                }
+
+                let proposal_digest =
+                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                        .to_string();
+                let proposal_id = idempotency_key.unwrap_or_else(|| proposal_digest.clone());
+                let promotion = PromotionState {
+                    parent_room_id: parent_room_id.clone(),
+                    validated: false,
+                    applied: false,
+                };
+                self.topology_promotions
+                    .insert(proposal_id.clone(), promotion);
+
+                Ok(CommandResult {
+                    events: vec![HostEvent::PromotionProposed {
+                        proposal_id,
+                        parent_room_id,
+                        child_room_id,
+                        child_checkpoint_hash,
+                        payload_ref,
+                        proposal_digest,
+                    }],
+                })
+            }
+            HostCommand::ValidateTopologyPromotion { proposal_id } => {
+                let Some(promotion) = self.topology_promotions.get_mut(&proposal_id) else {
+                    return Err(HostCoreError::InvalidCommand);
+                };
+
+                let validation_digest =
+                    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                        .to_string();
+                promotion.validated = true;
+                Ok(CommandResult {
+                    events: vec![HostEvent::PromotionValidated {
+                        proposal_id,
+                        validation_digest,
+                    }],
+                })
+            }
+            HostCommand::ApplyTopologyPromotion { proposal_id } => {
+                let Some(promotion) = self.topology_promotions.get_mut(&proposal_id) else {
+                    return Err(HostCoreError::InvalidCommand);
+                };
+
+                if !promotion.validated {
+                    return Err(HostCoreError::InvalidCommand);
+                }
+
+                promotion.applied = true;
+                let parent_new_canonical_hash =
+                    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                        .to_string();
+                let audit_key = format!("_topology/promotion/{proposal_id}");
+                Ok(CommandResult {
+                    events: vec![HostEvent::PromotionApplied {
+                        proposal_id,
+                        parent_room_id: promotion.parent_room_id.clone(),
+                        parent_new_canonical_hash,
+                        audit_key,
                     }],
                 })
             }

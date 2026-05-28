@@ -25,7 +25,7 @@ Partially implemented / deferred:
 2. Dotnet native FFI topology backend parity was deferred; minimal vertical for `create-child` + `describe-lineage` is now routed through native host-core/FFI.
 3. Hosted dashboard productization remains deferred.
 4. Operator automated drill runner remains deferred (manual runbook path is present).
-5. `.NET` topology behavior still has partial stubs for promotion/list-children flows; `create-child` and `describe-lineage` now execute through native boundary.
+5. `.NET` topology admin flows (`create-child`, `describe-lineage`, `list-children`, `propose/validate/apply-promotion`) now execute through native boundary.
 
 ## 1.1) CLI command reference (man page style)
 

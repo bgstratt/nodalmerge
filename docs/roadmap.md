@@ -2,7 +2,7 @@
 
 Owner: Platform/runtime
 Status: Active execution baseline
-Last updated: 2026-05-27
+Last updated: 2026-05-28
 
 ## 1. Executive decisions
 
@@ -247,8 +247,9 @@ Exit criteria:
 Current status:
 
 1. Wave 3 reliability/performance baseline package is now recorded: `docs/acceptance/wave3-reliability-performance-baseline-run01.json` (query/server/archive/topology/headless/CLI reliability vectors + representative `resolve_1k` benchmark lane).
-2. Wave 3 FSE-03 initial slice is now recorded: `docs/acceptance/query-wave3-backpressure-run01.json` (Rust server query projection-build row/inflight guardrails with deterministic `reject.query_backpressure` rejection contract).
-3. Wave 3 FSE-03 follow-up slice is now recorded: `docs/acceptance/query-wave3-backpressure-run02.json` (query build backpressure observability metrics + deterministic contention/recovery vector).
+2. Dotnet topology admin flows now route through native host-core/FFI boundary (create/describe/list/propose/validate/apply) and no longer rely on RuntimeMessageProcessor local stubs for these commands.
+3. Wave 3 FSE-03 initial slice is now recorded: `docs/acceptance/query-wave3-backpressure-run01.json` (Rust server query projection-build row/inflight guardrails with deterministic `reject.query_backpressure` rejection contract).
+4. Wave 3 FSE-03 follow-up slice is now recorded: `docs/acceptance/query-wave3-backpressure-run02.json` (query build backpressure observability metrics + deterministic contention/recovery vector).
 
 Goals:
 

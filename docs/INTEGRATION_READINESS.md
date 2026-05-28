@@ -15,7 +15,7 @@ This document answers: **what can you run today** to integrate headless workers,
 | **Operator CLI (run / archive / query)** | Yes | New | `nodalmerge run`, `archive`, `query` subcommands |
 | **Query / materialization** | Yes | Closed | Server WS + host vectors; SDK `query.*` on `nodalmerge-sdk-js` |
 | **Export / import (archive)** | Yes | Closed | Server archive adapters; post-closeout monitoring on calendar |
-| **Spec / auth / branching** | Partial | Wave 2–3 closed for declared scope | Topology + replay branching plans; sign-offs OOB |
+| **Spec / auth / branching** | Partial | Wave 2–3 closed for declared scope | Topology admin command group now routes through native host-core/FFI in `.NET`; sign-offs OOB |
 | **Observability dashboards** | Deferred | — | PromQL snippets in `docs/operator.md` only; no hosted Grafana commitment |
 
 ## 1. Headless peer worker
@@ -140,7 +140,7 @@ Engine semantics are shared (`nodalmerge-core`); packaging is what differs.
 | Area | In place | Still missing / deferred |
 |------|----------|---------------------------|
 | Headless sync + persist | Yes | Criterion backend baselines |
-| .NET peer-local FFI | Yes (`runtime-local-ffi`, `LocalPersistFfiClient`, `RuntimePeerLocalPersistenceService`) | Production enablement + `cargo build -p nodalmerge-runtime-local-ffi --release` before NuGet pack |
+| .NET peer-local FFI + topology admin bridge | Yes (`runtime-local-ffi`, `LocalPersistFfiClient`, `RuntimePeerLocalPersistenceService`, topology admin via host-core/FFI) | Production enablement + `cargo build -p nodalmerge-runtime-local-ffi --release` before NuGet pack |
 | CLI topology / archive / run | Yes | — |
 | CLI query | Yes (commands wired) | Cursor/token ergonomics polish only (functional lane now runs on Rust WS + .NET host runtime) |
 | Query/materialization | Yes (core/server vectors + SDK) | Extended replay/load/perf hardening in Wave 3 |

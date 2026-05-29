@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
 use nodalmerge_core::{canonical_hash, Hash, MapOp, Op, StateGraph};
+use nodalmerge_server::query_control::process_replay_read_range;
 use nodalmerge_server::room::{import_nodes, Room};
 use nodalmerge_server::store::{NoPersistence, SharedPersistence};
 
@@ -426,4 +427,119 @@ fn server_query_det_004_pagination_digest_continuity_matches_full_projection() {
     }
 
     assert_eq!(projection_digest(&rebuilt), full_digest);
+}
+
+#[tokio::test]
+async fn server_query_replay_004_read_range_cursor_progression_is_deterministic() {
+    let persistence: SharedPersistence = Arc::new(NoPersistence);
+    let signer = SigningKey::from_bytes(&[0x7bu8; 32]);
+    let room = Room::new(
+        "query-replay-range-004".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
+
+    let nodes = build_set_nodes(
+        &signer,
+        &[
+            ("world/a", "1"),
+            ("world/b", "2"),
+            ("world/c", "3"),
+            ("world/d", "4"),
+        ],
+    );
+    let (accepted, _, errs) = import_nodes(&room, nodes).await;
+    assert_eq!(accepted, 4);
+    assert!(errs.is_empty());
+
+    let mut first_pass = Vec::new();
+    let mut cursor = None;
+    loop {
+        let response = process_replay_read_range(
+            room.as_ref(),
+            &serde_json::json!({
+                "type": "replay.read-range",
+                "key_prefix": "world/",
+                "from_lamport": 0,
+                "limit": 2,
+                "cursor": cursor
+            }),
+        )
+        .await;
+        let items = response
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        first_pass.extend(items);
+        cursor = response
+            .get("next_cursor")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    let mut second_pass = Vec::new();
+    let mut cursor = None;
+    loop {
+        let response = process_replay_read_range(
+            room.as_ref(),
+            &serde_json::json!({
+                "type": "replay.read-range",
+                "key_prefix": "world/",
+                "from_lamport": 0,
+                "limit": 2,
+                "cursor": cursor
+            }),
+        )
+        .await;
+        let items = response
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        second_pass.extend(items);
+        cursor = response
+            .get("next_cursor")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert_eq!(first_pass, second_pass);
+    assert_eq!(first_pass.len(), 4);
+}
+
+#[tokio::test]
+async fn server_query_replay_005_read_range_rejects_missing_prefix() {
+    let persistence: SharedPersistence = Arc::new(NoPersistence);
+    let room = Room::new(
+        "query-replay-range-005".to_string(),
+        Arc::clone(&persistence),
+        512,
+    );
+
+    let response = process_replay_read_range(
+        room.as_ref(),
+        &serde_json::json!({
+            "type": "replay.read-range",
+            "key_prefix": "",
+            "from_lamport": 0,
+            "limit": 10
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        response.get("type").and_then(|v| v.as_str()),
+        Some("replay.read-range.rejected")
+    );
+    assert_eq!(
+        response.get("reason_class").and_then(|v| v.as_str()),
+        Some("reject.invalid_payload")
+    );
 }

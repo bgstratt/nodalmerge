@@ -35,6 +35,7 @@ nodalmerge topology list-children --parent-room parent-room
 
 nodalmerge archive describe --archive-ref room://parent-room --room parent-room
 nodalmerge query list-projections --room my-room
+nodalmerge query replay-read-range --room my-room --key-prefix world/ --from-lamport 0 --limit 50
 nodalmerge token mint \
   --room parent-room \
   --room-key-seed-hex <64-hex-secret> \

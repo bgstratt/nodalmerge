@@ -77,6 +77,9 @@ pub struct Room {
     /// D2: set of currently-connected peer pubkeys (hex). Used to populate
     /// the `peers` field of the `welcome` message and to drive WebRTC initiation.
     pub connected_peers: RwLock<HashSet<String>>,
+    /// D2/FSE-05: active connection reference counts per peer pubkey.
+    /// `connected_peers` contains exactly the keys whose count is > 0.
+    pub connected_peer_sessions: RwLock<HashMap<String, usize>>,
     /// F4: shared persistence handle. `NoPersistence` in the default in-memory build.
     pub persistence: SharedPersistence,
     /// F4: this room's id, passed to every `persistence.persist_*` call.
@@ -125,6 +128,7 @@ impl Room {
             tx,
             tick_abort: Mutex::new(None),
             connected_peers: RwLock::new(HashSet::new()),
+            connected_peer_sessions: RwLock::new(HashMap::new()),
             persistence,
             room_id,
             // Brand-new room has no peers yet, so the idle clock starts now.
@@ -139,8 +143,17 @@ impl Room {
     }
 
     /// Register a newly-connected peer. Clears the idle-eviction clock.
-    pub async fn register_peer(&self, pubkey_hex: String) {
-        let inserted = self.connected_peers.write().await.insert(pubkey_hex);
+    pub async fn register_peer(&self, pubkey_hex: String) -> PeerCountGaugeUpdate {
+        let mut peer_sessions = self.connected_peer_sessions.write().await;
+        let prior = peer_sessions.get(&pubkey_hex).copied().unwrap_or(0);
+        peer_sessions.insert(pubkey_hex.clone(), prior.saturating_add(1));
+        drop(peer_sessions);
+
+        let inserted = if prior == 0 {
+            self.connected_peers.write().await.insert(pubkey_hex)
+        } else {
+            false
+        };
         let plan = plan_register_peer_membership(inserted);
         if plan.clear_idle_since {
             *self.idle_since.lock().expect("idle_since poisoned") = None;
@@ -151,13 +164,30 @@ impl Room {
             metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone())
                 .increment(1.0);
         }
+        plan.gauge_update
     }
 
     /// Deregister a departing peer. If this was the last connected peer,
     /// starts the idle-eviction clock.
-    pub async fn deregister_peer(&self, pubkey_hex: &str) {
+    pub async fn deregister_peer(&self, pubkey_hex: &str) -> PeerCountGaugeUpdate {
+        let mut peer_sessions = self.connected_peer_sessions.write().await;
+        let mut removed = false;
+        match peer_sessions.get(pubkey_hex).copied() {
+            Some(1) => {
+                peer_sessions.remove(pubkey_hex);
+                removed = true;
+            }
+            Some(n) if n > 1 => {
+                peer_sessions.insert(pubkey_hex.to_string(), n - 1);
+            }
+            _ => {}
+        }
+        drop(peer_sessions);
+
         let mut peers = self.connected_peers.write().await;
-        let removed = peers.remove(pubkey_hex);
+        if removed {
+            peers.remove(pubkey_hex);
+        }
         let plan = plan_deregister_peer_membership(removed, peers.is_empty());
         if plan.set_idle_since_now {
             *self.idle_since.lock().expect("idle_since poisoned") = Some(Instant::now());
@@ -168,6 +198,7 @@ impl Room {
             metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone())
                 .decrement(1.0);
         }
+        plan.gauge_update
     }
 
     /// Install a room-level write policy.  Called when a client sends

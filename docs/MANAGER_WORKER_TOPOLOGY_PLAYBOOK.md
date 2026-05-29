@@ -124,6 +124,12 @@ Evidence artifact: `docs/acceptance/manager-worker-cli-workflow-plan-run01.json`
 | invalid lineage / stale parent | `AUTH-ROOM-004` |
 | replay parent after apply | `AUTH-ROOM-005` |
 
+Governance/drill companions:
+
+1. `docs/TOPOLOGY_GOVERNANCE_POLICY_TEMPLATES.md`
+2. `docs/TOPOLOGY_OPERATOR_DRILL_RUNBOOK.md`
+3. `docs/FEDERATION_PRECONDITIONS_CHECKLIST.md` (non-federated readiness gates only)
+
 ## 8. Non-goals for this playbook
 
 1. replacing existing websocket sync model

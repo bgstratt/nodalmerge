@@ -1,6 +1,6 @@
-# ActiveSync SDK
+# NodalMerge SDK
 
-A Firebase/Replicache-style document API over the ActiveSync CRDT engine.
+A Firebase/Replicache-style document API over the NodalMerge CRDT engine.
 Thin JS wrapper around the low-level `SyncStore` — no core changes.
 
 ## Install
@@ -8,6 +8,11 @@ Thin JS wrapper around the low-level `SyncStore` — no core changes.
 The SDK ships alongside the WASM bridge under `web/` in this repo. Copy
 `web/sdk.js`, `web/sdk.d.ts`, and the `web/pkg/` folder (produced by
 `wasm-pack build bridge --target web --out-dir ../web/pkg`) into your app.
+
+Also available as package surfaces used by wrappers/integrations:
+
+1. `nodalmerge-sdk-js` (`createNodalMergeSdk`) for runtime-oriented clients.
+2. `nodalmerge-bridge` for WASM bridge packaging.
 
 ## Quick start
 
@@ -114,6 +119,61 @@ doc.onError((err) => {
 
 const recent = doc.recentRejections();
 console.log('recent rejections', recent.length);
+```
+
+### Schema/version rollout guidance (FSE-06 baseline)
+
+Use `docs/MIGRATION_COOKBOOK.md` as the canonical rollout template.
+For rollout PR gating, use `docs/MIGRATION_ANTI_PATTERNS_CHECKLIST.md`.
+
+SDK-side rules:
+
+1. treat unsupported-window rejects (for example `reject.query_unsupported_version`) as non-retry-until-version-changes
+2. surface requested vs supported version details in UI/logs when available
+3. during migration windows, prefer dual-read compatibility and avoid hard cutovers in a single release
+
+### Replay range read (runtime-oriented SDK surface)
+
+The `nodalmerge-sdk-js` runtime surface can consume `replay.read-range` envelopes for history panes and analytics readers.
+
+Request envelope:
+
+```json
+{ "type": "replay.read-range", "key_prefix": "world/", "from_lamport": 0, "limit": 100, "cursor": "offset:0" }
+```
+
+Result envelope:
+
+```json
+{
+  "type": "replay.read-range.result",
+  "key_prefix": "world/",
+  "from_lamport": 0,
+  "items": [{ "lamport": 1, "node_id": "<hex>", "touched_keys": ["world/a"] }],
+  "next_cursor": "offset:100"
+}
+```
+
+Guidance:
+
+1. treat `cursor` / `next_cursor` as opaque server cursors
+2. use bounded `limit` windows to keep UI latency predictable
+
+Runtime-oriented helper (`nodalmerge-sdk-js`):
+
+```js
+const page1 = await sdk.query.readReplayRange({
+  keyPrefix: "world/",
+  fromLamport: 0,
+  limit: 100
+});
+
+const page2 = await sdk.query.readReplayRange({
+  keyPrefix: "world/",
+  fromLamport: 0,
+  limit: 100,
+  cursor: page1.next_cursor
+});
 ```
 
 ### Intent vs canonical refinement

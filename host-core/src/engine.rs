@@ -3078,6 +3078,75 @@ pub fn extract_presence_data_payload(message: &Value) -> Value {
     message["data"].clone()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresenceLeaseParseResult {
+    Valid {
+        ttl_ms: Option<u64>,
+        now_unix_ms: Option<u64>,
+    },
+    Invalid {
+        reason: &'static str,
+    },
+}
+
+/// Parse optional presence lease fields with stable rejection taxonomy.
+pub fn parse_presence_lease_fields(message: &Value) -> PresenceLeaseParseResult {
+    let ttl_value = message.get("ttl_ms");
+    let now_value = message.get("now_unix_ms");
+
+    let ttl_ms = match ttl_value {
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(0) => {
+                return PresenceLeaseParseResult::Invalid {
+                    reason: "reject.presence_lease_invalid:ttl_ms_must_be_positive_u64",
+                };
+            }
+            Some(v) => Some(v),
+            None => {
+                return PresenceLeaseParseResult::Invalid {
+                    reason: "reject.presence_lease_invalid:ttl_ms_must_be_positive_u64",
+                };
+            }
+        },
+        Some(_) => {
+            return PresenceLeaseParseResult::Invalid {
+                reason: "reject.presence_lease_invalid:ttl_ms_must_be_positive_u64",
+            };
+        }
+        None => None,
+    };
+
+    let now_unix_ms = match now_value {
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(v) => Some(v),
+            None => {
+                return PresenceLeaseParseResult::Invalid {
+                    reason: "reject.presence_lease_invalid:now_unix_ms_must_be_u64",
+                };
+            }
+        },
+        Some(_) => {
+            return PresenceLeaseParseResult::Invalid {
+                reason: "reject.presence_lease_invalid:now_unix_ms_must_be_u64",
+            };
+        }
+        None => None,
+    };
+
+    if ttl_ms.is_some() && now_unix_ms.is_none() {
+        return PresenceLeaseParseResult::Invalid {
+            reason: "reject.presence_lease_invalid:ttl_ms_requires_now_unix_ms",
+        };
+    }
+    if ttl_ms.is_none() && now_unix_ms.is_some() {
+        return PresenceLeaseParseResult::Invalid {
+            reason: "reject.presence_lease_invalid:now_unix_ms_requires_ttl_ms",
+        };
+    }
+
+    PresenceLeaseParseResult::Valid { ttl_ms, now_unix_ms }
+}
+
 /// Extract pack nodes payload text with adapter-compatible defaulting.
 pub fn extract_pack_nodes_payload_b64(message: &Value) -> String {
     message["nodes"].as_str().unwrap_or("").to_string()
@@ -4409,6 +4478,61 @@ mod tests {
         let msg = serde_json::json!({});
         let data = extract_presence_data_payload(&msg);
         assert_eq!(data, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn parse_presence_lease_fields_accepts_absent_lease() {
+        let msg = serde_json::json!({"type":"presence","data":{"state":"online"}});
+        let parsed = parse_presence_lease_fields(&msg);
+        assert_eq!(
+            parsed,
+            PresenceLeaseParseResult::Valid {
+                ttl_ms: None,
+                now_unix_ms: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_presence_lease_fields_accepts_valid_pair() {
+        let msg = serde_json::json!({
+            "type":"presence",
+            "data":{"state":"online"},
+            "ttl_ms": 5000,
+            "now_unix_ms": 12345
+        });
+        let parsed = parse_presence_lease_fields(&msg);
+        assert_eq!(
+            parsed,
+            PresenceLeaseParseResult::Valid {
+                ttl_ms: Some(5000),
+                now_unix_ms: Some(12345),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_presence_lease_fields_rejects_ttl_without_now() {
+        let msg = serde_json::json!({"type":"presence","ttl_ms":1000});
+        let parsed = parse_presence_lease_fields(&msg);
+        assert_eq!(
+            parsed,
+            PresenceLeaseParseResult::Invalid {
+                reason: "reject.presence_lease_invalid:ttl_ms_requires_now_unix_ms",
+            }
+        );
+    }
+
+    #[test]
+    fn parse_presence_lease_fields_rejects_now_without_ttl() {
+        let msg = serde_json::json!({"type":"presence","now_unix_ms":1000});
+        let parsed = parse_presence_lease_fields(&msg);
+        assert_eq!(
+            parsed,
+            PresenceLeaseParseResult::Invalid {
+                reason: "reject.presence_lease_invalid:now_unix_ms_requires_ttl_ms",
+            }
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ActiveSync Operations Inventory
+# NodalMerge Operations Inventory
 
 Purpose: single-source inventory of currently exposed operations across SDK, wire protocol, server runtime, core engine, auth bridge, and GC contracts, with a gap-analysis view.
 
@@ -8,7 +8,7 @@ Status legend:
 - Documented contract: defined in docs, not yet implemented as shared runtime surface
 - Planned: tracked in plans, not yet finalized
 
-## 0) Overall Architecture Assessment
+## 0) Overall architecture assessment
 
 This project is in stabilization-and-extraction stage, not early architecture stage.
 
@@ -27,9 +27,24 @@ This project is in stabilization-and-extraction stage, not early architecture st
 
 Primary remaining risk is lifecycle ownership semantics (especially blobs/GC), not missing CRDT functionality.
 
+### 0.1 Status refresh (2026-05-28)
+
+Implemented now:
+
+1. Query control-plane (`query.register`, `projection.build/read/list/invalidate`) in `nodalmerge-server` and host-core/FFI surfaces.
+2. Archive control-plane (`archive.describe/validate/export/import`) in `nodalmerge-server` and host-core/FFI surfaces.
+3. Topology control-plane (`create-child`, `describe-lineage`, `list-children`, `propose/validate/apply-promotion`) through native `.NET` host bridge.
+4. Promotion and lineage durability slices (restart parity, queue/backpressure metrics, and large-family baseline vectors).
+
+Still open / partial:
+
+1. GC subsystem extraction and ownership contract hardening (`activesync-gc` target shape in this doc).
+2. Full protocol catalog examples for all control-plane reject classes.
+3. Additional SDK/operator ergonomics for advanced replay/fork workflows.
+
 ## 1) Public SDK operations (web/sdk.js, web/sdk.d.ts)
 
-Source: web/sdk.d.ts, docs/sdk.md
+Source: `web/sdk.js`, `sdk-js/index.d.ts`, `docs/sdk.md`
 
 ### 1.1 Document lifecycle
 
@@ -391,7 +406,7 @@ This reduces host/runtime coupling and improves embedding consistency.
 ### 8.5 Can follow after stabilization
 
 1. Full C ABI breadth expansion.
-2. Full .NET embedding implementation.
+2. Additional `.NET` host feature expansion beyond current native control-plane parity.
 3. Non-websocket transport adapters.
 
 ### 8.6 Documentation gaps to close next

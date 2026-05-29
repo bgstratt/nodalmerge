@@ -7,6 +7,7 @@ use nodalmerge_runtime_local::{
     BackendOpenOptions, FileLocalPersistence, LocalPersistReason, MemoryLocalPersistence,
     NodeLogTail, PeerLocalPersistence, PersistenceHandle,
 };
+use rusqlite::{params, Connection};
 
 fn make_chain(sk: &SigningKey, writes: &[(&str, &[u8])]) -> Vec<SyncNode> {
     let mut g = StateGraph::new();
@@ -253,4 +254,146 @@ fn local_persist_004_readonly_rejects_append() {
     let err = ro.append_nodes(room, &nodes, None).expect_err("readonly");
     assert_eq!(err.reason, LocalPersistReason::ReadOnly);
     assert_eq!(err.reason_class(), "reject.local_persist_readonly");
+}
+
+/// LOCAL-PERSIST-008: composite uses durable tail as source-of-truth under concurrent writer drift.
+#[test]
+fn local_persist_008_composite_rejects_stale_tail_after_external_durable_append() {
+    let room = "local-persist-composite-008";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sk = SigningKey::from_bytes(&[0x68u8; 32]);
+    let nodes = make_chain(&sk, &[("world/008/a", b"a"), ("world/008/b", b"b")]);
+
+    // Session A: composite appends first node.
+    let composite = CompositeLocalPersistence::open(dir.path()).expect("open composite");
+    let append_a = composite
+        .append_nodes(room, &nodes[0..1], None)
+        .expect("append first node");
+    assert_eq!(append_a.tail.seq, 1);
+
+    // Session B: external durable append simulates cache drift / competing writer.
+    let file = FileLocalPersistence::open(dir.path()).expect("open file");
+    let append_b = file
+        .append_nodes(room, &nodes[1..2], None)
+        .expect("append second node via durable lane");
+    assert_eq!(append_b.tail.seq, 2);
+
+    // Session A tries stale expected tail from its old view -> must reject deterministically.
+    let err = composite
+        .append_nodes(
+            room,
+            &[],
+            Some(NodeLogTail {
+                seq: append_a.tail.seq,
+            }),
+        )
+        .expect_err("stale expected tail should reject");
+    assert_eq!(err.reason, LocalPersistReason::TailConflict);
+    assert_eq!(err.reason_class(), "reject.local_persist_tail_conflict");
+}
+
+/// LOCAL-PERSIST-009: composite blob reads fall back to durable storage after restart.
+#[test]
+fn local_persist_009_composite_blob_fallback_after_restart() {
+    let room = "local-persist-composite-009";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hash = nodalmerge_core::Hash::of(b"composite-blob-009");
+
+    {
+        let session = CompositeLocalPersistence::open(dir.path()).expect("open");
+        session
+            .put_blob(room, &hash, b"composite-blob-009")
+            .expect("put");
+        session.flush(room).expect("flush");
+    }
+
+    // New composite process has cold cache; read must still succeed via durable lane.
+    let restarted = CompositeLocalPersistence::open(dir.path()).expect("reopen");
+    let bytes = restarted
+        .get_blob(room, &hash)
+        .expect("get")
+        .expect("blob exists");
+    assert_eq!(bytes, b"composite-blob-009");
+}
+
+/// LOCAL-PERSIST-005: filesystem read-only adapter rejects writes with stable class.
+#[test]
+fn local_persist_005_fs_readonly_rejects_append() {
+    let room = "local-persist-fs-readonly-room";
+    let sk = SigningKey::from_bytes(&[0x67u8; 32]);
+    let nodes = make_chain(&sk, &[("k", b"v")]);
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // Seed durable store first so open_read_only has an existing db.
+    {
+        let rw = FileLocalPersistence::open(dir.path()).expect("open rw");
+        rw.append_nodes(room, &nodes, None).expect("append");
+        rw.flush(room).expect("flush");
+    }
+
+    let ro = FileLocalPersistence::open_read_only(dir.path()).expect("open ro");
+    let err = ro
+        .append_nodes(room, &nodes, None)
+        .expect_err("readonly filesystem adapter must reject writes");
+    assert_eq!(err.reason, LocalPersistReason::ReadOnly);
+    assert_eq!(err.reason_class(), "reject.local_persist_readonly");
+}
+
+/// LOCAL-PERSIST-006: schema version skew is rejected with stable class.
+#[test]
+fn local_persist_006_fs_version_skew_uses_stable_reason_class() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("local-persist.db");
+
+    // Create schema as current version.
+    {
+        let _ = FileLocalPersistence::open(dir.path()).expect("open");
+    }
+
+    // Simulate a future runtime bumping schema version.
+    {
+        let conn = Connection::open(&db_path).expect("open sqlite");
+        conn.execute("DELETE FROM schema_meta", [])
+            .expect("clear schema_meta");
+        conn.execute(
+            "INSERT INTO schema_meta (version) VALUES (?1)",
+            params![999_i64],
+        )
+        .expect("insert skewed schema version");
+    }
+
+    let err = FileLocalPersistence::open(dir.path()).expect_err("version skew must reject");
+    assert_eq!(err.reason, LocalPersistReason::VersionSkew);
+    assert_eq!(err.reason_class(), "reject.local_persist_version_skew");
+}
+
+/// LOCAL-PERSIST-007: malformed persisted node bytes are classified as corruption.
+#[test]
+fn local_persist_007_fs_corrupt_node_row_uses_stable_reason_class() {
+    let room = "local-persist-fs-corrupt-room";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("local-persist.db");
+
+    {
+        let _ = FileLocalPersistence::open(dir.path()).expect("open");
+    }
+
+    {
+        let conn = Connection::open(&db_path).expect("open sqlite");
+        conn.execute(
+            "INSERT INTO nodes (room_id, node_id, bytes) VALUES (?1, ?2, ?3)",
+            params![room, vec![0u8; 32], vec![1u8, 2u8, 3u8, 4u8]],
+        )
+        .expect("insert malformed node row");
+        conn.execute(
+            "INSERT INTO room_state (room_id, tail_seq) VALUES (?1, ?2)",
+            params![room, 1_i64],
+        )
+        .expect("insert room state");
+    }
+
+    let fs = FileLocalPersistence::open(dir.path()).expect("reopen");
+    let err = fs.recover(room).expect_err("corrupt row must reject");
+    assert_eq!(err.reason, LocalPersistReason::Corruption);
+    assert_eq!(err.reason_class(), "reject.local_persist_corruption");
 }

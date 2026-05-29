@@ -59,6 +59,7 @@ use nodalmerge_host_core::engine::{
     extract_set_policy_rule_values, extract_set_room_key_pubkey_text,
     extract_start_tick_intent_prefix, extract_start_tick_interval_ms, extract_webrtc_relay_fields,
     parse_client_capabilities, parse_client_frontier_node_ids, parse_client_ibf_input,
+    parse_presence_lease_fields,
     plan_blob_store_mutation, plan_direct_blob_io_bad_hash_gate,
     plan_direct_blob_io_negotiation_gate, plan_filtered_catchup_send_payload, plan_has_catchup,
     plan_pack_import_mutation, plan_peer_rate_limiters, plan_token_deadline_remaining_secs,
@@ -85,8 +86,10 @@ use nodalmerge_host_core::engine::{
     should_terminate_after_subscribe_ack_send, should_terminate_after_welcome_send,
     BlobStoreMutationAction, CompactRoomCompactionResult, CompactRoomRebuildResult,
     CompactRoomVerifyResult, DirectBlobIoVerifyOutcome, HelloPayloadClassification,
-    PackImportMutationAction, RequestUploadResolvePutUrlOutcome, SetPolicyDefaultParseResult,
-    SetPolicyParseResult, SetRoomKeyLockStateResult, SetRoomKeyParseResult,
+    PackImportMutationAction, PeerCountGaugeUpdate, PresenceLeaseParseResult,
+    RequestUploadResolvePutUrlOutcome,
+    SetPolicyDefaultParseResult, SetPolicyParseResult, SetRoomKeyLockStateResult,
+    SetRoomKeyParseResult,
 };
 use nodalmerge_host_core::protocol::{
     assemble_blob_available_envelope, assemble_blob_pack_envelope, assemble_blob_redirect_envelope,
@@ -123,7 +126,7 @@ use crate::capability_profile::{
 };
 use crate::query_control::{
     process_projection_build, process_projection_invalidate, process_projection_list,
-    process_projection_read, process_query_register,
+    process_projection_read, process_query_register, process_replay_read_range,
 };
 use crate::room::{import_nodes, Room, Rooms};
 
@@ -714,16 +717,18 @@ async fn handle_socket(
     let has_catchup = welcome_and_catchup.has_catchup;
 
     // D2: register this peer and broadcast peer-joined to the room.
-    room.register_peer(pubkey_hex.clone()).await;
+    let peer_membership_update = room.register_peer(pubkey_hex.clone()).await;
 
     // Small per-connection stabilization delay to avoid many peers
     // immediately provoking DB selection storms on first Mongo call.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let peer_joined = assemble_peer_joined_envelope(pubkey_hex.clone());
-    let peer_joined_json =
-        serde_json::to_string(&peer_joined).expect("peer-joined envelope should always serialize");
-    emit_room_broadcast(&room, peer_joined_json);
+    if peer_membership_update == PeerCountGaugeUpdate::Increment {
+        let peer_joined = assemble_peer_joined_envelope(pubkey_hex.clone());
+        let peer_joined_json =
+            serde_json::to_string(&peer_joined).expect("peer-joined envelope should always serialize");
+        emit_room_broadcast(&room, peer_joined_json);
+    }
 
     let welcome_send_ok = emit_single_send(&mut sink, &room_id, welcome_json).await;
     if should_terminate_after_welcome_send(welcome_send_ok) {
@@ -886,11 +891,13 @@ async fn handle_socket(
     tracing::debug!(peer = %short, "cleanup: deregistering peer");
     // D2: deregister peer and notify remaining peers so they can close their
     // WebRTC connections.
-    room.deregister_peer(&pubkey_hex).await;
-    let peer_left = assemble_peer_left_envelope(pubkey_hex.clone());
-    let peer_left_json =
-        serde_json::to_string(&peer_left).expect("peer-left envelope should always serialize");
-    emit_room_broadcast(&room, peer_left_json);
+    let peer_membership_update = room.deregister_peer(&pubkey_hex).await;
+    if peer_membership_update == PeerCountGaugeUpdate::Decrement {
+        let peer_left = assemble_peer_left_envelope(pubkey_hex.clone());
+        let peer_left_json =
+            serde_json::to_string(&peer_left).expect("peer-left envelope should always serialize");
+        emit_room_broadcast(&room, peer_left_json);
+    }
     tracing::debug!(peer = %short, "handler fully exited");
 }
 
@@ -1275,6 +1282,10 @@ async fn handle_client_message(
 
         // Ephemeral presence — forward, do not store -----------------------
         ClientDispatchCommand::Presence => {
+            if let PresenceLeaseParseResult::Invalid { reason } = parse_presence_lease_fields(&msg) {
+                send_error(sink, reason).await;
+                return true;
+            }
             let bcast = serde_json::to_string(&assemble_presence_envelope(
                 pubkey_hex.to_string(),
                 extract_presence_data_payload(&msg),
@@ -1579,6 +1590,21 @@ async fn handle_client_message(
                 return true;
             }
             let response = process_projection_list(room.as_ref(), msg).await;
+            if !emit_query_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
+        ClientDispatchCommand::ReplayReadRange => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "replay.read-range",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let response = process_replay_read_range(room.as_ref(), msg).await;
             if !emit_query_response(sink, room_id, &response).await {
                 return false;
             }
@@ -1978,7 +2004,7 @@ pub fn required_capability_for_control_plane_command(command: &str) -> Option<&'
         "archive.describe" => Some("archive.read"),
         "archive.validate" | "archive.import" | "archive.export" => Some("archive.admin"),
         "query.register" | "projection.build" | "projection.invalidate" => Some("query.admin"),
-        "projection.read" | "projection.list" => Some("query.read"),
+        "projection.read" | "projection.list" | "replay.read-range" => Some("query.read"),
         "topology.create-child"
         | "topology.describe-lineage"
         | "topology.list-children"
@@ -2639,6 +2665,10 @@ mod control_plane_auth_tests {
         );
         assert_eq!(
             required_capability_for_control_plane_command("projection.list"),
+            Some("query.read")
+        );
+        assert_eq!(
+            required_capability_for_control_plane_command("replay.read-range"),
             Some("query.read")
         );
     }

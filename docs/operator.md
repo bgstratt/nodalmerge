@@ -11,7 +11,9 @@ supported aliases.
 > First-time readers: see [quickstart.md](./quickstart.md) and
 > [self-host.md](./self-host.md). For integration shapes, see
 > [integration.md](./integration.md). For version upgrades, see
-> [migration.md](./migration.md). For cross-surface operation inventory and
+> [migration.md](./migration.md). For staged rollout templates, see
+> [MIGRATION_COOKBOOK.md](./MIGRATION_COOKBOOK.md) and
+> [MIGRATION_ANTI_PATTERNS_CHECKLIST.md](./MIGRATION_ANTI_PATTERNS_CHECKLIST.md). For cross-surface operation inventory and
 > gap analysis, see [operations-inventory.md](./operations-inventory.md).
 
 ---
@@ -313,6 +315,19 @@ bounce.
 coordinates sync-server-to-sync-server; rely on the DB's own
 replica-set / logical-replication / cross-region-replication.
 
+### Compatibility-window rollout policy (FSE-06 baseline)
+
+Follow `docs/MIGRATION_COOKBOOK.md` for forward-only, dual-read, and rollback-safe patterns.
+
+Operational policy:
+
+1. do not remove old reader/writer paths until convergence evidence is attached
+2. treat unsupported-window rejects (for example `reject.query_unsupported_version`) as rollout blockers, not transient retries
+3. if unsupported-window rejects spike:
+   - pause cutover
+   - restore dual-read/dual-write posture
+   - resume only after reject rate returns to baseline
+
 ---
 
 ## When things look wrong
@@ -326,6 +341,37 @@ replica-set / logical-replication / cross-region-replication.
 | `nodalmerge_merge_batch_seconds` p99 rising | CPU saturation; scale horizontally (shard by room) or verify ed25519 simd backend is active. |
 | `nodalmerge_persistence_write_seconds{kind="blob"}` p99 rising | Disk I/O or S3 latency; check the blob backend. |
 | Disk fills | `nodalmerge_blob_gc_deleted_total` not ticking; verify `--blob-gc-interval` is set. |
+
+### Presence continuity troubleshooting (FSE-05 phase A)
+
+Expected semantics:
+
+1. `presence` messages are ephemeral and session-scoped.
+2. Presence leave causes are stable:
+   - `leave`: websocket/session closed.
+   - `stale`: TTL lease expired and sweep removed the entry.
+3. Peer lifecycle broadcasts are pubkey-scoped (not socket-scoped):
+   - one `peer-joined` on first active session for a pubkey,
+   - one `peer-left` on last active session for that pubkey.
+
+Triage checks:
+
+1. Duplicate join/leave flicker for one user:
+   - verify client is not rotating pubkeys across reconnect attempts,
+   - verify reconnect overlap does not exceed expected brief window.
+2. Presence entries never aging out:
+   - verify sender includes TTL/clock fields where lease semantics are expected,
+   - verify sweep cadence (runtime path that triggers stale cleanup) is active.
+3. Unexpected stale removals:
+   - check client clock drift vs server time and configured TTL budget,
+   - confirm heartbeat/update interval is below TTL with margin.
+
+Malformed lease diagnostics (stable rejects):
+
+1. `reject.presence_lease_invalid:ttl_ms_requires_now_unix_ms`
+2. `reject.presence_lease_invalid:now_unix_ms_requires_ttl_ms`
+3. `reject.presence_lease_invalid:ttl_ms_must_be_positive_u64`
+4. `reject.presence_lease_invalid:now_unix_ms_must_be_u64`
 
 ---
 
@@ -712,6 +758,46 @@ Operational notes:
 1. Reuse only server-returned `cursor` values; do not fabricate cursors.
 2. Handle `projection.list.rejected` as deterministic input/state failure, not a transient transport failure.
 
+### `replay.read-range`
+
+Purpose:
+
+1. Read deterministic replay event windows for a key prefix using lamport floor + cursor paging.
+
+Request:
+
+```json
+{ "type": "replay.read-range", "key_prefix": "world/", "from_lamport": 0, "limit": 100, "cursor": "offset:0" }
+```
+
+Expected response:
+
+```json
+{
+  "type": "replay.read-range.result",
+  "key_prefix": "world/",
+  "from_lamport": 0,
+  "items": [{ "lamport": 1, "node_id": "<hex>", "touched_keys": ["world/a"] }],
+  "next_cursor": "offset:100"
+}
+```
+
+Expected rejection response:
+
+```json
+{
+  "type": "replay.read-range.rejected",
+  "reason_class": "reject.invalid_payload",
+  "reason_message": "replay.read-range requires non-empty key_prefix"
+}
+```
+
+Operational notes:
+
+1. Treat `next_cursor` as opaque and reuse only server-issued cursor values.
+2. Keep `limit` bounded for incident tooling to avoid oversized replay pages.
+3. Route rejects by `reason_class`; fix payload/state first, then retry.
+
 ### Query/Projection failure triage checklist
 
 1. Capture request envelope, response type, `reason_class`, and `reason_message`.
@@ -721,6 +807,220 @@ Operational notes:
 5. not-found/lifecycle class: repair query spec or projection state before retry.
 6. replay/digest mismatch class: escalate as deterministic parity incident.
 7. For repeated rejects with identical payload, stop retries and open an incident with captured envelopes.
+
+---
+
+## Archive operations
+
+This section documents archive control-plane requests used by operators during portability, audit, and restore workflows.
+
+### `archive.describe`
+
+Purpose:
+
+1. Resolve archive metadata for `room://` or `file://` references before validate/import/export actions.
+
+Request:
+
+```json
+{ "type": "archive.describe", "archive_ref": "room://parent-room" }
+```
+
+Expected response:
+
+```json
+{
+  "type": "archive.describe.result",
+  "archive_ref": "room://parent-room",
+  "manifest_id": "m.<id>",
+  "payload_digest": "sha256:<hex>"
+}
+```
+
+### `archive.validate`
+
+Purpose:
+
+1. Run deterministic integrity/compatibility validation prior to import.
+
+Request:
+
+```json
+{ "type": "archive.validate", "archive_ref": "room://parent-room", "mode": "full_integrity" }
+```
+
+Expected response:
+
+```json
+{
+  "type": "archive.validate.result",
+  "archive_ref": "room://parent-room",
+  "accepted": true
+}
+```
+
+Expected rejection:
+
+```json
+{
+  "type": "archive.validate.rejected",
+  "reason_class": "reject.archive_manifest_invalid",
+  "reason_message": "..."
+}
+```
+
+### `archive.export`
+
+Purpose:
+
+1. Export source room state to archive target.
+
+Request:
+
+```json
+{
+  "type": "archive.export",
+  "source_room_id": "parent-room",
+  "archive_ref": "file://C:/tmp/parent-room-001.nmarchive"
+}
+```
+
+Expected response:
+
+```json
+{
+  "type": "archive.export.completed",
+  "archive_ref": "file://C:/tmp/parent-room-001.nmarchive",
+  "checkpoint_hash": "<hex>"
+}
+```
+
+### `archive.import`
+
+Purpose:
+
+1. Import archive content into the session room using deterministic checkpoint verification.
+
+Request:
+
+```json
+{
+  "type": "archive.import",
+  "archive_ref": "file://C:/tmp/parent-room-001.nmarchive",
+  "import_mode": "full_apply"
+}
+```
+
+Expected response:
+
+```json
+{
+  "type": "archive.import.completed",
+  "archive_ref": "file://C:/tmp/parent-room-001.nmarchive",
+  "checkpoint_hash": "<hex>",
+  "imported_nodes": 42
+}
+```
+
+Expected rejection:
+
+```json
+{
+  "type": "archive.import.rejected",
+  "reason_class": "reject.archive_import_digest_mismatch",
+  "reason_message": "..."
+}
+```
+
+Operational notes:
+
+1. Use `reason_class` for alerts and runbook routing, not free-text messages.
+2. Capture archive ref + checkpoint hash in incident notes for every failed validate/import.
+3. Lock import/export actions behind change-control in production rooms.
+
+---
+
+## Topology operations
+
+This section documents parent/child room and promotion flows for manager/worker topologies.
+
+### `topology.create-child`
+
+Purpose:
+
+1. Create child room lineage record bound to parent checkpoint metadata.
+
+Request:
+
+```json
+{
+  "type": "topology.create-child",
+  "parent_room_id": "parent-room",
+  "child_room_id": "child-room-a",
+  "purpose": "worker-task",
+  "policy": "promotion-based",
+  "parent_checkpoint": { "hash": "<hex>", "seq": 12 }
+}
+```
+
+Expected response:
+
+```json
+{
+  "type": "topology.create-child.completed",
+  "parent_room_id": "parent-room",
+  "child_room_id": "child-room-a"
+}
+```
+
+### `topology.describe-lineage` and `topology.list-children`
+
+Purpose:
+
+1. Inspect lineage metadata for one room or list all children under a parent.
+
+Requests:
+
+```json
+{ "type": "topology.describe-lineage", "room_id": "child-room-a" }
+```
+
+```json
+{ "type": "topology.list-children", "parent_room_id": "parent-room" }
+```
+
+### Promotion flow
+
+Purpose:
+
+1. Deterministically promote a child checkpoint into parent canonical lane with explicit proposal/validation/apply steps.
+
+Requests:
+
+```json
+{
+  "type": "topology.propose-promotion",
+  "parent_room_id": "parent-room",
+  "child_room_id": "child-room-a",
+  "child_checkpoint_hash": "<hex>",
+  "payload_ref": "room://child-room-a"
+}
+```
+
+```json
+{ "type": "topology.validate-promotion", "proposal_id": "p.123" }
+```
+
+```json
+{ "type": "topology.apply-promotion", "proposal_id": "p.123" }
+```
+
+Operational notes:
+
+1. Promotion stage/outcome metrics are emitted as `nodalmerge_topology_promotion_total` and `nodalmerge_topology_promotion_seconds`.
+2. For rejects, route by `reason` label and include proposal id in incident logs.
+3. Large-family policy tuning uses lineage retention and queue controls (see topology execution plan and acceptance artifacts).
+4. Under concurrent apply contention against the same parent checkpoint, expect a single winner and `reject.promotion_stale_parent` for losing applies.
 
 ---
 
@@ -789,6 +1089,25 @@ Session-level metrics include:
 | `timed out waiting for protocol message` | MST descent or slow catch-up | Increase `NODALMERGE_HEADLESS_RUN_SECS`; check server load |
 | High `flush_ms` on file backend | Disk pressure | Move volume to faster storage; ensure exclusive mount |
 
+### Peer-local durability reject classes (FSE-09.A hardening)
+
+Runtime-local adapters expose stable classes for operator routing:
+
+1. `reject.local_persist_unavailable` — backend unavailable/misconfigured (retry or fix mount/path/permissions)
+2. `reject.local_persist_version_skew` — persisted schema newer/older than runtime supports (operator migration action)
+3. `reject.local_persist_corruption` — persisted bytes/structure invalid (data-loss-risk escalation path)
+4. `reject.local_persist_tail_conflict` — stale/concurrent writer tail expectation (retry with fresh tail)
+5. `reject.local_persist_quota` — backend quota exceeded (capacity action)
+6. `reject.local_persist_readonly` — write attempted on read-only backend/mount
+
+Hardening vectors:
+
+1. `LOCAL-PERSIST-005`: filesystem read-only write rejection class
+2. `LOCAL-PERSIST-006`: schema version skew rejection class
+3. `LOCAL-PERSIST-007`: malformed persisted row classified as corruption
+4. `LOCAL-PERSIST-008`: composite stale-tail conflict against external durable append
+5. `LOCAL-PERSIST-009`: composite blob fallback after restart (cold cache -> durable read)
+
 ### Backend selection
 
 1. **memory** — ephemeral; process exit loses peer-local state unless server still holds authority.
@@ -796,6 +1115,7 @@ Session-level metrics include:
 3. **composite** — write-through memory cache + file durability (§4b pilot); same `data_dir` as `file`.
 4. **registered:\<name\>** — opens a backend from `nodalmerge_runtime_local` registry (built-in: `registered:composite`).
 5. Custom backends — `register_backend` + `PersistenceHandle::from_arc`; must pass `LOCAL-PERSIST-*` vectors.
+6. Production hardening gate: `docs/PEER_LOCAL_PRODUCTION_HARDENING_CHECKLIST.md`.
 
 ### In-process peer-local on .NET host (`NodalMerge.DotNetHost`)
 
@@ -820,3 +1140,8 @@ Integration smoke: `scripts/integration-smoke.ps1` (vectors + live `nodalmerge r
 ### Room-family topology (manager/worker)
 
 Use `nodalmerge topology` CLI (`nodalmerge-cli` crate) against the same reflector for child rooms and promotion. Headless workers hold child-room peer-local state; topology commands require `topology.admin` on locked rooms. See `docs/MANAGER_WORKER_TOPOLOGY_PLAYBOOK.md`. Promotion counters and histograms are listed under [Topology promotion metrics](#topology-promotion-metrics-wave-3) (metrics scrape only; no in-repo dashboards yet).
+
+Governance and drills:
+
+1. policy templates: `docs/TOPOLOGY_GOVERNANCE_POLICY_TEMPLATES.md`
+2. operator rehearsal: `docs/TOPOLOGY_OPERATOR_DRILL_RUNBOOK.md`

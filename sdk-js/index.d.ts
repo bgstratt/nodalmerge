@@ -88,7 +88,9 @@ export type NodalMergeRuntimeMessageType =
   | "projection.invalidated"
   | "projection.invalidate.rejected"
   | "projection.list.result"
-  | "projection.list.rejected";
+  | "projection.list.rejected"
+  | "replay.read-range.result"
+  | "replay.read-range.rejected";
 
 export interface NodalMergeRuntimeMessage {
   type: NodalMergeRuntimeMessageType;
@@ -181,6 +183,13 @@ export declare class NodalMergeSdk {
     listProjections: (args?: {
       querySpecId?: string;
       stateFilter?: string;
+      cursor?: string;
+      timeoutMs?: number;
+    }) => Promise<NodalMergeRuntimeMessage>;
+    readReplayRange: (args: {
+      keyPrefix: string;
+      fromLamport?: number;
+      limit?: number;
       cursor?: string;
       timeoutMs?: number;
     }) => Promise<NodalMergeRuntimeMessage>;

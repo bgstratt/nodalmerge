@@ -1445,6 +1445,18 @@ impl<N: NodeStore> StateGraph<N> {
         ids.iter().filter_map(|id| self.nodes.get(id)).collect()
     }
 
+    /// Retrieve all nodes currently present in the graph.
+    ///
+    /// Nodes are returned as owned clones so callers can safely sort/filter
+    /// without borrowing the graph storage.
+    pub fn all_nodes(&self) -> Vec<SyncNode> {
+        self.nodes
+            .all_ids()
+            .into_iter()
+            .filter_map(|id| self.nodes.get(&id).cloned())
+            .collect()
+    }
+
     // -------------------------------------------------------------------------
     // State resolution (LWW-Map CRDT)
     // -------------------------------------------------------------------------

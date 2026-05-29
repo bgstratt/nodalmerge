@@ -1249,6 +1249,130 @@ fn presence_sweep_removes_stale_entries() {
 }
 
 #[test]
+fn presence_refresh_extends_lease_window_and_sweeps_on_new_boundary() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-presence", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-presence",
+            HostCommand::OpenSession {
+                session_id: 9,
+                peer_pubkey_hex: "peer-9".to_string(),
+            },
+        ))
+        .expect("open session should succeed");
+
+    engine
+        .apply(CommandEnvelope::new(
+            "room-presence",
+            HostCommand::PresenceSet {
+                session_id: 9,
+                data: json!({ "state": "online" }),
+                ttl_ms: Some(5_000),
+                now_unix_ms: Some(100_000),
+            },
+        ))
+        .expect("initial presence set should succeed");
+
+    engine
+        .apply(CommandEnvelope::new(
+            "room-presence",
+            HostCommand::PresenceSet {
+                session_id: 9,
+                data: json!({ "state": "still-online" }),
+                ttl_ms: Some(5_000),
+                now_unix_ms: Some(104_000),
+            },
+        ))
+        .expect("presence refresh should succeed");
+
+    let sweep_before_refreshed_expiry = engine
+        .apply(CommandEnvelope::new(
+            "room-presence",
+            HostCommand::PresenceSweep { now_unix_ms: 108_999 },
+        ))
+        .expect("presence sweep before refreshed expiry should succeed");
+    assert!(sweep_before_refreshed_expiry.events.is_empty());
+
+    let sweep_on_refreshed_expiry = engine
+        .apply(CommandEnvelope::new(
+            "room-presence",
+            HostCommand::PresenceSweep { now_unix_ms: 109_000 },
+        ))
+        .expect("presence sweep on refreshed expiry should succeed");
+    assert_eq!(
+        sweep_on_refreshed_expiry.events,
+        vec![HostEvent::PresenceValueRemoved {
+            room_id: "room-presence".to_string(),
+            session_id: 9,
+            from_peer_pubkey: "peer-9".to_string(),
+            reason: "stale".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn stale_sweep_then_close_session_does_not_emit_duplicate_leave() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-presence", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-presence",
+            HostCommand::OpenSession {
+                session_id: 10,
+                peer_pubkey_hex: "peer-10".to_string(),
+            },
+        ))
+        .expect("open session should succeed");
+
+    engine
+        .apply(CommandEnvelope::new(
+            "room-presence",
+            HostCommand::PresenceSet {
+                session_id: 10,
+                data: json!({ "state": "online" }),
+                ttl_ms: Some(1_000),
+                now_unix_ms: Some(200_000),
+            },
+        ))
+        .expect("presence set should succeed");
+
+    let sweep = engine
+        .apply(CommandEnvelope::new(
+            "room-presence",
+            HostCommand::PresenceSweep { now_unix_ms: 201_000 },
+        ))
+        .expect("presence sweep should succeed");
+    assert_eq!(
+        sweep.events,
+        vec![HostEvent::PresenceValueRemoved {
+            room_id: "room-presence".to_string(),
+            session_id: 10,
+            from_peer_pubkey: "peer-10".to_string(),
+            reason: "stale".to_string(),
+        }]
+    );
+
+    let close = engine
+        .apply(CommandEnvelope::new(
+            "room-presence",
+            HostCommand::CloseSession { session_id: 10 },
+        ))
+        .expect("close session should succeed");
+    assert_eq!(
+        close.events,
+        vec![HostEvent::SessionClosed {
+            room_id: "room-presence".to_string(),
+            session_id: 10,
+        }]
+    );
+}
+
+#[test]
 fn subscribe_updates_patterns_for_session() {
     let mut engine = HostEngine::new();
     engine

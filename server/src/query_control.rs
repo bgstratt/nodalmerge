@@ -515,6 +515,81 @@ pub async fn process_projection_list(room: &Room, msg: &Value) -> Value {
     })
 }
 
+pub async fn process_replay_read_range(room: &Room, msg: &Value) -> Value {
+    let key_prefix = msg
+        .get("key_prefix")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if key_prefix.is_empty() {
+        return json!({
+            "type": "replay.read-range.rejected",
+            "reason_class": "reject.invalid_payload",
+            "reason_message": "replay.read-range requires non-empty key_prefix"
+        });
+    }
+
+    let from_lamport = msg
+        .get("from_lamport")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let limit = msg
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(100)
+        .max(1) as usize;
+    let offset = parse_offset(msg.get("cursor").and_then(Value::as_str));
+
+    let graph = room.graph.read().await;
+    let mut events = graph
+        .all_nodes()
+        .into_iter()
+        .filter(|node| node.transaction.lamport >= from_lamport)
+        .filter_map(|node| {
+            let touched: Vec<String> = node
+                .transaction
+                .ops
+                .iter()
+                .filter_map(|op| op.key().map(str::to_string))
+                .filter(|key| key.starts_with(&key_prefix))
+                .collect();
+            if touched.is_empty() {
+                return None;
+            }
+            Some((node.transaction.lamport, node.id.to_hex(), touched))
+        })
+        .collect::<Vec<(u64, String, Vec<String>)>>();
+
+    events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let end = offset.saturating_add(limit).min(events.len());
+    let page = if offset < events.len() {
+        events[offset..end].to_vec()
+    } else {
+        Vec::new()
+    };
+    let next_cursor = (end < events.len()).then(|| format!("offset:{end}"));
+
+    let items = page
+        .into_iter()
+        .map(|(lamport, node_id, touched_keys)| {
+            json!({
+                "lamport": lamport,
+                "node_id": node_id,
+                "touched_keys": touched_keys
+            })
+        })
+        .collect::<Vec<Value>>();
+
+    json!({
+        "type": "replay.read-range.result",
+        "key_prefix": key_prefix,
+        "from_lamport": from_lamport,
+        "items": items,
+        "next_cursor": next_cursor
+    })
+}
+
 fn parse_offset(page_token: Option<&str>) -> usize {
     let Some(token) = page_token else {
         return 0;
@@ -728,5 +803,81 @@ mod tests {
             response.get("type").and_then(Value::as_str),
             Some("projection.build.completed")
         );
+    }
+
+    #[tokio::test]
+    async fn replay_read_range_returns_sorted_cursor_paged_events() {
+        use ed25519_dalek::SigningKey;
+        use nodalmerge_core::{MapOp, Op};
+
+        let persistence: SharedPersistence = Arc::new(NoPersistence);
+        let room = Room::new("query-replay-range".to_string(), persistence, 32);
+        let sk = SigningKey::from_bytes(&[0x11u8; 32]);
+        {
+            let mut graph = room.graph.write().await;
+            graph
+                .apply_local(
+                    &sk,
+                    0,
+                    vec![Op::Map(MapOp::Set {
+                        key: "world/a".to_string(),
+                        value: b"1".to_vec(),
+                    })],
+                )
+                .expect("seed graph");
+            graph
+                .apply_local(
+                    &sk,
+                    0,
+                    vec![Op::Map(MapOp::Set {
+                        key: "world/b".to_string(),
+                        value: b"2".to_vec(),
+                    })],
+                )
+                .expect("seed graph");
+        }
+
+        let first = process_replay_read_range(
+            room.as_ref(),
+            &json!({
+                "type": "replay.read-range",
+                "key_prefix": "world/",
+                "from_lamport": 0,
+                "limit": 1
+            }),
+        )
+        .await;
+        assert_eq!(
+            first.get("type").and_then(Value::as_str),
+            Some("replay.read-range.result")
+        );
+        let first_items = first
+            .get("items")
+            .and_then(Value::as_array)
+            .expect("items array");
+        assert_eq!(first_items.len(), 1);
+        let cursor = first
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .expect("next cursor");
+        assert!(cursor.starts_with("offset:"));
+
+        let second = process_replay_read_range(
+            room.as_ref(),
+            &json!({
+                "type": "replay.read-range",
+                "key_prefix": "world/",
+                "from_lamport": 0,
+                "limit": 10,
+                "cursor": cursor
+            }),
+        )
+        .await;
+        let second_items = second
+            .get("items")
+            .and_then(Value::as_array)
+            .expect("items array");
+        assert_eq!(second_items.len(), 1);
+        assert!(second.get("next_cursor").is_some());
     }
 }

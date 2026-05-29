@@ -7,7 +7,7 @@ use axum::{routing::get, Router};
 use ed25519_dalek::SigningKey;
 use futures_util::{SinkExt, StreamExt};
 use nodalmerge_core::{canonical_hash, replay};
-use nodalmerge_core::{MapOp, Op, RoomToken, StateGraph};
+use nodalmerge_core::{MapOp, Op, PromotionReasonClass, RoomToken, StateGraph};
 use nodalmerge_server::lineage::{snapshot_parent_checkpoint, snapshot_room_canonical_hash};
 use nodalmerge_server::promotion::{
     process_topology_apply_promotion, process_topology_propose_promotion,
@@ -801,6 +801,137 @@ async fn auth_room_phasee_large_family_baseline_and_policy_tuning() {
         TOTAL_CHILDREN,
         INDEX_CAP,
         listed_ids.len()
+    );
+}
+
+/// FSE-10.A: two validated promotions against the same parent applied concurrently.
+/// Exactly one apply should succeed; the other must reject as stale-parent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_room_fse10a_multi_promotion_concurrency_single_winner() {
+    let parent_id = "auth-parent-fse10a-concurrency";
+    let child_a_id = "auth-child-fse10a-a";
+    let child_b_id = "auth-child-fse10a-b";
+    let server_key = SigningKey::from_bytes(&[0xD1u8; 32]);
+    let persistence: SharedPersistence = Arc::new(NoPersistence);
+    let rooms = Rooms::new_with_topology_limits(
+        server_key.clone(),
+        persistence,
+        512,
+        0,
+        0,
+        1,  // force fair-queue contention on promotion operations
+        32, // allow bounded waiters
+        Some(256),
+    );
+
+    let author = SigningKey::from_bytes(&[0xD2u8; 32]);
+    let parent = rooms.get_or_create(parent_id).await;
+    import_nodes(
+        &parent,
+        vec![make_map_set_node(&author, "world/fse10a-root", b"ready")],
+    )
+    .await;
+    let checkpoint = snapshot_parent_checkpoint(&parent).await.unwrap();
+
+    for child_id in [child_a_id, child_b_id] {
+        rooms
+            .create_child_room(
+                parent_id,
+                child_id,
+                checkpoint.clone(),
+                "fse10a-load".to_string(),
+                "fse10a-runner".to_string(),
+                "promotion-based".to_string(),
+            )
+            .await
+            .expect("create child");
+    }
+
+    let child_a = rooms.get_or_create(child_a_id).await;
+    import_nodes(
+        &child_a,
+        vec![make_map_set_node(&author, "world/fse10a/a", b"outcome-a")],
+    )
+    .await;
+    let child_a_hash = snapshot_room_canonical_hash(&child_a).await.unwrap();
+
+    let child_b = rooms.get_or_create(child_b_id).await;
+    import_nodes(
+        &child_b,
+        vec![make_map_set_node(&author, "world/fse10a/b", b"outcome-b")],
+    )
+    .await;
+    let child_b_hash = snapshot_room_canonical_hash(&child_b).await.unwrap();
+
+    let proposed_a = process_topology_propose_promotion(
+        &rooms,
+        &serde_json::json!({
+            "parent_room_id": parent_id,
+            "child_room_id": child_a_id,
+            "child_checkpoint_hash": child_a_hash,
+            "payload_ref": "artifact://fse10a/a",
+            "idempotency_key": "prop-fse10a-a",
+        }),
+    )
+    .await
+    .expect("propose A");
+    let proposed_b = process_topology_propose_promotion(
+        &rooms,
+        &serde_json::json!({
+            "parent_room_id": parent_id,
+            "child_room_id": child_b_id,
+            "child_checkpoint_hash": child_b_hash,
+            "payload_ref": "artifact://fse10a/b",
+            "idempotency_key": "prop-fse10a-b",
+        }),
+    )
+    .await
+    .expect("propose B");
+
+    process_topology_validate_promotion(
+        &rooms,
+        &serde_json::json!({ "proposal_id": proposed_a.proposal_id }),
+    )
+    .await
+    .expect("validate A");
+    process_topology_validate_promotion(
+        &rooms,
+        &serde_json::json!({ "proposal_id": proposed_b.proposal_id }),
+    )
+    .await
+    .expect("validate B");
+
+    let apply_msg_a = serde_json::json!({ "proposal_id": proposed_a.proposal_id });
+    let apply_msg_b = serde_json::json!({ "proposal_id": proposed_b.proposal_id });
+
+    let (apply_a, apply_b) = tokio::join!(
+        process_topology_apply_promotion(
+            &rooms,
+            &server_key,
+            &apply_msg_a,
+        ),
+        process_topology_apply_promotion(
+            &rooms,
+            &server_key,
+            &apply_msg_b,
+        ),
+    );
+
+    let outcomes = vec![apply_a, apply_b];
+    let success_count = outcomes.iter().filter(|r| r.is_ok()).count();
+    let stale_parent_reject_count = outcomes
+        .iter()
+        .filter_map(|r| r.as_ref().err())
+        .filter(|rej| rej.reason_class == PromotionReasonClass::StaleParent)
+        .count();
+
+    assert_eq!(
+        success_count, 1,
+        "exactly one concurrent promotion apply should succeed"
+    );
+    assert_eq!(
+        stale_parent_reject_count, 1,
+        "losing concurrent promotion apply should reject with stale-parent"
     );
 }
 

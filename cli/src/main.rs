@@ -226,6 +226,25 @@ enum QuerySub {
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
     },
+    /// Read replay events by key prefix and lamport cursor window.
+    ReplayReadRange {
+        #[arg(long)]
+        key_prefix: String,
+        #[arg(long, default_value_t = 0)]
+        from_lamport: u64,
+        #[arg(long, default_value_t = 100)]
+        limit: u64,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, env = "NODALMERGE_SERVER_URL")]
+        server: Option<String>,
+        #[arg(long, env = "NODALMERGE_ROOM")]
+        room: Option<String>,
+        #[arg(long, env = "NODALMERGE_TOKEN_JSON")]
+        token_json: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        timeout_secs: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -616,6 +635,30 @@ fn map_query(sub: QuerySub, peer_seed: [u8; 32]) -> (TopologyGlobalOpts, QueryCo
             QueryCommand::InvalidateProjection {
                 projection_id,
                 reason,
+            },
+        ),
+        QuerySub::ReplayReadRange {
+            key_prefix,
+            from_lamport,
+            limit,
+            cursor,
+            server,
+            room,
+            token_json,
+            timeout_secs,
+        } => (
+            TopologyGlobalOpts {
+                server,
+                room,
+                token_json,
+                timeout_secs,
+                peer_seed,
+            },
+            QueryCommand::ReplayReadRange {
+                key_prefix,
+                from_lamport,
+                limit,
+                cursor,
             },
         ),
     }

@@ -449,3 +449,58 @@ test("query.listProjections resolves rejected response scoped to query_spec_id",
     }
   ]);
 });
+
+test("query.readReplayRange sends replay envelope and resolves paged result", async () => {
+  const { sdk } = await createSdkWithMockStore();
+  const sent = [];
+  sdk.connected = true;
+  sdk.ws = { readyState: 1 };
+  sdk.sendOrQueue = (msg) => sent.push(msg);
+
+  const pending = sdk.query.readReplayRange({
+    keyPrefix: "world/",
+    fromLamport: 0,
+    limit: 2,
+    cursor: "offset:0",
+    timeoutMs: 200
+  });
+
+  sdk.emit("runtime-message", {
+    type: "replay.read-range.result",
+    key_prefix: "world/",
+    from_lamport: 0,
+    items: [{ lamport: 1, node_id: "aa", touched_keys: ["world/a"] }],
+    next_cursor: "offset:2"
+  });
+
+  const result = await pending;
+  assert.equal(result.type, "replay.read-range.result");
+  assert.deepEqual(sent, [
+    {
+      type: "replay.read-range",
+      key_prefix: "world/",
+      from_lamport: 0,
+      limit: 2,
+      cursor: "offset:0"
+    }
+  ]);
+});
+
+test("query.readReplayRange validates keyPrefix and fromLamport", async () => {
+  const { sdk } = await createSdkWithMockStore();
+  sdk.connected = true;
+  sdk.ws = { readyState: 1 };
+  sdk.sendOrQueue = () => {
+    throw new Error("send should not be called");
+  };
+
+  await assert.rejects(
+    () => sdk.query.readReplayRange({ keyPrefix: "", fromLamport: 0, limit: 1, timeoutMs: 50 }),
+    /keyPrefix is required/
+  );
+
+  await assert.rejects(
+    () => sdk.query.readReplayRange({ keyPrefix: "world/", fromLamport: -1, limit: 1, timeoutMs: 50 }),
+    /fromLamport must be a non-negative integer/
+  );
+});

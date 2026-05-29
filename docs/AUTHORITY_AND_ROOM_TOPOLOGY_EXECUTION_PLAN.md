@@ -252,3 +252,4 @@ Phase E execution record (2026-05-28):
 2. Run in parallel with headless runtime/persistence Phase B-C.
 3. Gate broad manager/worker pod rollout on Phase C completion.
 4. Use Phase D-E for productization and scale hardening.
+5. Keep federation runtime implementation deferred; use `docs/FEDERATION_PRECONDITIONS_CHECKLIST.md` as entry gate for future FSE-08 work.

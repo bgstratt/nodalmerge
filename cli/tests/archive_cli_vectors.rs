@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use axum::{routing::get, Router};
 use ed25519_dalek::SigningKey;
-use nodalmerge_cli::{hex_lower, run_archive_command, ArchiveCommand, TopologyGlobalOpts};
+use nodalmerge_cli::{
+    hex_lower, run_archive_command, run_query_command, ArchiveCommand, QueryCommand, TopologyGlobalOpts,
+};
 use nodalmerge_core::{MapOp, Op, RoomToken, StateGraph};
 use nodalmerge_server::room::{import_nodes, Rooms};
 use nodalmerge_server::store::{DirPersistence, SharedPersistence};
@@ -94,7 +96,7 @@ async fn cli_archive_001_describe_room_ref() {
         .persist_nodes(room_id, &[&node]);
 
     let peer_sk = SigningKey::from_bytes(&[0xE4u8; 32]);
-    let token_json = capability_token(room_id, &peer_sk, &room_key, &["archive.read"]);
+    let token_json = capability_token(room_id, &peer_sk, &room_key, &["archive.read", "query.read"]);
 
     let globals = TopologyGlobalOpts {
         server: Some(format!("ws://{addr}/ws/{room_id}")),
@@ -116,5 +118,22 @@ async fn cli_archive_001_describe_room_ref() {
     assert_eq!(
         result.get("type").and_then(|v| v.as_str()),
         Some("archive.describe.result")
+    );
+
+    let replay = run_query_command(
+        &globals,
+        QueryCommand::ReplayReadRange {
+            key_prefix: "world/".to_string(),
+            from_lamport: 0,
+            limit: 10,
+            cursor: None,
+        },
+    )
+    .await
+    .expect("replay.read-range");
+
+    assert_eq!(
+        replay.get("type").and_then(|v| v.as_str()),
+        Some("replay.read-range.result")
     );
 }

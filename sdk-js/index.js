@@ -39,7 +39,9 @@ const runtimeMessageTypes = new Set([
   "projection.invalidated",
   "projection.invalidate.rejected",
   "projection.list.result",
-  "projection.list.rejected"
+  "projection.list.rejected",
+  "replay.read-range.result",
+  "replay.read-range.rejected"
 ]);
 
 function toBase64(bytes) {
@@ -214,6 +216,13 @@ function normalizePositiveLimit(limit) {
     throw new Error("limit must be a positive integer");
   }
   return limit;
+}
+
+function normalizeLamportFloor(value) {
+  if (!isNonNegativeInteger(value)) {
+    throw new Error("fromLamport must be a non-negative integer");
+  }
+  return value;
 }
 
 function normalizeTimeoutMs(timeoutMs, fallback = 5000) {
@@ -770,6 +779,27 @@ export class NodalMergeSdk {
 
           return msg.query_spec_id === querySpecId;
         },
+        timeoutMs
+      );
+    },
+
+    readReplayRange: async ({ keyPrefix, fromLamport = 0, limit = 100, cursor = undefined, timeoutMs = 5000 }) => {
+      if (typeof keyPrefix !== "string" || keyPrefix.trim().length === 0) {
+        throw new Error("keyPrefix is required");
+      }
+
+      this.ensureConnectedForRuntime("replay.read-range");
+      this.sendOrQueue({
+        type: "replay.read-range",
+        key_prefix: keyPrefix,
+        from_lamport: normalizeLamportFloor(fromLamport),
+        limit: normalizePositiveLimit(limit),
+        cursor: typeof cursor === "string" && cursor.length > 0 ? cursor : undefined
+      });
+
+      return this.waitForRuntimeMessage(
+        (msg) =>
+          msg.type === "replay.read-range.result" || msg.type === "replay.read-range.rejected",
         timeoutMs
       );
     }

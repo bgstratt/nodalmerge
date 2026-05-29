@@ -37,6 +37,12 @@ pub enum QueryCommand {
         projection_id: String,
         reason: String,
     },
+    ReplayReadRange {
+        key_prefix: String,
+        from_lamport: u64,
+        limit: u64,
+        cursor: Option<String>,
+    },
 }
 
 pub async fn run_query_command(
@@ -126,6 +132,26 @@ pub async fn run_query_command(
                 "projection.invalidate.rejected",
             ],
         ),
+        QueryCommand::ReplayReadRange {
+            key_prefix,
+            from_lamport,
+            limit,
+            cursor,
+        } => {
+            let mut msg = serde_json::json!({
+                "type": "replay.read-range",
+                "key_prefix": key_prefix,
+                "from_lamport": from_lamport,
+                "limit": limit,
+            });
+            if let Some(cursor) = cursor.filter(|t| !t.is_empty()) {
+                msg["cursor"] = Value::String(cursor);
+            }
+            (
+                msg,
+                &["replay.read-range.result", "replay.read-range.rejected"],
+            )
+        }
     };
 
     send_ws_command(&cfg, message, success_types)

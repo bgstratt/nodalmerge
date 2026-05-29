@@ -123,6 +123,14 @@ fn command_label(command: &HostCommand) -> &'static str {
         HostCommand::ProposeTopologyPromotion { .. } => "topology.propose-promotion",
         HostCommand::ValidateTopologyPromotion { .. } => "topology.validate-promotion",
         HostCommand::ApplyTopologyPromotion { .. } => "topology.apply-promotion",
+        HostCommand::RegisterQuerySpec { .. } => "query.register",
+        HostCommand::BuildProjection { .. } => "projection.build",
+        HostCommand::ReadProjection { .. } => "projection.read",
+        HostCommand::InvalidateProjection { .. } => "projection.invalidate",
+        HostCommand::ListProjections { .. } => "projection.list",
+        HostCommand::DescribeArchive { .. } => "archive.describe",
+        HostCommand::ValidateArchive { .. } => "archive.validate",
+        HostCommand::ImportArchive { .. } => "archive.import",
         HostCommand::Noop => "noop",
     }
 }
@@ -137,6 +145,14 @@ fn capability_label_for_command(command: &HostCommand) -> &'static str {
         HostCommand::ProposeTopologyPromotion { .. } => "topology.admin",
         HostCommand::ValidateTopologyPromotion { .. } => "topology.admin",
         HostCommand::ApplyTopologyPromotion { .. } => "topology.admin",
+        HostCommand::RegisterQuerySpec { .. } => "query.admin",
+        HostCommand::BuildProjection { .. } => "query.admin",
+        HostCommand::ReadProjection { .. } => "query.read",
+        HostCommand::InvalidateProjection { .. } => "query.admin",
+        HostCommand::ListProjections { .. } => "query.read",
+        HostCommand::DescribeArchive { .. } => "archive.read",
+        HostCommand::ValidateArchive { .. } => "archive.admin",
+        HostCommand::ImportArchive { .. } => "archive.admin",
         _ => "unknown",
     }
 }

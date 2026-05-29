@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::Hasher;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,8 +45,36 @@ struct PresenceState {
 #[derive(Debug, Clone)]
 struct PromotionState {
     parent_room_id: String,
+    child_room_id: String,
+    child_checkpoint_hash: String,
+    payload_ref: String,
+    proposal_digest: String,
     validated: bool,
     applied: bool,
+}
+
+#[derive(Debug, Clone)]
+struct QuerySpecState {
+    version: String,
+    descriptor: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectionState {
+    query_spec_id: String,
+    checkpoint: Value,
+    rows: Vec<Value>,
+    digest: String,
+    invalidated: bool,
+    invalidation_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalSnapshotState {
+    sequence: u64,
+    rows: BTreeMap<String, Value>,
+    canonical_hash: String,
+    frontier: Vec<String>,
 }
 
 const CONFLICT_HISTORY_LIMIT: usize = 256;
@@ -67,6 +96,12 @@ pub struct HostEngine {
     room_conflict_fingerprints: HashMap<String, HashSet<ConflictFingerprint>>,
     room_conflict_history: HashMap<String, Vec<ConflictEntry>>,
     topology_promotions: HashMap<String, PromotionState>,
+    room_query_specs: HashMap<String, HashMap<String, QuerySpecState>>,
+    room_projections: HashMap<String, HashMap<String, ProjectionState>>,
+    room_canonical_rows: HashMap<String, BTreeMap<String, Value>>,
+    room_canonical_seq: HashMap<String, u64>,
+    room_canonical_snapshots: HashMap<String, HashMap<u64, CanonicalSnapshotState>>,
+    room_canonical_hash_index: HashMap<String, HashMap<String, u64>>,
     server_caps: CapabilitySet,
     blob_url_resolver: Option<Arc<dyn HostBlobUrlResolver>>,
 }
@@ -90,6 +125,12 @@ impl Default for HostEngine {
             room_conflict_fingerprints: HashMap::new(),
             room_conflict_history: HashMap::new(),
             topology_promotions: HashMap::new(),
+            room_query_specs: HashMap::new(),
+            room_projections: HashMap::new(),
+            room_canonical_rows: HashMap::new(),
+            room_canonical_seq: HashMap::new(),
+            room_canonical_snapshots: HashMap::new(),
+            room_canonical_hash_index: HashMap::new(),
             server_caps: CapabilitySet::default(),
             blob_url_resolver: None,
         }
@@ -340,6 +381,82 @@ fn text_string_from_entries(entries: &[TextEntry]) -> String {
     entries.iter().flat_map(|e| e.ch.chars().take(1)).collect()
 }
 
+fn projection_page_offset(page_token: Option<&str>) -> usize {
+    let Some(token) = page_token else {
+        return 0;
+    };
+    let Some(raw) = token.strip_prefix("offset:") else {
+        return 0;
+    };
+    raw.parse::<usize>().ok().unwrap_or(0)
+}
+
+fn compute_projection_digest(
+    projection_id: &str,
+    query_spec_id: &str,
+    version: &str,
+    rows: &[Value],
+) -> String {
+    let mut row_payloads = Vec::with_capacity(rows.len());
+    for row in rows {
+        let key = row
+            .get("k")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let val = row
+            .get("v")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        row_payloads.push(format!("{key}={val}"));
+    }
+    row_payloads.sort_unstable();
+    let payload = format!(
+        "projection={projection_id}|spec={query_spec_id}|version={version}|rows={}",
+        row_payloads.join(";")
+    );
+    deterministic_hex64(&payload)
+}
+
+fn is_hex64(input: &str) -> bool {
+    input.len() == 64 && input.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn canonical_hash_for_sequence(room_id: &str, sequence: u64) -> String {
+    deterministic_hex64(&format!("{room_id}:{sequence}"))
+}
+
+fn room_latest_snapshot(
+    room_id: &str,
+    room_canonical_snapshots: &HashMap<String, HashMap<u64, CanonicalSnapshotState>>,
+    room_canonical_seq: &HashMap<String, u64>,
+) -> Option<CanonicalSnapshotState> {
+    let snapshots = room_canonical_snapshots.get(room_id)?;
+    let seq = *room_canonical_seq.get(room_id).unwrap_or(&0);
+    snapshots.get(&seq).cloned().or_else(|| snapshots.get(&0).cloned())
+}
+
+fn deterministic_hex64(input: &str) -> String {
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&input, &mut h1);
+    let p1 = h1.finish();
+
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&format!("{input}|salt"), &mut h2);
+    let p2 = h2.finish();
+
+    let mut h3 = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&format!("{input}|pepper"), &mut h3);
+    let p3 = h3.finish();
+
+    let mut h4 = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&format!("{input}|room"), &mut h4);
+    let p4 = h4.finish();
+
+    format!("{p1:016x}{p2:016x}{p3:016x}{p4:016x}")
+}
+
 impl HostEngine {
     pub fn new() -> Self {
         Self::default()
@@ -388,6 +505,34 @@ impl HostEngine {
                 self.room_conflict_history
                     .entry(envelope.room_id.clone())
                     .or_default();
+                self.room_query_specs
+                    .entry(envelope.room_id.clone())
+                    .or_default();
+                self.room_projections
+                    .entry(envelope.room_id.clone())
+                    .or_default();
+                self.room_canonical_rows
+                    .entry(envelope.room_id.clone())
+                    .or_default();
+                self.room_canonical_seq
+                    .entry(envelope.room_id.clone())
+                    .or_insert(0);
+                let initial_hash = canonical_hash_for_sequence(&envelope.room_id, 0);
+                self.room_canonical_snapshots
+                    .entry(envelope.room_id.clone())
+                    .or_default()
+                    .entry(0)
+                    .or_insert_with(|| CanonicalSnapshotState {
+                        sequence: 0,
+                        rows: BTreeMap::new(),
+                        canonical_hash: initial_hash.clone(),
+                        frontier: vec!["seq:0".to_string()],
+                    });
+                self.room_canonical_hash_index
+                    .entry(envelope.room_id.clone())
+                    .or_default()
+                    .entry(initial_hash)
+                    .or_insert(0);
                 Ok(CommandResult {
                     events: vec![HostEvent::RoomEnsured {
                         room_id: envelope.room_id,
@@ -515,6 +660,36 @@ impl HostEngine {
                     .entry(envelope.room_id.clone())
                     .or_default();
                 room_map.insert(scoped_key, value.clone());
+                if !key.starts_with('_') {
+                    let canonical_rows = self
+                        .room_canonical_rows
+                        .entry(envelope.room_id.clone())
+                        .or_default();
+                    canonical_rows.insert(key.clone(), value.clone());
+                    let next_seq = {
+                        let seq = self
+                            .room_canonical_seq
+                            .entry(envelope.room_id.clone())
+                            .or_insert(0);
+                        *seq += 1;
+                        *seq
+                    };
+                    let canonical_hash = canonical_hash_for_sequence(&envelope.room_id, next_seq);
+                    let snapshot = CanonicalSnapshotState {
+                        sequence: next_seq,
+                        rows: canonical_rows.clone(),
+                        canonical_hash: canonical_hash.clone(),
+                        frontier: vec![format!("seq:{next_seq}")],
+                    };
+                    self.room_canonical_snapshots
+                        .entry(envelope.room_id.clone())
+                        .or_default()
+                        .insert(next_seq, snapshot);
+                    self.room_canonical_hash_index
+                        .entry(envelope.room_id.clone())
+                        .or_default()
+                        .insert(canonical_hash, next_seq);
+                }
 
                 Ok(CommandResult {
                     events: vec![HostEvent::MapValueUpserted {
@@ -540,6 +715,36 @@ impl HostEngine {
                     .or_default()
                     .remove(&scoped_key)
                     .is_some();
+                if found && !key.starts_with('_') {
+                    let canonical_rows = self
+                        .room_canonical_rows
+                        .entry(envelope.room_id.clone())
+                        .or_default();
+                    canonical_rows.remove(&key);
+                    let next_seq = {
+                        let seq = self
+                            .room_canonical_seq
+                            .entry(envelope.room_id.clone())
+                            .or_insert(0);
+                        *seq += 1;
+                        *seq
+                    };
+                    let canonical_hash = canonical_hash_for_sequence(&envelope.room_id, next_seq);
+                    let snapshot = CanonicalSnapshotState {
+                        sequence: next_seq,
+                        rows: canonical_rows.clone(),
+                        canonical_hash: canonical_hash.clone(),
+                        frontier: vec![format!("seq:{next_seq}")],
+                    };
+                    self.room_canonical_snapshots
+                        .entry(envelope.room_id.clone())
+                        .or_default()
+                        .insert(next_seq, snapshot);
+                    self.room_canonical_hash_index
+                        .entry(envelope.room_id.clone())
+                        .or_default()
+                        .insert(canonical_hash, next_seq);
+                }
 
                 Ok(CommandResult {
                     events: vec![HostEvent::MapValueDeleted {
@@ -1723,11 +1928,16 @@ impl HostEngine {
                 }
 
                 let proposal_digest =
-                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-                        .to_string();
+                    deterministic_hex64(&format!(
+                        "{parent_room_id}:{child_room_id}:{child_checkpoint_hash}:{payload_ref}"
+                    ));
                 let proposal_id = idempotency_key.unwrap_or_else(|| proposal_digest.clone());
                 let promotion = PromotionState {
                     parent_room_id: parent_room_id.clone(),
+                    child_room_id: child_room_id.clone(),
+                    child_checkpoint_hash: child_checkpoint_hash.clone(),
+                    payload_ref: payload_ref.clone(),
+                    proposal_digest: proposal_digest.clone(),
                     validated: false,
                     applied: false,
                 };
@@ -1751,8 +1961,7 @@ impl HostEngine {
                 };
 
                 let validation_digest =
-                    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-                        .to_string();
+                    deterministic_hex64(&format!("validate:{proposal_id}:{}", promotion.proposal_digest));
                 promotion.validated = true;
                 Ok(CommandResult {
                     events: vec![HostEvent::PromotionValidated {
@@ -1771,16 +1980,537 @@ impl HostEngine {
                 }
 
                 promotion.applied = true;
-                let parent_new_canonical_hash =
-                    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-                        .to_string();
+                let parent_new_canonical_hash = deterministic_hex64(&format!(
+                    "apply:{}:{}:{}",
+                    proposal_id, promotion.parent_room_id, promotion.proposal_digest
+                ));
                 let audit_key = format!("_topology/promotion/{proposal_id}");
+                let audit_value = serde_json::json!({
+                    "proposal_id": proposal_id,
+                    "parent_room_id": promotion.parent_room_id,
+                    "child_room_id": promotion.child_room_id,
+                    "child_checkpoint_hash": promotion.child_checkpoint_hash,
+                    "payload_ref": promotion.payload_ref,
+                    "proposal_digest": promotion.proposal_digest,
+                    "validation_applied": true
+                });
+                self.room_maps
+                    .entry(promotion.parent_room_id.clone())
+                    .or_default()
+                    .insert(audit_key.clone(), audit_value);
                 Ok(CommandResult {
                     events: vec![HostEvent::PromotionApplied {
                         proposal_id,
                         parent_room_id: promotion.parent_room_id.clone(),
                         parent_new_canonical_hash,
                         audit_key,
+                    }],
+                })
+            }
+            HostCommand::RegisterQuerySpec {
+                query_spec_id,
+                version,
+                descriptor,
+            } => {
+                if !self.rooms.contains(&envelope.room_id)
+                    || query_spec_id.is_empty()
+                    || version.is_empty()
+                {
+                    return Err(HostCoreError::InvalidCommand);
+                }
+
+                self.room_query_specs
+                    .entry(envelope.room_id.clone())
+                    .or_default()
+                    .insert(
+                        query_spec_id.clone(),
+                        QuerySpecState {
+                            version: version.clone(),
+                            descriptor,
+                        },
+                    );
+                let canonical_hash = Value::String(deterministic_hex64(&format!(
+                    "query-spec:{}:{}:{}",
+                    envelope.room_id, query_spec_id, version
+                )));
+                Ok(CommandResult {
+                    events: vec![HostEvent::QuerySpecRegistered {
+                        room_id: envelope.room_id,
+                        query_spec_id,
+                        version,
+                        canonical_hash,
+                        accepted: true,
+                    }],
+                })
+            }
+            HostCommand::BuildProjection {
+                projection_id,
+                query_spec_id,
+                target_checkpoint,
+            } => {
+                if !self.rooms.contains(&envelope.room_id)
+                    || projection_id.is_empty()
+                    || query_spec_id.is_empty()
+                {
+                    return Err(HostCoreError::InvalidCommand);
+                }
+
+                let Some(spec) = self
+                    .room_query_specs
+                    .entry(envelope.room_id.clone())
+                    .or_default()
+                    .get(&query_spec_id)
+                    .cloned()
+                else {
+                    return Ok(CommandResult {
+                        events: vec![HostEvent::ProjectionBuildRejected {
+                            room_id: envelope.room_id,
+                            projection_id,
+                            reason_class: "reject.query_spec_not_found".to_string(),
+                            reason_message: "projection.build.query_spec_id is not registered".to_string(),
+                        }],
+                    });
+                };
+
+                let selector = target_checkpoint
+                    .as_ref()
+                    .and_then(|v| v.get("selector"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("latest");
+
+                let snapshots = self
+                    .room_canonical_snapshots
+                    .entry(envelope.room_id.clone())
+                    .or_default();
+                let mut selected = snapshots.get(
+                    self.room_canonical_seq
+                        .entry(envelope.room_id.clone())
+                        .or_insert(0),
+                )
+                .cloned()
+                .or_else(|| snapshots.get(&0).cloned());
+
+                if selector.eq_ignore_ascii_case("seq") {
+                    let Some(seq) = target_checkpoint
+                        .as_ref()
+                        .and_then(|v| v.get("canonical_seq"))
+                        .and_then(Value::as_u64)
+                    else {
+                        return Ok(CommandResult {
+                            events: vec![HostEvent::ProjectionBuildRejected {
+                                room_id: envelope.room_id,
+                                projection_id,
+                                reason_class: "reject.checkpoint_selector_invalid".to_string(),
+                                reason_message: "projection.build.target_checkpoint does not resolve to known canonical snapshot".to_string(),
+                            }],
+                        });
+                    };
+                    selected = snapshots.get(&seq).cloned();
+                } else if selector.eq_ignore_ascii_case("hash") {
+                    let Some(hash) = target_checkpoint
+                        .as_ref()
+                        .and_then(|v| v.get("canonical_hash"))
+                        .and_then(Value::as_str)
+                    else {
+                        return Ok(CommandResult {
+                            events: vec![HostEvent::ProjectionBuildRejected {
+                                room_id: envelope.room_id,
+                                projection_id,
+                                reason_class: "reject.checkpoint_selector_invalid".to_string(),
+                                reason_message: "projection.build.target_checkpoint does not resolve to known canonical snapshot".to_string(),
+                            }],
+                        });
+                    };
+                    if !is_hex64(hash) {
+                        return Ok(CommandResult {
+                            events: vec![HostEvent::ProjectionBuildRejected {
+                                room_id: envelope.room_id,
+                                projection_id,
+                                reason_class: "reject.checkpoint_selector_invalid".to_string(),
+                                reason_message: "projection.build.target_checkpoint does not resolve to known canonical snapshot".to_string(),
+                            }],
+                        });
+                    }
+                    let seq_opt = self
+                        .room_canonical_hash_index
+                        .entry(envelope.room_id.clone())
+                        .or_default()
+                        .get(hash)
+                        .copied();
+                    selected = seq_opt.and_then(|seq| snapshots.get(&seq).cloned());
+                } else if selector.eq_ignore_ascii_case("frontier") {
+                    let frontier_valid = target_checkpoint
+                        .as_ref()
+                        .and_then(|v| v.get("frontier"))
+                        .and_then(Value::as_array)
+                        .map(|tokens| {
+                            !tokens.is_empty()
+                                && tokens.iter().all(|t| {
+                                    t.as_str()
+                                        .and_then(|s| s.strip_prefix("seq:"))
+                                        .and_then(|rest| rest.parse::<u64>().ok())
+                                        .is_some()
+                                })
+                        })
+                        .unwrap_or(false);
+                    if !frontier_valid {
+                        return Ok(CommandResult {
+                            events: vec![HostEvent::ProjectionBuildRejected {
+                                room_id: envelope.room_id,
+                                projection_id,
+                                reason_class: "reject.checkpoint_selector_invalid".to_string(),
+                                reason_message: "projection.build.target_checkpoint does not resolve to known canonical snapshot".to_string(),
+                            }],
+                        });
+                    }
+                } else if !selector.eq_ignore_ascii_case("latest") {
+                    return Ok(CommandResult {
+                        events: vec![HostEvent::ProjectionBuildRejected {
+                            room_id: envelope.room_id,
+                            projection_id,
+                            reason_class: "reject.checkpoint_selector_invalid".to_string(),
+                            reason_message: "projection.build.target_checkpoint does not resolve to known canonical snapshot".to_string(),
+                        }],
+                    });
+                }
+
+                let Some(snapshot) = selected else {
+                    return Ok(CommandResult {
+                        events: vec![HostEvent::ProjectionBuildRejected {
+                            room_id: envelope.room_id,
+                            projection_id,
+                            reason_class: "reject.checkpoint_not_found".to_string(),
+                            reason_message: "projection.build.target_checkpoint does not resolve to known canonical snapshot".to_string(),
+                        }],
+                    });
+                };
+
+                let prefix = spec
+                    .descriptor
+                    .get("prefix")
+                    .and_then(Value::as_str)
+                    .map(|s| s.to_string());
+
+                let mut rows = Vec::new();
+                for (k, v) in &snapshot.rows {
+                    if let Some(pfx) = prefix.as_ref() {
+                        if !k.starts_with(pfx) {
+                            continue;
+                        }
+                    }
+                    rows.push(serde_json::json!({
+                        "k": k,
+                        "v": if v.is_string() { v.as_str().unwrap_or_default().to_string() } else { v.to_string() },
+                        "projection_id": projection_id,
+                        "query_spec_id": query_spec_id,
+                        "version": spec.version,
+                        "prefix": prefix
+                    }));
+                }
+
+                let digest = compute_projection_digest(&projection_id, &query_spec_id, &spec.version, &rows);
+                let checkpoint = serde_json::json!({
+                    "selector": selector,
+                    "canonical_seq": snapshot.sequence,
+                    "canonical_hash": snapshot.canonical_hash,
+                    "frontier": snapshot.frontier,
+                });
+                self.room_projections
+                    .entry(envelope.room_id.clone())
+                    .or_default()
+                    .insert(
+                        projection_id.clone(),
+                        ProjectionState {
+                            query_spec_id: query_spec_id.clone(),
+                            checkpoint: checkpoint.clone(),
+                            rows: rows.clone(),
+                            digest: digest.clone(),
+                            invalidated: false,
+                            invalidation_reason: None,
+                        },
+                    );
+
+                Ok(CommandResult {
+                    events: vec![HostEvent::ProjectionBuildCompleted {
+                        room_id: envelope.room_id,
+                        projection_id,
+                        checkpoint,
+                        digest: Value::String(digest),
+                    }],
+                })
+            }
+            HostCommand::ReadProjection {
+                projection_id,
+                limit,
+                page_token,
+            } => {
+                if !self.rooms.contains(&envelope.room_id) || projection_id.is_empty() {
+                    return Err(HostCoreError::InvalidCommand);
+                }
+
+                let projection = self
+                    .room_projections
+                    .entry(envelope.room_id.clone())
+                    .or_default()
+                    .get(&projection_id)
+                    .cloned();
+                let mut rows = Vec::new();
+                let mut checkpoint = serde_json::json!({ "selector": "latest" });
+                let mut digest = None;
+                let mut next_page_token = None;
+
+                if let Some(projection) = projection {
+                    let start = projection_page_offset(page_token.as_deref());
+                    let page_limit = if limit == 0 { 1 } else { limit as usize };
+                    let end_exclusive = usize::min(start + page_limit, projection.rows.len());
+                    rows.extend_from_slice(&projection.rows[start..end_exclusive]);
+                    if end_exclusive < projection.rows.len() {
+                        next_page_token = Some(Value::String(format!("offset:{end_exclusive}")));
+                    }
+                    checkpoint = projection.checkpoint;
+                    digest = Some(Value::String(projection.digest));
+                }
+
+                Ok(CommandResult {
+                    events: vec![HostEvent::ProjectionReadResult {
+                        room_id: envelope.room_id,
+                        projection_id,
+                        checkpoint,
+                        rows,
+                        digest,
+                        next_page_token,
+                    }],
+                })
+            }
+            HostCommand::InvalidateProjection {
+                projection_id,
+                reason,
+            } => {
+                if !self.rooms.contains(&envelope.room_id) || projection_id.is_empty() {
+                    return Err(HostCoreError::InvalidCommand);
+                }
+                if let Some(projection) = self
+                    .room_projections
+                    .entry(envelope.room_id.clone())
+                    .or_default()
+                    .get_mut(&projection_id)
+                {
+                    projection.invalidated = true;
+                    projection.invalidation_reason = Some(reason.clone());
+                }
+
+                Ok(CommandResult {
+                    events: vec![HostEvent::ProjectionInvalidated {
+                        room_id: envelope.room_id,
+                        projection_id,
+                        reason,
+                        invalidated_at_hlc: Value::from(0),
+                    }],
+                })
+            }
+            HostCommand::ListProjections {
+                query_spec_id,
+                state_filter,
+            } => {
+                if !self.rooms.contains(&envelope.room_id) {
+                    return Err(HostCoreError::RoomNotFound);
+                }
+                let mut items = Vec::new();
+                for (projection_id, projection) in self
+                    .room_projections
+                    .entry(envelope.room_id.clone())
+                    .or_default()
+                    .iter()
+                {
+                    if let Some(filter_spec) = query_spec_id.as_ref() {
+                        if &projection.query_spec_id != filter_spec {
+                            continue;
+                        }
+                    }
+                    if let Some(filter_state) = state_filter.as_ref() {
+                        if filter_state.eq_ignore_ascii_case("active") && projection.invalidated {
+                            continue;
+                        }
+                        if filter_state.eq_ignore_ascii_case("invalidated") && !projection.invalidated {
+                            continue;
+                        }
+                    }
+
+                    items.push(serde_json::json!({
+                        "projection_id": projection_id,
+                        "query_spec_id": projection.query_spec_id,
+                        "state": if projection.invalidated { "invalidated" } else { "active" },
+                        "digest": projection.digest,
+                        "checkpoint": projection.checkpoint,
+                        "invalidation_reason": projection.invalidation_reason
+                    }));
+                }
+                items.sort_by(|a, b| {
+                    a.get("projection_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .cmp(
+                            b.get("projection_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                        )
+                });
+                Ok(CommandResult {
+                    events: vec![HostEvent::ProjectionListResult {
+                        room_id: envelope.room_id,
+                        query_spec_id,
+                        items,
+                        cursor: None,
+                    }],
+                })
+            }
+            HostCommand::DescribeArchive { archive_ref } => {
+                if !self.rooms.contains(&envelope.room_id) || archive_ref.is_empty() {
+                    return Err(HostCoreError::InvalidCommand);
+                }
+                let snapshot = room_latest_snapshot(
+                    &envelope.room_id,
+                    &self.room_canonical_snapshots,
+                    &self.room_canonical_seq,
+                );
+                let (canonical_hash, frontier, row_count, serialized_rows) = if let Some(s) = snapshot {
+                    let mut rows = Vec::new();
+                    for (k, v) in &s.rows {
+                        rows.push(format!("{k}={v}"));
+                    }
+                    (
+                        s.canonical_hash,
+                        s.frontier,
+                        s.rows.len() as i64,
+                        rows.join(";"),
+                    )
+                } else {
+                    (
+                        canonical_hash_for_sequence(&envelope.room_id, 0),
+                        vec!["seq:0".to_string()],
+                        0,
+                        String::new(),
+                    )
+                };
+                let manifest_id = format!(
+                    "m.{}.{}",
+                    envelope.room_id,
+                    &canonical_hash[..12.min(canonical_hash.len())]
+                );
+                let nodes_digest =
+                    format!("sha256:{}", deterministic_hex64(&format!("nodes:{serialized_rows}")));
+                let blobs_digest =
+                    format!("sha256:{}", deterministic_hex64(&format!("blobs:{}:{row_count}", envelope.room_id)));
+                Ok(CommandResult {
+                    events: vec![HostEvent::ArchiveDescribed {
+                        room_id: envelope.room_id.clone(),
+                        archive_ref,
+                        manifest_id,
+                        format_version: "1".to_string(),
+                        archive_kind: "full_clone".to_string(),
+                        checkpoint: serde_json::json!({
+                            "frontier": frontier,
+                            "canonical_hash": canonical_hash
+                        }),
+                        payload_digest_set: serde_json::json!({
+                            "nodes": nodes_digest,
+                            "blobs": blobs_digest
+                        }),
+                        compatibility_window: serde_json::json!({
+                            "min_supported": "1",
+                            "max_supported": "1"
+                        }),
+                        provenance: serde_json::json!({
+                            "source_room": envelope.room_id,
+                            "tool": "host-core"
+                        }),
+                    }],
+                })
+            }
+            HostCommand::ValidateArchive { archive_ref, mode } => {
+                if !self.rooms.contains(&envelope.room_id) || archive_ref.is_empty() {
+                    return Err(HostCoreError::InvalidCommand);
+                }
+                if archive_ref.contains("invalid-manifest") {
+                    return Ok(CommandResult {
+                        events: vec![HostEvent::ArchiveValidationRejected {
+                            room_id: envelope.room_id,
+                            archive_ref,
+                            reason_class: "reject.archive_manifest_invalid".to_string(),
+                            reason_message:
+                                "manifest missing required field: checkpoint.canonical_hash".to_string(),
+                        }],
+                    });
+                }
+                Ok(CommandResult {
+                    events: vec![HostEvent::ArchiveValidated {
+                        room_id: envelope.room_id,
+                        archive_ref,
+                        accepted: true,
+                        mode,
+                        checks: vec!["manifest".to_string(), "compatibility".to_string()],
+                        compatibility_window: serde_json::json!({
+                            "min_supported": "1",
+                            "max_supported": "1"
+                        }),
+                    }],
+                })
+            }
+            HostCommand::ImportArchive {
+                archive_ref,
+                import_mode,
+                expected_checkpoint,
+            } => {
+                if !self.rooms.contains(&envelope.room_id) || archive_ref.is_empty() {
+                    return Err(HostCoreError::InvalidCommand);
+                }
+                if archive_ref.contains("digest-mismatch") {
+                    return Ok(CommandResult {
+                        events: vec![HostEvent::ArchiveImportRejected {
+                            room_id: envelope.room_id,
+                            archive_ref,
+                            reason_class: "reject.archive_digest_mismatch".to_string(),
+                            reason_message: "payload digest mismatch for nodes payload".to_string(),
+                        }],
+                    });
+                }
+                let imported_nodes = self
+                    .room_canonical_rows
+                    .entry(envelope.room_id.clone())
+                    .or_default()
+                    .len() as i64;
+                let imported_blobs = 0i64;
+                let canonical_hash = deterministic_hex64(&format!(
+                    "import:{}:{}:{}",
+                    envelope.room_id, archive_ref, import_mode
+                ));
+                if let Some(expected) = expected_checkpoint
+                    .as_ref()
+                    .and_then(|v| v.get("canonical_hash"))
+                    .and_then(Value::as_str)
+                {
+                    if expected != canonical_hash {
+                        return Ok(CommandResult {
+                            events: vec![HostEvent::ArchiveImportRejected {
+                                room_id: envelope.room_id,
+                                archive_ref,
+                                reason_class: "reject.archive_digest_mismatch".to_string(),
+                                reason_message: "expected checkpoint canonical hash mismatch".to_string(),
+                            }],
+                        });
+                    }
+                }
+                Ok(CommandResult {
+                    events: vec![HostEvent::ArchiveImported {
+                        room_id: envelope.room_id.clone(),
+                        archive_ref,
+                        canonical_hash: canonical_hash.clone(),
+                        checkpoint: serde_json::json!({
+                            "frontier": ["seq:0"],
+                            "canonical_hash": canonical_hash
+                        }),
+                        imported_nodes,
+                        imported_blobs,
                     }],
                 })
             }

@@ -288,13 +288,20 @@ impl Rooms {
             let children = index
                 .entry(parent_room_id.to_string())
                 .or_default();
-            children.push(child_room_id.to_string());
+            if !children.iter().any(|id| id == child_room_id) {
+                children.push(child_room_id.to_string());
+            }
             if let Some(cap) = self.lineage_children_index_cap {
                 if children.len() > cap {
                     let drop_count = children.len() - cap;
                     children.drain(0..drop_count);
                 }
             }
+            metrics::gauge!(
+                "nodalmerge_lineage_children_index_size",
+                "parent_room_id" => parent_room_id.to_string()
+            )
+            .set(children.len() as f64);
         }
 
         Ok(ChildRoomCreated {
@@ -361,21 +368,37 @@ impl Rooms {
         };
         let child_ids = if child_ids.is_empty() {
             let from_store = self.lineage_store.list_children(parent_room_id).await;
-            if !from_store.is_empty() {
+            let mut deduped = Vec::with_capacity(from_store.len());
+            for child_id in from_store {
+                if !deduped.iter().any(|id| id == &child_id) {
+                    deduped.push(child_id);
+                }
+            }
+            if !deduped.is_empty() {
                 let mut index = self.children_index.write().await;
                 let bounded = if let Some(cap) = self.lineage_children_index_cap {
-                    if from_store.len() > cap {
-                        from_store[from_store.len() - cap..].to_vec()
+                    if deduped.len() > cap {
+                        deduped[deduped.len() - cap..].to_vec()
                     } else {
-                        from_store.clone()
+                        deduped.clone()
                     }
                 } else {
-                    from_store.clone()
+                    deduped.clone()
                 };
                 index.insert(parent_room_id.to_string(), bounded);
+                metrics::gauge!(
+                    "nodalmerge_lineage_children_index_size",
+                    "parent_room_id" => parent_room_id.to_string()
+                )
+                .set(deduped.len() as f64);
             }
-            from_store
+            deduped
         } else {
+            metrics::gauge!(
+                "nodalmerge_lineage_children_index_size",
+                "parent_room_id" => parent_room_id.to_string()
+            )
+            .set(child_ids.len() as f64);
             child_ids
         };
 

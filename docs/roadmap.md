@@ -250,6 +250,7 @@ Current status:
 2. Dotnet topology admin flows now route through native host-core/FFI boundary (create/describe/list/propose/validate/apply) and no longer rely on RuntimeMessageProcessor local stubs for these commands.
 3. Wave 3 FSE-03 initial slice is now recorded: `docs/acceptance/query-wave3-backpressure-run01.json` (Rust server query projection-build row/inflight guardrails with deterministic `reject.query_backpressure` rejection contract).
 4. Wave 3 FSE-03 follow-up slice is now recorded: `docs/acceptance/query-wave3-backpressure-run02.json` (query build backpressure observability metrics + deterministic contention/recovery vector).
+5. Authority/topology Phase E large-family baseline + policy tuning slice is now recorded: `docs/acceptance/authority-topology-phasee-large-family-baseline-run01.json` (retention-cap enforcement at high child cardinality plus promotion-path verification under load).
 
 Goals:
 

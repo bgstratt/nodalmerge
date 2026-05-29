@@ -72,7 +72,8 @@ impl LineageStoreHandle {
         match &*self.inner {
             LineageStoreInner::Volatile(map) => {
                 let map = map.read().await;
-                map.iter()
+                let mut children: Vec<String> = map
+                    .iter()
                     .filter_map(|(room_id, lineage)| {
                         if lineage.parent_room_id == parent_room_id {
                             Some(room_id.clone())
@@ -80,12 +81,16 @@ impl LineageStoreHandle {
                             None
                         }
                     })
-                    .collect()
+                    .collect();
+                children.sort_unstable();
+                children
             }
             LineageStoreInner::Durable(conn) => {
                 let conn = conn.lock().await;
                 let mut stmt = match conn
-                    .prepare("SELECT room_id FROM room_lineage WHERE parent_room_id = ?1")
+                    .prepare(
+                        "SELECT room_id FROM room_lineage WHERE parent_room_id = ?1 ORDER BY room_id ASC",
+                    )
                 {
                     Ok(stmt) => stmt,
                     Err(_) => return Vec::new(),
@@ -95,7 +100,9 @@ impl LineageStoreHandle {
                     Ok(rows) => rows,
                     Err(_) => return Vec::new(),
                 };
-                rows.flatten().collect()
+                let mut children: Vec<String> = rows.flatten().collect();
+                children.sort_unstable();
+                children
             }
         }
     }

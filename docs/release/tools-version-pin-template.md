@@ -39,12 +39,15 @@ Include immutable references in workflow summary:
    - core parity lane run id: `<id>`
    - tools pinned-core lane run id: `<id>`
    - tools canary lane run id (if run): `<id>`
+4. Manifest validation proof:
+   - `scripts/release/Validate-CoreReleaseManifest.ps1` output attached in CI summary
 
 ## 4. Release Gate Checklist
 
 - [ ] Pinned-core release lane green
 - [ ] Tier 2 SDK/headless parity lane green
 - [ ] Integration smoke lane green
+- [ ] Core release manifest validated by script
 - [ ] Acceptance artifact updates committed in core (if any bounded deltas)
 
 ## 5. Notes

@@ -214,6 +214,41 @@ pub enum HostCommand {
     ApplyTopologyPromotion {
         proposal_id: String,
     },
+    RegisterQuerySpec {
+        query_spec_id: String,
+        version: String,
+        descriptor: Value,
+    },
+    BuildProjection {
+        projection_id: String,
+        query_spec_id: String,
+        target_checkpoint: Option<Value>,
+    },
+    ReadProjection {
+        projection_id: String,
+        limit: u64,
+        page_token: Option<String>,
+    },
+    InvalidateProjection {
+        projection_id: String,
+        reason: String,
+    },
+    ListProjections {
+        query_spec_id: Option<String>,
+        state_filter: Option<String>,
+    },
+    DescribeArchive {
+        archive_ref: String,
+    },
+    ValidateArchive {
+        archive_ref: String,
+        mode: String,
+    },
+    ImportArchive {
+        archive_ref: String,
+        import_mode: String,
+        expected_checkpoint: Option<Value>,
+    },
     Noop,
 }
 
@@ -468,6 +503,91 @@ pub enum HostEvent {
         parent_room_id: String,
         parent_new_canonical_hash: String,
         audit_key: String,
+    },
+    QuerySpecRegistered {
+        room_id: String,
+        query_spec_id: String,
+        version: String,
+        canonical_hash: Value,
+        accepted: bool,
+    },
+    QuerySpecRejected {
+        room_id: String,
+        query_spec_id: String,
+        version: String,
+        reason_class: String,
+        reason_message: String,
+    },
+    ProjectionBuildCompleted {
+        room_id: String,
+        projection_id: String,
+        checkpoint: Value,
+        digest: Value,
+    },
+    ProjectionBuildRejected {
+        room_id: String,
+        projection_id: String,
+        reason_class: String,
+        reason_message: String,
+    },
+    ProjectionReadResult {
+        room_id: String,
+        projection_id: String,
+        checkpoint: Value,
+        rows: Vec<Value>,
+        digest: Option<Value>,
+        next_page_token: Option<Value>,
+    },
+    ProjectionInvalidated {
+        room_id: String,
+        projection_id: String,
+        reason: String,
+        invalidated_at_hlc: Value,
+    },
+    ProjectionListResult {
+        room_id: String,
+        query_spec_id: Option<String>,
+        items: Vec<Value>,
+        cursor: Option<Value>,
+    },
+    ArchiveDescribed {
+        room_id: String,
+        archive_ref: String,
+        manifest_id: String,
+        format_version: String,
+        archive_kind: String,
+        checkpoint: Value,
+        payload_digest_set: Value,
+        compatibility_window: Value,
+        provenance: Value,
+    },
+    ArchiveValidated {
+        room_id: String,
+        archive_ref: String,
+        accepted: bool,
+        mode: String,
+        checks: Vec<String>,
+        compatibility_window: Value,
+    },
+    ArchiveValidationRejected {
+        room_id: String,
+        archive_ref: String,
+        reason_class: String,
+        reason_message: String,
+    },
+    ArchiveImported {
+        room_id: String,
+        archive_ref: String,
+        canonical_hash: String,
+        checkpoint: Value,
+        imported_nodes: i64,
+        imported_blobs: i64,
+    },
+    ArchiveImportRejected {
+        room_id: String,
+        archive_ref: String,
+        reason_class: String,
+        reason_message: String,
     },
     NoopAck,
 }

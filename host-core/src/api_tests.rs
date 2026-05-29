@@ -1705,6 +1705,247 @@ fn topology_promotion_roundtrip_emits_proposed_validated_applied() {
         HostEvent::PromotionApplied { proposal_id, audit_key, .. }
             if proposal_id == "prop-dotnet" && audit_key == "_topology/promotion/prop-dotnet"
     ));
+    let audit_read = engine
+        .apply(CommandEnvelope::new(
+            "parent-a",
+            HostCommand::MapGet {
+                namespace: "".to_string(),
+                key: "_topology/promotion/prop-dotnet".to_string(),
+            },
+        ))
+        .expect("audit map read should succeed");
+    assert!(matches!(
+        &audit_read.events[0],
+        HostEvent::MapValueRead { value: Some(v), .. }
+            if v["proposal_id"] == "prop-dotnet" && v["payload_ref"] == "artifact://dotnet"
+    ));
+}
+
+#[test]
+fn query_projection_roundtrip_emits_register_build_read_list_and_invalidate_events() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-query", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-query",
+            HostCommand::MapSet {
+                namespace: "".to_string(),
+                key: "world/a".to_string(),
+                value: json!("1"),
+            },
+        ))
+        .expect("map set should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-query",
+            HostCommand::MapSet {
+                namespace: "".to_string(),
+                key: "world/b".to_string(),
+                value: json!("2"),
+            },
+        ))
+        .expect("map set should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-query",
+            HostCommand::MapSet {
+                namespace: "".to_string(),
+                key: "world/c".to_string(),
+                value: json!("3"),
+            },
+        ))
+        .expect("map set should succeed");
+
+    let registered = engine
+        .apply(CommandEnvelope::new(
+            "room-query",
+            HostCommand::RegisterQuerySpec {
+                query_spec_id: "q.rooms".to_string(),
+                version: "v1".to_string(),
+                descriptor: json!({ "kind": "map_prefix", "prefix": "world/" }),
+            },
+        ))
+        .expect("register should succeed");
+    assert!(matches!(
+        &registered.events[0],
+        HostEvent::QuerySpecRegistered { query_spec_id, .. } if query_spec_id == "q.rooms"
+    ));
+
+    let built = engine
+        .apply(CommandEnvelope::new(
+            "room-query",
+            HostCommand::BuildProjection {
+                projection_id: "p.rooms".to_string(),
+                query_spec_id: "q.rooms".to_string(),
+                target_checkpoint: Some(json!({ "selector": "latest" })),
+            },
+        ))
+        .expect("build should succeed");
+    assert!(matches!(
+        &built.events[0],
+        HostEvent::ProjectionBuildCompleted { projection_id, .. } if projection_id == "p.rooms"
+    ));
+
+    let page1 = engine
+        .apply(CommandEnvelope::new(
+            "room-query",
+            HostCommand::ReadProjection {
+                projection_id: "p.rooms".to_string(),
+                limit: 1,
+                page_token: None,
+            },
+        ))
+        .expect("read page 1 should succeed");
+    assert!(matches!(
+        &page1.events[0],
+        HostEvent::ProjectionReadResult { rows, next_page_token, .. }
+            if rows.len() == 1 && next_page_token.is_some()
+    ));
+
+    let listed_active = engine
+        .apply(CommandEnvelope::new(
+            "room-query",
+            HostCommand::ListProjections {
+                query_spec_id: Some("q.rooms".to_string()),
+                state_filter: Some("active".to_string()),
+            },
+        ))
+        .expect("list active should succeed");
+    assert!(matches!(
+        &listed_active.events[0],
+        HostEvent::ProjectionListResult { items, .. } if items.len() == 1 && items[0]["state"] == "active"
+    ));
+
+    let invalidated = engine
+        .apply(CommandEnvelope::new(
+            "room-query",
+            HostCommand::InvalidateProjection {
+                projection_id: "p.rooms".to_string(),
+                reason: "manual".to_string(),
+            },
+        ))
+        .expect("invalidate should succeed");
+    assert!(matches!(
+        &invalidated.events[0],
+        HostEvent::ProjectionInvalidated { projection_id, .. } if projection_id == "p.rooms"
+    ));
+
+    let listed_invalidated = engine
+        .apply(CommandEnvelope::new(
+            "room-query",
+            HostCommand::ListProjections {
+                query_spec_id: Some("q.rooms".to_string()),
+                state_filter: Some("invalidated".to_string()),
+            },
+        ))
+        .expect("list invalidated should succeed");
+    assert!(matches!(
+        &listed_invalidated.events[0],
+        HostEvent::ProjectionListResult { items, .. }
+            if items.len() == 1 && items[0]["state"] == "invalidated"
+    ));
+}
+
+#[test]
+fn projection_build_rejects_unknown_query_spec() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-query", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+
+    let rejected = engine
+        .apply(CommandEnvelope::new(
+            "room-query",
+            HostCommand::BuildProjection {
+                projection_id: "p.rooms".to_string(),
+                query_spec_id: "missing".to_string(),
+                target_checkpoint: Some(json!({ "selector": "latest" })),
+            },
+        ))
+        .expect("build missing spec should emit rejection event");
+
+    assert!(matches!(
+        &rejected.events[0],
+        HostEvent::ProjectionBuildRejected { reason_class, .. } if reason_class == "reject.query_spec_not_found"
+    ));
+}
+
+#[test]
+fn archive_commands_emit_describe_validate_reject_and_import_events() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-archive", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+
+    let described = engine
+        .apply(CommandEnvelope::new(
+            "room-archive",
+            HostCommand::DescribeArchive {
+                archive_ref: "s3://bucket/room-a.nmar".to_string(),
+            },
+        ))
+        .expect("describe should succeed");
+    assert!(matches!(
+        &described.events[0],
+        HostEvent::ArchiveDescribed { archive_ref, .. } if archive_ref == "s3://bucket/room-a.nmar"
+    ));
+    if let HostEvent::ArchiveDescribed { manifest_id, payload_digest_set, .. } = &described.events[0]
+    {
+        assert!(manifest_id.starts_with("m.room-archive."));
+        assert!(
+            payload_digest_set["nodes"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("sha256:")
+        );
+    }
+
+    let validated = engine
+        .apply(CommandEnvelope::new(
+            "room-archive",
+            HostCommand::ValidateArchive {
+                archive_ref: "s3://bucket/room-a.nmar".to_string(),
+                mode: "metadata_only".to_string(),
+            },
+        ))
+        .expect("validate should succeed");
+    assert!(matches!(
+        &validated.events[0],
+        HostEvent::ArchiveValidated { accepted, .. } if *accepted
+    ));
+
+    let rejected = engine
+        .apply(CommandEnvelope::new(
+            "room-archive",
+            HostCommand::ValidateArchive {
+                archive_ref: "s3://bucket/invalid-manifest.nmar".to_string(),
+                mode: "full_integrity".to_string(),
+            },
+        ))
+        .expect("validate invalid manifest should emit rejection event");
+    assert!(matches!(
+        &rejected.events[0],
+        HostEvent::ArchiveValidationRejected { reason_class, .. }
+            if reason_class == "reject.archive_manifest_invalid"
+    ));
+
+    let imported = engine
+        .apply(CommandEnvelope::new(
+            "room-archive",
+            HostCommand::ImportArchive {
+                archive_ref: "s3://bucket/room-a.nmar".to_string(),
+                import_mode: "full_clone".to_string(),
+                expected_checkpoint: None,
+            },
+        ))
+        .expect("import should succeed");
+    assert!(matches!(
+        &imported.events[0],
+        HostEvent::ArchiveImported { canonical_hash, .. }
+            if canonical_hash.len() == 64
+    ));
 }
 
 fn signed_single_node_pack_b64() -> String {

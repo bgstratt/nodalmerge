@@ -519,11 +519,6 @@ impl TextProjection {
         CompactId::from_op_id_existing(id, &self.actor_table)
     }
 
-    fn entry_for_id(&self, id: OpId) -> Option<&ProjectionEntry> {
-        let cid = self.compact_id_existing(id)?;
-        self.entries.get(&cid)
-    }
-
     fn compact_id_cmp(&self, left: CompactId, right: CompactId) -> Ordering {
         left.lamport.cmp(&right.lamport).then_with(|| {
             let left_author = self.actor_table.author_for_idx(left.actor_idx).unwrap_or([0; 32]);
@@ -549,13 +544,6 @@ impl TextProjection {
                 let idx = self.child_insert_idx(&self.root_children, child);
                 self.root_children.insert(idx, child);
             }
-        }
-    }
-
-    fn children_for(&self, parent: Option<CompactId>) -> &[CompactId] {
-        match parent {
-            Some(parent_id) => self.children.get(&parent_id).map(Vec::as_slice).unwrap_or(&[]),
-            None => self.root_children.as_slice(),
         }
     }
 

@@ -37,18 +37,45 @@ function Clear-GlobalNuGetPackageVersion {
     }
 }
 
+function Resolve-CommandPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [string[]]$Fallbacks = @()
+    )
+
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    foreach ($fallback in $Fallbacks) {
+        if (-not [string]::IsNullOrWhiteSpace($fallback) -and (Test-Path $fallback)) {
+            return [System.IO.Path]::GetFullPath($fallback)
+        }
+    }
+
+    return $null
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Push-Location $scriptDir
 try {
+    $cargoFallback = Join-Path $HOME ".cargo\bin\cargo.exe"
+    $cargoPath = Resolve-CommandPath -Name "cargo" -Fallbacks @($cargoFallback)
+    if (-not $cargoPath) {
+        throw "cargo executable not found. Install Rust or add cargo to PATH (`$HOME\.cargo\bin`)."
+    }
+
     $resolvedOutput = [System.IO.Path]::GetFullPath((Join-Path $scriptDir $OutputDir))
     New-Item -ItemType Directory -Force -Path $resolvedOutput | Out-Null
 
     Write-Host "Building native runtime (release)..."
     Invoke-Checked -Name "cargo build host ffi runtime (nodalmerge-host-ffi)" -Command {
-        cargo build -p nodalmerge-host-ffi --release
+        & $cargoPath build -p nodalmerge-host-ffi --release
     }
     Invoke-Checked -Name "cargo build peer-local ffi runtime (nodalmerge-runtime-local-ffi)" -Command {
-        cargo build -p nodalmerge-runtime-local-ffi --release
+        & $cargoPath build -p nodalmerge-runtime-local-ffi --release
     }
 
     Write-Host "Packing managed packages to $resolvedOutput ..."

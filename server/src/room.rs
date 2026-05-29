@@ -350,6 +350,28 @@ impl Rooms {
         let promotion_queue_max = parse_env_usize("NODALMERGE_TOPOLOGY_PROMOTION_MAX_QUEUE", 32);
         let lineage_children_index_cap =
             parse_optional_env_usize("NODALMERGE_LINEAGE_CHILDREN_INDEX_MAX");
+        Self::new_with_topology_limits(
+            server_key,
+            persistence,
+            broadcast_capacity,
+            peer_rate_nodes,
+            peer_rate_bytes,
+            promotion_queue_concurrency,
+            promotion_queue_max,
+            lineage_children_index_cap,
+        )
+    }
+
+    pub fn new_with_topology_limits(
+        server_key: SigningKey,
+        persistence: SharedPersistence,
+        broadcast_capacity: usize,
+        peer_rate_nodes: u32,
+        peer_rate_bytes: u32,
+        promotion_queue_concurrency: usize,
+        promotion_queue_max: usize,
+        lineage_children_index_cap: Option<usize>,
+    ) -> Self {
         let store_root = crate::store::topology_store_root(&persistence);
         let lineage_store = Arc::new(crate::lineage_store::LineageStoreHandle::open(
             store_root.clone(),

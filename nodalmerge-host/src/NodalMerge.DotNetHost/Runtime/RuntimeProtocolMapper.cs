@@ -805,7 +805,7 @@ public sealed class RuntimeProtocolMapper
                             ["child_room_id"] = message.ChildRoomId,
                             ["child_purpose"] = message.ChildPurpose,
                             ["created_by"] = string.IsNullOrWhiteSpace(message.CreatedBy)
-                                ? "dotnet-host-stub"
+                                ? "dotnet-host"
                                 : message.CreatedBy,
                             ["promotion_policy_id"] = message.PromotionPolicyId,
                             ["parent_checkpoint"] = message.ParentCheckpoint.DeepClone()

@@ -27,6 +27,11 @@ This runbook executes the first real cross-repo rehearsal for the optional `noda
    - RC tag name
    - artifact manifest location
 4. Update a concrete copy of `core-release-manifest-template.json` with real values.
+5. Validate the concrete manifest before handoff:
+
+```powershell
+pwsh -File ./scripts/release/Validate-CoreReleaseManifest.ps1 -ManifestPath .\docs\release\core-release-manifest-runNN.json
+```
 
 ## 2. Run core parity gates (Tier 1 + Tier 3)
 
@@ -77,6 +82,7 @@ This runbook executes the first real cross-repo rehearsal for the optional `noda
 ```powershell
 # Core repo
 pwsh -File ./pack-local-artifacts.ps1 -Version 0.1.0-rc1
+pwsh -File ./scripts/release/Validate-CoreReleaseManifest.ps1 -ManifestPath .\docs\release\core-release-manifest-runNN.json
 
 # Run selected parity lanes (examples)
 cargo test -p nodalmerge-runtime-local-ffi --test abi

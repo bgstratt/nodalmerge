@@ -84,8 +84,6 @@ pub async fn run_worker_session(cfg: WorkerConfig) -> Result<WorkerReport, Strin
         match next {
             Ok(Some(Ok(WsMessage::Text(text)))) => {
                 if text.contains("reject.") {
-                    timings.websocket_sync_ms = sync_start.elapsed().as_millis() as u64;
-                    timings.total_ms = session_start.elapsed().as_millis() as u64;
                     return Err(text);
                 }
                 let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -132,8 +130,6 @@ pub async fn run_worker_session(cfg: WorkerConfig) -> Result<WorkerReport, Strin
             Ok(Some(Ok(WsMessage::Close(_)))) => break,
             Ok(Some(Ok(_))) | Ok(None) => {}
             Ok(Some(Err(e))) => {
-                timings.websocket_sync_ms = sync_start.elapsed().as_millis() as u64;
-                timings.total_ms = session_start.elapsed().as_millis() as u64;
                 return Err(format!("websocket error: {e}"));
             }
             Err(_) => break,

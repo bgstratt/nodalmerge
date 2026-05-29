@@ -1,11 +1,11 @@
 {
   "manifest_type": "core_release_handoff",
   "schema_version": "1",
-  "generated_at_utc": "YYYY-MM-DDTHH:MM:SSZ",
+  "generated_at_utc": "YYYY-MM-DDTHH:MM:SSZ (required; ISO-8601 UTC)",
   "core_release": {
     "version": "X.Y.Z",
     "git_tag": "vX.Y.Z",
-    "git_sha": "<core-commit-sha>",
+    "git_sha": "<40-lowercase-hex-core-commit-sha>",
     "release_notes_url": "https://example.invalid/core/releases/vX.Y.Z"
   },
   "artifacts": {

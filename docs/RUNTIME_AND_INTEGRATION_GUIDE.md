@@ -22,10 +22,13 @@ Implemented now:
 Partially implemented / deferred:
 
 1. Topology Phase E scale items (lineage index optimization/retention, large family baselines).
-2. Dotnet native FFI topology backend parity was deferred; minimal vertical for `create-child` + `describe-lineage` is now routed through native host-core/FFI.
-3. Hosted dashboard productization remains deferred.
-4. Operator automated drill runner remains deferred (manual runbook path is present).
-5. `.NET` topology admin flows (`create-child`, `describe-lineage`, `list-children`, `propose/validate/apply-promotion`) now execute through native boundary.
+2. Hosted dashboard productization remains deferred.
+3. Operator automated drill runner remains deferred (manual runbook path is present).
+4. Large-room-family lineage retention/scale hardening remains in-progress (operational tuning and baselines).
+
+Parity status note:
+
+1. `.NET` topology admin flows (`create-child`, `describe-lineage`, `list-children`, `propose/validate/apply-promotion`) execute through native host-core/FFI boundary (no local runtime stubs for this command group).
 
 ## 1.1) CLI command reference (man page style)
 

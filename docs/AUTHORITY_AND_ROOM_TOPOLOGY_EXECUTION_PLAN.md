@@ -1,8 +1,8 @@
 # Authority and Room Topology Execution Plan 
 
 Owner: Runtime + host + operator streams
-Status: ClosedForDeclaredSlice (Wave 2 Phases A–D; see authority-topology-phased-closeout.json)
-Last updated: 2026-05-27
+Status: ClosedForDeclaredSlice (Wave 2 Phases A–D; Wave 3 Phase E large-family baseline run01 recorded)
+Last updated: 2026-05-28
 
 Companion guidance:
 
@@ -220,6 +220,13 @@ Acceptance criteria:
 
 1. performance and durability SLOs are documented and repeatable
 2. no replay determinism regressions in room-family scenarios
+
+Phase E execution record (2026-05-28):
+
+1. Large room-family baseline vector added (`auth_room_phasee_large_family_baseline_and_policy_tuning`) with 600 child rooms and retention-cap enforcement checks.
+2. Retention policy guidance is now tied to explicit knobs: `NODALMERGE_LINEAGE_CHILDREN_INDEX_MAX`, `NODALMERGE_TOPOLOGY_PROMOTION_MAX_INFLIGHT`, `NODALMERGE_TOPOLOGY_PROMOTION_MAX_QUEUE`.
+3. Promotion propose/validate/apply flow is verified under large-family cardinality load in the same vector.
+4. Evidence: `docs/acceptance/authority-topology-phasee-large-family-baseline-run01.json`.
 
 ## 8. Conformance vectors
 

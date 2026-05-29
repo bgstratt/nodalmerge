@@ -222,6 +222,23 @@ target dates, and acceptance evidence artifacts.
   2. Topology admin command group emits deterministic topology envelopes through native host-core/FFI bridge (met).
   3. Focused host-core + dotnet tests for create/describe/list/propose/validate/apply bridge routing are green (met).
 
+### 3.6 Authority topology Phase E large-family baseline and policy tuning
+
+- Status: **Completed for baseline slice** (2026-05-28)
+- Owner: Runtime + operator streams
+- Target date: 2026-06-19
+- Source plan: `docs/AUTHORITY_AND_ROOM_TOPOLOGY_EXECUTION_PLAN.md` (Phase E)
+- Required outputs:
+  1. Large room-family stress baseline vector with explicit child-cardinality load.
+  2. Retention policy evidence tied to `NODALMERGE_LINEAGE_CHILDREN_INDEX_MAX`.
+  3. Promotion roundtrip verification under large-family load.
+- Evidence artifacts:
+  1. `docs/acceptance/authority-topology-phasee-large-family-baseline-run01.json`
+- Completion gate:
+  1. Retention cap keeps newest children under load and remains deterministic (met).
+  2. Promotion propose/validate/apply remains functional at large-family cardinality baseline (met).
+  3. Phase E policy-tuning guidance is documented with concrete runtime knobs (met).
+
 ## 4. Tracking policy
 
 1. Update this checklist when a checkpoint starts, completes, or is re-scoped.

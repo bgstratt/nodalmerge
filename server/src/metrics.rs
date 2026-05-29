@@ -193,6 +193,10 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
         Unit::Seconds,
         "Time spent waiting for a projection build slot after the immediate try_acquire failed."
     );
+    describe_gauge!(
+        "nodalmerge_lineage_children_index_size",
+        "Current number of child room ids tracked per parent in the in-memory lineage children index. Label: `parent_room_id`."
+    );
     // Scoped replication (Phase A): filtering/catch-up observability.
     describe_counter!("nodalmerge_filtered_nodes_total", "Total nodes removed by subscription filtering before relay/catch-up send. Labels: `room`, `stage` (`catchup`|`broadcast`).");
     describe_counter!("nodalmerge_filtered_bytes_total", "Total node-payload bytes removed by subscription filtering before relay/catch-up send. Labels: `room`, `stage` (`catchup`|`broadcast`).");

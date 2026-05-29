@@ -145,7 +145,7 @@ Engine semantics are shared (`nodalmerge-core`); packaging is what differs.
 | CLI query | Yes (commands wired) | Cursor/token ergonomics polish only (functional lane now runs on Rust WS + .NET host runtime) |
 | Query/materialization | Yes (core/server vectors + SDK) | Extended replay/load/perf hardening in Wave 3 |
 | Export/import | Yes (server + CLI import/describe/validate/export) | — |
-| Durable promotion lineage on server restart | Yes (promotion records + lineage metadata durable) | Phase E lineage index optimization and large-room-family scale baselines |
+| Durable promotion lineage on server restart | Yes (promotion records + lineage metadata durable) | Phase E large-family baseline run-01 is now recorded; further multi-profile stress lanes can extend this evidence |
 | Hosted dashboards | — | Deferred by product choice |
 
 **Pre–AI workspace closeout:** `docs/acceptance/pre-ai-workspace-integration-closeout.json`

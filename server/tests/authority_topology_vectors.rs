@@ -1,7 +1,7 @@
 //! AUTH-ROOM-* topology / lineage vectors (Wave 2 Phase B).
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{routing::get, Router};
 use ed25519_dalek::SigningKey;
@@ -151,6 +151,49 @@ async fn auth_room_lineage_create_and_list_via_rooms_api() {
 
     let listed = rooms.list_children(parent_id).await.expect("list");
     assert_eq!(listed.children.len(), 1);
+}
+
+/// Lineage children index cap keeps only the most recent child ids in-memory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_room_lineage_children_index_cap_enforced() {
+    let parent_id = "auth-parent-cap";
+    let server_key = SigningKey::from_bytes(&[0x98u8; 32]);
+    let persistence: SharedPersistence = Arc::new(NoPersistence);
+    let rooms = Rooms::new_with_topology_limits(
+        server_key,
+        persistence,
+        512,
+        0,
+        0,
+        4,
+        32,
+        Some(2),
+    );
+
+    let author = SigningKey::from_bytes(&[0x95u8; 32]);
+    let parent = rooms.get_or_create(parent_id).await;
+    import_nodes(&parent, vec![make_map_set_node(&author, "world/cap", b"1")]).await;
+    let checkpoint = snapshot_parent_checkpoint(&parent).await.expect("snapshot");
+
+    for child in ["auth-child-cap-1", "auth-child-cap-2", "auth-child-cap-3"] {
+        rooms
+            .create_child_room(
+                parent_id,
+                child,
+                checkpoint.clone(),
+                "worker-task".to_string(),
+                "manager-1".to_string(),
+                "promotion-based".to_string(),
+            )
+            .await
+            .expect("create child");
+    }
+
+    let listed = rooms.list_children(parent_id).await.expect("list");
+    let ids: Vec<String> = listed.children.iter().map(|c| c.child_room_id.clone()).collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&"auth-child-cap-2".to_string()));
+    assert!(ids.contains(&"auth-child-cap-3".to_string()));
 }
 
 /// WS path: topology.create-child with topology.admin capability token.
@@ -644,6 +687,121 @@ async fn auth_room_006_lineage_survives_store_restart() {
 
     drop(parent_after);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Phase E baseline: large room-family create/list pressure with retention cap and
+/// promotion flow still succeeding under high child cardinality.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_room_phasee_large_family_baseline_and_policy_tuning() {
+    let parent_id = "auth-parent-phasee-large-family";
+    let server_key = SigningKey::from_bytes(&[0xC1u8; 32]);
+    let persistence: SharedPersistence = Arc::new(NoPersistence);
+    let rooms = Rooms::new_with_topology_limits(
+        server_key.clone(),
+        persistence,
+        512,
+        0,
+        0,
+        4,    // NODALMERGE_TOPOLOGY_PROMOTION_MAX_INFLIGHT equivalent
+        256,  // NODALMERGE_TOPOLOGY_PROMOTION_MAX_QUEUE equivalent
+        Some(128), // NODALMERGE_LINEAGE_CHILDREN_INDEX_MAX equivalent
+    );
+
+    let author = SigningKey::from_bytes(&[0xC2u8; 32]);
+    let parent = rooms.get_or_create(parent_id).await;
+    import_nodes(
+        &parent,
+        vec![make_map_set_node(&author, "world/phasee-root", b"ready")],
+    )
+    .await;
+    let parent_hash_before = snapshot_room_canonical_hash(&parent).await.unwrap();
+    let checkpoint = snapshot_parent_checkpoint(&parent).await.unwrap();
+
+    const TOTAL_CHILDREN: usize = 600;
+    const INDEX_CAP: usize = 128;
+    let create_start = Instant::now();
+    for i in 0..TOTAL_CHILDREN {
+        let child_id = format!("auth-child-phasee-{i:04}");
+        rooms
+            .create_child_room(
+                parent_id,
+                &child_id,
+                checkpoint.clone(),
+                "phasee-load".to_string(),
+                "phasee-runner".to_string(),
+                "promotion-based".to_string(),
+            )
+            .await
+            .expect("create child");
+    }
+    let create_elapsed = create_start.elapsed();
+
+    let list_start = Instant::now();
+    let listed = rooms.list_children(parent_id).await.expect("list children");
+    let list_elapsed = list_start.elapsed();
+
+    let listed_ids: Vec<String> = listed
+        .children
+        .iter()
+        .map(|child| child.child_room_id.clone())
+        .collect();
+    assert_eq!(listed_ids.len(), INDEX_CAP);
+
+    // Retention policy should keep the newest child ids under pressure.
+    for i in (TOTAL_CHILDREN - INDEX_CAP)..TOTAL_CHILDREN {
+        let expected = format!("auth-child-phasee-{i:04}");
+        assert!(listed_ids.contains(&expected), "missing retained child {expected}");
+    }
+
+    // Promotion flow remains functional even after large-family cardinality load.
+    let promoted_child_id = format!("auth-child-phasee-{:04}", TOTAL_CHILDREN - 1);
+    let promoted_child = rooms.get_or_create(&promoted_child_id).await;
+    import_nodes(
+        &promoted_child,
+        vec![make_map_set_node(
+            &author,
+            "world/phasee-promotion",
+            b"child-outcome",
+        )],
+    )
+    .await;
+    let promoted_child_hash = snapshot_room_canonical_hash(&promoted_child).await.unwrap();
+
+    let proposed = process_topology_propose_promotion(
+        &rooms,
+        &serde_json::json!({
+            "parent_room_id": parent_id,
+            "child_room_id": promoted_child_id,
+            "child_checkpoint_hash": promoted_child_hash,
+            "payload_ref": "artifact://phasee/large-family/run01",
+            "idempotency_key": "prop-phasee-large-family",
+        }),
+    )
+    .await
+    .expect("propose promotion under large-family load");
+    process_topology_validate_promotion(
+        &rooms,
+        &serde_json::json!({ "proposal_id": proposed.proposal_id }),
+    )
+    .await
+    .expect("validate proposal");
+    let applied = process_topology_apply_promotion(
+        &rooms,
+        &server_key,
+        &serde_json::json!({ "proposal_id": proposed.proposal_id }),
+    )
+    .await
+    .expect("apply proposal");
+    assert_ne!(applied.parent_new_canonical_hash, parent_hash_before);
+
+    eprintln!(
+        "phasee_large_family_baseline create_ms={} list_ms={} total_children={} cap={} retained={}",
+        create_elapsed.as_millis(),
+        list_elapsed.as_millis(),
+        TOTAL_CHILDREN,
+        INDEX_CAP,
+        listed_ids.len()
+    );
 }
 
 async fn drain_until_welcome(

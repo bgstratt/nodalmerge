@@ -30,6 +30,8 @@ Notes:
 3. For active dev branches, add `-AllowDirtyCrates` while keeping publish flows clean/repeatable.
 4. The local bundler uses `cargo package --no-verify` for dependency-ordered workspace staging; keep the publish dry-run checks in Sections 1 and 4 before external release.
 5. If dependent crates are not yet published to crates.io, use `-AllowCrateDependencyFailures` for local staging while still producing available `.crate` artifacts.
+6. NuGet packaging path compiles native runtimes (`nodalmerge-host-ffi`, `nodalmerge-runtime-local-ffi`) before `dotnet pack` so runtime assets are fresh.
+7. npm packaging path rebuilds WASM bridge assets (`wasm-pack build`) before `npm pack`.
 
 ## 0.1 Two-Machine Local Publish + Consume
 
@@ -48,6 +50,19 @@ This produces:
 1. `artifacts/package-local/nuget` (NuGet packages)
 2. `artifacts/package-local/npm` (npm tarballs)
 3. `artifacts/package-local/crates` (crate archives)
+
+Optional split runs:
+
+```powershell
+# only NuGet (native runtimes + managed host packages)
+pwsh -File ./pack-local-artifacts.ps1 -Version 0.1.0-local -SkipNpm -SkipCrates
+
+# only npm (forces wasm rebuild)
+pwsh -File ./pack-local-artifacts.ps1 -Version 0.1.0-local -SkipNuGet -SkipCrates
+
+# only crates
+pwsh -File ./pack-local-artifacts.ps1 -Version 0.1.0-local -SkipNuGet -SkipNpm
+```
 
 ### Step B: Consume NuGet packages in another .NET app
 

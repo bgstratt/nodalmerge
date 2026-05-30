@@ -43,5 +43,12 @@ artifacts/
 BenchmarkDotNet.Artifacts/
 dotnet-host/artifacts/
 
+# Local npm pack artifacts (generated tarballs)
+**/*.tgz
+bridge/pkg/*.tgz
+sdk-js/*.tgz
+wrappers/**/*.tgz
+artifacts/package-local/npm/*.tgz
+
 # Local test execution logs
 .tmp-testlogs/

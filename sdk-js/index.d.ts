@@ -145,7 +145,7 @@ export declare class NodalMergeSdk {
     deleteTextAt: (key: string, pos: number, len: number) => void;
     insertTextRange: (key: string, anchor: TextInsertAnchor, text: string) => void;
     deleteTextRange: (key: string, anchor: TextDeleteAnchor, len: number) => void;
-    push: () => void;
+    push: () => boolean;
     pull: () => void;
   };
 

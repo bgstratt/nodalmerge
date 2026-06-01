@@ -12,6 +12,9 @@ const defaultReconnectPolicy = {
   maxAttempts: Infinity
 };
 
+/** Stay under the runtime host 64 KiB inbound frame limit (JSON envelope + base64 pack). */
+const MAX_RUNTIME_PACK_B64_LENGTH = 60 * 1024;
+
 const runtimeMessageTypes = new Set([
   "welcome",
   "pack",
@@ -27,6 +30,7 @@ const runtimeMessageTypes = new Set([
   "webrtc-answer",
   "webrtc-ice",
   "error",
+  "pack-ack",
   "noop-ack",
   "session-opened",
   "session-closed",
@@ -328,6 +332,177 @@ export class NodalMergeSdk {
     this.activeTransportMode = "ws-only";
     this.peerLocalPersistence = null;
     this.peerLocalHydrateReport = null;
+    /** Node IDs already acknowledged by the runtime server (delta push bookkeeping). */
+    this.sentToServer = new Set();
+    /** Node IDs marked sent on the last outbound pack (reverted on reject / oversize). */
+    this.lastPushMarkedIds = [];
+    /** Snapshot of graph node ids captured before the first sync.set in a push batch. */
+    this.mutationBaseIds = null;
+  }
+
+  captureMutationBaseIds() {
+    if (this.mutationBaseIds !== null || !this.store) {
+      return;
+    }
+    this.mutationBaseIds = new Set(
+      parseJsonOrDefault(this.store.all_node_ids_json(), []).filter((id) => typeof id === "string")
+    );
+  }
+
+  clearMutationBaseIds() {
+    this.mutationBaseIds = null;
+  }
+
+  snapshotNodeIds() {
+    return new Set(
+      parseJsonOrDefault(this.store.all_node_ids_json(), []).filter((id) => typeof id === "string")
+    );
+  }
+
+  listUnsentNodeIds() {
+    const all = parseJsonOrDefault(this.store.all_node_ids_json(), []);
+    return all.filter((id) => typeof id === "string" && !this.sentToServer.has(id));
+  }
+
+  revertLastPushMarks() {
+    if (!this.lastPushMarkedIds || this.lastPushMarkedIds.length === 0) {
+      return;
+    }
+    for (const id of this.lastPushMarkedIds) {
+      this.sentToServer.delete(id);
+    }
+    this.lastPushMarkedIds = [];
+  }
+
+  noteServerNodesImported(packB64) {
+    const idsBefore = new Set(parseJsonOrDefault(this.store.all_node_ids_json(), []));
+    this.store.import_pack(packB64);
+    const idsAfter = parseJsonOrDefault(this.store.all_node_ids_json(), []);
+    for (const id of idsAfter) {
+      if (typeof id === "string" && !idsBefore.has(id)) {
+        this.sentToServer.add(id);
+      }
+    }
+  }
+
+  markPushedNodeIds(idsBeforePush) {
+    const marked = [];
+    const idsAfter = parseJsonOrDefault(this.store.all_node_ids_json(), []);
+    for (const id of idsAfter) {
+      if (typeof id === "string" && !idsBeforePush.has(id)) {
+        this.sentToServer.add(id);
+        marked.push(id);
+      }
+    }
+    this.lastPushMarkedIds = marked;
+    return marked;
+  }
+
+  enqueueDeltaPack(nodes, idsBeforePush) {
+    if (!nodes || nodes.length <= 4) {
+      return false;
+    }
+    if (nodes.length > MAX_RUNTIME_PACK_B64_LENGTH) {
+      this.revertLastPushMarks();
+      this.emit(
+        "error",
+        new Error(`sync push pack exceeds runtime limit (${nodes.length} b64 chars)`)
+      );
+      return false;
+    }
+    this.sendOrQueue({
+      type: "pack",
+      nodes
+    });
+    this.markPushedNodeIds(idsBeforePush);
+    return true;
+  }
+
+  sendDeltaFromKnownBase(baseIds) {
+    if (!this.store) {
+      return false;
+    }
+    const idsBeforePush = new Set(this.sentToServer);
+    const known = JSON.stringify([...baseIds]);
+    let nodes;
+    try {
+      nodes = this.store.export_nodes_missing_from(known);
+    } catch (err) {
+      this.emit("error", err);
+      return false;
+    }
+    return this.enqueueDeltaPack(nodes, idsBeforePush);
+  }
+
+  sendLocalDeltaPack() {
+    if (!this.store) {
+      return false;
+    }
+
+    const idsBeforePush = new Set(this.sentToServer);
+    const known = JSON.stringify([...this.sentToServer]);
+    let nodes;
+    try {
+      nodes = this.store.export_nodes_missing_from(known);
+    } catch (err) {
+      this.emit("error", err);
+      return false;
+    }
+
+    if (nodes && nodes.length > 4) {
+      return this.enqueueDeltaPack(nodes, idsBeforePush);
+    }
+
+    const unsent = this.listUnsentNodeIds();
+    if (unsent.length > 0) {
+      this.emit(
+        "error",
+        new Error(`sync push stranded with ${unsent.length} local node(s) not exported`)
+      );
+    }
+
+    return false;
+  }
+
+  handleInboundPushAck(msg) {
+    const rejected = typeof msg.rejected_count === "number" ? msg.rejected_count : 0;
+    const accepted = typeof msg.accepted_count === "number" ? msg.accepted_count : 0;
+    const incoming = typeof msg.incoming_count === "number" ? msg.incoming_count : 0;
+    if (rejected > 0 || (incoming > 0 && accepted < incoming)) {
+      this.revertLastPushMarks();
+      this.sendLocalDeltaPack();
+    }
+  }
+
+  handleInboundRuntimeError(msg) {
+    const message = typeof msg.msg === "string" ? msg.msg : "";
+    if (!message.toLowerCase().includes("message too large")) {
+      return;
+    }
+    this.revertLastPushMarks();
+    this.emit("error", new Error(message));
+  }
+
+  handleWelcomeMessage(msg) {
+    const missing = Array.isArray(msg.missing) ? msg.missing : [];
+    if (missing.length > 0) {
+      try {
+        const delta = this.store.export_nodes_missing_from(JSON.stringify(missing));
+        const idsBeforePush = new Set(this.sentToServer);
+        this.enqueueDeltaPack(delta, idsBeforePush);
+      } catch (err) {
+        this.emit("error", err);
+      }
+    } else if (msg.root && msg.root !== this.store.merkle_root_hex()) {
+      const serverFrontier = Array.isArray(msg.frontier) ? msg.frontier : [];
+      try {
+        const delta = this.store.export_nodes_missing_from(JSON.stringify(serverFrontier));
+        const idsBeforePush = new Set(this.sentToServer);
+        this.enqueueDeltaPack(delta, idsBeforePush);
+      } catch (err) {
+        this.emit("error", err);
+      }
+    }
   }
 
   schedulePeerLocalPersist() {
@@ -419,6 +594,7 @@ export class NodalMergeSdk {
 
       this.manualDisconnect = false;
       this.clearReconnectTimer();
+      this.clearMutationBaseIds();
 
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         return;
@@ -452,8 +628,20 @@ export class NodalMergeSdk {
           this.emit("runtime-message", runtimeMessage);
         }
 
+        if (msg.type === "welcome") {
+          this.handleWelcomeMessage(msg);
+        }
+
+        if (msg.type === "pack-ack") {
+          this.handleInboundPushAck(msg);
+        }
+
+        if (msg.type === "error") {
+          this.handleInboundRuntimeError(msg);
+        }
+
         if (msg.type === "pack" && typeof msg.nodes === "string") {
-          this.store.import_pack(msg.nodes);
+          this.noteServerNodesImported(msg.nodes);
           this.emitState();
           this.schedulePeerLocalPersist();
         }
@@ -545,12 +733,21 @@ export class NodalMergeSdk {
 
   sync = {
     set: (key, value) => {
+      this.captureMutationBaseIds();
       this.store.set(key, textEncoder.encode(value));
       this.schedulePeerLocalPersist();
     },
 
     get: (key) => {
       const b64 = this.store.read_speculative(key);
+      if (!b64) {
+        return null;
+      }
+      return textDecoder.decode(fromBase64(b64));
+    },
+
+    getCanonical: (key) => {
+      const b64 = this.store.read_canonical(key);
       if (!b64) {
         return null;
       }
@@ -644,11 +841,16 @@ export class NodalMergeSdk {
     },
 
     push: () => {
-      this.sendOrQueue({
-        type: "pack",
-        nodes: this.store.export_all_nodes()
-      });
+      let pushed = false;
+      if (this.mutationBaseIds !== null) {
+        const baseIds = this.mutationBaseIds;
+        this.mutationBaseIds = null;
+        pushed = this.sendDeltaFromKnownBase(baseIds);
+      } else {
+        pushed = this.sendLocalDeltaPack();
+      }
       this.schedulePeerLocalPersist();
+      return pushed;
     },
 
     pull: () => {

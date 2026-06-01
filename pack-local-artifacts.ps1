@@ -134,14 +134,20 @@ if (-not $SkipNuGet) { New-Item -ItemType Directory -Path $nugetOutput -Force | 
 if (-not $SkipCrates) { New-Item -ItemType Directory -Path $crateOutput -Force | Out-Null }
 
 $cargoFallback = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
+$rustupFallback = Join-Path $env:USERPROFILE ".cargo\bin\rustup.exe"
 $wasmPackFallback = Join-Path $env:USERPROFILE ".cargo\bin\wasm-pack.exe"
 $requiresCargo = (-not $SkipCrates) -or (-not $SkipNuGet)
-$cargoPath = if ($requiresCargo) { Resolve-CommandPath -Name "cargo" -Fallbacks @($cargoFallback) } else { $null }
+$requiresWasmBridge = -not $SkipNpm
+$cargoPath = if ($requiresCargo -or $requiresWasmBridge) {
+    Resolve-CommandPath -Name "cargo" -Fallbacks @($cargoFallback)
+} else {
+    $null
+}
 $dotnetPath = if ($SkipNuGet) { $null } else { Resolve-CommandPath -Name "dotnet" }
 $npmPath = if ($SkipNpm) { $null } else { Resolve-CommandPath -Name "npm" }
 $wasmPackPath = if ($SkipNpm) { $null } else { Resolve-CommandPath -Name "wasm-pack" -Fallbacks @($wasmPackFallback) }
 
-if ($requiresCargo -and -not $cargoPath) {
+if (($requiresCargo -or $requiresWasmBridge) -and -not $cargoPath) {
     throw "cargo executable not found. Install Rust or add cargo to PATH (`$HOME\.cargo\bin`)."
 }
 if (-not $SkipNuGet -and -not $dotnetPath) {
@@ -154,10 +160,21 @@ if (-not $SkipNpm -and -not $wasmPackPath) {
     throw "wasm-pack executable not found. Install wasm-pack to build bridge/pkg assets."
 }
 
-if ($requiresCargo) {
+if ($requiresCargo -or $requiresWasmBridge) {
     $cargoBinDir = Split-Path -Parent $cargoPath
     if (-not [string]::IsNullOrWhiteSpace($cargoBinDir) -and ($env:Path -notlike "*$cargoBinDir*")) {
         $env:Path = "$cargoBinDir;$env:Path"
+    }
+}
+
+if ($requiresWasmBridge) {
+    $rustupPath = Resolve-CommandPath -Name "rustup" -Fallbacks @($rustupFallback)
+    if (-not $rustupPath) {
+        throw "rustup executable not found. wasm-pack needs rustup to install/check the wasm32-unknown-unknown target (`$HOME\.cargo\bin`)."
+    }
+    Write-Host "[npm] Ensuring wasm32-unknown-unknown target is installed ..."
+    Invoke-Checked -Name "rustup target add wasm32-unknown-unknown" -Command {
+        & $rustupPath target add wasm32-unknown-unknown
     }
 }
 
@@ -229,6 +246,29 @@ try {
         try {
             Invoke-Checked -Name "npm pack wrapper nodalmerge-sdk-js" -Command { & $npmPath pack }
             Get-ChildItem -Path . -Filter "*.tgz" | ForEach-Object {
+                Copy-Item -Path $_.FullName -Destination (Join-Path $npmOutput $_.Name) -Force
+            }
+        }
+        finally {
+            Pop-Location
+        }
+
+        # Wrapper packs are compatibility stubs. Re-stage the real WASM + SDK tarballs last.
+        Write-Host "[npm] Staging canonical bridge/pkg and sdk-js tarballs ..."
+        Push-Location (Join-Path $repoRoot "bridge\pkg")
+        try {
+            Invoke-Checked -Name "npm pack bridge/pkg (canonical)" -Command { & $npmPath pack }
+            Get-ChildItem -Path . -Filter "nodalmerge-bridge-*.tgz" | ForEach-Object {
+                Copy-Item -Path $_.FullName -Destination (Join-Path $npmOutput $_.Name) -Force
+            }
+        }
+        finally {
+            Pop-Location
+        }
+        Push-Location (Join-Path $repoRoot "sdk-js")
+        try {
+            Invoke-Checked -Name "npm pack sdk-js (canonical)" -Command { & $npmPath pack }
+            Get-ChildItem -Path . -Filter "nodalmerge-sdk-js-*.tgz" | ForEach-Object {
                 Copy-Item -Path $_.FullName -Destination (Join-Path $npmOutput $_.Name) -Force
             }
         }

@@ -467,6 +467,39 @@ impl SyncStore {
         self.graph.resolve_text_canonical(key)
     }
 
+    /// Visible RGA sequence with stable `(lamport, author)` per character.
+    ///
+    /// JSON array: `[{"lamport":1,"author":"<64 hex>","ch":"a"}, ...]`
+    /// Tombstoned characters are omitted. Use for attribution UIs and debugging.
+    pub fn resolve_text_seq_json(&self, key: &str) -> String {
+        Self::text_seq_to_json(self.graph.resolve_text_seq_with_chars(key))
+    }
+
+    /// Authoritative replay: visible sequence using only DAG nodes with
+    /// `transaction.lamport <= max_lamport` (inclusive).
+    pub fn resolve_text_seq_at_lamport_json(&self, key: &str, max_lamport: u64) -> String {
+        Self::text_seq_to_json(self.graph.resolve_text_seq_at_lamport(key, max_lamport))
+    }
+
+    /// Authoritative replay text at lamport `max_lamport`.
+    pub fn resolve_text_at_lamport(&self, key: &str, max_lamport: u64) -> String {
+        self.graph.resolve_text_at_lamport(key, max_lamport)
+    }
+
+    fn text_seq_to_json(seq: Vec<(nodalmerge_core::OpId, char)>) -> String {
+        let items: Vec<serde_json::Value> = seq
+            .into_iter()
+            .map(|(id, ch)| {
+                serde_json::json!({
+                    "lamport": id.lamport,
+                    "author": hex32(&id.author),
+                    "ch": ch.to_string(),
+                })
+            })
+            .collect();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// Internal helper: persist one canonical range op node.
     fn commit_text_range_op(&mut self, range_op: TextRangeOp, wall_ms: u64) -> Result<(), JsValue> {
         self.graph
@@ -865,6 +898,72 @@ impl SyncStore {
         Ok(base64_encode(&pack_nodes(&nodes)))
     }
 
+    /// Local DAG replay page for a key prefix (same shape as `replay.read-range.result`).
+    /// Reads the in-memory graph only — no host query plane.
+    pub fn read_replay_range_local_json(
+        &self,
+        key_prefix: &str,
+        from_lamport: u64,
+        limit: u32,
+        cursor: &str,
+    ) -> Result<String, JsValue> {
+        let key_prefix = key_prefix.trim();
+        if key_prefix.is_empty() {
+            return Err(JsValue::from_str("key_prefix is required"));
+        }
+        let limit = (limit.max(1)) as usize;
+        let offset = replay_read_range_offset(cursor);
+
+        let mut events: Vec<(u64, String, Vec<String>)> = self
+            .graph
+            .all_nodes()
+            .into_iter()
+            .filter(|node| node.transaction.lamport >= from_lamport)
+            .filter_map(|node| {
+                let touched: Vec<String> = node
+                    .transaction
+                    .ops
+                    .iter()
+                    .filter_map(|op| op.key().map(str::to_string))
+                    .filter(|key| key.starts_with(key_prefix))
+                    .collect();
+                if touched.is_empty() {
+                    return None;
+                }
+                Some((node.transaction.lamport, node.id.to_hex(), touched))
+            })
+            .collect();
+
+        events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let end = offset.saturating_add(limit).min(events.len());
+        let page = if offset < events.len() {
+            events[offset..end].to_vec()
+        } else {
+            Vec::new()
+        };
+        let next_cursor = (end < events.len()).then(|| format!("offset:{end}"));
+
+        let items: Vec<serde_json::Value> = page
+            .into_iter()
+            .map(|(lamport, node_id, touched_keys)| {
+                serde_json::json!({
+                    "lamport": lamport,
+                    "node_id": node_id,
+                    "touched_keys": touched_keys
+                })
+            })
+            .collect();
+
+        let out = serde_json::json!({
+            "type": "replay.read-range.result",
+            "key_prefix": key_prefix,
+            "from_lamport": from_lamport,
+            "items": items,
+            "next_cursor": next_cursor
+        });
+        serde_json::to_string(&out).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
     /// Import nodes received from a remote peer.
     /// Accepts a base64-encoded postcard byte string (A3 wire format).
     /// Handles out-of-order delivery by retrying nodes whose parents haven't
@@ -1083,6 +1182,17 @@ impl SyncStore {
         let nodes = self.graph.get_nodes(&missing);
         Ok(base64_encode(&pack_nodes(&nodes)))
     }
+}
+
+fn replay_read_range_offset(page_token: &str) -> usize {
+    let token = page_token.trim();
+    if token.is_empty() {
+        return 0;
+    }
+    let Some(raw) = token.strip_prefix("offset:") else {
+        return 0;
+    };
+    raw.parse::<usize>().unwrap_or(0)
 }
 
 fn parse_hex_hash(hex: &str) -> Option<nodalmerge_core::Hash> {

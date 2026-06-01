@@ -229,6 +229,28 @@ function normalizeLamportFloor(value) {
   return value;
 }
 
+function parseTextSequenceJson(raw) {
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        typeof entry.lamport === "number" &&
+        typeof entry.author === "string" &&
+        typeof entry.ch === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
 function normalizeTimeoutMs(timeoutMs, fallback = 5000) {
   if (timeoutMs == null) {
     return fallback;
@@ -304,6 +326,16 @@ export function parseRuntimeMessage(data) {
   return parsed;
 }
 
+const emptyTopologySnapshot = {
+  connected: false,
+  outboxDepth: 0,
+  nodeCount: 0,
+  frontier: [],
+  pubkey: "",
+  transportPolicy: "ws-only",
+  activeTransport: "ws-only"
+};
+
 export class NodalMergeSdk {
   constructor(options) {
     this.options = options;
@@ -338,15 +370,107 @@ export class NodalMergeSdk {
     this.lastPushMarkedIds = [];
     /** Snapshot of graph node ids captured before the first sync.set in a push batch. */
     this.mutationBaseIds = null;
+    /** Active `&mut` WASM store calls — reads must not run while this is > 0. */
+    this.storeWriteDepth = 0;
+    this.emitStateScheduled = false;
+    this.pendingPushAfterWrite = false;
+  }
+
+  /** True while the WASM graph is being mutated (import_pack, text ops, etc.). */
+  isWasmStoreBusy() {
+    return this.storeWriteDepth > 0;
+  }
+
+  withStoreWrite(fn) {
+    if (!this.store) {
+      return undefined;
+    }
+    this.storeWriteDepth += 1;
+    try {
+      return fn();
+    } catch (err) {
+      this.emit("error", err);
+      return undefined;
+    } finally {
+      this.storeWriteDepth -= 1;
+      if (this.storeWriteDepth === 0 && this.pendingPushAfterWrite) {
+        this.pendingPushAfterWrite = false;
+        queueMicrotask(() => {
+          try {
+            this.flushPush();
+          } catch (err) {
+            this.emit("error", err);
+          }
+        });
+      }
+      if (this.emitStateScheduled && this.storeWriteDepth === 0) {
+        this.emitStateScheduled = false;
+        queueMicrotask(() => this.emitState());
+      }
+    }
+  }
+
+  withStoreRead(fn, fallback = null) {
+    if (!this.store || this.storeWriteDepth > 0) {
+      return fallback;
+    }
+    try {
+      return fn();
+    } catch (err) {
+      this.emit("error", err);
+      return fallback;
+    }
+  }
+
+  safeTopologySnapshot() {
+    if (!this.store) {
+      return {
+        ...emptyTopologySnapshot,
+        connected: this.connected,
+        outboxDepth: this.outbox.length,
+        transportPolicy: this.transportPolicy,
+        activeTransport: this.activeTransportMode
+      };
+    }
+
+    return (
+      this.withStoreRead(
+        () => ({
+          connected: this.connected,
+          outboxDepth: this.outbox.length,
+          nodeCount: this.store.node_count(),
+          frontier: parseJsonOrDefault(this.store.frontier_hex_json(), []),
+          pubkey: this.store.pubkey_hex(),
+          transportPolicy: this.transportPolicy,
+          activeTransport: this.activeTransportMode
+        }),
+        {
+          ...emptyTopologySnapshot,
+          connected: this.connected,
+          outboxDepth: this.outbox.length,
+          transportPolicy: this.transportPolicy,
+          activeTransport: this.activeTransportMode
+        }
+      ) ?? {
+        ...emptyTopologySnapshot,
+        connected: this.connected,
+        outboxDepth: this.outbox.length,
+        transportPolicy: this.transportPolicy,
+        activeTransport: this.activeTransportMode
+      }
+    );
   }
 
   captureMutationBaseIds() {
     if (this.mutationBaseIds !== null || !this.store) {
       return;
     }
-    this.mutationBaseIds = new Set(
-      parseJsonOrDefault(this.store.all_node_ids_json(), []).filter((id) => typeof id === "string")
+    const ids = this.withStoreRead(
+      () =>
+        parseJsonOrDefault(this.store.all_node_ids_json(), []).filter((id) => typeof id === "string"),
+      []
     );
+    this.mutationBaseIds = new Set(ids);
   }
 
   clearMutationBaseIds() {
@@ -354,13 +478,16 @@ export class NodalMergeSdk {
   }
 
   snapshotNodeIds() {
-    return new Set(
-      parseJsonOrDefault(this.store.all_node_ids_json(), []).filter((id) => typeof id === "string")
+    const ids = this.withStoreRead(
+      () =>
+        parseJsonOrDefault(this.store.all_node_ids_json(), []).filter((id) => typeof id === "string"),
+      []
     );
+    return new Set(ids);
   }
 
   listUnsentNodeIds() {
-    const all = parseJsonOrDefault(this.store.all_node_ids_json(), []);
+    const all = this.withStoreRead(() => parseJsonOrDefault(this.store.all_node_ids_json(), []), []);
     return all.filter((id) => typeof id === "string" && !this.sentToServer.has(id));
   }
 
@@ -375,19 +502,23 @@ export class NodalMergeSdk {
   }
 
   noteServerNodesImported(packB64) {
-    const idsBefore = new Set(parseJsonOrDefault(this.store.all_node_ids_json(), []));
-    this.store.import_pack(packB64);
-    const idsAfter = parseJsonOrDefault(this.store.all_node_ids_json(), []);
-    for (const id of idsAfter) {
-      if (typeof id === "string" && !idsBefore.has(id)) {
-        this.sentToServer.add(id);
+    this.withStoreWrite(() => {
+      const idsBefore = new Set(
+        parseJsonOrDefault(this.store.all_node_ids_json(), []).filter((id) => typeof id === "string")
+      );
+      this.store.import_pack(packB64);
+      const idsAfter = parseJsonOrDefault(this.store.all_node_ids_json(), []);
+      for (const id of idsAfter) {
+        if (typeof id === "string" && !idsBefore.has(id)) {
+          this.sentToServer.add(id);
+        }
       }
-    }
+    });
   }
 
   markPushedNodeIds(idsBeforePush) {
     const marked = [];
-    const idsAfter = parseJsonOrDefault(this.store.all_node_ids_json(), []);
+    const idsAfter = this.withStoreRead(() => parseJsonOrDefault(this.store.all_node_ids_json(), []), []);
     for (const id of idsAfter) {
       if (typeof id === "string" && !idsBeforePush.has(id)) {
         this.sentToServer.add(id);
@@ -419,33 +550,27 @@ export class NodalMergeSdk {
   }
 
   sendDeltaFromKnownBase(baseIds) {
-    if (!this.store) {
+    if (!this.store || this.storeWriteDepth > 0) {
       return false;
     }
     const idsBeforePush = new Set(this.sentToServer);
     const known = JSON.stringify([...baseIds]);
-    let nodes;
-    try {
-      nodes = this.store.export_nodes_missing_from(known);
-    } catch (err) {
-      this.emit("error", err);
+    const nodes = this.withStoreRead(() => this.store.export_nodes_missing_from(known), null);
+    if (!nodes) {
       return false;
     }
     return this.enqueueDeltaPack(nodes, idsBeforePush);
   }
 
   sendLocalDeltaPack() {
-    if (!this.store) {
+    if (!this.store || this.storeWriteDepth > 0) {
       return false;
     }
 
     const idsBeforePush = new Set(this.sentToServer);
     const known = JSON.stringify([...this.sentToServer]);
-    let nodes;
-    try {
-      nodes = this.store.export_nodes_missing_from(known);
-    } catch (err) {
-      this.emit("error", err);
+    const nodes = this.withStoreRead(() => this.store.export_nodes_missing_from(known), null);
+    if (!nodes) {
       return false;
     }
 
@@ -462,6 +587,15 @@ export class NodalMergeSdk {
     }
 
     return false;
+  }
+
+  flushPush() {
+    if (this.mutationBaseIds !== null) {
+      const baseIds = this.mutationBaseIds;
+      this.mutationBaseIds = null;
+      return this.sendDeltaFromKnownBase(baseIds);
+    }
+    return this.sendLocalDeltaPack();
   }
 
   handleInboundPushAck(msg) {
@@ -484,25 +618,87 @@ export class NodalMergeSdk {
   }
 
   handleWelcomeMessage(msg) {
+    if (this.storeWriteDepth > 0) {
+      return;
+    }
     const missing = Array.isArray(msg.missing) ? msg.missing : [];
     if (missing.length > 0) {
-      try {
-        const delta = this.store.export_nodes_missing_from(JSON.stringify(missing));
+      const delta = this.withStoreRead(
+        () => this.store.export_nodes_missing_from(JSON.stringify(missing)),
+        null
+      );
+      if (delta) {
         const idsBeforePush = new Set(this.sentToServer);
         this.enqueueDeltaPack(delta, idsBeforePush);
-      } catch (err) {
-        this.emit("error", err);
       }
-    } else if (msg.root && msg.root !== this.store.merkle_root_hex()) {
+      return;
+    }
+    const root = this.withStoreRead(() => this.store.merkle_root_hex(), "");
+    if (msg.root && msg.root !== root) {
       const serverFrontier = Array.isArray(msg.frontier) ? msg.frontier : [];
-      try {
-        const delta = this.store.export_nodes_missing_from(JSON.stringify(serverFrontier));
+      const delta = this.withStoreRead(
+        () => this.store.export_nodes_missing_from(JSON.stringify(serverFrontier)),
+        null
+      );
+      if (delta) {
         const idsBeforePush = new Set(this.sentToServer);
         this.enqueueDeltaPack(delta, idsBeforePush);
-      } catch (err) {
-        this.emit("error", err);
       }
     }
+  }
+
+  handleWsMessage(msg, runtimeMessage) {
+    if (msg.type === "welcome") {
+      this.handleWelcomeMessage(msg);
+    }
+
+    if (msg.type === "pack-ack") {
+      this.handleInboundPushAck(msg);
+    }
+
+    if (msg.type === "error") {
+      this.handleInboundRuntimeError(msg);
+    }
+
+    let graphMutated = false;
+    if (msg.type === "pack" && typeof msg.nodes === "string") {
+      this.noteServerNodesImported(msg.nodes);
+      this.schedulePeerLocalPersist();
+      graphMutated = true;
+    }
+
+    if (msg.type === "blob-pack" && Array.isArray(msg.blobs)) {
+      this.withStoreWrite(() => {
+        for (const entry of msg.blobs) {
+          if (entry && typeof entry.hash === "string" && typeof entry.data === "string") {
+            this.store.store_blob_bytes(entry.hash, fromBase64(entry.data));
+          }
+        }
+      });
+      this.schedulePeerLocalPersist();
+      graphMutated = true;
+    }
+
+    if (runtimeMessage) {
+      this.emit("runtime-message", runtimeMessage);
+    }
+
+    if (graphMutated) {
+      queueMicrotask(() => this.emitState());
+    }
+
+    if (shouldEmitPresenceEvent(msg)) {
+      this.emit("presence", cloneMessagePayload(msg));
+    }
+
+    if (shouldEmitSignalEvent(msg)) {
+      if (this.transportPolicy === "auto") {
+        this.setActiveTransportMode("ws+webrtc");
+      }
+      this.emit("signal", cloneMessagePayload(msg));
+    }
+
+    this.emit("message", msg);
   }
 
   schedulePeerLocalPersist() {
@@ -611,7 +807,7 @@ export class NodalMergeSdk {
       this.connected = true;
       this.reconnectAttempt = 0;
       this.emitState();
-      this.emit("connected", this.topology.snapshot());
+      this.emit("connected", this.safeTopologySnapshot());
 
       ws.onmessage = (evt) => {
         if (typeof evt.data !== "string") {
@@ -624,69 +820,37 @@ export class NodalMergeSdk {
         }
 
         const runtimeMessage = parseRuntimeMessage(evt.data);
-        if (runtimeMessage) {
-          this.emit("runtime-message", runtimeMessage);
-        }
-
-        if (msg.type === "welcome") {
-          this.handleWelcomeMessage(msg);
-        }
-
-        if (msg.type === "pack-ack") {
-          this.handleInboundPushAck(msg);
-        }
-
-        if (msg.type === "error") {
-          this.handleInboundRuntimeError(msg);
-        }
-
-        if (msg.type === "pack" && typeof msg.nodes === "string") {
-          this.noteServerNodesImported(msg.nodes);
-          this.emitState();
-          this.schedulePeerLocalPersist();
-        }
-
-        if (msg.type === "blob-pack" && Array.isArray(msg.blobs)) {
-          for (const entry of msg.blobs) {
-            if (entry && typeof entry.hash === "string" && typeof entry.data === "string") {
-              this.store.store_blob_bytes(entry.hash, fromBase64(entry.data));
-            }
-          }
-          this.emitState();
-          this.schedulePeerLocalPersist();
-        }
-
-        if (shouldEmitPresenceEvent(msg)) {
-          this.emit("presence", cloneMessagePayload(msg));
-        }
-
-        if (shouldEmitSignalEvent(msg)) {
-          if (this.transportPolicy === "auto") {
-            this.setActiveTransportMode("ws+webrtc");
-          }
-          this.emit("signal", cloneMessagePayload(msg));
-        }
-
-        this.emit("message", msg);
+        queueMicrotask(() => this.handleWsMessage(msg, runtimeMessage));
       };
 
       ws.onclose = () => {
         this.connected = false;
-        this.emitState();
-        this.emit("disconnected", this.topology.snapshot());
+        queueMicrotask(() => {
+          this.emitState();
+          this.emit("disconnected", this.safeTopologySnapshot());
+        });
 
         if (!this.manualDisconnect) {
           this.scheduleReconnect();
         }
       };
 
-      const hello = {
-        type: "hello",
-        room: this.options.roomId,
-        pubkey: this.store.pubkey_hex(),
-        frontier: parseJsonOrDefault(this.store.frontier_hex_json(), []),
-        caps: parseJsonOrDefault(this.store.our_capabilities_json(), {})
-      };
+      const hello = this.withStoreRead(
+        () => ({
+          type: "hello",
+          room: this.options.roomId,
+          pubkey: this.store.pubkey_hex(),
+          frontier: parseJsonOrDefault(this.store.frontier_hex_json(), []),
+          caps: parseJsonOrDefault(this.store.our_capabilities_json(), {})
+        }),
+        {
+          type: "hello",
+          room: this.options.roomId,
+          pubkey: "",
+          frontier: [],
+          caps: {}
+        }
+      );
 
       if (this.options.token) {
         hello.token = this.options.token;
@@ -734,36 +898,98 @@ export class NodalMergeSdk {
   sync = {
     set: (key, value) => {
       this.captureMutationBaseIds();
-      this.store.set(key, textEncoder.encode(value));
+      this.withStoreWrite(() => {
+        this.store.set(key, textEncoder.encode(value));
+      });
       this.schedulePeerLocalPersist();
     },
 
-    get: (key) => {
-      const b64 = this.store.read_speculative(key);
-      if (!b64) {
+    get: (key) =>
+      this.withStoreRead(() => {
+        const b64 = this.store.read_speculative(key);
+        if (!b64) {
+          return null;
+        }
+        return textDecoder.decode(fromBase64(b64));
+      }, null),
+
+    getCanonical: (key) =>
+      this.withStoreRead(() => {
+        const b64 = this.store.read_canonical(key);
+        if (!b64) {
+          return null;
+        }
+        return textDecoder.decode(fromBase64(b64));
+      }, null),
+
+    getText: (key) => this.withStoreRead(() => this.store.resolve_text(key), ""),
+
+    getTextCanonical: (key) => this.withStoreRead(() => this.store.resolve_text_canonical(key), ""),
+
+    getTextSequence: (key) =>
+      this.withStoreRead(
+        () => parseTextSequenceJson(this.store.resolve_text_seq_json(key)),
+        []
+      ),
+
+    getTextAtLamport: (key, maxLamport) => {
+      if (!isNonNegativeInteger(maxLamport)) {
+        throw new Error("getTextAtLamport maxLamport must be a non-negative integer");
+      }
+      return this.withStoreRead(
+        () => this.store.resolve_text_at_lamport(key, BigInt(maxLamport)),
+        ""
+      );
+    },
+
+    getTextSequenceAtLamport: (key, maxLamport) => {
+      if (!isNonNegativeInteger(maxLamport)) {
+        throw new Error("getTextSequenceAtLamport maxLamport must be a non-negative integer");
+      }
+      return this.withStoreRead(
+        () =>
+          parseTextSequenceJson(
+            this.store.resolve_text_seq_at_lamport_json(key, BigInt(maxLamport))
+          ),
+        []
+      );
+    },
+
+    readLocalReplayRange: ({ keyPrefix, fromLamport = 0, limit = 100, cursor = undefined }) => {
+      if (typeof keyPrefix !== "string" || keyPrefix.trim().length === 0) {
+        throw new Error("keyPrefix is required");
+      }
+      const empty = {
+        type: "replay.read-range.result",
+        key_prefix: keyPrefix.trim(),
+        from_lamport: normalizeLamportFloor(fromLamport),
+        items: [],
+        next_cursor: null
+      };
+      if (this.storeWriteDepth > 0) {
+        return empty;
+      }
+      if (typeof this.store.read_replay_range_local_json !== "function") {
         return null;
       }
-      return textDecoder.decode(fromBase64(b64));
-    },
-
-    getCanonical: (key) => {
-      const b64 = this.store.read_canonical(key);
-      if (!b64) {
-        return null;
+      try {
+        const raw = this.store.read_replay_range_local_json(
+          keyPrefix,
+          BigInt(normalizeLamportFloor(fromLamport)),
+          normalizePositiveLimit(limit),
+          typeof cursor === "string" && cursor.length > 0 ? cursor : ""
+        );
+        return parseJsonOrDefault(raw, empty);
+      } catch (err) {
+        this.emit("error", err);
+        return empty;
       }
-      return textDecoder.decode(fromBase64(b64));
-    },
-
-    getText: (key) => {
-      return this.store.resolve_text(key);
-    },
-
-    getTextCanonical: (key) => {
-      return this.store.resolve_text_canonical(key);
     },
 
     del: (key) => {
-      this.store.delete(key);
+      this.withStoreWrite(() => {
+        this.store.delete(key);
+      });
       this.schedulePeerLocalPersist();
     },
 
@@ -774,7 +1000,14 @@ export class NodalMergeSdk {
       if (!isNonNegativeInteger(pos)) {
         throw new Error("insertTextAt pos must be a non-negative integer");
       }
-      this.store.insert_text_range(key, pos, text);
+      this.captureMutationBaseIds();
+      this.withStoreWrite(() => {
+        if ([...text].length === 1 && typeof this.store.insert_text === "function") {
+          this.store.insert_text(key, pos, text);
+        } else {
+          this.store.insert_text_range(key, pos, text);
+        }
+      });
       this.schedulePeerLocalPersist();
     },
 
@@ -788,7 +1021,14 @@ export class NodalMergeSdk {
       if (len === 0) {
         return;
       }
-      this.store.delete_text_range(key, pos, len);
+      this.captureMutationBaseIds();
+      this.withStoreWrite(() => {
+        if (len === 1 && typeof this.store.delete_text === "function") {
+          this.store.delete_text(key, pos);
+        } else {
+          this.store.delete_text_range(key, pos, len);
+        }
+      });
       this.schedulePeerLocalPersist();
     },
 
@@ -796,23 +1036,26 @@ export class NodalMergeSdk {
       if (typeof text !== "string" || text.length === 0) {
         return;
       }
+      this.captureMutationBaseIds();
       const normalized = normalizeRangeAnchor(anchor, "insert");
-      switch (normalized.kind) {
-        case "offset":
-          this.store.insert_text_range(key, normalized.pos, text);
-          return;
-        case "start":
-          this.store.insert_text_range_start(key, text);
-          return;
-        case "end":
-          this.store.insert_text_range_end(key, text);
-          return;
-        case "after":
-          this.store.insert_text_range_after(key, normalized.lamport, normalized.author, text);
-          return;
-        default:
-          throw new Error("Unsupported insert anchor kind");
-      }
+      this.withStoreWrite(() => {
+        switch (normalized.kind) {
+          case "offset":
+            this.store.insert_text_range(key, normalized.pos, text);
+            break;
+          case "start":
+            this.store.insert_text_range_start(key, text);
+            break;
+          case "end":
+            this.store.insert_text_range_end(key, text);
+            break;
+          case "after":
+            this.store.insert_text_range_after(key, normalized.lamport, normalized.author, text);
+            break;
+          default:
+            throw new Error("Unsupported insert anchor kind");
+        }
+      });
       this.schedulePeerLocalPersist();
     },
 
@@ -823,40 +1066,41 @@ export class NodalMergeSdk {
       if (len === 0) {
         return;
       }
+      this.captureMutationBaseIds();
       const normalized = normalizeRangeAnchor(anchor, "delete");
-      switch (normalized.kind) {
-        case "offset":
-          this.store.delete_text_range(key, normalized.pos, len);
-          return;
-        case "start":
-          this.store.delete_text_range_start(key, len);
-          return;
-        case "after":
-          this.store.delete_text_range_after(key, normalized.lamport, normalized.author, len);
-          return;
-        default:
-          throw new Error("Unsupported delete anchor kind");
-      }
+      this.withStoreWrite(() => {
+        switch (normalized.kind) {
+          case "offset":
+            this.store.delete_text_range(key, normalized.pos, len);
+            break;
+          case "start":
+            this.store.delete_text_range_start(key, len);
+            break;
+          case "after":
+            this.store.delete_text_range_after(key, normalized.lamport, normalized.author, len);
+            break;
+          default:
+            throw new Error("Unsupported delete anchor kind");
+        }
+      });
       this.schedulePeerLocalPersist();
     },
 
     push: () => {
-      let pushed = false;
-      if (this.mutationBaseIds !== null) {
-        const baseIds = this.mutationBaseIds;
-        this.mutationBaseIds = null;
-        pushed = this.sendDeltaFromKnownBase(baseIds);
-      } else {
-        pushed = this.sendLocalDeltaPack();
+      if (this.storeWriteDepth > 0) {
+        this.pendingPushAfterWrite = true;
+        return true;
       }
+      const pushed = this.flushPush();
       this.schedulePeerLocalPersist();
       return pushed;
     },
 
     pull: () => {
+      const known = this.withStoreRead(() => parseJsonOrDefault(this.store.all_node_ids_json(), []), []);
       this.sendOrQueue({
         type: "request",
-        known: parseJsonOrDefault(this.store.all_node_ids_json(), [])
+        known
       });
     }
   };
@@ -1082,15 +1326,7 @@ export class NodalMergeSdk {
   };
 
   topology = {
-    snapshot: () => ({
-      connected: this.connected,
-      outboxDepth: this.outbox.length,
-      nodeCount: this.store.node_count(),
-      frontier: parseJsonOrDefault(this.store.frontier_hex_json(), []),
-      pubkey: this.store.pubkey_hex(),
-      transportPolicy: this.transportPolicy,
-      activeTransport: this.activeTransportMode
-    })
+    snapshot: () => this.safeTopologySnapshot()
   };
 
   on(event, handler) {
@@ -1224,7 +1460,11 @@ export class NodalMergeSdk {
   }
 
   emitState() {
-    this.emit("state", this.topology.snapshot());
+    if (this.storeWriteDepth > 0) {
+      this.emitStateScheduled = true;
+      return;
+    }
+    this.emit("state", this.safeTopologySnapshot());
   }
 }
 

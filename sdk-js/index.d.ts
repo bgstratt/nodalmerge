@@ -129,6 +129,8 @@ export type TextDeleteAnchor =
 export declare class NodalMergeSdk {
   constructor(options: NodalMergeSdkOptions);
   initialize(): Promise<void>;
+  /** True while import_pack / text ops hold the WASM graph (no concurrent reads). */
+  isWasmStoreBusy(): boolean;
 
   room: {
     connect: () => Promise<void>;
@@ -140,6 +142,18 @@ export declare class NodalMergeSdk {
     get: (key: string) => string | null;
     getText: (key: string) => string;
     getTextCanonical: (key: string) => string;
+    getTextSequence: (key: string) => Array<{ lamport: number; author: string; ch: string }>;
+    getTextAtLamport: (key: string, maxLamport: number) => string;
+    getTextSequenceAtLamport: (
+      key: string,
+      maxLamport: number
+    ) => Array<{ lamport: number; author: string; ch: string }>;
+    readLocalReplayRange: (args: {
+      keyPrefix: string;
+      fromLamport?: number;
+      limit?: number;
+      cursor?: string;
+    }) => NodalMergeRuntimeMessage | null;
     del: (key: string) => void;
     insertTextAt: (key: string, pos: number, text: string) => void;
     deleteTextAt: (key: string, pos: number, len: number) => void;

@@ -32,6 +32,10 @@ function createMockStore() {
   const calls = [];
   return {
     calls,
+    all_node_ids_json: () => {
+      calls.push(["all_node_ids_json"]);
+      return "[]";
+    },
     resolve_text: (...args) => {
       calls.push(["resolve_text", ...args]);
       return "spec-text";
@@ -40,6 +44,8 @@ function createMockStore() {
       calls.push(["resolve_text_canonical", ...args]);
       return "canon-text";
     },
+    insert_text: (...args) => calls.push(["insert_text", ...args]),
+    delete_text: (...args) => calls.push(["delete_text", ...args]),
     insert_text_range: (...args) => calls.push(["insert_text_range", ...args]),
     delete_text_range: (...args) => calls.push(["delete_text_range", ...args]),
     insert_text_range_start: (...args) => calls.push(["insert_text_range_start", ...args]),
@@ -80,6 +86,7 @@ test("sync.insertTextRange routes offset/start/end anchors", async () => {
   sdk.sync.insertTextRange("doc", { kind: "end" }, "z");
 
   assert.deepEqual(mockStore.calls, [
+    ["all_node_ids_json"],
     ["insert_text_range", "doc", 2, "xy"],
     ["insert_text_range_start", "doc", "a"],
     ["insert_text_range_end", "doc", "z"],
@@ -99,15 +106,16 @@ test("sync.insertTextRange routes after anchor and normalizes inputs", async () 
     "!"
   );
 
-  assert.equal(mockStore.calls.length, 1);
-  assert.equal(mockStore.calls[0][0], "insert_text_range_after");
-  assert.equal(mockStore.calls[0][1], "doc");
-  assert.equal(mockStore.calls[0][2], 42n);
+  assert.equal(mockStore.calls.length, 2);
+  assert.equal(mockStore.calls[0][0], "all_node_ids_json");
+  assert.equal(mockStore.calls[1][0], "insert_text_range_after");
+  assert.equal(mockStore.calls[1][1], "doc");
+  assert.equal(mockStore.calls[1][2], 42n);
   assert.equal(
-    mockStore.calls[0][3],
+    mockStore.calls[1][3],
     "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
   );
-  assert.equal(mockStore.calls[0][4], "!");
+  assert.equal(mockStore.calls[1][4], "!");
 });
 
 test("sync.deleteTextRange routes offset/start/after anchors", async () => {
@@ -126,6 +134,7 @@ test("sync.deleteTextRange routes offset/start/after anchors", async () => {
   );
 
   assert.deepEqual(mockStore.calls, [
+    ["all_node_ids_json"],
     ["delete_text_range", "doc", 1, 2],
     ["delete_text_range_start", "doc", 3],
     ["delete_text_range_after", "doc", 9n, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 1],
@@ -156,8 +165,22 @@ test("sync.insertTextAt and deleteTextAt dispatch to offset range methods", asyn
   sdk.sync.deleteTextAt("doc", 1, 1);
 
   assert.deepEqual(mockStore.calls, [
+    ["all_node_ids_json"],
     ["insert_text_range", "doc", 0, "abc"],
-    ["delete_text_range", "doc", 1, 1],
+    ["delete_text", "doc", 1],
+  ]);
+});
+
+test("sync.insertTextAt and deleteTextAt use per-char bridge ops for single code points", async () => {
+  const { sdk, mockStore } = await createSdkWithMockStore();
+
+  sdk.sync.insertTextAt("doc", 2, "z");
+  sdk.sync.deleteTextAt("doc", 0, 1);
+
+  assert.deepEqual(mockStore.calls, [
+    ["all_node_ids_json"],
+    ["insert_text", "doc", 2, "z"],
+    ["delete_text", "doc", 0],
   ]);
 });
 
@@ -484,6 +507,33 @@ test("query.readReplayRange sends replay envelope and resolves paged result", as
       cursor: "offset:0"
     }
   ]);
+});
+
+test("sync.readLocalReplayRange reads WASM graph without websocket", async () => {
+  const { sdk } = await createSdkWithMockStore();
+  sdk.store.read_replay_range_local_json = (keyPrefix, fromLamport, limit, cursor) => {
+    assert.equal(keyPrefix, "notes/demo/");
+    assert.equal(fromLamport, 0n);
+    assert.equal(limit, 5);
+    assert.equal(cursor, "");
+    return JSON.stringify({
+      type: "replay.read-range.result",
+      key_prefix: "notes/demo/",
+      from_lamport: 0,
+      items: [{ lamport: 3, node_id: "abc", touched_keys: ["notes/demo/body"] }],
+      next_cursor: null
+    });
+  };
+
+  const result = sdk.sync.readLocalReplayRange({
+    keyPrefix: "notes/demo/",
+    fromLamport: 0,
+    limit: 5
+  });
+
+  assert.equal(result.type, "replay.read-range.result");
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].lamport, 3);
 });
 
 test("query.readReplayRange validates keyPrefix and fromLamport", async () => {

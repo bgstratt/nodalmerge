@@ -547,7 +547,22 @@ impl TextProjection {
         }
     }
 
-    fn elapsed_ns_u64(start: Instant) -> u64 {
+    /// `Instant::now()` panics on `wasm32-unknown-unknown`; skip timing there.
+    fn projection_timing_start() -> Option<Instant> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Some(Instant::now())
+        }
+    }
+
+    fn elapsed_ns_u64(start: Option<Instant>) -> u64 {
+        let Some(start) = start else {
+            return 0;
+        };
         let ns = start.elapsed().as_nanos();
         ns.min(u64::MAX as u128) as u64
     }
@@ -1240,7 +1255,7 @@ impl TextProjection {
     }
 
     fn refresh_run_index_incremental(&mut self) {
-        let started = Instant::now();
+        let started = Self::projection_timing_start();
         let weights: Vec<usize> = self.visible_runs.iter().map(TextRun::len_chars).collect();
         self.position_index.rebuild_from_weights(&weights);
         self.index_update_time_ns = self
@@ -1249,7 +1264,7 @@ impl TextProjection {
     }
 
     fn refresh_run_index_for_weight_change(&mut self, run_idx: usize) {
-        let started = Instant::now();
+        let started = Self::projection_timing_start();
         let new_weight = self
             .visible_runs
             .get(run_idx)
@@ -1342,7 +1357,7 @@ impl TextProjection {
         for (i, id) in self.visible_ids.iter().copied().enumerate() {
             self.visible_pos_by_id.insert(id, i);
         }
-        let idx_rebuild_started = Instant::now();
+        let idx_rebuild_started = Self::projection_timing_start();
         let weights: Vec<usize> = self.visible_runs.iter().map(TextRun::len_chars).collect();
         self.position_index = CountedPositionIndex::new_from_weights(&weights);
         self.index_rebuild_time_ns = self
@@ -1382,6 +1397,32 @@ pub fn resolve_text_seq(nodes: &[&SyncNode], key: &str) -> Vec<(OpId, char)> {
 /// Resolve the RGA text for `key` as a plain UTF-8 `String`.
 pub fn resolve_text(nodes: &[&SyncNode], key: &str) -> String {
     resolve_text_seq(nodes, key)
+        .into_iter()
+        .map(|(_, ch)| ch)
+        .collect()
+}
+
+/// Replay visible RGA state for `key` using only DAG nodes with
+/// `transaction.lamport <= max_lamport` (inclusive).
+///
+/// Tombstones from deletes in the included window are honored. This is the
+/// authoritative history playback path — not a glyph filter on the live view.
+pub fn resolve_text_seq_upto_lamport(
+    nodes: &[&SyncNode],
+    key: &str,
+    max_lamport: u64,
+) -> Vec<(OpId, char)> {
+    let filtered: Vec<&SyncNode> = nodes
+        .iter()
+        .copied()
+        .filter(|node| node.transaction.lamport <= max_lamport)
+        .collect();
+    resolve_text_seq(&filtered, key)
+}
+
+/// Plain UTF-8 text at lamport `max_lamport` (see [`resolve_text_seq_upto_lamport`]).
+pub fn resolve_text_upto_lamport(nodes: &[&SyncNode], key: &str, max_lamport: u64) -> String {
+    resolve_text_seq_upto_lamport(nodes, key, max_lamport)
         .into_iter()
         .map(|(_, ch)| ch)
         .collect()
@@ -1432,6 +1473,57 @@ mod tests {
         assert_eq!(seq.len(), 2);
         assert_eq!(seq[0], (id_h, 'h'));
         assert_eq!(seq[1], (id_i, 'i'));
+    }
+
+    #[test]
+    fn text_replay_upto_lamport_excludes_later_nodes_and_honors_deletes() {
+        let sk = sk(1);
+        let mut g = StateGraph::new();
+
+        let id_a = next_op_id(&g, &sk, 1000);
+        g.apply_local(
+            &sk,
+            1000,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: None,
+                ch: 'a',
+            })],
+        )
+        .unwrap();
+
+        let id_b = next_op_id(&g, &sk, 1001);
+        g.apply_local(
+            &sk,
+            1001,
+            vec![Op::Text(TextOp::Insert {
+                key: "doc".into(),
+                after: Some(id_a),
+                ch: 'b',
+            })],
+        )
+        .unwrap();
+
+        let owned = g.all_nodes();
+        let nodes: Vec<&SyncNode> = owned.iter().collect();
+        assert_eq!(resolve_text_upto_lamport(&nodes, "doc", id_a.lamport), "a");
+        assert_eq!(resolve_text_upto_lamport(&nodes, "doc", id_b.lamport), "ab");
+
+        g.apply_local(
+            &sk,
+            1002,
+            vec![Op::Text(TextOp::Delete {
+                key: "doc".into(),
+                target: id_b,
+            })],
+        )
+        .unwrap();
+
+        let owned = g.all_nodes();
+        let nodes: Vec<&SyncNode> = owned.iter().collect();
+        let delete_lamport = g.lamport();
+        assert_eq!(resolve_text_upto_lamport(&nodes, "doc", delete_lamport), "a");
+        assert_eq!(g.resolve_text("doc"), "a");
     }
 
     #[test]

@@ -1239,16 +1239,36 @@ impl<N: NodeStore> StateGraph<N> {
         TextProjection::from_nodes(&nodes, key)
     }
 
+    fn all_nodes_snapshot(&self) -> Vec<&SyncNode> {
+        self.nodes
+            .all_ids()
+            .iter()
+            .filter_map(|id| self.nodes.get(id))
+            .collect()
+    }
+
     fn resolve_text_seq_legacy(&self, key: &str) -> Vec<(crate::op::OpId, char)> {
-        let node_ids = self.nodes.all_ids();
-        let nodes: Vec<&SyncNode> = node_ids.iter().filter_map(|id| self.nodes.get(id)).collect();
+        let nodes = self.all_nodes_snapshot();
         crate::text::resolve_text_seq(&nodes, key)
     }
 
     fn resolve_text_legacy(&self, key: &str) -> String {
-        let node_ids = self.nodes.all_ids();
-        let nodes: Vec<&SyncNode> = node_ids.iter().filter_map(|id| self.nodes.get(id)).collect();
+        let nodes = self.all_nodes_snapshot();
         crate::text::resolve_text(&nodes, key)
+    }
+
+    fn resolve_text_seq_legacy_at_lamport(
+        &self,
+        key: &str,
+        max_lamport: u64,
+    ) -> Vec<(crate::op::OpId, char)> {
+        let nodes = self.all_nodes_snapshot();
+        crate::text::resolve_text_seq_upto_lamport(&nodes, key, max_lamport)
+    }
+
+    fn resolve_text_legacy_at_lamport(&self, key: &str, max_lamport: u64) -> String {
+        let nodes = self.all_nodes_snapshot();
+        crate::text::resolve_text_upto_lamport(&nodes, key, max_lamport)
     }
 
     /// Bulk-ingest a batch of remote nodes with parallel batched signature
@@ -1697,6 +1717,23 @@ impl<N: NodeStore> StateGraph<N> {
     /// require canonical replay output independent of runtime projection mode.
     pub fn resolve_text_canonical(&self, key: &str) -> String {
         self.resolve_text_legacy(key)
+    }
+
+    /// Visible RGA sequence replayed from DAG nodes with `transaction.lamport <= max_lamport`.
+    ///
+    /// Always uses canonical replay (not the live projection cache) so scrubbing
+    /// reflects tombstones and concurrent edits correctly.
+    pub fn resolve_text_seq_at_lamport(
+        &self,
+        key: &str,
+        max_lamport: u64,
+    ) -> Vec<(crate::op::OpId, char)> {
+        self.resolve_text_seq_legacy_at_lamport(key, max_lamport)
+    }
+
+    /// Plain UTF-8 text at lamport `max_lamport` (see [`Self::resolve_text_seq_at_lamport`]).
+    pub fn resolve_text_at_lamport(&self, key: &str, max_lamport: u64) -> String {
+        self.resolve_text_legacy_at_lamport(key, max_lamport)
     }
 
     /// Phase 2.5 skeleton: resolve a window of text by character offset.

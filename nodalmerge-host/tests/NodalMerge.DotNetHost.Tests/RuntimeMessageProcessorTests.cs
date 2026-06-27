@@ -355,13 +355,9 @@ public class RuntimeMessageProcessorTests
     }
 
     [Fact]
-    public void Query_register_routes_through_bridge_and_maps_query_registered_event()
+    public void Query_register_is_answered_locally_and_maps_query_registered_event()
     {
-        var bridge = new FakeRuntimeCommandBridge(
-            FfiJsonBridgeResult.Success(
-                "[{\"QuerySpecRegistered\":{\"room_id\":\"room-a\",\"query_spec_id\":\"q.rooms\",\"version\":\"v1\",\"canonical_hash\":\"stub-canonical:q.rooms:v1\",\"accepted\":true}}]"
-            )
-        );
+        var bridge = new FakeRuntimeCommandBridge();
         var mapper = new RuntimeProtocolMapper();
         var processor = new RuntimeMessageProcessor(bridge, mapper);
         var state = new RuntimeConnectionState(1)
@@ -382,33 +378,13 @@ public class RuntimeMessageProcessorTests
         Assert.Single(result.OutboundMessages);
         Assert.Contains("\"type\":\"query.registered\"", result.OutboundMessages[0]);
         Assert.Contains("\"query_spec_id\":\"q.rooms\"", result.OutboundMessages[0]);
-        Assert.Single(bridge.Commands);
-        Assert.Contains("\"RegisterQuerySpec\":", bridge.Commands[0]);
+        Assert.Empty(bridge.Commands);
     }
 
     [Fact]
-    public void Query_projection_roundtrip_routes_through_bridge_commands()
+    public void Query_projection_roundtrip_is_answered_locally_without_bridge_commands()
     {
-        var bridge = new FakeRuntimeCommandBridge(
-            FfiJsonBridgeResult.Success(
-                "[{\"QuerySpecRegistered\":{\"room_id\":\"room-a\",\"query_spec_id\":\"q.rooms\",\"version\":\"v1\",\"canonical_hash\":\"stub-canonical:q.rooms:v1\",\"accepted\":true}}]"
-            ),
-            FfiJsonBridgeResult.Success(
-                "[{\"ProjectionBuildCompleted\":{\"room_id\":\"room-a\",\"projection_id\":\"p.rooms\",\"checkpoint\":{\"selector\":\"latest\",\"canonical_seq\":3,\"canonical_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frontier\":[\"seq:3\"]},\"digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}]"
-            ),
-            FfiJsonBridgeResult.Success(
-                "[{\"ProjectionReadResult\":{\"room_id\":\"room-a\",\"projection_id\":\"p.rooms\",\"checkpoint\":{\"selector\":\"latest\",\"canonical_seq\":3,\"canonical_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frontier\":[\"seq:3\"]},\"rows\":[{\"k\":\"world/a\",\"v\":\"1\"}],\"digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"next_page_token\":\"offset:1\"}}]"
-            ),
-            FfiJsonBridgeResult.Success(
-                "[{\"ProjectionListResult\":{\"room_id\":\"room-a\",\"query_spec_id\":\"q.rooms\",\"items\":[{\"projection_id\":\"p.rooms\",\"query_spec_id\":\"q.rooms\",\"state\":\"active\",\"digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"checkpoint\":{\"selector\":\"latest\"},\"invalidation_reason\":null}],\"cursor\":null}}]"
-            ),
-            FfiJsonBridgeResult.Success(
-                "[{\"ProjectionInvalidated\":{\"room_id\":\"room-a\",\"projection_id\":\"p.rooms\",\"reason\":\"manual\",\"invalidated_at_hlc\":0}}]"
-            ),
-            FfiJsonBridgeResult.Success(
-                "[{\"ProjectionListResult\":{\"room_id\":\"room-a\",\"query_spec_id\":\"q.rooms\",\"items\":[{\"projection_id\":\"p.rooms\",\"query_spec_id\":\"q.rooms\",\"state\":\"invalidated\",\"digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"checkpoint\":{\"selector\":\"latest\"},\"invalidation_reason\":\"manual\"}],\"cursor\":null}}]"
-            )
-        );
+        var bridge = new FakeRuntimeCommandBridge();
         var mapper = new RuntimeProtocolMapper();
         var processor = new RuntimeMessageProcessor(bridge, mapper);
         var state = new RuntimeConnectionState(1)
@@ -465,13 +441,7 @@ public class RuntimeMessageProcessorTests
         Assert.Contains("\"type\":\"projection.list.result\"", listInvalidatedResult.OutboundMessages[0]);
         Assert.Contains("\"state\":\"invalidated\"", listInvalidatedResult.OutboundMessages[0]);
 
-        Assert.Equal(6, bridge.Commands.Count);
-        Assert.Contains("\"RegisterQuerySpec\":", bridge.Commands[0]);
-        Assert.Contains("\"BuildProjection\":", bridge.Commands[1]);
-        Assert.Contains("\"ReadProjection\":", bridge.Commands[2]);
-        Assert.Contains("\"ListProjections\":", bridge.Commands[3]);
-        Assert.Contains("\"InvalidateProjection\":", bridge.Commands[4]);
-        Assert.Contains("\"ListProjections\":", bridge.Commands[5]);
+        Assert.Empty(bridge.Commands);
     }
 
     [Fact]

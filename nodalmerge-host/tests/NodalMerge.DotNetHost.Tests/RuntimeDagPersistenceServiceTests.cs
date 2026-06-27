@@ -495,6 +495,9 @@ public class RuntimeDagPersistenceServiceTests
 
         public List<string> DeletedNodeIds { get; } = new();
 
+        /// <summary>All records written via <see cref="PersistAcceptedNodesAsync"/>, in insertion order.</summary>
+        public IReadOnlyList<AcceptedNodeRecord> PersistedNodes => _nodes;
+
         public ValueTask<NodeSnapshot?> LoadRoomSnapshotAsync(string roomId, CancellationToken cancellationToken = default)
         {
             if (RoomSnapshot is null)
@@ -540,6 +543,61 @@ public class RuntimeDagPersistenceServiceTests
         }
     }
 
+    [Fact]
+    public async Task PersistInboundPackAsync_PopulatesCausalParentNodeIds_WhenBridgeAnswersInspectPack()
+    {
+        var roomId = "room-inspect-test";
+        var store = new TestNodeStoreProvider();
+        var parentId = new string('a', 64);
+        var tipId = new string('b', 64);
+
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            InspectPackResult = (
+                ExternalParentIds: [parentId],
+                TipNodeIds: [tipId]
+            )
+        };
+
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { Enabled = false }
+        );
+
+        var payload = new byte[] { 1, 2, 3 };
+        await service.PersistInboundPackAsync(roomId, Convert.ToBase64String(payload), CancellationToken.None);
+
+        Assert.Single(store.PersistedNodes);
+        var record = store.PersistedNodes[0];
+        Assert.NotNull(record.CausalParentNodeIds);
+        Assert.Contains(parentId, record.CausalParentNodeIds!);
+
+        // FrontierHashHex should be a SHA-256 of the sorted+joined tip node ids.
+        Assert.NotNull(record.FrontierHashHex);
+        Assert.Equal(64, record.FrontierHashHex!.Length);
+    }
+
+    [Fact]
+    public async Task PersistInboundPackAsync_LeavesFieldsNull_WhenBridgeDoesNotAnswerInspectPack()
+    {
+        var roomId = "room-no-inspect";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge(); // InspectPackResult not set
+
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { Enabled = false }
+        );
+
+        var payload = new byte[] { 4, 5, 6 };
+        await service.PersistInboundPackAsync(roomId, Convert.ToBase64String(payload), CancellationToken.None);
+
+        Assert.Single(store.PersistedNodes);
+        var record = store.PersistedNodes[0];
+        Assert.Null(record.CausalParentNodeIds);
+        Assert.Null(record.FrontierHashHex);
+    }
+
     private sealed class RecordingRuntimeCommandBridge : IRuntimeCommandBridge
     {
         public byte[]? FailingImportPayload { get; set; }
@@ -549,6 +607,12 @@ public class RuntimeDagPersistenceServiceTests
         public string? ServerPackRootHex { get; set; }
 
         public Queue<byte[]>? ServerPackPayloadSequence { get; set; }
+
+        /// <summary>
+        /// When set, <see cref="ProcessJsonCommand"/> will answer <c>InspectPack</c> commands
+        /// with a synthetic <c>PackInspected</c> event using these values.
+        /// </summary>
+        public (string[]? ExternalParentIds, string[]? TipNodeIds)? InspectPackResult { get; set; }
 
         public AsStatus EnsureRoomStatus { get; private set; } = AsStatus.Internal;
 
@@ -593,6 +657,19 @@ public class RuntimeDagPersistenceServiceTests
                 return FfiJsonBridgeResult.Success(eventsJson);
             }
 
+            if (InspectPackResult.HasValue && IsInspectPack(doc.RootElement))
+            {
+                var (extParents, tips) = InspectPackResult.Value;
+                var extArr = extParents is { Length: > 0 }
+                    ? "[" + string.Join(",", extParents.Select(id => $"\"{id}\"")) + "]"
+                    : "[]";
+                var tipArr = tips is { Length: > 0 }
+                    ? "[" + string.Join(",", tips.Select(id => $"\"{id}\"")) + "]"
+                    : "[]";
+                var eventsJson = $"[{{\"PackInspected\":{{\"node_count\":1,\"external_parent_ids_hex\":{extArr},\"tip_node_ids_hex\":{tipArr}}}}}]";
+                return FfiJsonBridgeResult.Success(eventsJson);
+            }
+
             var importPayload = ReadImportPayload(doc.RootElement);
             if (importPayload is null)
             {
@@ -621,6 +698,14 @@ public class RuntimeDagPersistenceServiceTests
                 && command.ValueKind == JsonValueKind.Object
                 && command.TryGetProperty("RequestServerPack", out var request)
                 && request.ValueKind == JsonValueKind.Object;
+        }
+
+        private static bool IsInspectPack(JsonElement root)
+        {
+            return root.TryGetProperty("command", out var command)
+                && command.ValueKind == JsonValueKind.Object
+                && command.TryGetProperty("InspectPack", out var inspect)
+                && inspect.ValueKind == JsonValueKind.Object;
         }
 
         private static byte[]? ReadImportPayload(JsonElement root)

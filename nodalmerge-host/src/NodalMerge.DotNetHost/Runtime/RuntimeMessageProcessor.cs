@@ -57,6 +57,11 @@ public sealed class RuntimeMessageProcessor
         var closeRequested = mapResult.ShouldCloseConnection;
         var dispatchSucceeded = true;
 
+        if (mapResult.DirectOutboundMessages is { Count: > 0 } directOutbound)
+        {
+            outbound.AddRange(directOutbound);
+        }
+
         foreach (var commandJson in mapResult.CommandJsons)
         {
             var bridgeResult = _bridge.ProcessJsonCommand(commandJson);

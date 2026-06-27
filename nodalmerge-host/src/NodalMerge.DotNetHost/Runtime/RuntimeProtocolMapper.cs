@@ -524,19 +524,24 @@ public sealed class RuntimeProtocolMapper
                 return RuntimeMapResult.Failure("query.register.descriptor is required");
             }
 
-            return RuntimeMapResult.Success([
-                SerializeEnvelope(
-                    state.RoomId,
-                    new JsonObject
-                    {
-                        ["RegisterQuerySpec"] = new JsonObject
-                        {
-                            ["query_spec_id"] = message.QuerySpecId,
-                            ["version"] = message.QuerySpecVersion,
-                            ["descriptor"] = message.Descriptor.DeepClone()
-                        }
-                    }
-                )
+            var descriptorClone = message.Descriptor.DeepClone();
+            var canonicalHash = ComputeJsonHash(descriptorClone);
+            state.QuerySpecStubs[message.QuerySpecId] = new QuerySpecStubState(
+                message.QuerySpecId,
+                message.QuerySpecVersion,
+                descriptorClone
+            );
+
+            return RuntimeMapResult.SuccessDirect([
+                new JsonObject
+                {
+                    ["type"] = "query.registered",
+                    ["room"] = state.RoomId,
+                    ["query_spec_id"] = message.QuerySpecId,
+                    ["version"] = message.QuerySpecVersion,
+                    ["canonical_hash"] = canonicalHash,
+                    ["accepted"] = true
+                }.ToJsonString()
             ]);
         }
 
@@ -557,24 +562,56 @@ public sealed class RuntimeProtocolMapper
                 return RuntimeMapResult.Failure("projection.build.query_spec_id is required");
             }
 
-            var buildPayload = new JsonObject
+            if (!state.TryResolveCanonicalSnapshotAtCheckpoint(
+                    message.TargetCheckpoint,
+                    out var snapshot,
+                    out var rejectReasonClass,
+                    out var rejectReasonMessage))
             {
-                ["projection_id"] = message.ProjectionId,
-                ["query_spec_id"] = message.QuerySpecId
-            };
-            if (message.TargetCheckpoint is not null)
-            {
-                buildPayload["target_checkpoint"] = message.TargetCheckpoint.DeepClone();
-            }
-
-            return RuntimeMapResult.Success([
-                SerializeEnvelope(
-                    state.RoomId,
+                return RuntimeMapResult.SuccessDirect([
                     new JsonObject
                     {
-                        ["BuildProjection"] = buildPayload
-                    }
-                )
+                        ["type"] = "projection.build.rejected",
+                        ["room"] = state.RoomId,
+                        ["projection_id"] = message.ProjectionId,
+                        ["reason_class"] = rejectReasonClass,
+                        ["reason_message"] = rejectReasonMessage
+                    }.ToJsonString()
+                ]);
+            }
+
+            var descriptor = state.QuerySpecStubs.TryGetValue(message.QuerySpecId, out var querySpec)
+                ? querySpec.Descriptor
+                : null;
+            var matchedRows = FilterCanonicalRowsByDescriptor(snapshot.Rows, descriptor);
+            var digest = ComputeRowsDigest(matchedRows);
+
+            var checkpointJson = new JsonObject
+            {
+                ["sequence"] = snapshot.Sequence,
+                ["canonical_hash"] = snapshot.CanonicalHash,
+                ["frontier"] = snapshot.Frontier.DeepClone()
+            };
+
+            state.ProjectionStubs[message.ProjectionId] = new ProjectionStubState(
+                message.ProjectionId,
+                message.QuerySpecId,
+                checkpointJson,
+                matchedRows,
+                digest,
+                false,
+                null
+            );
+
+            return RuntimeMapResult.SuccessDirect([
+                new JsonObject
+                {
+                    ["type"] = "projection.build.completed",
+                    ["room"] = state.RoomId,
+                    ["projection_id"] = message.ProjectionId,
+                    ["checkpoint"] = checkpointJson.DeepClone(),
+                    ["digest"] = digest
+                }.ToJsonString()
             ]);
         }
 
@@ -590,24 +627,50 @@ public sealed class RuntimeProtocolMapper
                 return RuntimeMapResult.Failure("projection.read.projection_id is required");
             }
 
-            var readPayload = new JsonObject
+            if (!state.ProjectionStubs.TryGetValue(message.ProjectionId, out var projectionStub))
             {
-                ["projection_id"] = message.ProjectionId,
-                ["limit"] = message.Limit.GetValueOrDefault(100)
-            };
-            if (!string.IsNullOrWhiteSpace(message.PageToken))
-            {
-                readPayload["page_token"] = message.PageToken;
+                return RuntimeMapResult.Failure("projection.read.projection_id not found");
             }
 
-            return RuntimeMapResult.Success([
-                SerializeEnvelope(
-                    state.RoomId,
-                    new JsonObject
-                    {
-                        ["ReadProjection"] = readPayload
-                    }
-                )
+            var limit = (int)message.Limit.GetValueOrDefault(100);
+            var offset = 0;
+            if (!string.IsNullOrWhiteSpace(message.PageToken))
+            {
+                const string offsetPrefix = "offset:";
+                if (message.PageToken.StartsWith(offsetPrefix, StringComparison.Ordinal))
+                {
+                    int.TryParse(message.PageToken[offsetPrefix.Length..], out offset);
+                }
+            }
+
+            var allRows = projectionStub.Rows as JsonArray ?? new JsonArray();
+            var page = new JsonArray();
+            var index = 0;
+            foreach (var row in allRows)
+            {
+                if (index >= offset && page.Count < limit)
+                {
+                    page.Add(row?.DeepClone());
+                }
+
+                index++;
+            }
+
+            string? nextPageToken = offset + page.Count < allRows.Count
+                ? $"offset:{offset + page.Count}"
+                : null;
+
+            return RuntimeMapResult.SuccessDirect([
+                new JsonObject
+                {
+                    ["type"] = "projection.read.result",
+                    ["room"] = state.RoomId,
+                    ["projection_id"] = message.ProjectionId,
+                    ["checkpoint"] = projectionStub.Checkpoint.DeepClone(),
+                    ["rows"] = page,
+                    ["digest"] = projectionStub.Digest,
+                    ["next_page_token"] = nextPageToken
+                }.ToJsonString()
             ]);
         }
 
@@ -623,22 +686,30 @@ public sealed class RuntimeProtocolMapper
                 return RuntimeMapResult.Failure("projection.invalidate.projection_id is required");
             }
 
+            if (!state.ProjectionStubs.TryGetValue(message.ProjectionId, out var stubToInvalidate))
+            {
+                return RuntimeMapResult.Failure("projection.invalidate.projection_id not found");
+            }
+
             var reason = string.IsNullOrWhiteSpace(message.InvalidationReason)
                 ? "manual"
                 : message.InvalidationReason;
 
-            return RuntimeMapResult.Success([
-                SerializeEnvelope(
-                    state.RoomId,
-                    new JsonObject
-                    {
-                        ["InvalidateProjection"] = new JsonObject
-                        {
-                            ["projection_id"] = message.ProjectionId,
-                            ["reason"] = reason
-                        }
-                    }
-                )
+            state.ProjectionStubs[message.ProjectionId] = stubToInvalidate with
+            {
+                IsInvalidated = true,
+                InvalidationReason = reason
+            };
+
+            return RuntimeMapResult.SuccessDirect([
+                new JsonObject
+                {
+                    ["type"] = "projection.invalidated",
+                    ["room"] = state.RoomId,
+                    ["projection_id"] = message.ProjectionId,
+                    ["reason"] = reason,
+                    ["invalidated_at_hlc"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                }.ToJsonString()
             ]);
         }
 
@@ -649,24 +720,45 @@ public sealed class RuntimeProtocolMapper
                 return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=projection.list requires=query.read");
             }
 
-            var listPayload = new JsonObject();
-            if (!string.IsNullOrWhiteSpace(message.QuerySpecId))
+            var items = new JsonArray();
+            foreach (var stub in state.ProjectionStubs.Values)
             {
-                listPayload["query_spec_id"] = message.QuerySpecId;
-            }
-            if (!string.IsNullOrWhiteSpace(message.StateFilter))
-            {
-                listPayload["state_filter"] = message.StateFilter;
+                if (!string.IsNullOrWhiteSpace(message.QuerySpecId)
+                    && !string.Equals(stub.QuerySpecId, message.QuerySpecId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var stubState = stub.IsInvalidated ? "invalidated" : "active";
+                if (!string.IsNullOrWhiteSpace(message.StateFilter)
+                    && !string.Equals(stubState, message.StateFilter, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var item = new JsonObject
+                {
+                    ["projection_id"] = stub.ProjectionId,
+                    ["query_spec_id"] = stub.QuerySpecId,
+                    ["state"] = stubState
+                };
+                if (stub.IsInvalidated)
+                {
+                    item["invalidation_reason"] = stub.InvalidationReason;
+                }
+
+                items.Add(item);
             }
 
-            return RuntimeMapResult.Success([
-                SerializeEnvelope(
-                    state.RoomId,
-                    new JsonObject
-                    {
-                        ["ListProjections"] = listPayload
-                    }
-                )
+            return RuntimeMapResult.SuccessDirect([
+                new JsonObject
+                {
+                    ["type"] = "projection.list.result",
+                    ["room"] = state.RoomId,
+                    ["query_spec_id"] = message.QuerySpecId,
+                    ["items"] = items,
+                    ["cursor"] = null
+                }.ToJsonString()
             ]);
         }
 
@@ -1045,6 +1137,106 @@ public sealed class RuntimeProtocolMapper
             ]);
         }
 
+        if (string.Equals(type, "checkpoint.promote", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
+            {
+                return RuntimeMapResult.Failure("hello must be sent first");
+            }
+
+            if (!IsControlPlaneAllowed(state, "query.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=checkpoint.promote requires=query.admin");
+            }
+
+            var promotePayload = new JsonObject();
+            if (message.TargetCheckpoint is not null)
+            {
+                promotePayload["selector"] = message.TargetCheckpoint.DeepClone();
+            }
+
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(
+                    state.RoomId,
+                    new JsonObject
+                    {
+                        ["PromoteCheckpointToGraph"] = promotePayload
+                    }
+                )
+            ]);
+        }
+
+        if (string.Equals(type, "graph.get-frontier", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
+            {
+                return RuntimeMapResult.Failure("hello must be sent first");
+            }
+            if (!IsControlPlaneAllowed(state, "query.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=graph.get-frontier requires=query.admin");
+            }
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(state.RoomId, new JsonObject { ["GetFrontier"] = new JsonObject() })
+            ]);
+        }
+
+        if (string.Equals(type, "graph.get-causal-parents", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
+            {
+                return RuntimeMapResult.Failure("hello must be sent first");
+            }
+            if (!IsControlPlaneAllowed(state, "query.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=graph.get-causal-parents requires=query.admin");
+            }
+            var nodeIdHex = message.NodeIdHex ?? string.Empty;
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(state.RoomId, new JsonObject
+                {
+                    ["GetCausalParents"] = new JsonObject { ["node_id_hex"] = nodeIdHex }
+                })
+            ]);
+        }
+
+        if (string.Equals(type, "graph.get-canonical-resolution", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
+            {
+                return RuntimeMapResult.Failure("hello must be sent first");
+            }
+            if (!IsControlPlaneAllowed(state, "query.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=graph.get-canonical-resolution requires=query.admin");
+            }
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(state.RoomId, new JsonObject { ["GetCanonicalResolution"] = new JsonObject() })
+            ]);
+        }
+
+        if (string.Equals(type, "graph.compute-sync-diff", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
+            {
+                return RuntimeMapResult.Failure("hello must be sent first");
+            }
+            if (!IsControlPlaneAllowed(state, "query.admin"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=graph.compute-sync-diff requires=query.admin");
+            }
+            var peerIds = message.PeerNodeIdsHex ?? [];
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(state.RoomId, new JsonObject
+                {
+                    ["ComputeSyncDiff"] = new JsonObject
+                    {
+                        ["peer_node_ids_hex"] = new JsonArray(peerIds.Select(id => (JsonNode)JsonValue.Create(id)!).ToArray())
+                    }
+                })
+            ]);
+        }
+
         if (string.Equals(type, "webrtc-offer", StringComparison.OrdinalIgnoreCase)
             || string.Equals(type, "webrtc-answer", StringComparison.OrdinalIgnoreCase)
             || string.Equals(type, "webrtc-ice", StringComparison.OrdinalIgnoreCase))
@@ -1095,6 +1287,9 @@ public sealed class RuntimeProtocolMapper
 
             var namespaceValue = ResolveNamespace(message);
             var valueNode = message.Value?.DeepClone() ?? JsonValue.Create((string?)null)!;
+
+            state.CanonicalMapRows[message.Key] = valueNode.DeepClone();
+            state.AdvanceCanonicalSequenceAndSnapshot();
 
             return RuntimeMapResult.Success([
                 SerializeEnvelope(
@@ -1153,6 +1348,9 @@ public sealed class RuntimeProtocolMapper
             }
 
             var namespaceValue = ResolveNamespace(message);
+            state.CanonicalMapRows.Remove(message.Key);
+            state.AdvanceCanonicalSequenceAndSnapshot();
+
             return RuntimeMapResult.Success([
                 SerializeEnvelope(
                     state.RoomId,
@@ -1986,6 +2184,67 @@ public sealed class RuntimeProtocolMapper
                     ["projection_id"] = projectionBuildCompleted["projection_id"]?.GetValue<string>(),
                     ["checkpoint"] = projectionBuildCompleted["checkpoint"]?.DeepClone(),
                     ["digest"] = projectionBuildCompleted["digest"]?.DeepClone()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("CheckpointPromoted", out var checkpointPromotedNode) && checkpointPromotedNode is JsonObject checkpointPromoted)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "checkpoint-promoted",
+                    ["room"] = checkpointPromoted["room_id"]?.GetValue<string>(),
+                    ["seq"] = checkpointPromoted["seq"]?.DeepClone(),
+                    ["node_id_hex"] = checkpointPromoted["node_id_hex"]?.DeepClone(),
+                    ["frontier"] = checkpointPromoted["frontier_heads_hex"]?.DeepClone() ?? new JsonArray()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("FrontierQueried", out var frontierQueriedNode) && frontierQueriedNode is JsonObject frontierQueried)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "frontier-queried",
+                    ["room"] = frontierQueried["room_id"]?.GetValue<string>(),
+                    ["frontier"] = frontierQueried["frontier_heads_hex"]?.DeepClone() ?? new JsonArray()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("CausalParentsQueried", out var causalParentsQueriedNode) && causalParentsQueriedNode is JsonObject causalParentsQueried)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "causal-parents-queried",
+                    ["room"] = causalParentsQueried["room_id"]?.GetValue<string>(),
+                    ["node_id_hex"] = causalParentsQueried["node_id_hex"]?.DeepClone(),
+                    ["parent_ids"] = causalParentsQueried["parent_ids_hex"]?.DeepClone() ?? new JsonArray(),
+                    ["node_found"] = causalParentsQueried["node_found"]?.DeepClone()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("CanonicalResolutionQueried", out var canonicalResQueriedNode) && canonicalResQueriedNode is JsonObject canonicalResQueried)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "canonical-resolution-queried",
+                    ["room"] = canonicalResQueried["room_id"]?.GetValue<string>(),
+                    ["entries"] = canonicalResQueried["entries"]?.DeepClone() ?? new JsonArray(),
+                    ["entry_count"] = canonicalResQueried["entry_count"]?.DeepClone()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("SyncDiffComputed", out var syncDiffComputedNode) && syncDiffComputedNode is JsonObject syncDiffComputed)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "sync-diff-computed",
+                    ["room"] = syncDiffComputed["room_id"]?.GetValue<string>(),
+                    ["only_in_server"] = syncDiffComputed["only_in_server"]?.DeepClone() ?? new JsonArray(),
+                    ["only_in_peer"] = syncDiffComputed["only_in_peer"]?.DeepClone() ?? new JsonArray()
                 }.ToJsonString());
                 continue;
             }
@@ -2875,6 +3134,42 @@ public sealed class RuntimeProtocolMapper
 
         return json;
     }
+
+    private static string ComputeJsonHash(JsonNode? node)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(node?.ToJsonString() ?? "null"));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    private static JsonArray FilterCanonicalRowsByDescriptor(
+        Dictionary<string, JsonNode?> rows,
+        JsonNode? descriptor)
+    {
+        var prefix = (descriptor as JsonObject)?["prefix"]?.GetValue<string>() ?? string.Empty;
+
+        var result = new JsonArray();
+        foreach (var kvp in rows.OrderBy(x => x.Key, StringComparer.Ordinal))
+        {
+            if (!kvp.Key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            result.Add(new JsonObject
+            {
+                ["k"] = kvp.Key,
+                ["v"] = kvp.Value?.DeepClone()
+            });
+        }
+
+        return result;
+    }
+
+    private static string ComputeRowsDigest(JsonArray rows)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(rows.ToJsonString()));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
 }
 
 public sealed class RuntimeConnectionState
@@ -3209,7 +3504,8 @@ public sealed record RuntimeMapResult(
     bool IsSuccess,
     string? Error,
     IReadOnlyList<string> CommandJsons,
-    bool ShouldCloseConnection
+    bool ShouldCloseConnection,
+    IReadOnlyList<string>? DirectOutboundMessages = null
 )
 {
     public static RuntimeMapResult Success(
@@ -3217,6 +3513,12 @@ public sealed record RuntimeMapResult(
         bool shouldCloseConnection = false
     ) =>
         new(true, null, commandJsons, shouldCloseConnection);
+
+    public static RuntimeMapResult SuccessDirect(
+        IReadOnlyList<string> outboundMessages,
+        bool shouldCloseConnection = false
+    ) =>
+        new(true, null, [], shouldCloseConnection, outboundMessages);
 
     public static RuntimeMapResult Failure(string error) =>
         new(false, error, [], false);
@@ -3350,6 +3652,10 @@ public sealed class RuntimeInboundMessage
     public string? ProposalId { get; set; }
     [JsonPropertyName("blobs")]
     public RuntimeInboundBlob[]? Blobs { get; set; }
+    [JsonPropertyName("node_id_hex")]
+    public string? NodeIdHex { get; set; }
+    [JsonPropertyName("peer_node_ids_hex")]
+    public string[]? PeerNodeIdsHex { get; set; }
 }
 
 public sealed record TopologyChildStubState(

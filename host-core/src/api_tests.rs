@@ -2306,6 +2306,467 @@ fn import_pack_dedups_conflict_events_by_fingerprint() {
 }
 
 #[test]
+fn promote_checkpoint_to_graph_advances_frontier_and_updates_snapshot() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-promote", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-promote",
+            HostCommand::MapSet {
+                namespace: "".to_string(),
+                key: "world/a".to_string(),
+                value: json!("1"),
+            },
+        ))
+        .expect("map set should succeed");
+
+    let promoted = engine
+        .apply(CommandEnvelope::new(
+            "room-promote",
+            HostCommand::PromoteCheckpointToGraph {
+                selector: Some(json!({ "selector": "latest" })),
+            },
+        ))
+        .expect("promote should succeed");
+
+    let (seq, node_id_hex, frontier_heads_hex) = match &promoted.events[0] {
+        HostEvent::CheckpointPromoted { seq, node_id_hex, frontier_heads_hex, .. } => {
+            (*seq, node_id_hex.clone(), frontier_heads_hex.clone())
+        }
+        other => panic!("expected CheckpointPromoted, got {other:?}"),
+    };
+    assert_eq!(seq, 1);
+    assert_eq!(frontier_heads_hex, vec![node_id_hex.clone()]);
+
+    // The canonical snapshot's frontier should now be the real CRDT frontier
+    // (not the "seq:<n>" placeholder) — verified indirectly via
+    // BuildProjection's checkpoint, which reuses the same resolver.
+    engine
+        .apply(CommandEnvelope::new(
+            "room-promote",
+            HostCommand::RegisterQuerySpec {
+                query_spec_id: "q.world".to_string(),
+                version: "v1".to_string(),
+                descriptor: json!({ "kind": "map_prefix", "prefix": "world/" }),
+            },
+        ))
+        .expect("register should succeed");
+    let built = engine
+        .apply(CommandEnvelope::new(
+            "room-promote",
+            HostCommand::BuildProjection {
+                projection_id: "p.world".to_string(),
+                query_spec_id: "q.world".to_string(),
+                target_checkpoint: Some(json!({ "selector": "seq", "canonical_seq": seq })),
+            },
+        ))
+        .expect("build should succeed");
+    let checkpoint = match &built.events[0] {
+        HostEvent::ProjectionBuildCompleted { checkpoint, .. } => checkpoint,
+        other => panic!("expected ProjectionBuildCompleted, got {other:?}"),
+    };
+    assert_eq!(checkpoint["frontier"], json!(frontier_heads_hex));
+
+    // Traceability: fetch every node currently in the graph and confirm the
+    // promoted node carries a marker linking it back to this snapshot's seq.
+    let pack = engine
+        .apply(CommandEnvelope::new(
+            "room-promote",
+            HostCommand::RequestServerPack { known_ids: vec![] },
+        ))
+        .expect("request-server-pack should succeed");
+    let nodes_b64 = match &pack.events[0] {
+        HostEvent::ServerPackPrepared { nodes_b64, .. } => nodes_b64.clone(),
+        other => panic!("expected ServerPackPrepared, got {other:?}"),
+    };
+    let decoded = crate::engine::base64_decode(&nodes_b64).expect("pack should base64-decode");
+    let nodes = nodalmerge_core::unpack_nodes(&decoded).expect("pack should unpack");
+    let promoted_node = nodes
+        .iter()
+        .find(|n| n.id.to_hex() == node_id_hex)
+        .expect("promoted node should be present in the graph");
+    assert!(promoted_node.transaction.ops.iter().any(|op| matches!(
+        op,
+        Op::Map(MapOp::Set { key, value })
+            if key == "_promotion/source_snapshot_seq" && value == &seq.to_le_bytes().to_vec()
+    )));
+}
+
+#[test]
+fn promote_checkpoint_to_graph_is_idempotent_for_the_same_snapshot() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-promote-twice", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-promote-twice",
+            HostCommand::MapSet {
+                namespace: "".to_string(),
+                key: "world/a".to_string(),
+                value: json!("1"),
+            },
+        ))
+        .expect("map set should succeed");
+
+    let selector = Some(json!({ "selector": "seq", "canonical_seq": 1 }));
+    let first = engine
+        .apply(CommandEnvelope::new(
+            "room-promote-twice",
+            HostCommand::PromoteCheckpointToGraph { selector: selector.clone() },
+        ))
+        .expect("first promote should succeed");
+    let second = engine
+        .apply(CommandEnvelope::new(
+            "room-promote-twice",
+            HostCommand::PromoteCheckpointToGraph { selector },
+        ))
+        .expect("second promote should succeed");
+
+    let (first_id, first_frontier) = match &first.events[0] {
+        HostEvent::CheckpointPromoted { node_id_hex, frontier_heads_hex, .. } => {
+            (node_id_hex.clone(), frontier_heads_hex.clone())
+        }
+        other => panic!("expected CheckpointPromoted, got {other:?}"),
+    };
+    let (second_id, second_frontier) = match &second.events[0] {
+        HostEvent::CheckpointPromoted { node_id_hex, frontier_heads_hex, .. } => {
+            (node_id_hex.clone(), frontier_heads_hex.clone())
+        }
+        other => panic!("expected CheckpointPromoted, got {other:?}"),
+    };
+
+    assert_eq!(first_id, second_id, "re-promoting the same snapshot must not create a new node");
+    assert_eq!(first_frontier, second_frontier, "frontier must not advance on a no-op re-promotion");
+}
+
+#[test]
+fn promote_checkpoint_to_graph_rejects_unresolvable_selector() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-promote-bad", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+
+    let missing_seq_field = engine.apply(CommandEnvelope::new(
+        "room-promote-bad",
+        HostCommand::PromoteCheckpointToGraph {
+            selector: Some(json!({ "selector": "seq" })),
+        },
+    ));
+    assert!(matches!(missing_seq_field, Err(HostCoreError::InvalidCommand)));
+
+    let unknown_seq = engine.apply(CommandEnvelope::new(
+        "room-promote-bad",
+        HostCommand::PromoteCheckpointToGraph {
+            selector: Some(json!({ "selector": "seq", "canonical_seq": 999 })),
+        },
+    ));
+    assert!(matches!(unknown_seq, Err(HostCoreError::InvalidCommand)));
+}
+
+#[test]
+fn get_frontier_returns_empty_for_unpromoted_room() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-frontier-empty", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-frontier-empty",
+            HostCommand::MapSet { namespace: "".to_string(), key: "k".to_string(), value: json!("v") },
+        ))
+        .expect("map set should succeed");
+
+    let result = engine
+        .apply(CommandEnvelope::new("room-frontier-empty", HostCommand::GetFrontier))
+        .expect("get frontier should succeed");
+
+    let frontier_heads = match &result.events[0] {
+        HostEvent::FrontierQueried { frontier_heads_hex, .. } => frontier_heads_hex.clone(),
+        other => panic!("expected FrontierQueried, got {other:?}"),
+    };
+    // No promotion has happened, so the causal graph is empty and has no frontier heads.
+    assert!(frontier_heads.is_empty(), "unpromoted room should have empty frontier");
+}
+
+#[test]
+fn get_frontier_returns_heads_after_promotion() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-frontier-post-promote", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-frontier-post-promote",
+            HostCommand::MapSet { namespace: "".to_string(), key: "k".to_string(), value: json!("v") },
+        ))
+        .expect("map set should succeed");
+    let promote_result = engine
+        .apply(CommandEnvelope::new(
+            "room-frontier-post-promote",
+            HostCommand::PromoteCheckpointToGraph { selector: None },
+        ))
+        .expect("promote should succeed");
+    let promoted_node_id = match &promote_result.events[0] {
+        HostEvent::CheckpointPromoted { node_id_hex, .. } => node_id_hex.clone(),
+        other => panic!("expected CheckpointPromoted, got {other:?}"),
+    };
+
+    let result = engine
+        .apply(CommandEnvelope::new("room-frontier-post-promote", HostCommand::GetFrontier))
+        .expect("get frontier should succeed");
+
+    let frontier_heads = match &result.events[0] {
+        HostEvent::FrontierQueried { frontier_heads_hex, .. } => frontier_heads_hex.clone(),
+        other => panic!("expected FrontierQueried, got {other:?}"),
+    };
+    assert!(frontier_heads.contains(&promoted_node_id), "frontier must include the promoted node");
+}
+
+#[test]
+fn get_causal_parents_returns_not_found_for_unknown_node() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-parents-unknown", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+
+    let hex_zeroes = "0".repeat(64);
+    let result = engine
+        .apply(CommandEnvelope::new(
+            "room-parents-unknown",
+            HostCommand::GetCausalParents { node_id_hex: hex_zeroes.clone() },
+        ))
+        .expect("query should succeed even for unknown node");
+
+    match &result.events[0] {
+        HostEvent::CausalParentsQueried { node_found, parent_ids_hex, node_id_hex, .. } => {
+            assert!(!node_found, "unknown node should report node_found=false");
+            assert!(parent_ids_hex.is_empty());
+            assert_eq!(node_id_hex, &hex_zeroes);
+        }
+        other => panic!("expected CausalParentsQueried, got {other:?}"),
+    }
+}
+
+#[test]
+fn get_causal_parents_returns_parents_for_promoted_node() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-parents-found", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-parents-found",
+            HostCommand::MapSet { namespace: "".to_string(), key: "k".to_string(), value: json!("v") },
+        ))
+        .expect("map set should succeed");
+    // Promote once to get a root node (no parents).
+    let p1 = engine
+        .apply(CommandEnvelope::new(
+            "room-parents-found",
+            HostCommand::PromoteCheckpointToGraph { selector: None },
+        ))
+        .expect("first promote should succeed");
+    let root_id = match &p1.events[0] {
+        HostEvent::CheckpointPromoted { node_id_hex, .. } => node_id_hex.clone(),
+        other => panic!("expected CheckpointPromoted, got {other:?}"),
+    };
+    // A second map write creates a new canonical seq.
+    engine
+        .apply(CommandEnvelope::new(
+            "room-parents-found",
+            HostCommand::MapSet { namespace: "".to_string(), key: "k2".to_string(), value: json!("v2") },
+        ))
+        .expect("map set 2 should succeed");
+    // Promote again — this node's parents should include root_id.
+    let p2 = engine
+        .apply(CommandEnvelope::new(
+            "room-parents-found",
+            HostCommand::PromoteCheckpointToGraph { selector: None },
+        ))
+        .expect("second promote should succeed");
+    let child_id = match &p2.events[0] {
+        HostEvent::CheckpointPromoted { node_id_hex, .. } => node_id_hex.clone(),
+        other => panic!("expected CheckpointPromoted, got {other:?}"),
+    };
+
+    let result = engine
+        .apply(CommandEnvelope::new(
+            "room-parents-found",
+            HostCommand::GetCausalParents { node_id_hex: child_id.clone() },
+        ))
+        .expect("get causal parents should succeed");
+
+    match &result.events[0] {
+        HostEvent::CausalParentsQueried { node_found, parent_ids_hex, .. } => {
+            assert!(node_found);
+            assert!(parent_ids_hex.contains(&root_id), "child node must list root as parent");
+        }
+        other => panic!("expected CausalParentsQueried, got {other:?}"),
+    }
+}
+
+#[test]
+fn get_canonical_resolution_returns_empty_for_unpromoted_room() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-canonical-empty", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-canonical-empty",
+            HostCommand::MapSet { namespace: "".to_string(), key: "k".to_string(), value: json!("v") },
+        ))
+        .expect("map set should succeed");
+
+    let result = engine
+        .apply(CommandEnvelope::new("room-canonical-empty", HostCommand::GetCanonicalResolution))
+        .expect("get canonical resolution should succeed");
+
+    match &result.events[0] {
+        HostEvent::CanonicalResolutionQueried { entries, entry_count, .. } => {
+            // No promotion, so the causal graph holds nothing.
+            assert_eq!(*entry_count, 0);
+            assert!(entries.is_empty());
+        }
+        other => panic!("expected CanonicalResolutionQueried, got {other:?}"),
+    }
+}
+
+#[test]
+fn get_canonical_resolution_returns_rows_after_promotion() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-canonical-rows", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-canonical-rows",
+            HostCommand::MapSet { namespace: "".to_string(), key: "hello".to_string(), value: json!("world") },
+        ))
+        .expect("map set should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-canonical-rows",
+            HostCommand::PromoteCheckpointToGraph { selector: None },
+        ))
+        .expect("promote should succeed");
+
+    let result = engine
+        .apply(CommandEnvelope::new("room-canonical-rows", HostCommand::GetCanonicalResolution))
+        .expect("get canonical resolution should succeed");
+
+    match &result.events[0] {
+        HostEvent::CanonicalResolutionQueried { entries, entry_count, .. } => {
+            // The promoted snapshot includes "hello" but not the _promotion/* marker keys
+            // because resolve_canonical uses the graph's content-addressed resolution,
+            // not the canonical checkpoint rows.
+            assert!(*entry_count > 0, "must have at least one resolved entry");
+            assert!(entries.iter().any(|e| e.key == "hello"), "resolved map must include the written key");
+        }
+        other => panic!("expected CanonicalResolutionQueried, got {other:?}"),
+    }
+}
+
+#[test]
+fn compute_sync_diff_returns_all_server_nodes_when_peer_is_empty() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-sync-diff", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-sync-diff",
+            HostCommand::MapSet { namespace: "".to_string(), key: "k".to_string(), value: json!("v") },
+        ))
+        .expect("map set should succeed");
+    let promoted = engine
+        .apply(CommandEnvelope::new(
+            "room-sync-diff",
+            HostCommand::PromoteCheckpointToGraph { selector: None },
+        ))
+        .expect("promote should succeed");
+    let node_id = match &promoted.events[0] {
+        HostEvent::CheckpointPromoted { node_id_hex, .. } => node_id_hex.clone(),
+        other => panic!("expected CheckpointPromoted, got {other:?}"),
+    };
+
+    let result = engine
+        .apply(CommandEnvelope::new(
+            "room-sync-diff",
+            HostCommand::ComputeSyncDiff { peer_node_ids_hex: Vec::new() },
+        ))
+        .expect("compute sync diff should succeed");
+
+    match &result.events[0] {
+        HostEvent::SyncDiffComputed { only_in_server, only_in_peer, .. } => {
+            assert!(only_in_server.contains(&node_id), "server-only list must include the promoted node");
+            assert!(only_in_peer.is_empty(), "empty peer should have nothing only-in-peer");
+        }
+        other => panic!("expected SyncDiffComputed, got {other:?}"),
+    }
+}
+
+#[test]
+fn inspect_pack_extracts_node_count_and_tips() {
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-inspect-pack", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-inspect-pack",
+            HostCommand::MapSet { namespace: "".to_string(), key: "a".to_string(), value: json!("1") },
+        ))
+        .expect("map set should succeed");
+    engine
+        .apply(CommandEnvelope::new(
+            "room-inspect-pack",
+            HostCommand::PromoteCheckpointToGraph { selector: None },
+        ))
+        .expect("promote should succeed");
+
+    // Get a server pack to use as the input for InspectPack.
+    let pack_result = engine
+        .apply(CommandEnvelope::new(
+            "room-inspect-pack",
+            HostCommand::RequestServerPack { known_ids: Vec::new() },
+        ))
+        .expect("request server pack should succeed");
+    let nodes_b64 = match &pack_result.events[0] {
+        HostEvent::ServerPackPrepared { nodes_b64, .. } => nodes_b64.clone(),
+        other => panic!("expected ServerPackPrepared, got {other:?}"),
+    };
+
+    let result = engine
+        .apply(CommandEnvelope::new(
+            "room-inspect-pack",
+            HostCommand::InspectPack { nodes_b64 },
+        ))
+        .expect("inspect pack should succeed");
+
+    match &result.events[0] {
+        HostEvent::PackInspected { node_count, tip_node_ids_hex, .. } => {
+            assert!(*node_count > 0, "pack must contain at least one node");
+            assert!(!tip_node_ids_hex.is_empty(), "pack must have at least one tip node");
+        }
+        other => panic!("expected PackInspected, got {other:?}"),
+    }
+}
+
+#[test]
+fn inspect_pack_rejects_malformed_input() {
+    let mut engine = HostEngine::new();
+    let result = engine.apply(CommandEnvelope::new(
+        "any-room",
+        HostCommand::InspectPack { nodes_b64: "not-valid-base64!!!".to_string() },
+    ));
+    assert!(matches!(result, Err(HostCoreError::InvalidCommand)));
+}
+
+#[test]
 fn relay_peer_signal_emits_peer_signal_relayed_event() {
     let mut engine = HostEngine::new();
     engine

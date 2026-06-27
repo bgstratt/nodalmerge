@@ -171,6 +171,85 @@ public sealed class RuntimeDagPersistenceService
         }
     }
 
+    private static string BuildInspectPackEnvelope(string nodesB64)
+    {
+        return JsonSerializer.Serialize(new
+        {
+            room_id = "",
+            command = new
+            {
+                InspectPack = new
+                {
+                    nodes_b64 = nodesB64
+                }
+            }
+        });
+    }
+
+    private (IReadOnlyList<string>? causalParentNodeIds, string? frontierHashHex) TryInspectPack(byte[] payload)
+    {
+        try
+        {
+            var nodesB64 = Convert.ToBase64String(payload);
+            var response = _bridge.ProcessJsonCommand(BuildInspectPackEnvelope(nodesB64));
+            if (response.Status != AsStatus.Ok)
+            {
+                return (null, null);
+            }
+            using var eventsDoc = JsonDocument.Parse(response.EventsJson);
+            if (eventsDoc.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return (null, null);
+            }
+            foreach (var eventElement in eventsDoc.RootElement.EnumerateArray())
+            {
+                if (eventElement.ValueKind != JsonValueKind.Object
+                    || !eventElement.TryGetProperty("PackInspected", out var inspected)
+                    || inspected.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                IReadOnlyList<string>? causalParents = null;
+                if (inspected.TryGetProperty("external_parent_ids_hex", out var extParents)
+                    && extParents.ValueKind == JsonValueKind.Array)
+                {
+                    var ids = extParents.EnumerateArray()
+                        .Where(e => e.ValueKind == JsonValueKind.String)
+                        .Select(e => e.GetString()!)
+                        .ToList();
+                    if (ids.Count > 0)
+                    {
+                        causalParents = ids;
+                    }
+                }
+
+                string? frontierHashHex = null;
+                if (inspected.TryGetProperty("tip_node_ids_hex", out var tips)
+                    && tips.ValueKind == JsonValueKind.Array)
+                {
+                    var tipList = tips.EnumerateArray()
+                        .Where(e => e.ValueKind == JsonValueKind.String)
+                        .Select(e => e.GetString()!)
+                        .OrderBy(s => s, StringComparer.Ordinal)
+                        .ToList();
+                    if (tipList.Count > 0)
+                    {
+                        var joined = string.Join(string.Empty, tipList);
+                        frontierHashHex = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(joined)));
+                    }
+                }
+
+                return (causalParents, frontierHashHex);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "runtime dag inspect-pack failed");
+        }
+        return (null, null);
+    }
+
     private async ValueTask PersistPackPayloadAsync(
         string roomId,
         byte[] payload,
@@ -181,12 +260,13 @@ public sealed class RuntimeDagPersistenceService
         var hashHex = Convert.ToHexStringLower(SHA256.HashData(payload));
         var acceptedAtUtc = DateTimeOffset.UtcNow;
         var retentionWindow = _compactionOptions.RetentionWindow ?? DefaultCompactionRetentionWindow;
+        var (causalParentNodeIds, frontierHashHex) = TryInspectPack(payload);
         var record = new AcceptedNodeRecord(
             NodeIdHex: $"pack:{hashHex}",
             Payload: payload,
             PayloadKind: AcceptedNodeKinds.Pack,
-            CausalParentNodeIds: null,
-            FrontierHashHex: null,
+            CausalParentNodeIds: causalParentNodeIds,
+            FrontierHashHex: frontierHashHex,
             Applied: false,
             IsTombstone: false,
             AcceptedAtUtc: acceptedAtUtc,

@@ -302,7 +302,7 @@ public class RuntimeProtocolTests
     }
 
     [Fact]
-    public void Query_register_maps_to_host_command_when_query_admin_capability_present()
+    public void Query_register_is_answered_locally_when_query_admin_capability_present()
     {
         var mapper = new RuntimeProtocolMapper();
         var state = new RuntimeConnectionState(1)
@@ -319,10 +319,12 @@ public class RuntimeProtocolTests
         );
 
         Assert.True(result.IsSuccess);
-        Assert.Single(result.CommandJsons);
-        Assert.Contains("RegisterQuerySpec", result.CommandJsons[0]);
-        Assert.Contains("\"query_spec_id\":\"q.rooms\"", result.CommandJsons[0]);
-        Assert.Contains("\"version\":\"v1\"", result.CommandJsons[0]);
+        Assert.Empty(result.CommandJsons);
+        Assert.NotNull(result.DirectOutboundMessages);
+        Assert.Single(result.DirectOutboundMessages!);
+        Assert.Contains("\"type\":\"query.registered\"", result.DirectOutboundMessages![0]);
+        Assert.Contains("\"query_spec_id\":\"q.rooms\"", result.DirectOutboundMessages![0]);
+        Assert.Contains("\"version\":\"v1\"", result.DirectOutboundMessages![0]);
     }
 
     [Fact]
@@ -346,7 +348,7 @@ public class RuntimeProtocolTests
     }
 
     [Fact]
-    public void Projection_read_maps_to_host_command_when_query_read_capability_present()
+    public void Projection_read_is_answered_locally_after_projection_build()
     {
         var mapper = new RuntimeProtocolMapper();
         var state = new RuntimeConnectionState(1)
@@ -355,19 +357,32 @@ public class RuntimeProtocolTests
             RoomId = "room-a",
             PeerPubkeyHex = "peer-a"
         };
+        state.SessionCapabilities.Add("query.admin");
         state.SessionCapabilities.Add("query.read");
 
+        var registerResult = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"query.register\",\"query_spec_id\":\"q.rooms\",\"version\":\"v1\",\"descriptor\":{\"kind\":\"map_prefix\",\"prefix\":\"world/\"}}",
+            state
+        );
+        Assert.True(registerResult.IsSuccess);
+
+        var buildResult = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"projection.build\",\"projection_id\":\"p.rooms\",\"query_spec_id\":\"q.rooms\",\"target_checkpoint\":{\"selector\":\"latest\"}}",
+            state
+        );
+        Assert.True(buildResult.IsSuccess);
+
         var result = mapper.MapIncomingMessageToCommandJsons(
-            "{\"type\":\"projection.read\",\"projection_id\":\"p.rooms\",\"limit\":50,\"page_token\":\"tok-1\"}",
+            "{\"type\":\"projection.read\",\"projection_id\":\"p.rooms\",\"limit\":50}",
             state
         );
 
         Assert.True(result.IsSuccess);
-        Assert.Single(result.CommandJsons);
-        Assert.Contains("ReadProjection", result.CommandJsons[0]);
-        Assert.Contains("\"projection_id\":\"p.rooms\"", result.CommandJsons[0]);
-        Assert.Contains("\"limit\":50", result.CommandJsons[0]);
-        Assert.Contains("\"page_token\":\"tok-1\"", result.CommandJsons[0]);
+        Assert.Empty(result.CommandJsons);
+        Assert.NotNull(result.DirectOutboundMessages);
+        Assert.Single(result.DirectOutboundMessages!);
+        Assert.Contains("\"type\":\"projection.read.result\"", result.DirectOutboundMessages![0]);
+        Assert.Contains("\"projection_id\":\"p.rooms\"", result.DirectOutboundMessages![0]);
     }
 
     [Fact]
@@ -1555,6 +1570,68 @@ public class RuntimeProtocolTests
     }
 
     [Fact]
+    public void Checkpoint_promote_maps_to_host_command_when_query_admin_capability_present()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(7)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+        state.SessionCapabilities.Add("query.admin");
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"checkpoint.promote\",\"target_checkpoint\":{\"selector\":\"latest\"}}",
+            state
+        );
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.CommandJsons);
+        Assert.Contains("PromoteCheckpointToGraph", result.CommandJsons[0]);
+        Assert.Contains("\"selector\":\"latest\"", result.CommandJsons[0]);
+    }
+
+    [Fact]
+    public void Checkpoint_promote_requires_query_admin_capability()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(7)
+        {
+            IsInitialized = true,
+            RoomId = "room-a",
+            PeerPubkeyHex = "peer-a"
+        };
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            "{\"type\":\"checkpoint.promote\"}",
+            state
+        );
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("reject.control_plane_forbidden: command=checkpoint.promote requires=query.admin", result.Error);
+    }
+
+    [Fact]
+    public void Event_mapper_converts_checkpoint_promoted_event_to_runtime_message()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var eventsJson =
+            "[{\"CheckpointPromoted\":{\"room_id\":\"room-a\",\"seq\":1,\"node_id_hex\":\"" +
+            new string('a', 64) +
+            "\",\"frontier_heads_hex\":[\"" + new string('a', 64) + "\"]}}]";
+
+        var result = mapper.MapEventsJsonToOutboundMessages(eventsJson);
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.OutboundMessages);
+        Assert.Contains("\"type\":\"checkpoint-promoted\"", result.OutboundMessages[0]);
+        Assert.Contains("\"seq\":1", result.OutboundMessages[0]);
+        Assert.Contains($"\"node_id_hex\":\"{new string('a', 64)}\"", result.OutboundMessages[0]);
+        Assert.Contains($"\"frontier\":[\"{new string('a', 64)}\"]", result.OutboundMessages[0]);
+    }
+
+    [Fact]
     public void Webrtc_offer_maps_to_host_relay_command_after_hello()
     {
         var mapper = new RuntimeProtocolMapper();
@@ -1836,5 +1913,147 @@ public class RuntimeProtocolTests
         Assert.Contains("\"type\":\"topology.validate-promotion.completed\"", result.OutboundMessages[4]);
         Assert.Contains("\"type\":\"topology.apply-promotion.completed\"", result.OutboundMessages[5]);
         Assert.Contains("\"audit_key\":\"_topology/promotion/prop-1\"", result.OutboundMessages[5]);
+    }
+
+    [Fact]
+    public void Graph_get_frontier_maps_to_host_command_when_query_admin_present()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(7) { IsInitialized = true, RoomId = "room-a", PeerPubkeyHex = "peer-a" };
+        state.SessionCapabilities.Add("query.admin");
+
+        var result = mapper.MapIncomingMessageToCommandJsons("{\"type\":\"graph.get-frontier\"}", state);
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.CommandJsons);
+        Assert.Contains("GetFrontier", result.CommandJsons[0]);
+    }
+
+    [Fact]
+    public void Graph_get_frontier_requires_query_admin_capability()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(7) { IsInitialized = true, RoomId = "room-a", PeerPubkeyHex = "peer-a" };
+
+        var result = mapper.MapIncomingMessageToCommandJsons("{\"type\":\"graph.get-frontier\"}", state);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("graph.get-frontier", result.Error);
+    }
+
+    [Fact]
+    public void Graph_get_causal_parents_maps_node_id_hex_to_host_command()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(7) { IsInitialized = true, RoomId = "room-a", PeerPubkeyHex = "peer-a" };
+        state.SessionCapabilities.Add("query.admin");
+        var nodeId = new string('b', 64);
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            $"{{\"type\":\"graph.get-causal-parents\",\"node_id_hex\":\"{nodeId}\"}}",
+            state
+        );
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.CommandJsons);
+        Assert.Contains("GetCausalParents", result.CommandJsons[0]);
+        Assert.Contains(nodeId, result.CommandJsons[0]);
+    }
+
+    [Fact]
+    public void Graph_get_canonical_resolution_maps_to_host_command()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(7) { IsInitialized = true, RoomId = "room-a", PeerPubkeyHex = "peer-a" };
+        state.SessionCapabilities.Add("query.admin");
+
+        var result = mapper.MapIncomingMessageToCommandJsons("{\"type\":\"graph.get-canonical-resolution\"}", state);
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.CommandJsons);
+        Assert.Contains("GetCanonicalResolution", result.CommandJsons[0]);
+    }
+
+    [Fact]
+    public void Graph_compute_sync_diff_maps_peer_ids_to_host_command()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var state = new RuntimeConnectionState(7) { IsInitialized = true, RoomId = "room-a", PeerPubkeyHex = "peer-a" };
+        state.SessionCapabilities.Add("query.admin");
+        var nodeId = new string('c', 64);
+
+        var result = mapper.MapIncomingMessageToCommandJsons(
+            $"{{\"type\":\"graph.compute-sync-diff\",\"peer_node_ids_hex\":[\"{nodeId}\"]}}",
+            state
+        );
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.CommandJsons);
+        Assert.Contains("ComputeSyncDiff", result.CommandJsons[0]);
+        Assert.Contains(nodeId, result.CommandJsons[0]);
+    }
+
+    [Fact]
+    public void Event_mapper_converts_frontier_queried_event_to_runtime_message()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var headHex = new string('d', 64);
+        var eventsJson = $"[{{\"FrontierQueried\":{{\"room_id\":\"room-a\",\"frontier_heads_hex\":[\"{headHex}\"]}}}}]";
+
+        var result = mapper.MapEventsJsonToOutboundMessages(eventsJson);
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.OutboundMessages);
+        Assert.Contains("\"type\":\"frontier-queried\"", result.OutboundMessages[0]);
+        Assert.Contains($"\"{headHex}\"", result.OutboundMessages[0]);
+    }
+
+    [Fact]
+    public void Event_mapper_converts_causal_parents_queried_event_to_runtime_message()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var nodeId = new string('e', 64);
+        var parentId = new string('f', 64);
+        var eventsJson = $"[{{\"CausalParentsQueried\":{{\"room_id\":\"room-a\",\"node_id_hex\":\"{nodeId}\"," +
+                         $"\"parent_ids_hex\":[\"{parentId}\"],\"node_found\":true}}}}]";
+
+        var result = mapper.MapEventsJsonToOutboundMessages(eventsJson);
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.OutboundMessages);
+        Assert.Contains("\"type\":\"causal-parents-queried\"", result.OutboundMessages[0]);
+        Assert.Contains($"\"node_id_hex\":\"{nodeId}\"", result.OutboundMessages[0]);
+        Assert.Contains(parentId, result.OutboundMessages[0]);
+    }
+
+    [Fact]
+    public void Event_mapper_converts_canonical_resolution_queried_event_to_runtime_message()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var eventsJson = "[{\"CanonicalResolutionQueried\":{\"room_id\":\"room-a\"," +
+                         "\"entries\":[{\"key\":\"hello\",\"value_bytes_b64\":\"d29ybGQ=\"}],\"entry_count\":1}}]";
+
+        var result = mapper.MapEventsJsonToOutboundMessages(eventsJson);
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.OutboundMessages);
+        Assert.Contains("\"type\":\"canonical-resolution-queried\"", result.OutboundMessages[0]);
+        Assert.Contains("\"entry_count\":1", result.OutboundMessages[0]);
+    }
+
+    [Fact]
+    public void Event_mapper_converts_sync_diff_computed_event_to_runtime_message()
+    {
+        var mapper = new RuntimeProtocolMapper();
+        var serverId = new string('a', 64);
+        var eventsJson = $"[{{\"SyncDiffComputed\":{{\"room_id\":\"room-a\"," +
+                         $"\"only_in_server\":[\"{serverId}\"],\"only_in_peer\":[]}}}}]";
+
+        var result = mapper.MapEventsJsonToOutboundMessages(eventsJson);
+
+        Assert.True(result.IsSuccess);
+        Assert.Single(result.OutboundMessages);
+        Assert.Contains("\"type\":\"sync-diff-computed\"", result.OutboundMessages[0]);
+        Assert.Contains(serverId, result.OutboundMessages[0]);
     }
 }

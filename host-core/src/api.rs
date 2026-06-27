@@ -249,6 +249,29 @@ pub enum HostCommand {
         import_mode: String,
         expected_checkpoint: Option<Value>,
     },
+    /// Explicit promotion boundary: materializes a Canonical Checkpoint-plane
+    /// snapshot (see docs/EXECUTION_MODEL_PLANES.md) into the room's real
+    /// CRDT graph as a synthetic origin node. `selector` reuses the same
+    /// shape as `BuildProjection.target_checkpoint` (seq/hash/latest).
+    PromoteCheckpointToGraph {
+        selector: Option<Value>,
+    },
+    /// Read the current CRDT frontier (leaf node ids) for a room's sync graph.
+    GetFrontier,
+    /// Read the causal parents of a specific node in a room's sync graph.
+    GetCausalParents {
+        node_id_hex: String,
+    },
+    /// Read the canonical (conflict-resolved) map for a room's sync graph.
+    GetCanonicalResolution,
+    /// Compute the set difference between this room's sync graph and a peer's claimed node set.
+    ComputeSyncDiff {
+        peer_node_ids_hex: Vec<String>,
+    },
+    /// Decode a pack's bytes and extract causal metadata without applying it to any graph.
+    InspectPack {
+        nodes_b64: String,
+    },
     Noop,
 }
 
@@ -466,6 +489,40 @@ pub enum HostEvent {
         room_id: String,
         entries: Vec<ConflictEntry>,
     },
+    /// Result of `PromoteCheckpointToGraph` — either a freshly-applied
+    /// promotion node, or the existing one if this `promotion_id` was already
+    /// promoted (idempotent re-promotion).
+    CheckpointPromoted {
+        room_id: String,
+        seq: u64,
+        node_id_hex: String,
+        frontier_heads_hex: Vec<String>,
+    },
+    FrontierQueried {
+        room_id: String,
+        frontier_heads_hex: Vec<String>,
+    },
+    CausalParentsQueried {
+        room_id: String,
+        node_id_hex: String,
+        parent_ids_hex: Vec<String>,
+        node_found: bool,
+    },
+    CanonicalResolutionQueried {
+        room_id: String,
+        entries: Vec<CanonicalMapEntry>,
+        entry_count: usize,
+    },
+    SyncDiffComputed {
+        room_id: String,
+        only_in_server: Vec<String>,
+        only_in_peer: Vec<String>,
+    },
+    PackInspected {
+        node_count: usize,
+        external_parent_ids_hex: Vec<String>,
+        tip_node_ids_hex: Vec<String>,
+    },
     PeerSignalRelayed {
         room_id: String,
         from_peer_pubkey: String,
@@ -640,6 +697,13 @@ pub struct PresenceEntry {
 pub struct ConflictEntry {
     pub at_unix_ms: u64,
     pub event: ConflictEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CanonicalMapEntry {
+    pub key: String,
+    /// Base64-encoded raw value bytes from the canonical resolution.
+    pub value_bytes_b64: String,
 }
 
 impl CommandResult {

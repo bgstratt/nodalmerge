@@ -3,12 +3,11 @@ use std::hash::Hasher;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nodalmerge_core::{Frontier, Hash, MerkleSearchTree, NodeId, Policy, PolicyDefault, PolicyRule, RoomToken, StateGraph, SyncCapabilities, SyncNode, pack_nodes, unpack_nodes};
+use nodalmerge_core::{Frontier, Hash, MapOp, MerkleSearchTree, NodeId, Op, Policy, PolicyDefault, PolicyRule, RoomToken, StateGraph, SyncCapabilities, SyncNode, Transaction, pack_nodes, unpack_nodes};
 use nodalmerge_core::conflicts::ConflictFingerprint;
 use crate::api::{
-    BlobEntry, BlobRedirectEntry, CapabilitySet, CommandEnvelope, CommandResult, ConflictEntry,
-    HostCommand,
-    HostEvent, ListEntry, MapEntry, SessionId, TextEntry,
+    BlobEntry, BlobRedirectEntry, CanonicalMapEntry, CapabilitySet, CommandEnvelope, CommandResult,
+    ConflictEntry, HostCommand, HostEvent, ListEntry, MapEntry, SessionId, TextEntry,
 };
 use crate::errors::{HostCoreError, HostCoreResult};
 use crate::traits::HostBlobUrlResolver;
@@ -435,6 +434,95 @@ fn room_latest_snapshot(
     let snapshots = room_canonical_snapshots.get(room_id)?;
     let seq = *room_canonical_seq.get(room_id).unwrap_or(&0);
     snapshots.get(&seq).cloned().or_else(|| snapshots.get(&0).cloned())
+}
+
+/// Outcome of resolving a `target_checkpoint`/`selector` value (the shape
+/// shared by `BuildProjection` and `PromoteCheckpointToGraph`) against the
+/// Canonical Checkpoint plane (see docs/EXECUTION_MODEL_PLANES.md).
+enum CheckpointResolution {
+    Resolved(u64, CanonicalSnapshotState),
+    SelectorInvalid,
+    NotFound,
+}
+
+/// Shared checkpoint-selector resolution logic for the Canonical Checkpoint
+/// plane (`seq`/`hash`/`frontier`/`latest`, matching the vocabulary already
+/// established by `BuildProjection.target_checkpoint`). Read-only — takes
+/// borrowed maps rather than `&self` so it works uniformly inside `apply`'s
+/// `&mut self` match without fighting the borrow checker.
+fn resolve_canonical_checkpoint(
+    room_id: &str,
+    target_checkpoint: &Option<Value>,
+    room_canonical_snapshots: &HashMap<String, HashMap<u64, CanonicalSnapshotState>>,
+    room_canonical_seq: &HashMap<String, u64>,
+    room_canonical_hash_index: &HashMap<String, HashMap<String, u64>>,
+) -> CheckpointResolution {
+    let snapshots = room_canonical_snapshots.get(room_id);
+    let selector = target_checkpoint
+        .as_ref()
+        .and_then(|v| v.get("selector"))
+        .and_then(Value::as_str)
+        .unwrap_or("latest");
+
+    let mut selected = snapshots.and_then(|snapshots| {
+        let seq = room_canonical_seq.get(room_id).copied().unwrap_or(0);
+        snapshots.get(&seq).cloned().or_else(|| snapshots.get(&0).cloned())
+    });
+
+    if selector.eq_ignore_ascii_case("seq") {
+        let Some(seq) = target_checkpoint
+            .as_ref()
+            .and_then(|v| v.get("canonical_seq"))
+            .and_then(Value::as_u64)
+        else {
+            return CheckpointResolution::SelectorInvalid;
+        };
+        selected = snapshots.and_then(|s| s.get(&seq).cloned());
+    } else if selector.eq_ignore_ascii_case("hash") {
+        let Some(hash) = target_checkpoint
+            .as_ref()
+            .and_then(|v| v.get("canonical_hash"))
+            .and_then(Value::as_str)
+        else {
+            return CheckpointResolution::SelectorInvalid;
+        };
+        if !is_hex64(hash) {
+            return CheckpointResolution::SelectorInvalid;
+        }
+        let seq_opt = room_canonical_hash_index
+            .get(room_id)
+            .and_then(|idx| idx.get(hash))
+            .copied();
+        selected = seq_opt.and_then(|seq| snapshots.and_then(|s| s.get(&seq).cloned()));
+    } else if selector.eq_ignore_ascii_case("frontier") {
+        let frontier_valid = target_checkpoint
+            .as_ref()
+            .and_then(|v| v.get("frontier"))
+            .and_then(Value::as_array)
+            .map(|tokens| {
+                !tokens.is_empty()
+                    && tokens.iter().all(|t| {
+                        t.as_str()
+                            .and_then(|s| s.strip_prefix("seq:"))
+                            .and_then(|rest| rest.parse::<u64>().ok())
+                            .is_some()
+                    })
+            })
+            .unwrap_or(false);
+        if !frontier_valid {
+            return CheckpointResolution::SelectorInvalid;
+        }
+    } else if !selector.eq_ignore_ascii_case("latest") {
+        return CheckpointResolution::SelectorInvalid;
+    }
+
+    match selected {
+        Some(snapshot) => {
+            let seq = snapshot.sequence;
+            CheckpointResolution::Resolved(seq, snapshot)
+        }
+        None => CheckpointResolution::NotFound,
+    }
 }
 
 fn deterministic_hex64(input: &str) -> String {
@@ -1778,6 +1866,232 @@ impl HostEngine {
                     }],
                 })
             }
+            HostCommand::GetFrontier => {
+                if !self.rooms.contains(&envelope.room_id) {
+                    return Err(HostCoreError::RoomNotFound);
+                }
+                let graph = self.room_sync_graphs.entry(envelope.room_id.clone()).or_default();
+                let frontier_heads_hex = graph.frontier().to_hex_vec();
+                Ok(CommandResult {
+                    events: vec![HostEvent::FrontierQueried {
+                        room_id: envelope.room_id,
+                        frontier_heads_hex,
+                    }],
+                })
+            }
+            HostCommand::GetCausalParents { node_id_hex } => {
+                if !self.rooms.contains(&envelope.room_id) {
+                    return Err(HostCoreError::RoomNotFound);
+                }
+                let parsed_id = parse_node_id_hex(&node_id_hex);
+                let graph = self.room_sync_graphs.entry(envelope.room_id.clone()).or_default();
+                let (parent_ids_hex, node_found) = match parsed_id {
+                    Some(id) => {
+                        let nodes = graph.get_nodes(&[id]);
+                        match nodes.into_iter().next() {
+                            Some(node) => {
+                                let parents = node.transaction.parents.iter()
+                                    .map(|h| h.to_hex())
+                                    .collect();
+                                (parents, true)
+                            }
+                            None => (Vec::new(), false),
+                        }
+                    }
+                    None => (Vec::new(), false),
+                };
+                Ok(CommandResult {
+                    events: vec![HostEvent::CausalParentsQueried {
+                        room_id: envelope.room_id,
+                        node_id_hex,
+                        parent_ids_hex,
+                        node_found,
+                    }],
+                })
+            }
+            HostCommand::GetCanonicalResolution => {
+                if !self.rooms.contains(&envelope.room_id) {
+                    return Err(HostCoreError::RoomNotFound);
+                }
+                let graph = self.room_sync_graphs.entry(envelope.room_id.clone()).or_default();
+                let resolved = graph.resolve_canonical();
+                let mut entries: Vec<CanonicalMapEntry> = resolved
+                    .into_iter()
+                    .map(|(key, value)| CanonicalMapEntry {
+                        key,
+                        value_bytes_b64: base64_encode(&value),
+                    })
+                    .collect();
+                entries.sort_by(|a, b| a.key.cmp(&b.key));
+                let entry_count = entries.len();
+                Ok(CommandResult {
+                    events: vec![HostEvent::CanonicalResolutionQueried {
+                        room_id: envelope.room_id,
+                        entries,
+                        entry_count,
+                    }],
+                })
+            }
+            HostCommand::ComputeSyncDiff { peer_node_ids_hex } => {
+                if !self.rooms.contains(&envelope.room_id) {
+                    return Err(HostCoreError::RoomNotFound);
+                }
+                let peer_ids: HashSet<Hash> = peer_node_ids_hex.iter()
+                    .filter_map(|hex| parse_node_id_hex(hex))
+                    .collect();
+                let graph = self.room_sync_graphs.entry(envelope.room_id.clone()).or_default();
+                let server_ids: HashSet<Hash> = graph.all_node_ids().into_iter().collect();
+                let only_in_server: Vec<String> = server_ids.difference(&peer_ids)
+                    .map(|id| id.to_hex())
+                    .collect();
+                let only_in_peer: Vec<String> = peer_ids.difference(&server_ids)
+                    .map(|id| id.to_hex())
+                    .collect();
+                Ok(CommandResult {
+                    events: vec![HostEvent::SyncDiffComputed {
+                        room_id: envelope.room_id,
+                        only_in_server,
+                        only_in_peer,
+                    }],
+                })
+            }
+            HostCommand::PromoteCheckpointToGraph { selector } => {
+                if !self.rooms.contains(&envelope.room_id) {
+                    return Err(HostCoreError::RoomNotFound);
+                }
+
+                let (seq, snapshot) = match resolve_canonical_checkpoint(
+                    &envelope.room_id,
+                    &selector,
+                    &self.room_canonical_snapshots,
+                    &self.room_canonical_seq,
+                    &self.room_canonical_hash_index,
+                ) {
+                    CheckpointResolution::Resolved(seq, snapshot) => (seq, snapshot),
+                    CheckpointResolution::SelectorInvalid | CheckpointResolution::NotFound => {
+                        return Err(HostCoreError::InvalidCommand);
+                    }
+                };
+
+                // Deterministic identity for this promotion attempt, independent of
+                // frontier/lamport at promotion time — see docs/EXECUTION_MODEL_PLANES.md.
+                let promotion_id_hex = Hash::of(
+                    format!("{}:{}:{}", envelope.room_id, seq, snapshot.canonical_hash).as_bytes(),
+                )
+                .to_hex();
+
+                let graph = self
+                    .room_sync_graphs
+                    .entry(envelope.room_id.clone())
+                    .or_default();
+
+                let all_ids = graph.all_node_ids();
+                let already_promoted = graph.get_nodes(&all_ids).into_iter().find_map(|node| {
+                    let is_match = node.transaction.ops.iter().any(|op| matches!(
+                        op,
+                        Op::Map(MapOp::Set { key, value })
+                            if key == "_promotion/id"
+                                && String::from_utf8_lossy(value) == promotion_id_hex
+                    ));
+                    is_match.then(|| node.id)
+                });
+
+                let node_id_hex = if let Some(existing_id) = already_promoted {
+                    existing_id.to_hex()
+                } else {
+                    let mut ops: Vec<Op> = snapshot
+                        .rows
+                        .iter()
+                        .map(|(key, value)| {
+                            let value_bytes = match value {
+                                Value::String(s) => s.clone().into_bytes(),
+                                other => other.to_string().into_bytes(),
+                            };
+                            Op::Map(MapOp::Set { key: key.clone(), value: value_bytes })
+                        })
+                        .collect();
+                    // Marker ops — not part of the snapshot's rows — so a promoted
+                    // node is always traceable back to the checkpoint it materialized
+                    // from, and re-promotion is detectable above.
+                    ops.push(Op::Map(MapOp::Set {
+                        key: "_promotion/source_snapshot_seq".to_string(),
+                        value: seq.to_le_bytes().to_vec(),
+                    }));
+                    ops.push(Op::Map(MapOp::Set {
+                        key: "_promotion/id".to_string(),
+                        value: promotion_id_hex.clone().into_bytes(),
+                    }));
+
+                    let transaction = Transaction {
+                        author: [0u8; 32],
+                        lamport: all_ids.len() as u64 + 1,
+                        wall_ms: now_unix_ms(),
+                        ops,
+                        parents: graph.frontier().heads,
+                    };
+                    let node = SyncNode::new(transaction);
+                    let node_id_hex = node.id.to_hex();
+                    graph.apply_remote_batch(vec![node]);
+                    node_id_hex
+                };
+
+                let frontier_heads_hex = graph.frontier().to_hex_vec();
+
+                if let Some(stored) = self
+                    .room_canonical_snapshots
+                    .get_mut(&envelope.room_id)
+                    .and_then(|snapshots| snapshots.get_mut(&seq))
+                {
+                    stored.frontier = frontier_heads_hex.clone();
+                }
+
+                Ok(CommandResult {
+                    events: vec![HostEvent::CheckpointPromoted {
+                        room_id: envelope.room_id,
+                        seq,
+                        node_id_hex,
+                        frontier_heads_hex,
+                    }],
+                })
+            }
+            HostCommand::InspectPack { nodes_b64 } => {
+                let decoded = base64_decode(&nodes_b64).map_err(|_| HostCoreError::InvalidCommand)?;
+                let nodes: Vec<SyncNode> = unpack_nodes(&decoded).map_err(|_| HostCoreError::InvalidCommand)?;
+                let node_count = nodes.len();
+                let pack_node_ids: HashSet<Hash> = nodes.iter().map(|n| n.id).collect();
+                // External parents: parent ids from any node in the pack that are not
+                // themselves present in the pack (what this pack causally depends on externally).
+                let mut external_parents: HashSet<Hash> = HashSet::new();
+                // Internal parents: node ids that ARE referenced as a parent within the pack.
+                let mut referenced_in_pack: HashSet<Hash> = HashSet::new();
+                for node in &nodes {
+                    for parent in &node.transaction.parents {
+                        if pack_node_ids.contains(parent) {
+                            referenced_in_pack.insert(*parent);
+                        } else {
+                            external_parents.insert(*parent);
+                        }
+                    }
+                }
+                // Tips: pack nodes that are not referenced as a parent by any other pack node.
+                let tip_node_ids_hex: Vec<String> = pack_node_ids.difference(&referenced_in_pack)
+                    .map(|id| id.to_hex())
+                    .collect();
+                let mut external_parent_ids_hex: Vec<String> = external_parents.iter()
+                    .map(|id| id.to_hex())
+                    .collect();
+                // Deterministic output order.
+                external_parent_ids_hex.sort_unstable();
+                let mut tip_node_ids_hex_sorted = tip_node_ids_hex;
+                tip_node_ids_hex_sorted.sort_unstable();
+                Ok(CommandResult {
+                    events: vec![HostEvent::PackInspected {
+                        node_count,
+                        external_parent_ids_hex,
+                        tip_node_ids_hex: tip_node_ids_hex_sorted,
+                    }],
+                })
+            }
             HostCommand::RelayPeerSignal {
                 session_id,
                 msg_type,
@@ -2078,50 +2392,15 @@ impl HostEngine {
                     .and_then(Value::as_str)
                     .unwrap_or("latest");
 
-                let snapshots = self
-                    .room_canonical_snapshots
-                    .entry(envelope.room_id.clone())
-                    .or_default();
-                let mut selected = snapshots.get(
-                    self.room_canonical_seq
-                        .entry(envelope.room_id.clone())
-                        .or_insert(0),
-                )
-                .cloned()
-                .or_else(|| snapshots.get(&0).cloned());
-
-                if selector.eq_ignore_ascii_case("seq") {
-                    let Some(seq) = target_checkpoint
-                        .as_ref()
-                        .and_then(|v| v.get("canonical_seq"))
-                        .and_then(Value::as_u64)
-                    else {
-                        return Ok(CommandResult {
-                            events: vec![HostEvent::ProjectionBuildRejected {
-                                room_id: envelope.room_id,
-                                projection_id,
-                                reason_class: "reject.checkpoint_selector_invalid".to_string(),
-                                reason_message: "projection.build.target_checkpoint does not resolve to known canonical snapshot".to_string(),
-                            }],
-                        });
-                    };
-                    selected = snapshots.get(&seq).cloned();
-                } else if selector.eq_ignore_ascii_case("hash") {
-                    let Some(hash) = target_checkpoint
-                        .as_ref()
-                        .and_then(|v| v.get("canonical_hash"))
-                        .and_then(Value::as_str)
-                    else {
-                        return Ok(CommandResult {
-                            events: vec![HostEvent::ProjectionBuildRejected {
-                                room_id: envelope.room_id,
-                                projection_id,
-                                reason_class: "reject.checkpoint_selector_invalid".to_string(),
-                                reason_message: "projection.build.target_checkpoint does not resolve to known canonical snapshot".to_string(),
-                            }],
-                        });
-                    };
-                    if !is_hex64(hash) {
+                let snapshot = match resolve_canonical_checkpoint(
+                    &envelope.room_id,
+                    &target_checkpoint,
+                    &self.room_canonical_snapshots,
+                    &self.room_canonical_seq,
+                    &self.room_canonical_hash_index,
+                ) {
+                    CheckpointResolution::Resolved(_, snapshot) => snapshot,
+                    CheckpointResolution::SelectorInvalid => {
                         return Ok(CommandResult {
                             events: vec![HostEvent::ProjectionBuildRejected {
                                 room_id: envelope.room_id,
@@ -2131,58 +2410,16 @@ impl HostEngine {
                             }],
                         });
                     }
-                    let seq_opt = self
-                        .room_canonical_hash_index
-                        .entry(envelope.room_id.clone())
-                        .or_default()
-                        .get(hash)
-                        .copied();
-                    selected = seq_opt.and_then(|seq| snapshots.get(&seq).cloned());
-                } else if selector.eq_ignore_ascii_case("frontier") {
-                    let frontier_valid = target_checkpoint
-                        .as_ref()
-                        .and_then(|v| v.get("frontier"))
-                        .and_then(Value::as_array)
-                        .map(|tokens| {
-                            !tokens.is_empty()
-                                && tokens.iter().all(|t| {
-                                    t.as_str()
-                                        .and_then(|s| s.strip_prefix("seq:"))
-                                        .and_then(|rest| rest.parse::<u64>().ok())
-                                        .is_some()
-                                })
-                        })
-                        .unwrap_or(false);
-                    if !frontier_valid {
+                    CheckpointResolution::NotFound => {
                         return Ok(CommandResult {
                             events: vec![HostEvent::ProjectionBuildRejected {
                                 room_id: envelope.room_id,
                                 projection_id,
-                                reason_class: "reject.checkpoint_selector_invalid".to_string(),
+                                reason_class: "reject.checkpoint_not_found".to_string(),
                                 reason_message: "projection.build.target_checkpoint does not resolve to known canonical snapshot".to_string(),
                             }],
                         });
                     }
-                } else if !selector.eq_ignore_ascii_case("latest") {
-                    return Ok(CommandResult {
-                        events: vec![HostEvent::ProjectionBuildRejected {
-                            room_id: envelope.room_id,
-                            projection_id,
-                            reason_class: "reject.checkpoint_selector_invalid".to_string(),
-                            reason_message: "projection.build.target_checkpoint does not resolve to known canonical snapshot".to_string(),
-                        }],
-                    });
-                }
-
-                let Some(snapshot) = selected else {
-                    return Ok(CommandResult {
-                        events: vec![HostEvent::ProjectionBuildRejected {
-                            room_id: envelope.room_id,
-                            projection_id,
-                            reason_class: "reject.checkpoint_not_found".to_string(),
-                            reason_message: "projection.build.target_checkpoint does not resolve to known canonical snapshot".to_string(),
-                        }],
-                    });
                 };
 
                 let prefix = spec
@@ -3438,7 +3675,7 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
-fn base64_decode(s: &str) -> Result<Vec<u8>, ()> {
+pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, ()> {
     const TABLE: &[u8; 128] = b"\
         \xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\
         \xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\
@@ -3515,6 +3752,21 @@ fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Parse a 64-character lowercase hex string into a `Hash` (Blake3 / 32 bytes).
+fn parse_node_id_hex(hex: &str) -> Option<Hash> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    let hex_bytes = hex.as_bytes();
+    for i in 0..32 {
+        let hi = (hex_bytes[i * 2] as char).to_digit(16)?;
+        let lo = (hex_bytes[i * 2 + 1] as char).to_digit(16)?;
+        bytes[i] = (hi * 16 + lo) as u8;
+    }
+    Some(Hash(bytes))
 }
 
 #[cfg(test)]

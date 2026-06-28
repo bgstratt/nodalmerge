@@ -101,6 +101,16 @@ public sealed class RuntimeDagPersistenceService
         return task;
     }
 
+    public async Task<string?> TryExportRoomPackB64Async(string roomId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(roomId))
+            return null;
+        var snapshot = await TryGetServerPackSnapshotAsync(roomId, cancellationToken);
+        return snapshot is null || snapshot.Payload.Length == 0
+            ? null
+            : Convert.ToBase64String(snapshot.Payload);
+    }
+
     public void InvalidateHydration(string roomId)
     {
         if (string.IsNullOrWhiteSpace(roomId))

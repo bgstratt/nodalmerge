@@ -17,6 +17,10 @@ public sealed class RuntimeRoomBroker
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<ulong, RuntimeRoomConnection>> _rooms =
         new(StringComparer.Ordinal);
 
+    // Secondary index: stable peer_id → current session_id, for reconnect targeting.
+    private readonly ConcurrentDictionary<string, ulong> _peerIdToSession =
+        new(StringComparer.Ordinal);
+
     public RuntimeRoomRegistrationResult Register(WebSocket socket, RuntimeConnectionState state)
     {
         if (!state.IsInitialized
@@ -29,8 +33,13 @@ public sealed class RuntimeRoomBroker
         var roomId = state.RoomId;
         var room = _rooms.GetOrAdd(roomId, _ => new ConcurrentDictionary<ulong, RuntimeRoomConnection>());
 
-        var connection = new RuntimeRoomConnection(state.SessionId, roomId, state.PeerPubkeyHex, socket);
+        var connection = new RuntimeRoomConnection(state.SessionId, roomId, state.PeerPubkeyHex, state.PeerId, state.PeerType, socket);
         room[state.SessionId] = connection;
+
+        if (!string.IsNullOrWhiteSpace(state.PeerId))
+        {
+            _peerIdToSession[state.PeerId] = state.SessionId;
+        }
 
         var peers = room.Values
             .Where(candidate => candidate.SessionId != state.SessionId)
@@ -39,10 +48,12 @@ public sealed class RuntimeRoomBroker
             .ToArray();
 
         _logger.LogInformation(
-            "runtime room register room={Room} session={Session} peer={Peer} roomPeers={PeerCount}",
+            "runtime room register room={Room} session={Session} peer={Peer} peerId={PeerId} peerType={PeerType} roomPeers={PeerCount}",
             roomId,
             state.SessionId,
             state.PeerPubkeyHex,
+            state.PeerId ?? "-",
+            state.PeerType ?? "ui",
             room.Count
         );
 
@@ -64,11 +75,17 @@ public sealed class RuntimeRoomBroker
 
         room.TryRemove(state.SessionId, out _);
 
+        if (!string.IsNullOrWhiteSpace(state.PeerId))
+        {
+            _peerIdToSession.TryRemove(state.PeerId, out _);
+        }
+
         _logger.LogInformation(
-            "runtime room unregister room={Room} session={Session} peer={Peer} roomPeers={PeerCount}",
+            "runtime room unregister room={Room} session={Session} peer={Peer} peerId={PeerId} roomPeers={PeerCount}",
             roomId,
             state.SessionId,
             state.PeerPubkeyHex,
+            state.PeerId ?? "-",
             room.Count
         );
 
@@ -81,11 +98,15 @@ public sealed class RuntimeRoomBroker
         return false;
     }
 
+    public bool TryGetSessionByPeerId(string peerId, out ulong sessionId) =>
+        _peerIdToSession.TryGetValue(peerId, out sessionId);
+
     public async Task BroadcastAsync(
         string roomId,
         string outboundMessage,
         ulong? excludeSessionId = null,
         string? targetPeerPubkey = null,
+        string? targetPeerId = null,
         CancellationToken cancellationToken = default
     )
     {
@@ -111,6 +132,12 @@ public sealed class RuntimeRoomBroker
                 continue;
             }
 
+            if (!string.IsNullOrWhiteSpace(targetPeerId)
+                && !string.Equals(connection.PeerId, targetPeerId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             attempted += 1;
 
             var sent = await connection.TrySendTextAsync(outboundMessage, cancellationToken);
@@ -125,12 +152,13 @@ public sealed class RuntimeRoomBroker
         }
 
         _logger.LogInformation(
-            "runtime room broadcast room={Room} attempted={Attempted} delivered={Delivered} excludeSession={ExcludeSession} targetPeer={TargetPeer}",
+            "runtime room broadcast room={Room} attempted={Attempted} delivered={Delivered} excludeSession={ExcludeSession} targetPeer={TargetPeer} targetPeerId={TargetPeerId}",
             roomId,
             attempted,
             delivered,
             excludeSessionId,
-            targetPeerPubkey ?? "*"
+            targetPeerPubkey ?? "*",
+            targetPeerId ?? "*"
         );
 
         if (room.IsEmpty)
@@ -145,17 +173,21 @@ internal sealed class RuntimeRoomConnection
     private readonly WebSocket _socket;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
-    public RuntimeRoomConnection(ulong sessionId, string roomId, string peerPubkeyHex, WebSocket socket)
+    public RuntimeRoomConnection(ulong sessionId, string roomId, string peerPubkeyHex, string? peerId, string? peerType, WebSocket socket)
     {
         SessionId = sessionId;
         RoomId = roomId;
         PeerPubkeyHex = peerPubkeyHex;
+        PeerId = peerId;
+        PeerType = peerType;
         _socket = socket;
     }
 
     public ulong SessionId { get; }
     public string RoomId { get; }
     public string PeerPubkeyHex { get; }
+    public string? PeerId { get; }
+    public string? PeerType { get; }
 
     public async Task<bool> TrySendTextAsync(string text, CancellationToken cancellationToken)
     {

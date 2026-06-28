@@ -20,9 +20,15 @@ public class DemoReadinessSmokeTests
         await using var app = BuildTestApp(services =>
         {
             services.AddSingleton<IRuntimeCommandBridge>(new FakeRuntimeCommandBridge(
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
-                FfiJsonBridgeResult.Success("[]"),
+                FfiJsonBridgeResult.Success("[]"),           // hydrate pre-state EnsureRoom
+                FfiJsonBridgeResult.Success("[]"),           // hydrate pre-state RequestServerPack
+                FfiJsonBridgeResult.Success("[]"),           // hydrate main EnsureRoom
+                FfiJsonBridgeResult.Success("[]"),           // hello EnsureRoom
+                FfiJsonBridgeResult.Success("[]"),           // hello OpenSession
+                FfiJsonBridgeResult.Success("[]"),           // hello ClientHello
+                FfiJsonBridgeResult.Success("[]"),           // hello RequestServerPack
+                FfiJsonBridgeResult.Success("[]"),           // catch-up EnsureRoom
+                FfiJsonBridgeResult.Success("[]"),           // catch-up RequestServerPack
                 FfiJsonBridgeResult.Success("[\"NoopAck\"]"),
                 FfiJsonBridgeResult.Failure(AsStatus.Protocol),
                 FfiJsonBridgeResult.Success("[\"NoopAck\"]")

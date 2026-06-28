@@ -84,6 +84,8 @@ public sealed class RuntimeProtocolMapper
 
             state.RoomId = message.Room;
             state.PeerPubkeyHex = message.Pubkey;
+            state.PeerId = string.IsNullOrWhiteSpace(message.PeerId) ? message.Pubkey : message.PeerId;
+            state.PeerType = string.IsNullOrWhiteSpace(message.PeerType) ? "ui" : message.PeerType;
             UpdateServerPeerStatus(state, state.PeerPubkeyHex);
             state.IsInitialized = true;
             state.SessionId = ResolveSessionId(message, state);
@@ -217,6 +219,8 @@ public sealed class RuntimeProtocolMapper
 
             state.RoomId = roomId;
             state.PeerPubkeyHex = peerPubkeyHex;
+            state.PeerId = string.IsNullOrWhiteSpace(message.PeerId) ? peerPubkeyHex : message.PeerId;
+            state.PeerType = string.IsNullOrWhiteSpace(message.PeerType) ? "ui" : message.PeerType;
             UpdateServerPeerStatus(state, state.PeerPubkeyHex);
             state.IsInitialized = true;
             SetSessionCapabilities(state, null);
@@ -3188,6 +3192,8 @@ public sealed class RuntimeConnectionState
     public bool IsInitialized { get; set; }
     public string? RoomId { get; set; }
     public string? PeerPubkeyHex { get; set; }
+    public string? PeerId { get; set; }
+    public string? PeerType { get; set; }
     public string? TraceId { get; set; }
     public bool IsServerPeer { get; set; }
     public HashSet<string> SessionCapabilities { get; } = new(StringComparer.Ordinal);
@@ -3656,6 +3662,10 @@ public sealed class RuntimeInboundMessage
     public string? NodeIdHex { get; set; }
     [JsonPropertyName("peer_node_ids_hex")]
     public string[]? PeerNodeIdsHex { get; set; }
+    [JsonPropertyName("peer_id")]
+    public string? PeerId { get; set; }
+    [JsonPropertyName("peer_type")]
+    public string? PeerType { get; set; }
 }
 
 public sealed record TopologyChildStubState(

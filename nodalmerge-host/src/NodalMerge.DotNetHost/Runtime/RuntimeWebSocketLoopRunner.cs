@@ -311,7 +311,9 @@ public sealed class RuntimeWebSocketLoopRunner
                                 ["type"] = "peer-joined",
                                 ["room"] = state.RoomId,
                                 ["from"] = state.PeerPubkeyHex,
-                                ["pubkey"] = state.PeerPubkeyHex
+                                ["pubkey"] = state.PeerPubkeyHex,
+                                ["peer_id"] = state.PeerId,
+                                ["peer_type"] = state.PeerType ?? "ui"
                             }.ToJsonString();
 
                             await roomBroker.BroadcastAsync(
@@ -320,6 +322,28 @@ public sealed class RuntimeWebSocketLoopRunner
                                 excludeSessionId: state.SessionId,
                                 cancellationToken: cancellationToken
                             );
+                        }
+
+                        // Send the new peer a catch-up pack with the current server CRDT state so
+                        // they are immediately in sync without needing a separate sync-diff round-trip.
+                        if (dagPersistenceService is not null && !string.IsNullOrWhiteSpace(state.RoomId))
+                        {
+                            var nodesB64 = await dagPersistenceService.TryExportRoomPackB64Async(
+                                state.RoomId!, cancellationToken);
+                            if (!string.IsNullOrWhiteSpace(nodesB64))
+                            {
+                                var catchUpPack = new JsonObject
+                                {
+                                    ["type"] = "pack",
+                                    ["room"] = state.RoomId,
+                                    ["from"] = "server",
+                                    ["nodes"] = nodesB64
+                                }.ToJsonString();
+                                processResult = processResult with
+                                {
+                                    OutboundMessages = [.. processResult.OutboundMessages, catchUpPack]
+                                };
+                            }
                         }
                     }
                 }
@@ -437,7 +461,9 @@ public sealed class RuntimeWebSocketLoopRunner
                     {
                         ["type"] = "peer-left",
                         ["room"] = state.RoomId,
-                        ["from"] = state.PeerPubkeyHex
+                        ["from"] = state.PeerPubkeyHex,
+                        ["peer_id"] = state.PeerId,
+                        ["peer_type"] = state.PeerType ?? "ui"
                     }.ToJsonString();
 
                     await roomBroker.BroadcastAsync(

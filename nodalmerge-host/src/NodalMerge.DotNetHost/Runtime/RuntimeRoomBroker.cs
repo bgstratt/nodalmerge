@@ -101,6 +101,20 @@ public sealed class RuntimeRoomBroker
     public bool TryGetSessionByPeerId(string peerId, out ulong sessionId) =>
         _peerIdToSession.TryGetValue(peerId, out sessionId);
 
+    /// <summary>
+    /// Returns a snapshot of all connections currently registered in <paramref name="roomId"/>.
+    /// Each entry exposes the stable peer_id (or pubkey fallback), peer_type, and pubkey.
+    /// </summary>
+    public IReadOnlyList<(string PeerId, string? PeerType, string PubkeyHex)> GetConnectedPeers(string roomId)
+    {
+        if (!_rooms.TryGetValue(roomId, out var room))
+            return [];
+
+        return room.Values
+            .Select(c => (c.PeerId ?? c.PeerPubkeyHex, c.PeerType, c.PeerPubkeyHex))
+            .ToList();
+    }
+
     public async Task BroadcastAsync(
         string roomId,
         string outboundMessage,

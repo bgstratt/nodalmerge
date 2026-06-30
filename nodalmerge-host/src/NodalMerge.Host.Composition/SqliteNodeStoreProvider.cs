@@ -9,6 +9,11 @@ internal sealed class SqliteNodeStoreProvider : INodeStoreProvider
 {
     private readonly string _connectionString;
 
+    static SqliteNodeStoreProvider()
+    {
+        SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlite3());
+    }
+
     public SqliteNodeStoreProvider(SqliteNodeStorageOptions options)
     {
         var fullPath = Path.GetFullPath(options.DbPath);

@@ -1,16 +1,16 @@
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using NodalMerge.DotNetHost.Ffi;
 using NodalMerge.DotNetHost.Runtime;
 using NodalMerge.Host.Abstractions.Providers;
 using NodalMerge.Host.Composition;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 using System.Text.Json.Serialization;
 
 namespace NodalMerge.DotNetHost;
 
-public static class HostApplication
+public static class WebApplicationExtensions
 {
     private sealed record SyncTokenMintRequest(
         string Room,
@@ -29,7 +29,18 @@ public static class HostApplication
         [property: JsonPropertyName("sig_hex")] string SigHex
     );
 
-        private const string DemoHtml = """
+    private sealed class BlobUrlQuery
+    {
+        public string Hash { get; init; } = string.Empty;
+        public string? Op { get; init; }
+        public string? Room { get; init; }
+        public string? Namespace { get; init; }
+        [JsonPropertyName("contentType")]
+        public string? ContentType { get; init; }
+        public long? Size { get; init; }
+    }
+
+    private const string DemoHtml = """
 <!doctype html>
 <html lang="en">
 <head>
@@ -202,23 +213,12 @@ public static class HostApplication
 </html>
 """;
 
-    public static WebApplication Build(
-        string[] args,
-        Action<IServiceCollection>? configureServices = null,
-        Action<IWebHostBuilder>? configureWebHost = null,
-        Action<ConfigurationManager>? configureConfiguration = null
-    )
+    /// <summary>
+    /// Registers the NodalMerge WebSocket middleware and maps all runtime endpoints.
+    /// Call this after building the WebApplication and before app.Run().
+    /// </summary>
+    public static WebApplication MapNodalMergeEndpoints(this WebApplication app)
     {
-        var builder = WebApplication.CreateBuilder(args);
-        configureWebHost?.Invoke(builder.WebHost);
-        configureConfiguration?.Invoke(builder.Configuration);
-
-        builder.Services.AddNodalMergeHostProviders(builder.Configuration);
-        builder.Services.AddNodalMergeRuntimeCore(builder.Configuration);
-
-        configureServices?.Invoke(builder.Services);
-
-        var app = builder.Build();
         app.UseWebSockets();
 
         var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("NodalMerge.Startup");
@@ -232,6 +232,7 @@ public static class HostApplication
         startupLogger.LogWarning(
             "Runtime websocket path remains relay-first; experimental DAG pack persistence/hydration via configured node store is enabled"
         );
+
         var peerLocal = app.Services.GetRequiredService<RuntimePeerLocalPersistenceService>();
         if (peerLocal.IsEnabled)
         {
@@ -279,194 +280,6 @@ public static class HostApplication
             });
         });
 
-        static async Task<IResult> HandleTokenMintAsync(
-            SyncTokenMintRequest request,
-            IRoomTokenAuthProvider authProvider,
-            CancellationToken cancellationToken
-        )
-        {
-            if (string.IsNullOrWhiteSpace(request.Room))
-            {
-                return Results.BadRequest(new { error = "room is required" });
-            }
-
-            if (string.IsNullOrWhiteSpace(request.PeerPubkeyHex))
-            {
-                return Results.BadRequest(new { error = "peerPubkeyHex is required" });
-            }
-
-            try
-            {
-                var mintResult = await authProvider.MintAsync(
-                    new RoomTokenMintRequest(
-                        request.Room,
-                        request.PeerPubkeyHex,
-                        request.LifetimeSeconds,
-                        request.Capabilities,
-                        request.CapabilityProfileVersion
-                    ),
-                    cancellationToken
-                );
-
-                if (!mintResult.IsSupported)
-                {
-                    return Results.StatusCode(StatusCodes.Status501NotImplemented);
-                }
-
-                return Results.Ok(new
-                {
-                    peer_pubkey_hex = mintResult.PeerPubkeyHex,
-                    expiry_secs = mintResult.ExpiryUnixSeconds,
-                    capabilities = mintResult.Capabilities,
-                    sig_hex = mintResult.SignatureHex
-                });
-            }
-            catch (SidecarAuthProviderException ex)
-            {
-                if (ex.IsTimeout)
-                {
-                    return Results.StatusCode(StatusCodes.Status504GatewayTimeout);
-                }
-
-                if (ex.StatusCode is >= 500)
-                {
-                    return Results.StatusCode(StatusCodes.Status502BadGateway);
-                }
-
-                return Results.BadRequest(new { error = ex.Message });
-            }
-            catch (InvalidOperationException ex)
-            {
-                return Results.BadRequest(new { error = ex.Message });
-            }
-
-        }
-
-        static async Task<IResult> HandleTokenValidateAsync(
-            SyncTokenValidateRequest request,
-            IRoomTokenAuthProvider authProvider,
-            CancellationToken cancellationToken
-        )
-        {
-            if (string.IsNullOrWhiteSpace(request.Room))
-            {
-                return Results.BadRequest(new { error = "room is required" });
-            }
-
-            if (string.IsNullOrWhiteSpace(request.PeerPubkeyHex))
-            {
-                return Results.BadRequest(new { error = "peer_pubkey_hex is required" });
-            }
-
-            if (string.IsNullOrWhiteSpace(request.SigHex))
-            {
-                return Results.BadRequest(new { error = "sig_hex is required" });
-            }
-
-            try
-            {
-                var validation = await authProvider.ValidateAsync(
-                    new RoomTokenValidationRequest(
-                        request.Room,
-                        request.PeerPubkeyHex,
-                        request.ExpirySecs,
-                        request.Capabilities,
-                        request.CapabilityProfileVersion,
-                        request.SigHex
-                    ),
-                    cancellationToken
-                );
-
-                return Results.Ok(new { valid = validation.IsValid, reason = validation.Reason });
-            }
-            catch (SidecarAuthProviderException ex)
-            {
-                if (ex.IsTimeout)
-                {
-                    return Results.StatusCode(StatusCodes.Status504GatewayTimeout);
-                }
-
-                if (ex.StatusCode is >= 500)
-                {
-                    return Results.StatusCode(StatusCodes.Status502BadGateway);
-                }
-
-                return Results.BadRequest(new { error = ex.Message });
-            }
-            catch (InvalidOperationException ex)
-            {
-                return Results.BadRequest(new { error = ex.Message });
-            }
-
-        }
-
-        static async Task<IResult> HandleBlobUrlAsync(
-            [AsParameters] BlobUrlQuery query,
-            IBlobUrlResolverProvider resolver,
-            CancellationToken cancellationToken
-        )
-        {
-            if (string.IsNullOrWhiteSpace(query.Hash))
-            {
-                return Results.BadRequest(new { error = "hash is required" });
-            }
-
-            var room = string.IsNullOrWhiteSpace(query.Room) ? "default" : query.Room;
-            var scope = string.IsNullOrWhiteSpace(query.Namespace) ? "assets" : query.Namespace;
-            var op = (query.Op ?? string.Empty).Trim().ToLowerInvariant();
-
-            if (op == "put")
-            {
-                if (query.Size is null || query.Size <= 0)
-                {
-                    return Results.BadRequest(new { error = "size must be a positive integer for op=put" });
-                }
-
-                var url = await resolver.ResolvePutUrlAsync(
-                    new BlobPutUrlRequest(
-                        room,
-                        scope,
-                        query.Hash,
-                        query.Size.Value,
-                        query.ContentType
-                    ),
-                    cancellationToken
-                );
-
-                if (url is null)
-                {
-                    return Results.StatusCode(StatusCodes.Status404NotFound);
-                }
-
-                return Results.Ok(new
-                {
-                    url = url.Url,
-                    expiresAt = url.ExpiresAtUtc.ToUnixTimeSeconds()
-                });
-            }
-
-            if (op == "get")
-            {
-                var url = await resolver.ResolveGetUrlAsync(
-                    new BlobGetUrlRequest(room, scope, query.Hash),
-                    cancellationToken
-                );
-
-                if (url is null)
-                {
-                    return Results.StatusCode(StatusCodes.Status404NotFound);
-                }
-
-                return Results.Ok(new
-                {
-                    url = url.Url,
-                    expiresAt = url.ExpiresAtUtc.ToUnixTimeSeconds()
-                });
-            }
-
-            return Results.BadRequest(new { error = "op must be 'get' or 'put'" });
-        }
-
         app.MapPost("/sync/token", HandleTokenMintAsync);
         app.MapPost("/api/sync/token", HandleTokenMintAsync);
         app.MapPost("/sync/token/validate", HandleTokenValidateAsync);
@@ -508,76 +321,216 @@ public static class HostApplication
             await loopRunner.RunAsync(socket, bridge, context.RequestAborted);
         });
 
-        static async Task HandleRuntimeWebSocketAsync(HttpContext context)
-        {
-            var logger = context.RequestServices
-                .GetRequiredService<ILoggerFactory>()
-                .CreateLogger("NodalMerge.RuntimeWs");
-
-            if (!context.WebSockets.IsWebSocketRequest)
-            {
-                context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                await context.Response.WriteAsync("WebSocket upgrade required");
-                return;
-            }
-
-            logger.LogInformation(
-                "runtime ws open remote={Remote} path={Path}",
-                context.Connection.RemoteIpAddress?.ToString(),
-                context.Request.Path.ToString()
-            );
-
-            var frameProcessor = context.RequestServices.GetRequiredService<RuntimeFrameProcessor>();
-            var loopRunner = context.RequestServices.GetRequiredService<RuntimeWebSocketLoopRunner>();
-            var sessionIds = context.RequestServices.GetRequiredService<RuntimeSessionIdAllocator>();
-            var roomBroker = context.RequestServices.GetRequiredService<RuntimeRoomBroker>();
-            var dagPersistence = context.RequestServices.GetRequiredService<RuntimeDagPersistenceService>();
-            var peerLocalPersistence = context.RequestServices.GetRequiredService<RuntimePeerLocalPersistenceService>();
-            var tokenValidationService = context.RequestServices.GetRequiredService<RuntimeTokenValidationService>();
-            var state = new RuntimeConnectionState(sessionIds.Next());
-
-            // Compatibility path `/ws/{roomId}` can carry the room only in the URL.
-            // Seed state.RoomId early so hydration can run before hello processing.
-            if (context.Request.RouteValues.TryGetValue("roomId", out var roomRouteValue)
-                && roomRouteValue is not null)
-            {
-                var routeRoom = roomRouteValue.ToString();
-                if (!string.IsNullOrWhiteSpace(routeRoom)
-                    && !string.Equals(routeRoom, "runtime", StringComparison.OrdinalIgnoreCase))
-                {
-                    state.RoomId = Uri.UnescapeDataString(routeRoom);
-                }
-            }
-
-            using var socket = await context.WebSockets.AcceptWebSocketAsync();
-            try
-            {
-                await loopRunner.RunAsync(
-                    socket,
-                    frameProcessor,
-                    state,
-                    roomBroker,
-                    tokenValidationService,
-                    dagPersistence,
-                    peerLocalPersistence,
-                    context.RequestAborted
-                );
-            }
-            finally
-            {
-                logger.LogInformation(
-                    "runtime ws closed remote={Remote} path={Path} close={CloseStatus}",
-                    context.Connection.RemoteIpAddress?.ToString(),
-                    context.Request.Path.ToString(),
-                    socket.CloseStatus?.ToString() ?? "none"
-                );
-            }
-        }
-
         app.Map("/ws/runtime", HandleRuntimeWebSocketAsync);
         app.Map("/ws/{roomId}", HandleRuntimeWebSocketAsync);
 
         return app;
+    }
+
+    private static async Task HandleRuntimeWebSocketAsync(HttpContext context)
+    {
+        var logger = context.RequestServices
+            .GetRequiredService<ILoggerFactory>()
+            .CreateLogger("NodalMerge.RuntimeWs");
+
+        if (!context.WebSockets.IsWebSocketRequest)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsync("WebSocket upgrade required");
+            return;
+        }
+
+        logger.LogInformation(
+            "runtime ws open remote={Remote} path={Path}",
+            context.Connection.RemoteIpAddress?.ToString(),
+            context.Request.Path.ToString()
+        );
+
+        var frameProcessor = context.RequestServices.GetRequiredService<RuntimeFrameProcessor>();
+        var loopRunner = context.RequestServices.GetRequiredService<RuntimeWebSocketLoopRunner>();
+        var sessionIds = context.RequestServices.GetRequiredService<RuntimeSessionIdAllocator>();
+        var roomBroker = context.RequestServices.GetRequiredService<RuntimeRoomBroker>();
+        var dagPersistence = context.RequestServices.GetRequiredService<RuntimeDagPersistenceService>();
+        var peerLocalPersistence = context.RequestServices.GetRequiredService<RuntimePeerLocalPersistenceService>();
+        var tokenValidationService = context.RequestServices.GetRequiredService<RuntimeTokenValidationService>();
+        var state = new RuntimeConnectionState(sessionIds.Next());
+
+        if (context.Request.RouteValues.TryGetValue("roomId", out var roomRouteValue)
+            && roomRouteValue is not null)
+        {
+            var routeRoom = roomRouteValue.ToString();
+            if (!string.IsNullOrWhiteSpace(routeRoom)
+                && !string.Equals(routeRoom, "runtime", StringComparison.OrdinalIgnoreCase))
+            {
+                state.RoomId = Uri.UnescapeDataString(routeRoom);
+            }
+        }
+
+        using var socket = await context.WebSockets.AcceptWebSocketAsync();
+        try
+        {
+            await loopRunner.RunAsync(
+                socket,
+                frameProcessor,
+                state,
+                roomBroker,
+                tokenValidationService,
+                dagPersistence,
+                peerLocalPersistence,
+                context.RequestAborted
+            );
+        }
+        finally
+        {
+            logger.LogInformation(
+                "runtime ws closed remote={Remote} path={Path} close={CloseStatus}",
+                context.Connection.RemoteIpAddress?.ToString(),
+                context.Request.Path.ToString(),
+                socket.CloseStatus?.ToString() ?? "none"
+            );
+        }
+    }
+
+    private static async Task<IResult> HandleTokenMintAsync(
+        SyncTokenMintRequest request,
+        IRoomTokenAuthProvider authProvider,
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrWhiteSpace(request.Room))
+            return Results.BadRequest(new { error = "room is required" });
+
+        if (string.IsNullOrWhiteSpace(request.PeerPubkeyHex))
+            return Results.BadRequest(new { error = "peerPubkeyHex is required" });
+
+        try
+        {
+            var mintResult = await authProvider.MintAsync(
+                new RoomTokenMintRequest(
+                    request.Room,
+                    request.PeerPubkeyHex,
+                    request.LifetimeSeconds,
+                    request.Capabilities,
+                    request.CapabilityProfileVersion
+                ),
+                cancellationToken
+            );
+
+            if (!mintResult.IsSupported)
+                return Results.StatusCode(StatusCodes.Status501NotImplemented);
+
+            return Results.Ok(new
+            {
+                peer_pubkey_hex = mintResult.PeerPubkeyHex,
+                expiry_secs = mintResult.ExpiryUnixSeconds,
+                capabilities = mintResult.Capabilities,
+                sig_hex = mintResult.SignatureHex
+            });
+        }
+        catch (SidecarAuthProviderException ex)
+        {
+            if (ex.IsTimeout) return Results.StatusCode(StatusCodes.Status504GatewayTimeout);
+            if (ex.StatusCode is >= 500) return Results.StatusCode(StatusCodes.Status502BadGateway);
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private static async Task<IResult> HandleTokenValidateAsync(
+        SyncTokenValidateRequest request,
+        IRoomTokenAuthProvider authProvider,
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrWhiteSpace(request.Room))
+            return Results.BadRequest(new { error = "room is required" });
+
+        if (string.IsNullOrWhiteSpace(request.PeerPubkeyHex))
+            return Results.BadRequest(new { error = "peer_pubkey_hex is required" });
+
+        if (string.IsNullOrWhiteSpace(request.SigHex))
+            return Results.BadRequest(new { error = "sig_hex is required" });
+
+        try
+        {
+            var validation = await authProvider.ValidateAsync(
+                new RoomTokenValidationRequest(
+                    request.Room,
+                    request.PeerPubkeyHex,
+                    request.ExpirySecs,
+                    request.Capabilities,
+                    request.CapabilityProfileVersion,
+                    request.SigHex
+                ),
+                cancellationToken
+            );
+
+            return Results.Ok(new { valid = validation.IsValid, reason = validation.Reason });
+        }
+        catch (SidecarAuthProviderException ex)
+        {
+            if (ex.IsTimeout) return Results.StatusCode(StatusCodes.Status504GatewayTimeout);
+            if (ex.StatusCode is >= 500) return Results.StatusCode(StatusCodes.Status502BadGateway);
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private static async Task<IResult> HandleBlobUrlAsync(
+        [AsParameters] BlobUrlQuery query,
+        IBlobUrlResolverProvider resolver,
+        CancellationToken cancellationToken
+    )
+    {
+        if (string.IsNullOrWhiteSpace(query.Hash))
+            return Results.BadRequest(new { error = "hash is required" });
+
+        var room = string.IsNullOrWhiteSpace(query.Room) ? "default" : query.Room;
+        var scope = string.IsNullOrWhiteSpace(query.Namespace) ? "assets" : query.Namespace;
+        var op = (query.Op ?? string.Empty).Trim().ToLowerInvariant();
+
+        if (op == "put")
+        {
+            if (query.Size is null || query.Size <= 0)
+                return Results.BadRequest(new { error = "size must be a positive integer for op=put" });
+
+            var url = await resolver.ResolvePutUrlAsync(
+                new BlobPutUrlRequest(room, scope, query.Hash, query.Size.Value, query.ContentType),
+                cancellationToken
+            );
+
+            if (url is null) return Results.StatusCode(StatusCodes.Status404NotFound);
+
+            return Results.Ok(new
+            {
+                url = url.Url,
+                expiresAt = url.ExpiresAtUtc.ToUnixTimeSeconds()
+            });
+        }
+
+        if (op == "get")
+        {
+            var url = await resolver.ResolveGetUrlAsync(
+                new BlobGetUrlRequest(room, scope, query.Hash),
+                cancellationToken
+            );
+
+            if (url is null) return Results.StatusCode(StatusCodes.Status404NotFound);
+
+            return Results.Ok(new
+            {
+                url = url.Url,
+                expiresAt = url.ExpiresAtUtc.ToUnixTimeSeconds()
+            });
+        }
+
+        return Results.BadRequest(new { error = "op must be 'get' or 'put'" });
     }
 
     private static void EmitAuthReadinessChecks(
@@ -626,21 +579,4 @@ public static class HostApplication
             }
         }
     }
-
-    private sealed class BlobUrlQuery
-    {
-        public string Hash { get; init; } = string.Empty;
-
-        public string? Op { get; init; }
-
-        public string? Room { get; init; }
-
-        public string? Namespace { get; init; }
-
-        [JsonPropertyName("contentType")]
-        public string? ContentType { get; init; }
-
-        public long? Size { get; init; }
-    }
-
 }

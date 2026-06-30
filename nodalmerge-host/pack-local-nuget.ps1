@@ -85,6 +85,9 @@ try {
     Invoke-Checked -Name "dotnet pack NodalMerge.Host.Composition" -Command {
         dotnet pack ./src/NodalMerge.Host.Composition/NodalMerge.Host.Composition.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
+    Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost" -Command {
+        dotnet pack ./src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj -c Release -o $resolvedOutput /p:Version=$Version
+    }
 
     Write-Host "Packing native runtime packages to $resolvedOutput ..."
     Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost.Native.win-x64" -Command {
@@ -126,6 +129,7 @@ try {
     # Ensure subsequent restore picks up freshly packed local artifacts even when version is reused.
     Clear-GlobalNuGetPackageVersion -PackageId "NodalMerge.Host.Abstractions" -PackageVersion $Version
     Clear-GlobalNuGetPackageVersion -PackageId "NodalMerge.Host.Composition" -PackageVersion $Version
+    Clear-GlobalNuGetPackageVersion -PackageId "NodalMerge.DotNetHost" -PackageVersion $Version
     Clear-GlobalNuGetPackageVersion -PackageId "NodalMerge.DotNetHost.Native.win-x64" -PackageVersion $Version
     Clear-GlobalNuGetPackageVersion -PackageId "NodalMerge.DotNetHost.Native.linux-x64" -PackageVersion $Version
 

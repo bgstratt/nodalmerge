@@ -7,7 +7,16 @@
     <UserSecretsId>7575e404-45c6-42e8-9cba-3a37140683ce</UserSecretsId>
     <NodalMergeUseNuGetPackages Condition="'$(NodalMergeUseNuGetPackages)' == ''">false</NodalMergeUseNuGetPackages>
     <NodalMergePackageVersion Condition="'$(NodalMergePackageVersion)' == ''">0.1.0-local</NodalMergePackageVersion>
+    <IsPackable>true</IsPackable>
+    <PackageId>NodalMerge.DotNetHost</PackageId>
+    <Description>Embeddable ASP.NET Core host for the NodalMerge CRDT runtime. Add AddNodalMergeRuntimeCore to your DI container and call MapNodalMergeEndpoints on your WebApplication to embed the runtime without any Rust toolchain dependency.</Description>
+    <PackageTags>nodalmerge;sync;crdt;host;dotnet;websocket;ffi</PackageTags>
+    <PackageReadmeFile>NUGET_README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\NUGET_README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
 
   <ItemGroup Condition="'$(NodalMergeUseNuGetPackages)' != 'true'">
     <ProjectReference Include="..\NodalMerge.Host.Abstractions\NodalMerge.Host.Abstractions.csproj" />

@@ -114,7 +114,7 @@ public sealed class CapabilityProfileExpander
                 return false;
             }
 
-            graph[cap] = inherits;
+            graph[cap!] = inherits;
         }
 
         foreach (var (node, parents) in graph)

@@ -1,9 +1,0 @@
-{
-  "baseline_run_id": "b2",
-  "candidate_run_id": "c2",
-  "p50_latency_regression_pct": 5.0,
-  "p95_latency_regression_pct": 5.0,
-  "alloc_regression_pct": 10.0,
-  "metric_mode": "computed",
-  "utc_timestamp": "2026-05-22T04:19:42.2176635Z"
-}

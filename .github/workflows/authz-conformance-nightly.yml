@@ -1,8 +1,6 @@
 name: authz-conformance-nightly
 
 on:
-  schedule:
-    - cron: '15 3 * * *'
   workflow_dispatch:
     inputs:
       auth_path_benchmark_baseline_run_id:

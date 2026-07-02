@@ -94,9 +94,29 @@ try {
         dotnet pack ./src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
 
+    $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
     $linuxLocalNative = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../target/release/libnodalmerge_runtime_local_ffi.so"))
+    $linuxNative = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../target/release/libnodalmerge_host_ffi.so"))
+    $isWindowsRuntime = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+
+    if ($isWindowsRuntime) {
+        $wslPath = Resolve-CommandPath -Name "wsl"
+        if ($wslPath) {
+            $repoRootWsl = (& wsl.exe -- wslpath -a ($repoRoot -replace '\\', '/')).Trim()
+            Write-Host "Building linux-x64 native runtime via WSL (release)..."
+            Invoke-Checked -Name "wsl cargo build host ffi runtime (nodalmerge-host-ffi)" -Command {
+                & wsl.exe -- bash -lc "cd '$repoRootWsl' && cargo build -p nodalmerge-host-ffi --release"
+            }
+            Invoke-Checked -Name "wsl cargo build peer-local ffi runtime (nodalmerge-runtime-local-ffi)" -Command {
+                & wsl.exe -- bash -lc "cd '$repoRootWsl' && cargo build -p nodalmerge-runtime-local-ffi --release"
+            }
+        }
+        else {
+            Write-Warning "wsl executable not found; cannot build real linux-x64 native artifacts from Windows."
+        }
+    }
+
     if (-not (Test-Path -LiteralPath $linuxLocalNative)) {
-        $isWindowsRuntime = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
         if ($isWindowsRuntime) {
             Write-Warning "linux-x64 peer-local FFI artifact not found at $linuxLocalNative; creating placeholder for package restore on Windows."
             $linuxLocalDir = Split-Path -Parent $linuxLocalNative
@@ -108,9 +128,7 @@ try {
         }
     }
 
-    $linuxNative = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../target/release/libnodalmerge_host_ffi.so"))
     if (-not (Test-Path -LiteralPath $linuxNative)) {
-        $isWindowsRuntime = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
         if ($isWindowsRuntime) {
             Write-Warning "linux-x64 native artifact not found at $linuxNative; creating local placeholder for package-mode restore on Windows."
             $linuxDir = Split-Path -Parent $linuxNative

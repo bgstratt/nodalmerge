@@ -429,8 +429,13 @@ fn bench_text_trace_rustcode(c: &mut Criterion) {
         run_split_starts.push(0);
     }
 
+    // Full apply+read throughput, reported as ops/sec (elements = ops applied per iteration)
+    // rather than raw wall-clock only, so it's directly comparable across trace sizes/runs.
+    let mut throughput_group = c.benchmark_group("text_trace_rustcode_throughput");
+    throughput_group.throughput(Throughput::Elements(sanity_ops as u64));
+
     let bench_name = format!("text_trace_rustcode_unsigned_{mode_label}");
-    c.bench_function(&bench_name, |b| {
+    throughput_group.bench_function(&bench_name, |b| {
         b.iter(|| {
             let (graph, applied_ops) =
                 replay_trace_unsigned(black_box(&trace), max_ops, projection_mode, parity_sample_every);
@@ -439,6 +444,18 @@ fn bench_text_trace_rustcode(c: &mut Criterion) {
             black_box(graph.text_runtime_counters());
         });
     });
+
+    // Split metrics: apply-only cost (no read). This is the cleanest char op
+    // insert/delete throughput number (ops/sec), isolated from read cost.
+    let apply_only_bench_name = format!("text_trace_rustcode_apply_only_unsigned_{mode_label}");
+    throughput_group.bench_function(&apply_only_bench_name, |b| {
+        b.iter(|| {
+            let (_graph, applied_ops) =
+                replay_trace_unsigned(black_box(&trace), max_ops, projection_mode, parity_sample_every);
+            black_box(applied_ops);
+        });
+    });
+    throughput_group.finish();
 
     let range_bench_name = format!("text_trace_rustcode_range_unsigned_{mode_label}");
     c.bench_function(&range_bench_name, |b| {
@@ -450,16 +467,6 @@ fn bench_text_trace_rustcode(c: &mut Criterion) {
                 black_box(graph.resolve_text_range(TEXT_KEY, *start, range_len).len());
             }
             black_box(graph.text_runtime_counters());
-        });
-    });
-
-    // Split metrics: apply-only cost (no read).
-    let apply_only_bench_name = format!("text_trace_rustcode_apply_only_unsigned_{mode_label}");
-    c.bench_function(&apply_only_bench_name, |b| {
-        b.iter(|| {
-            let (_graph, applied_ops) =
-                replay_trace_unsigned(black_box(&trace), max_ops, projection_mode, parity_sample_every);
-            black_box(applied_ops);
         });
     });
 

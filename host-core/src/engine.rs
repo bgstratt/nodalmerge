@@ -586,7 +586,8 @@ impl HostEngine {
                     .or_default();
                 self.room_sync_graphs
                     .entry(envelope.room_id.clone())
-                    .or_default();
+                    .or_default()
+                    .set_conflict_stream_enabled(true);
                 self.room_conflict_fingerprints
                     .entry(envelope.room_id.clone())
                     .or_default();
@@ -1725,10 +1726,16 @@ impl HostEngine {
                     .room_sync_graphs
                     .entry(envelope.room_id.clone())
                     .or_default();
+                // Idempotent; covers graphs created before this build.
+                graph.set_conflict_stream_enabled(true);
                 let applied = graph.apply_remote_batch(nodes);
 
                 let now_unix_ms = now_unix_ms();
-                let detected = graph.detect_conflicts();
+                // Incremental conflict stream: O(batch) instead of the old
+                // full-history `detect_conflicts()` rescan per import. The
+                // fingerprint dedup below is unchanged, so delivery stays
+                // at-most-once per pairing.
+                let detected = graph.drain_pending_conflicts();
                 let seen_fingerprints = self
                     .room_conflict_fingerprints
                     .entry(envelope.room_id.clone())
@@ -2147,7 +2154,10 @@ impl HostEngine {
                 self.room_presence.entry(child_room_id.clone()).or_default();
                 self.room_subscriptions.entry(child_room_id.clone()).or_default();
                 self.room_policies.entry(child_room_id.clone()).or_default();
-                self.room_sync_graphs.entry(child_room_id.clone()).or_default();
+                self.room_sync_graphs
+                    .entry(child_room_id.clone())
+                    .or_default()
+                    .set_conflict_stream_enabled(true);
                 self.room_conflict_fingerprints
                     .entry(child_room_id.clone())
                     .or_default();

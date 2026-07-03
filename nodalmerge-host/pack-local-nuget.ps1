@@ -85,10 +85,10 @@ try {
     Invoke-Checked -Name "dotnet pack NodalMerge.Host.Composition" -Command {
         dotnet pack ./src/NodalMerge.Host.Composition/NodalMerge.Host.Composition.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
-    Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost" -Command {
-        dotnet pack ./src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj -c Release -o $resolvedOutput /p:Version=$Version
-    }
 
+    # Native runtime packages are packed here, *before* NodalMerge.DotNetHost below — that pack step
+    # now needs to restore PackageReference entries pointing at these exact packages/version (see the
+    # comment on that step), so they must already exist in $resolvedOutput by the time it runs.
     Write-Host "Packing native runtime packages to $resolvedOutput ..."
     Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost.Native.win-x64" -Command {
         dotnet pack ./src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version
@@ -142,6 +142,20 @@ try {
 
     Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost.Native.linux-x64" -Command {
         dotnet pack ./src/NodalMerge.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version
+    }
+
+    Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost" -Command {
+        # NodalMergeUseNuGetPackages=true is required here: it's what makes NodalMerge.DotNetHost.csproj
+        # reference NodalMerge.DotNetHost.Native.win-x64/linux-x64 as PackageReferences (its default,
+        # project-reference-only branch never touches the native packages at all), so those flowed into
+        # this package's own nuspec <dependencies> instead of being silently dropped — the bug this fixes.
+        # NodalMergePackageVersion must match $Version so those PackageReferences resolve to the exact
+        # native packages just packed above, not the csproj's unrelated "0.1.0-local" default. --source
+        # points restore directly at $resolvedOutput (plus nuget.org for everything else) so this works
+        # regardless of ambient NuGet.config / global-packages-cache state.
+        dotnet pack ./src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj -c Release -o $resolvedOutput `
+            /p:Version=$Version /p:NodalMergeUseNuGetPackages=true /p:NodalMergePackageVersion=$Version `
+            --source $resolvedOutput --source https://api.nuget.org/v3/index.json
     }
 
     # Ensure subsequent restore picks up freshly packed local artifacts even when version is reused.

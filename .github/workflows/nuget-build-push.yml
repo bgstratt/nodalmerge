@@ -318,6 +318,71 @@ jobs:
           path: ${{ env.NUGET_OUTPUT_DIR }}/*.nupkg
           if-no-files-found: error
 
+  pack-dotnethost:
+    name: pack NodalMerge.DotNetHost
+    needs:
+      - pack-managed
+      - pack-native-linux
+      - pack-native-win
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Resolve package version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.packageVersion }}" ]; then
+            echo "value=${{ github.event.inputs.packageVersion }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=0.1.0-preview.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # NodalMerge.DotNetHost.csproj only references the Abstractions/Composition/Native.*
+      # packages (rather than its sibling projects) when built with NodalMergeUseNuGetPackages=true
+      # — its default, project-reference-only mode never touches the native packages at all, which
+      # is exactly why 0.1.2 shipped with no native dependency declared. Packing it correctly here
+      # needs those sibling packages already built (hence needs: above) and restorable, so they're
+      # downloaded into a local folder feed and passed via --source.
+      - name: Download managed packages (Abstractions/Composition)
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-managed
+          path: ${{ env.NUGET_OUTPUT_DIR }}
+
+      - name: Download linux native package
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-native-linux-x64
+          path: ${{ env.NUGET_OUTPUT_DIR }}
+
+      - name: Download windows native package
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-native-win-x64
+          path: ${{ env.NUGET_OUTPUT_DIR }}
+
+      - name: Pack NodalMerge.DotNetHost
+        run: |
+          dotnet pack nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj -c Release -o "$NUGET_OUTPUT_DIR" \
+            /p:Version=${{ steps.version.outputs.value }} \
+            /p:NodalMergeUseNuGetPackages=true \
+            /p:NodalMergePackageVersion=${{ steps.version.outputs.value }} \
+            --source "$NUGET_OUTPUT_DIR" --source https://api.nuget.org/v3/index.json
+
+      - name: Upload NodalMerge.DotNetHost artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-dotnethost
+          path: ${{ env.NUGET_OUTPUT_DIR }}/NodalMerge.DotNetHost.*.nupkg
+          if-no-files-found: error
+
   publish:
     name: publish github packages
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
@@ -325,6 +390,7 @@ jobs:
       - pack-managed
       - pack-native-linux
       - pack-native-win
+      - pack-dotnethost
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -351,6 +417,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: nuget-native-win-x64
+          path: ${{ env.NUGET_OUTPUT_DIR }}
+
+      - name: Download NodalMerge.DotNetHost package
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-dotnethost
           path: ${{ env.NUGET_OUTPUT_DIR }}
 
       - name: Add GitHub Packages source

@@ -314,10 +314,21 @@ export interface CreateDocOptions {
   }) => void;
   /** F6: callback invoked after a direct presigned PUT upload completes successfully. */
   onDirectUpload?: (args: { hash: string; length: number }) => void | Promise<void>;
+  persistence?: {
+    enabled?: boolean;
+    dbName?: string;
+    dbVersion?: number;
+    debounceMs?: number;
+    migrateLegacyDemo?: boolean;
+  };
+  /** wasm-bindgen InitInput (URL string, Request, Module, or bytes) for bundlers
+   *  that relocate the bridge .wasm (e.g. Vite `?url` imports). Default: fetch
+   *  relative to the bridge module. First init wins; later inputs are ignored. */
+  wasmModule?: string | URL | Request | WebAssembly.Module | BufferSource | Promise<unknown>;
 }
 
 export function createDoc(opts: CreateDocOptions): Promise<Doc>;
-export function ready(): Promise<unknown>;
+export function ready(wasmInput?: CreateDocOptions['wasmModule']): Promise<unknown>;
 
 /** Build a single capability string like `read:world/**`. */
 export function capability(

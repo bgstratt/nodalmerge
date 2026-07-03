@@ -43,6 +43,10 @@ artifacts/
 BenchmarkDotNet.Artifacts/
 dotnet-host/artifacts/
 
+# Generated at pack time from web/sdk.js by sdk-js/scripts/gen-doc-module.mjs
+sdk-js/doc.js
+sdk-js/doc.d.ts
+
 # Local npm pack artifacts (generated tarballs)
 **/*.tgz
 bridge/pkg/*.tgz

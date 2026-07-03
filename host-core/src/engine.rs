@@ -1728,7 +1728,61 @@ impl HostEngine {
                     .or_default();
                 // Idempotent; covers graphs created before this build.
                 graph.set_conflict_stream_enabled(true);
-                let applied = graph.apply_remote_batch(nodes);
+                // Multi-pass topological import. `apply_remote_batch` applies in
+                // input order and rejects children that precede their parents
+                // (`MissingParent`), but catch-up packs are not guaranteed to be
+                // topologically sorted. Retry MissingParent rejects until fixpoint
+                // — mirrors `server::room::import_nodes`. Without this, a
+                // client's full-graph reconnect pack is silently truncated.
+                let applied = {
+                    let mut pending = nodes;
+                    let mut result = nodalmerge_core::BatchResult::default();
+                    loop {
+                        if pending.is_empty() {
+                            break;
+                        }
+                        let before = pending.len();
+                        let mut by_id: HashMap<NodeId, SyncNode> =
+                            HashMap::with_capacity(before);
+                        let mut order: Vec<NodeId> = Vec::with_capacity(before);
+                        for n in pending.drain(..) {
+                            if !by_id.contains_key(&n.id) {
+                                order.push(n.id);
+                            }
+                            by_id.insert(n.id, n);
+                        }
+                        let batch: Vec<SyncNode> = order
+                            .iter()
+                            .filter_map(|id| by_id.get(id).cloned())
+                            .collect();
+
+                        let pass = graph.apply_remote_batch(batch);
+                        result.accepted.extend(pass.accepted.iter().copied());
+
+                        let mut still_pending = Vec::new();
+                        let mut missing_errs = Vec::new();
+                        for (id, err) in pass.rejected {
+                            match err {
+                                e @ nodalmerge_core::SyncError::MissingParent(_) => {
+                                    if let Some(n) = by_id.remove(&id) {
+                                        still_pending.push(n);
+                                        missing_errs.push((id, e));
+                                    }
+                                }
+                                e => result.rejected.push((id, e)),
+                            }
+                        }
+
+                        if still_pending.len() == before {
+                            // No progress — the remaining parents are genuinely
+                            // absent from both the room and this pack.
+                            result.rejected.extend(missing_errs);
+                            break;
+                        }
+                        pending = still_pending;
+                    }
+                    result
+                };
 
                 let now_unix_ms = now_unix_ms();
                 // Incremental conflict stream: O(batch) instead of the old

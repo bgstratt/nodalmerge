@@ -2150,6 +2150,97 @@ fn import_pack_and_request_server_pack_roundtrip() {
 }
 
 #[test]
+fn import_pack_retries_missing_parent_rejects_until_fixpoint() {
+    // Catch-up packs are not guaranteed topologically sorted. A child that
+    // precedes its parent in the pack must still import (multi-pass retry),
+    // matching server::room::import_nodes semantics.
+    let mut graph = StateGraph::new();
+    let signing_key = SigningKey::from_bytes(&[9u8; 32]);
+    let mut ids = Vec::new();
+    for (i, ch) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+        let id = graph
+            .apply_local(
+                &signing_key,
+                (i + 1) as u64,
+                vec![Op::Map(MapOp::Set {
+                    key: format!("world/k{ch}"),
+                    value: ch.as_bytes().to_vec(),
+                })],
+            )
+            .expect("local apply should succeed");
+        ids.push(id);
+    }
+    // Reverse order: every child arrives before its parent.
+    let mut nodes = graph.get_nodes(&ids);
+    nodes.reverse();
+    let nodes_b64 = shape_catchup_pack_payload_b64(&nodes);
+
+    let mut engine = HostEngine::new();
+    engine
+        .apply(CommandEnvelope::new("room-sync", HostCommand::EnsureRoom))
+        .expect("ensure room should succeed");
+    let import = engine
+        .apply(CommandEnvelope::new(
+            "room-sync",
+            HostCommand::ImportPack { nodes_b64 },
+        ))
+        .expect("import-pack should succeed");
+
+    assert!(matches!(
+        &import.events[0],
+        HostEvent::PackImported {
+            incoming_count: 5,
+            accepted_count: 5,
+            rejected_count: 0,
+            ..
+        }
+    ));
+
+    // Nodes whose parents are genuinely absent must still be rejected.
+    let mut other = StateGraph::new();
+    let other_key = SigningKey::from_bytes(&[11u8; 32]);
+    other
+        .apply_local(
+            &other_key,
+            1,
+            vec![Op::Map(MapOp::Set {
+                key: "world/root".to_string(),
+                value: b"r".to_vec(),
+            })],
+        )
+        .expect("local apply should succeed");
+    let orphan_id = other
+        .apply_local(
+            &other_key,
+            2,
+            vec![Op::Map(MapOp::Set {
+                key: "world/orphan".to_string(),
+                value: b"o".to_vec(),
+            })],
+        )
+        .expect("local apply should succeed");
+    // Ship only the child — its parent never arrives.
+    let orphan_b64 = shape_catchup_pack_payload_b64(&other.get_nodes(&[orphan_id]));
+    let orphan_import = engine
+        .apply(CommandEnvelope::new(
+            "room-sync",
+            HostCommand::ImportPack {
+                nodes_b64: orphan_b64,
+            },
+        ))
+        .expect("import-pack should succeed");
+    assert!(matches!(
+        &orphan_import.events[0],
+        HostEvent::PackImported {
+            incoming_count: 1,
+            accepted_count: 0,
+            rejected_count: 1,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn mst_request_and_mst_done_emit_sync_events() {
     let mut engine = HostEngine::new();
     engine

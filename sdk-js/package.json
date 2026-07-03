@@ -1,17 +1,31 @@
 {
   "name": "nodalmerge-sdk-js",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "High-level JavaScript SDK wrapper for NodalMerge room/sync/replay/offline/CAS/topology flows",
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./doc": {
+      "types": "./doc.d.ts",
+      "default": "./doc.js"
+    },
+    "./persistence/*": "./persistence/*"
+  },
   "scripts": {
+    "prepack": "node scripts/gen-doc-module.mjs",
     "test": "node --test index.test.js persistence/peer-local-indexeddb.test.js",
     "smoke:demo": "npm --prefix ../web/smoke run smoke"
   },
   "files": [
     "index.js",
     "index.d.ts",
+    "doc.js",
+    "doc.d.ts",
     "persistence/",
     "README.md",
     "PERSISTENCE_MIGRATION.md"

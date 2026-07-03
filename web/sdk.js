@@ -29,10 +29,14 @@ import { createPeerLocalIndexedDbPersistence } from '../sdk-js/persistence/peer-
 // -----------------------------------------------------------------------------
 // Module init — idempotent. Callers can also await `createDoc` directly; this
 // is exposed so apps that load the SDK early can fire WASM fetch in parallel.
+// `wasmInput` (optional) is forwarded to the wasm-bindgen init — a URL/module
+// for bundlers (e.g. Vite `?url` imports) that relocate the .wasm asset. When
+// omitted, init fetches the .wasm relative to the bridge module as before.
+// The first call wins; later inputs are ignored.
 // -----------------------------------------------------------------------------
 let _initPromise = null;
-export function ready() {
-  if (!_initPromise) _initPromise = init();
+export function ready(wasmInput) {
+  if (!_initPromise) _initPromise = wasmInput === undefined ? init() : init(wasmInput);
   return _initPromise;
 }
 
@@ -328,6 +332,21 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
     if (missing.length > 0) {
       const delta = store.export_nodes_missing_from(JSON.stringify(missing));
       send({ type: 'pack', nodes: delta });
+    } else if (!msg.root && !msg.mst_root) {
+      // Minimal-welcome host (e.g. embedded runtime hosts): the welcome
+      // carries no missing/root/frontier/mst info, so reconciliation is
+      // client-driven. Push everything the server hasn't acked (it dedupes
+      // known nodes cheaply) and request whatever it has that we don't.
+      // Without this, mutations made while disconnected are stranded after
+      // reconnect and late joiners never receive room history.
+      try {
+        const knownIds = JSON.parse(store.all_node_ids_json());
+        if (knownIds.length > 0) {
+          const delta = store.export_nodes_missing_from(JSON.stringify([]));
+          if (delta && delta.length > 0) send({ type: 'pack', nodes: delta });
+        }
+        send({ type: 'request', known: knownIds });
+      } catch (e) { log('warn', '[sdk] welcome catch-up (minimal welcome)', e); }
     } else if (msg.root && msg.root !== store.merkle_root_hex()) {
       // Roots differ but server didn't tell us what it wants (IBF decode
       // failure on a large diff, or a freshly-restarted server). Push what
@@ -1119,10 +1138,11 @@ function makePeerMesh({
  *   onMetric?: (ev) => void,           // G8: metric event hook. See docs/sdk.md.
  *   onDirectUpload?: (args: { hash: string; length: number }) => void | Promise<void>; // F6: callback after a direct presigned PUT completes
  *   persistence?: { enabled?: boolean, dbName?: string, dbVersion?: number, debounceMs?: number, migrateLegacyDemo?: boolean },
+ *   wasmModule?: any,                  // wasm-bindgen InitInput (URL/module/bytes) for bundlers; default = fetch relative to the bridge module
  * }} opts
  */
 export async function createDoc(opts) {
-  await ready();
+  await ready(opts?.wasmModule);
 
   const {
     serverUrl,

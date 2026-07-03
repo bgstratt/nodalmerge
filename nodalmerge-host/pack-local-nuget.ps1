@@ -150,12 +150,15 @@ try {
         # project-reference-only branch never touches the native packages at all), so those flowed into
         # this package's own nuspec <dependencies> instead of being silently dropped — the bug this fixes.
         # NodalMergePackageVersion must match $Version so those PackageReferences resolve to the exact
-        # native packages just packed above, not the csproj's unrelated "0.1.0-local" default. --source
-        # points restore directly at $resolvedOutput (plus nuget.org for everything else) so this works
-        # regardless of ambient NuGet.config / global-packages-cache state.
+        # native packages just packed above, not the csproj's unrelated "0.1.0-local" default.
+        # RestoreAdditionalProjectSources appends $resolvedOutput to the default feeds (nuget.org)
+        # so the freshly packed Abstractions/Composition/Native packages resolve from disk while
+        # everything else restores normally. (Neither `dotnet pack --source` nor a URL inside
+        # /p:RestoreSources works here: both get misparsed as relative local paths on current SDKs
+        # whenever restore actually has to enumerate the sources, i.e. on a cold package cache.)
         dotnet pack ./src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj -c Release -o $resolvedOutput `
             /p:Version=$Version /p:NodalMergeUseNuGetPackages=true /p:NodalMergePackageVersion=$Version `
-            --source $resolvedOutput --source https://api.nuget.org/v3/index.json
+            "/p:RestoreAdditionalProjectSources=$resolvedOutput"
     }
 
     # Ensure subsequent restore picks up freshly packed local artifacts even when version is reused.

@@ -1,0 +1,22 @@
+{
+  "convergence_cold_start": {
+    "batch_apply_ms": 115.8281,
+    "converged": true,
+    "node_count": 50000
+  },
+  "test": "text_trace_throughput_wire_cost_and_cold_start_convergence",
+  "throughput": {
+    "batched_ops_per_sec": 4747.399692524215,
+    "batched_speedup_x": 0.8569724878882915,
+    "batched_wall_ms": 10532.0814,
+    "unbatched_ops_per_sec": 5539.73407503725,
+    "unbatched_wall_ms": 9025.704
+  },
+  "trace_op_count": 50000,
+  "wire_cost": {
+    "max_bytes_per_op": 212,
+    "mean_bytes_per_op": 210.82438,
+    "min_bytes_per_op": 141,
+    "total_wire_bytes": 10541219
+  }
+}

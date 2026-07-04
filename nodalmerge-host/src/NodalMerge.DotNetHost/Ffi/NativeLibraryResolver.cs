@@ -96,6 +96,32 @@ public static class NativeLibraryResolver
         yield return Path.Combine(baseDir, fileName);
         yield return Path.Combine(cwd, fileName);
 
+        // NuGet-deployed native assets. Probed before the cargo target
+        // fallbacks below so a host consuming the packaged runtime never
+        // silently picks up a stale dev build from a sibling repo checkout.
+        // (NODALMERGE_HOST_FFI_DLL / NODALMERGE_LOCAL_FFI_DLL still override
+        // everything for deliberate local-dev pinning.)
+        var rid = RuntimeInformation.RuntimeIdentifier;
+        yield return Path.Combine(baseDir, "runtimes", rid, "native", fileName);
+        if (!string.IsNullOrEmpty(rid))
+        {
+            var dashIndex = rid.LastIndexOf('-');
+            if (dashIndex > 0)
+            {
+                // e.g. "win10-x64" -> "win-x64" style fallback for portable RIDs.
+                var arch = rid[(dashIndex + 1)..];
+                var portableRid = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+                    ? $"win-{arch}"
+                    : RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+                        ? $"osx-{arch}"
+                        : $"linux-{arch}";
+                if (!string.Equals(portableRid, rid, StringComparison.Ordinal))
+                {
+                    yield return Path.Combine(baseDir, "runtimes", portableRid, "native", fileName);
+                }
+            }
+        }
+
         // Common workspace cargo target locations when running from repo root.
         yield return Path.Combine(cwd, "target", "debug", fileName);
         yield return Path.Combine(cwd, "target", "release", fileName);
@@ -123,6 +149,22 @@ public static class NativeLibraryResolver
             yield return Path.Combine(cwd, "..", "..", "..", siblingRepoName, "target", "release", fileName);
             yield return Path.Combine(cwd, "..", "..", "..", "..", siblingRepoName, "target", "debug", fileName);
             yield return Path.Combine(cwd, "..", "..", "..", "..", siblingRepoName, "target", "release", fileName);
+        }
+
+        // Bounded upward walk from the assembly location and cwd looking for a
+        // cargo target directory. Covers runners whose base/cwd is a deep bin
+        // output (e.g. `dotnet test` runs from tests/<proj>/bin/<cfg>/<tfm>,
+        // six levels below the repo root's target/), which the fixed-depth
+        // chains above don't reach.
+        foreach (var start in new[] { baseDir, cwd })
+        {
+            var dir = string.IsNullOrEmpty(start) ? null : Path.GetFullPath(start);
+            for (var depth = 0; depth < 8 && !string.IsNullOrEmpty(dir); depth++)
+            {
+                yield return Path.Combine(dir, "target", "debug", fileName);
+                yield return Path.Combine(dir, "target", "release", fileName);
+                dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            }
         }
     }
 

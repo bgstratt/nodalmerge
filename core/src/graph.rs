@@ -1,14 +1,18 @@
-use std::collections::{HashMap, HashSet, BTreeMap};
+use std::collections::{HashMap, HashSet, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(all(feature = "text_projection", not(target_arch = "wasm32")))]
 use std::time::Instant;
 use crate::{
     compaction::is_snapshot_node,
+    conflicts::{ConflictEvent, ConflictKind, ConflictOp},
     error::SyncError,
     frontier::Frontier,
     hash::Hash,
+    list::FracIdx,
     node::{NodeId, SyncNode},
-    op::{Op, MapOp, TextOp, Transaction},
+    op::{ItemId, ListOp, Op, MapOp, TextOp, Transaction},
     policy::Policy,
     storage::{NodeStore, MemoryNodeStore},
     text::{ProjectionUpdateOp, TextParityMismatch, TextProjectionMode},
@@ -39,6 +43,106 @@ pub const WALL_SKEW_MAX_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// The resolved, queryable state of the LWW-Map after applying all nodes.
 pub type ResolvedMap = HashMap<String, Vec<u8>>;
+
+/// Current LWW winner for one map key.
+#[derive(Debug, Clone)]
+struct MapWinner {
+    lamport: u64,
+    author: [u8; 32],
+    /// `None` = winning op was a delete (key hidden, but the tombstone
+    /// still occupies the LWW slot so lower-priority sets can't resurrect).
+    value: Option<Vec<u8>>,
+    is_blob: bool,
+}
+
+impl MapWinner {
+    fn conflict_op(&self) -> ConflictOp {
+        match (&self.value, self.is_blob) {
+            (None, _) => ConflictOp::Delete,
+            (Some(v), true) => {
+                let mut hash = [0u8; 32];
+                if v.len() == 32 {
+                    hash.copy_from_slice(v);
+                }
+                ConflictOp::SetBlob { blob_hash: hash }
+            }
+            (Some(v), false) => ConflictOp::Set { value: v.clone() },
+        }
+    }
+}
+
+/// Incrementally maintained list-key state (mirrors
+/// `crate::list::resolve_list_seq` semantics exactly).
+#[derive(Debug, Default)]
+struct ListCacheState {
+    items: HashMap<ItemId, ListItemCache>,
+    /// Visible items ordered by `(FracIdx, ItemId)` — legacy sort order.
+    visible: BTreeSet<(FracIdx, ItemId)>,
+}
+
+#[derive(Debug, Clone)]
+struct ListItemCache {
+    position: Option<FracIdx>,
+    pos_priority: (u64, [u8; 32]),
+    saw_insert: bool,
+    deleted: bool,
+}
+
+impl Default for ListItemCache {
+    fn default() -> Self {
+        ListItemCache {
+            position: None,
+            pos_priority: (0, [0u8; 32]),
+            saw_insert: false,
+            deleted: false,
+        }
+    }
+}
+
+impl ListItemCache {
+    fn is_visible(&self) -> bool {
+        self.saw_insert && !self.deleted && self.position.is_some()
+    }
+}
+
+/// Per-`(list_key, item)` bookkeeping for the incremental conflict stream.
+#[derive(Debug, Default)]
+struct ListConflictState {
+    pos_winner: Option<(u64, [u8; 32], ConflictOp)>,
+    delete_winner: Option<(u64, [u8; 32])>,
+    /// Position-setting ops seen so far, kept for loser enumeration when a
+    /// delete arrives later. Capped — an item moved thousands of times
+    /// before deletion reports at most this many demoted-move conflicts.
+    pos_ops: Vec<(u64, [u8; 32], ConflictOp)>,
+}
+
+const LIST_CONFLICT_POS_OPS_CAP: usize = 64;
+
+/// Ceiling for the undrained incremental conflict buffer; oldest events
+/// are dropped past it (hosts drain per import, so this only guards
+/// against an enabled-but-never-drained consumer).
+const PENDING_CONFLICTS_CAP: usize = 16_384;
+
+/// Incrementally maintained materialized views over the DAG: LWW map
+/// winners (speculative + canonical), list projections, referenced blob
+/// hashes, and the optional incremental conflict stream.
+///
+/// Correctness argument: `(lamport, author)` is a total order and winners
+/// only improve; list deletes are absorbing; `local_node_ids` only grows;
+/// nodes are never removed from a live graph (compaction builds a fresh
+/// graph via `apply_remote`, repopulating these caches). So cache state is
+/// an exact, order-independent function of the admitted node set — the
+/// same invariant the full-replay resolvers had.
+#[derive(Debug, Default)]
+struct StateCaches {
+    map_all: HashMap<String, MapWinner>,
+    map_canonical: HashMap<String, MapWinner>,
+    lists: HashMap<String, ListCacheState>,
+    blob_hashes: HashSet<Hash>,
+    conflict_stream_enabled: bool,
+    pending_conflicts: Vec<ConflictEvent>,
+    list_conflict_state: HashMap<(String, ItemId), ListConflictState>,
+}
 
 /// Outcome of [`StateGraph::apply_remote_batch`].
 ///
@@ -292,6 +396,8 @@ pub struct StateGraph<N: NodeStore = MemoryNodeStore> {
     /// Monotonic touch clock used for LRU-style eviction ordering.
     #[cfg(feature = "text_projection")]
     text_projection_touch_clock: u64,
+    /// Incremental materialized views (LWW map, lists, blob refs, conflicts).
+    state_caches: StateCaches,
 }
 
 impl Default for StateGraph<MemoryNodeStore> {
@@ -330,6 +436,7 @@ impl Default for StateGraph<MemoryNodeStore> {
             text_projection_last_touch: HashMap::new(),
             #[cfg(feature = "text_projection")]
             text_projection_touch_clock: 0,
+            state_caches: StateCaches::default(),
         }
     }
 }
@@ -377,6 +484,7 @@ impl<N: NodeStore> StateGraph<N> {
             text_projection_last_touch: HashMap::new(),
             #[cfg(feature = "text_projection")]
             text_projection_touch_clock: 0,
+            state_caches: StateCaches::default(),
         }
     }
 
@@ -758,6 +866,9 @@ impl<N: NodeStore> StateGraph<N> {
         let node = SyncNode::new_signed(tx, signing_key);
         let id = node.id;
         self.insert_node(node.clone())?;
+        // Speculative view only — locally-authored nodes are excluded from
+        // the canonical view until a remote peer confirms/re-broadcasts.
+        self.update_state_caches(&node, false);
         self.update_text_projection_from_node(&node);
         // E2: mark this node as locally authored (speculative, not yet confirmed).
         self.local_node_ids.insert(id);
@@ -892,6 +1003,7 @@ impl<N: NodeStore> StateGraph<N> {
             }
         }
         self.insert_node(node.clone())?;
+        self.update_state_caches(&node, true);
         Ok(())
     }
 
@@ -1481,13 +1593,302 @@ impl<N: NodeStore> StateGraph<N> {
     // State resolution (LWW-Map CRDT)
     // -------------------------------------------------------------------------
 
-    /// Resolve the current value of the shared map by replaying all nodes in
-    /// causal order and applying LWW semantics per key.
+    /// Incrementally fold one admitted node into the materialized map/list/
+    /// blob caches. `canonical` is false only for locally-authored
+    /// (unconfirmed) nodes, mirroring the `local_node_ids` read-time filter
+    /// the full-replay resolver used.
+    fn update_state_caches(&mut self, node: &SyncNode, canonical: bool) {
+        let tx = &node.transaction;
+        let prio = (tx.lamport, tx.author);
+        // Replicates the replay scan's strict-greater rule: the replay
+        // default entry was `(0, [0u8; 32], None)`, so an op carrying that
+        // exact priority never won there either.
+        if prio == (0, [0u8; 32]) {
+            return;
+        }
+        for op in &tx.ops {
+            match op {
+                Op::Map(mop) => {
+                    let (key, value, is_blob) = match mop {
+                        MapOp::Set { key, value } => (key, Some(value.clone()), false),
+                        MapOp::Delete { key } => (key, None, false),
+                        MapOp::SetBlob { key, blob_hash } => {
+                            self.state_caches.blob_hashes.insert(*blob_hash);
+                            (key, Some(blob_hash.as_bytes().to_vec()), true)
+                        }
+                    };
+                    let candidate = MapWinner {
+                        lamport: tx.lamport,
+                        author: tx.author,
+                        value,
+                        is_blob,
+                    };
+                    if self.state_caches.conflict_stream_enabled {
+                        if let Some(current) = self.state_caches.map_all.get(key) {
+                            if current.author != tx.author {
+                                let event = if prio > (current.lamport, current.author) {
+                                    ConflictEvent {
+                                        kind: ConflictKind::MapOverwrite,
+                                        key: key.clone(),
+                                        winner_author: tx.author,
+                                        winner_lamport: tx.lamport,
+                                        winner_op: candidate.conflict_op(),
+                                        loser_author: current.author,
+                                        loser_lamport: current.lamport,
+                                        loser_op: current.conflict_op(),
+                                    }
+                                } else {
+                                    ConflictEvent {
+                                        kind: ConflictKind::MapOverwrite,
+                                        key: key.clone(),
+                                        winner_author: current.author,
+                                        winner_lamport: current.lamport,
+                                        winner_op: current.conflict_op(),
+                                        loser_author: tx.author,
+                                        loser_lamport: tx.lamport,
+                                        loser_op: candidate.conflict_op(),
+                                    }
+                                };
+                                Self::push_pending_conflict(
+                                    &mut self.state_caches.pending_conflicts,
+                                    event,
+                                );
+                            }
+                        }
+                    }
+                    Self::lww_update(&mut self.state_caches.map_all, key, &candidate);
+                    if canonical {
+                        Self::lww_update(&mut self.state_caches.map_canonical, key, &candidate);
+                    }
+                }
+                Op::List(lop) => {
+                    self.update_list_conflict_state(lop, prio);
+                    Self::update_list_cache(&mut self.state_caches.lists, lop, prio);
+                }
+                Op::Text(_) => {}
+            }
+        }
+    }
+
+    fn lww_update(cache: &mut HashMap<String, MapWinner>, key: &str, candidate: &MapWinner) {
+        match cache.get_mut(key) {
+            Some(current) => {
+                if (candidate.lamport, candidate.author) > (current.lamport, current.author) {
+                    *current = candidate.clone();
+                }
+            }
+            None => {
+                cache.insert(key.to_string(), candidate.clone());
+            }
+        }
+    }
+
+    fn push_pending_conflict(pending: &mut Vec<ConflictEvent>, event: ConflictEvent) {
+        if pending.len() >= PENDING_CONFLICTS_CAP {
+            let overflow = pending.len() + 1 - PENDING_CONFLICTS_CAP;
+            pending.drain(0..overflow);
+        }
+        pending.push(event);
+    }
+
+    /// Mirror of `crate::list::resolve_list_seq`'s per-op state machine,
+    /// applied incrementally with the visible ordered set maintained inline.
+    fn update_list_cache(
+        lists: &mut HashMap<String, ListCacheState>,
+        lop: &ListOp,
+        prio: (u64, [u8; 32]),
+    ) {
+        let (list_key, item_id) = match lop {
+            ListOp::Insert { list_key, item_id, .. }
+            | ListOp::Move { list_key, item_id, .. }
+            | ListOp::Delete { list_key, item_id } => (list_key, *item_id),
+        };
+        let cache = lists.entry(list_key.clone()).or_default();
+        let entry = cache.items.entry(item_id).or_default();
+        let was_visible_pos = if entry.is_visible() {
+            entry.position.clone()
+        } else {
+            None
+        };
+
+        match lop {
+            ListOp::Insert { position, .. } => {
+                entry.saw_insert = true;
+                if prio > entry.pos_priority {
+                    entry.position = Some(position.clone());
+                    entry.pos_priority = prio;
+                }
+            }
+            ListOp::Move { position, .. } => {
+                if prio > entry.pos_priority {
+                    entry.position = Some(position.clone());
+                    entry.pos_priority = prio;
+                }
+            }
+            ListOp::Delete { .. } => {
+                entry.deleted = true;
+            }
+        }
+
+        let now_visible_pos = if entry.is_visible() {
+            entry.position.clone()
+        } else {
+            None
+        };
+        if was_visible_pos != now_visible_pos {
+            if let Some(old_pos) = was_visible_pos {
+                cache.visible.remove(&(old_pos, item_id));
+            }
+            if let Some(new_pos) = now_visible_pos {
+                cache.visible.insert((new_pos, item_id));
+            }
+        }
+    }
+
+    /// Incremental list-conflict bookkeeping (only when the conflict stream
+    /// is enabled). Mirrors `detect_list_conflicts` pairings: losing
+    /// position ops from other authors, and position ops absorbed by a
+    /// delete.
+    fn update_list_conflict_state(&mut self, lop: &ListOp, prio: (u64, [u8; 32])) {
+        if !self.state_caches.conflict_stream_enabled {
+            return;
+        }
+        let (lamport, author) = prio;
+        match lop {
+            ListOp::Insert { list_key, item_id, .. } | ListOp::Move { list_key, item_id, .. } => {
+                let cop = match lop {
+                    ListOp::Insert { .. } => ConflictOp::ListInsert { item_id: item_id.0 },
+                    _ => ConflictOp::ListMove { item_id: item_id.0 },
+                };
+                let st = self
+                    .state_caches
+                    .list_conflict_state
+                    .entry((list_key.clone(), *item_id))
+                    .or_default();
+                let mut event = None;
+                if let Some((dl, da)) = st.delete_winner {
+                    if da != author {
+                        event = Some(ConflictEvent {
+                            kind: ConflictKind::ListDeleteWon,
+                            key: format!("{}#{}", list_key, item_id.to_hex()),
+                            winner_author: da,
+                            winner_lamport: dl,
+                            winner_op: ConflictOp::ListDelete { item_id: item_id.0 },
+                            loser_author: author,
+                            loser_lamport: lamport,
+                            loser_op: cop.clone(),
+                        });
+                    }
+                } else if let Some((wl, wa, wop)) = &st.pos_winner {
+                    if *wa != author {
+                        event = Some(if prio > (*wl, *wa) {
+                            ConflictEvent {
+                                kind: ConflictKind::ListMoveLost,
+                                key: format!("{}#{}", list_key, item_id.to_hex()),
+                                winner_author: author,
+                                winner_lamport: lamport,
+                                winner_op: cop.clone(),
+                                loser_author: *wa,
+                                loser_lamport: *wl,
+                                loser_op: wop.clone(),
+                            }
+                        } else {
+                            ConflictEvent {
+                                kind: ConflictKind::ListMoveLost,
+                                key: format!("{}#{}", list_key, item_id.to_hex()),
+                                winner_author: *wa,
+                                winner_lamport: *wl,
+                                winner_op: wop.clone(),
+                                loser_author: author,
+                                loser_lamport: lamport,
+                                loser_op: cop.clone(),
+                            }
+                        });
+                    }
+                }
+                if st.pos_ops.len() < LIST_CONFLICT_POS_OPS_CAP {
+                    st.pos_ops.push((lamport, author, cop.clone()));
+                }
+                if st
+                    .pos_winner
+                    .as_ref()
+                    .map(|(l, a, _)| prio > (*l, *a))
+                    .unwrap_or(true)
+                {
+                    st.pos_winner = Some((lamport, author, cop));
+                }
+                if let Some(event) = event {
+                    Self::push_pending_conflict(&mut self.state_caches.pending_conflicts, event);
+                }
+            }
+            ListOp::Delete { list_key, item_id } => {
+                let st = self
+                    .state_caches
+                    .list_conflict_state
+                    .entry((list_key.clone(), *item_id))
+                    .or_default();
+                let mut events = Vec::new();
+                if st.delete_winner.is_none() {
+                    for (pl, pa, pop) in &st.pos_ops {
+                        if *pa == author {
+                            continue;
+                        }
+                        events.push(ConflictEvent {
+                            kind: ConflictKind::ListDeleteWon,
+                            key: format!("{}#{}", list_key, item_id.to_hex()),
+                            winner_author: author,
+                            winner_lamport: lamport,
+                            winner_op: ConflictOp::ListDelete { item_id: item_id.0 },
+                            loser_author: *pa,
+                            loser_lamport: *pl,
+                            loser_op: pop.clone(),
+                        });
+                    }
+                }
+                if st
+                    .delete_winner
+                    .map(|(l, a)| prio > (l, a))
+                    .unwrap_or(true)
+                {
+                    st.delete_winner = Some((lamport, author));
+                }
+                for event in events {
+                    Self::push_pending_conflict(&mut self.state_caches.pending_conflicts, event);
+                }
+            }
+        }
+    }
+
+    /// Enable/disable the incremental conflict stream (see
+    /// [`drain_pending_conflicts`](Self::drain_pending_conflicts)).
+    /// Disabled by default; hosts that poll per-import enable it once at
+    /// room creation. Events are only recorded for ops applied while
+    /// enabled.
+    pub fn set_conflict_stream_enabled(&mut self, enabled: bool) {
+        self.state_caches.conflict_stream_enabled = enabled;
+    }
+
+    /// Drain conflict events recorded since the last drain.
+    ///
+    /// Unlike [`detect_conflicts`](Self::detect_conflicts) (a full O(history)
+    /// recomputation that re-pairs every historical loser against the
+    /// current winner on each call), this is O(new ops) and emits each
+    /// pairing once, at the moment the losing/demoting op is applied.
+    pub fn drain_pending_conflicts(&mut self) -> Vec<ConflictEvent> {
+        std::mem::take(&mut self.state_caches.pending_conflicts)
+    }
+
+    /// Resolve the current value of the shared map (LWW winner per key).
     ///
     /// Returns the **speculative** view — includes local (unconfirmed) writes.
-    /// Use `resolve_canonical()` for confirmed-only state (E2).
+    /// Use `resolve_canonical()` for confirmed-only state (E2). Served from
+    /// the incrementally-maintained winner cache: O(keys), not O(history).
     pub fn resolve(&self) -> ResolvedMap {
-        self.resolve_inner(false)
+        self.state_caches
+            .map_all
+            .iter()
+            .filter_map(|(k, w)| w.value.clone().map(|v| (k.clone(), v)))
+            .collect()
     }
 
     /// Canonical state: like `resolve()` but excludes nodes that were authored
@@ -1497,22 +1898,35 @@ impl<N: NodeStore> StateGraph<N> {
     /// nodes; once they arrive via `apply_remote` they enter the canonical view.
     /// In AllowAll / Cooperative mode, all remote writes are canonical.
     pub fn resolve_canonical(&self) -> ResolvedMap {
-        self.resolve_inner(true)
+        self.state_caches
+            .map_canonical
+            .iter()
+            .filter_map(|(k, w)| w.value.clone().map(|v| (k.clone(), v)))
+            .collect()
     }
 
-    /// Per-key read from the speculative view (local + remote nodes).
+    /// Per-key read from the speculative view (local + remote nodes). O(1).
     pub fn read_speculative(&self, key: &str) -> Option<Vec<u8>> {
-        self.resolve_inner(false).remove(key)
+        self.state_caches
+            .map_all
+            .get(key)
+            .and_then(|w| w.value.clone())
     }
 
-    /// Per-key read from the canonical view (remote nodes only).
+    /// Per-key read from the canonical view (remote nodes only). O(1).
     pub fn read_canonical(&self, key: &str) -> Option<Vec<u8>> {
-        self.resolve_inner(true).remove(key)
+        self.state_caches
+            .map_canonical
+            .get(key)
+            .and_then(|w| w.value.clone())
     }
 
-    /// Internal LWW scan. When `skip_local` is true, nodes whose IDs are in
-    /// `local_node_ids` are excluded (canonical view).
-    fn resolve_inner(&self, skip_local: bool) -> ResolvedMap {
+    /// Full-replay LWW scan — retained as the parity oracle for the
+    /// incremental winner caches (tests assert cache == replay). When
+    /// `skip_local` is true, nodes whose IDs are in `local_node_ids` are
+    /// excluded (canonical view).
+    #[cfg(test)]
+    fn resolve_replay(&self, skip_local: bool) -> ResolvedMap {
         let mut per_key: BTreeMap<String, (u64, [u8; 32], Option<Vec<u8>>)> = BTreeMap::new();
 
         let node_ids = self.nodes.all_ids();
@@ -1559,61 +1973,24 @@ impl<N: NodeStore> StateGraph<N> {
     ///
     /// When `is_blob` is true, `value` holds the 32-byte Blake3 blob hash;
     /// callers must look that up in the local `BlobStore` to get actual bytes.
+    /// Served from the incremental winner cache: O(keys), not O(history).
     pub fn resolve_with_meta(&self) -> HashMap<String, (u64, [u8; 32], Vec<u8>, bool)> {
-        let mut per_key: BTreeMap<String, (u64, [u8; 32], Option<Vec<u8>>, bool)> = BTreeMap::new();
-
-        let node_ids = self.nodes.all_ids();
-        for id in &node_ids {
-            let Some(node) = self.nodes.get(id) else { continue };
-            let tx = &node.transaction;
-            for op in &tx.ops {
-                match op {
-                    Op::Map(MapOp::Set { key, value }) => {
-                        let entry = per_key.entry(key.clone()).or_insert((0, [0u8; 32], None, false));
-                        if (tx.lamport, tx.author) > (entry.0, entry.1) {
-                            *entry = (tx.lamport, tx.author, Some(value.clone()), false);
-                        }
-                    }
-                    Op::Map(MapOp::Delete { key }) => {
-                        let entry = per_key.entry(key.clone()).or_insert((0, [0u8; 32], None, false));
-                        if (tx.lamport, tx.author) > (entry.0, entry.1) {
-                            *entry = (tx.lamport, tx.author, None, false);
-                        }
-                    }
-                    Op::Map(MapOp::SetBlob { key, blob_hash }) => {
-                        let entry = per_key.entry(key.clone()).or_insert((0, [0u8; 32], None, false));
-                        if (tx.lamport, tx.author) > (entry.0, entry.1) {
-                            *entry = (tx.lamport, tx.author, Some(blob_hash.as_bytes().to_vec()), true);
-                        }
-                    }
-                    Op::List(_) | Op::Text(_) => {} // stubs — Phase C
-                }
-            }
-        }
-
-        per_key
-            .into_iter()
-            .filter_map(|(key, (lamport, author, value, is_blob))| {
-                value.map(|v| (key, (lamport, author, v, is_blob)))
+        self.state_caches
+            .map_all
+            .iter()
+            .filter_map(|(k, w)| {
+                w.value
+                    .clone()
+                    .map(|v| (k.clone(), (w.lamport, w.author, v, w.is_blob)))
             })
             .collect()
     }
 
     /// Return the set of all blob hashes referenced by `SetBlob` ops in the
     /// graph. Used by the bridge to determine which blobs must be fetched
-    /// from peers.
+    /// from peers. Served from the incremental cache: O(hashes).
     pub fn referenced_blob_hashes(&self) -> HashSet<Hash> {
-        let mut hashes = HashSet::new();
-        let node_ids = self.nodes.all_ids();
-        for id in &node_ids {
-            let Some(node) = self.nodes.get(id) else { continue };
-            for op in &node.transaction.ops {
-                if let Op::Map(MapOp::SetBlob { blob_hash, .. }) = op {
-                    hashes.insert(*blob_hash);
-                }
-            }
-        }
-        hashes
+        self.state_caches.blob_hashes.clone()
     }
 
     // -------------------------------------------------------------------------
@@ -1862,6 +2239,26 @@ impl<N: NodeStore> StateGraph<N> {
     /// Item *content* lives in the sidecar Map keyed by hex(item_id) — the
     /// SDK composes the two; core stays neutral.
     pub fn resolve_list(
+        &self,
+        list_key: &str,
+    ) -> Vec<(crate::op::ItemId, crate::list::FracIdx)> {
+        self.state_caches
+            .lists
+            .get(list_key)
+            .map(|cache| {
+                cache
+                    .visible
+                    .iter()
+                    .map(|(pos, id)| (*id, pos.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Full-replay list resolution — retained as the parity oracle for the
+    /// incremental list cache (tests assert cache == replay).
+    #[cfg(test)]
+    fn resolve_list_replay(
         &self,
         list_key: &str,
     ) -> Vec<(crate::op::ItemId, crate::list::FracIdx)> {
@@ -3655,5 +4052,218 @@ mod tests {
         assert_eq!(res.rejected.len(), 1);
         assert_eq!(res.rejected[0].0, bad_id);
         assert!(matches!(res.rejected[0].1, SyncError::WallClockSkew { .. }));
+    }
+
+    // -------------------------------------------------------------------
+    // Incremental state-cache parity (map/list/blob caches vs full replay)
+    // -------------------------------------------------------------------
+
+    /// Deterministic xorshift so the parity tests are reproducible.
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    #[test]
+    fn map_cache_matches_replay_under_randomized_local_and_remote_writes() {
+        let ka = key_a();
+        let kb = key_b();
+        let mut g_a = StateGraph::new();
+        let mut g_b = StateGraph::new();
+        let mut rng = 0x1234_5678_9abc_def0u64;
+        let keys = ["alpha", "beta", "gamma", "delta"];
+
+        for step in 0..200 {
+            let key = keys[(xorshift(&mut rng) % keys.len() as u64) as usize];
+            let roll = xorshift(&mut rng) % 10;
+            let (graph, sk) = if xorshift(&mut rng) % 2 == 0 {
+                (&mut g_a, &ka)
+            } else {
+                (&mut g_b, &kb)
+            };
+            let op = if roll < 6 {
+                Op::Map(MapOp::Set {
+                    key: key.into(),
+                    value: format!("v{step}").into_bytes(),
+                })
+            } else if roll < 8 {
+                Op::Map(MapOp::Delete { key: key.into() })
+            } else {
+                Op::Map(MapOp::SetBlob {
+                    key: key.into(),
+                    blob_hash: Hash::of(format!("blob{step}").as_bytes()),
+                })
+            };
+            graph.apply_local(sk, step, vec![op]).unwrap();
+
+            // Periodically cross-sync so remote/canonical paths are exercised.
+            if step % 17 == 0 {
+                let b_nodes: Vec<SyncNode> = g_b.all_nodes();
+                for n in b_nodes {
+                    let _ = g_a.apply_remote(n);
+                }
+                let a_nodes: Vec<SyncNode> = g_a.all_nodes();
+                for n in a_nodes {
+                    let _ = g_b.apply_remote(n);
+                }
+            }
+        }
+
+        for g in [&g_a, &g_b] {
+            assert_eq!(g.resolve(), g.resolve_replay(false), "speculative cache != replay");
+            assert_eq!(
+                g.resolve_canonical(),
+                g.resolve_replay(true),
+                "canonical cache != replay"
+            );
+            // resolve_with_meta must agree with resolve() on keys/values.
+            let meta = g.resolve_with_meta();
+            let plain = g.resolve();
+            assert_eq!(meta.len(), plain.len());
+            for (k, v) in &plain {
+                assert_eq!(&meta.get(k).unwrap().2, v);
+            }
+            // Blob-hash cache parity vs manual scan.
+            let mut scanned = HashSet::new();
+            for node in g.all_nodes() {
+                for op in &node.transaction.ops {
+                    if let Op::Map(MapOp::SetBlob { blob_hash, .. }) = op {
+                        scanned.insert(*blob_hash);
+                    }
+                }
+            }
+            assert_eq!(g.referenced_blob_hashes(), scanned);
+        }
+    }
+
+    #[test]
+    fn list_cache_matches_replay_under_randomized_ops() {
+        use crate::list::FracIdx;
+        use crate::op::{ItemId, ListOp};
+
+        let ka = key_a();
+        let kb = key_b();
+        let mut g_a = StateGraph::new();
+        let mut g_b = StateGraph::new();
+        let mut rng = 0xfeed_beef_cafe_0001u64;
+        let item_pool: Vec<ItemId> = (0..8u8).map(|i| ItemId([i; 16])).collect();
+        let lists = ["L1", "L2"];
+
+        for step in 0..200 {
+            let list_key = lists[(xorshift(&mut rng) % 2) as usize];
+            let item_id = item_pool[(xorshift(&mut rng) % item_pool.len() as u64) as usize];
+            let pos = FracIdx::new(format!(
+                "{}{}",
+                char::from(b'A' + (xorshift(&mut rng) % 26) as u8),
+                char::from(b'a' + (xorshift(&mut rng) % 26) as u8)
+            ));
+            let roll = xorshift(&mut rng) % 10;
+            let op = if roll < 5 {
+                Op::List(ListOp::Insert {
+                    list_key: list_key.into(),
+                    item_id,
+                    position: pos,
+                })
+            } else if roll < 8 {
+                Op::List(ListOp::Move {
+                    list_key: list_key.into(),
+                    item_id,
+                    position: pos,
+                })
+            } else {
+                Op::List(ListOp::Delete {
+                    list_key: list_key.into(),
+                    item_id,
+                })
+            };
+            let (graph, sk) = if xorshift(&mut rng) % 2 == 0 {
+                (&mut g_a, &ka)
+            } else {
+                (&mut g_b, &kb)
+            };
+            graph.apply_local(sk, step, vec![op]).unwrap();
+
+            if step % 13 == 0 {
+                let b_nodes: Vec<SyncNode> = g_b.all_nodes();
+                for n in b_nodes {
+                    let _ = g_a.apply_remote(n);
+                }
+                let a_nodes: Vec<SyncNode> = g_a.all_nodes();
+                for n in a_nodes {
+                    let _ = g_b.apply_remote(n);
+                }
+            }
+        }
+        for g in [&g_a, &g_b] {
+            for list_key in lists {
+                assert_eq!(
+                    g.resolve_list(list_key),
+                    g.resolve_list_replay(list_key),
+                    "list cache != replay for {list_key}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conflict_stream_emits_map_lww_losses_once() {
+        let ka = key_a();
+        let kb = key_b();
+        let author_a = ka.verifying_key().to_bytes();
+        let author_b = kb.verifying_key().to_bytes();
+
+        let mut g = StateGraph::new();
+        g.set_conflict_stream_enabled(true);
+
+        // A writes, then B's later write demotes it: one MapOverwrite event.
+        g.apply_local(&ka, 0, vec![set("k", "from-a")]).unwrap();
+        g.apply_local(&kb, 0, vec![set("k", "from-b")]).unwrap();
+
+        let events = g.drain_pending_conflicts();
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.kind, crate::conflicts::ConflictKind::MapOverwrite);
+        assert_eq!(e.key, "k");
+        assert_eq!(e.winner_author, author_b);
+        assert_eq!(e.loser_author, author_a);
+
+        // Drained — no repeats.
+        assert!(g.drain_pending_conflicts().is_empty());
+
+        // Same-author overwrite: refinement, not conflict.
+        g.apply_local(&kb, 0, vec![set("k", "from-b-2")]).unwrap();
+        assert!(g.drain_pending_conflicts().is_empty());
+    }
+
+    #[test]
+    fn conflict_stream_emits_list_delete_won() {
+        use crate::list::FracIdx;
+        use crate::op::{ItemId, ListOp};
+
+        let ka = key_a();
+        let kb = key_b();
+        let mut g = StateGraph::new();
+        g.set_conflict_stream_enabled(true);
+
+        let item = ItemId([7u8; 16]);
+        g.apply_local(&ka, 0, vec![Op::List(ListOp::Insert {
+            list_key: "L".into(),
+            item_id: item,
+            position: FracIdx::new("M"),
+        })]).unwrap();
+        g.apply_local(&kb, 0, vec![Op::List(ListOp::Delete {
+            list_key: "L".into(),
+            item_id: item,
+        })]).unwrap();
+
+        let events = g.drain_pending_conflicts();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, crate::conflicts::ConflictKind::ListDeleteWon);
+        // Delete is absorbing: item is gone despite the earlier insert.
+        assert!(g.resolve_list("L").is_empty());
     }
 }

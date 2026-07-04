@@ -40,8 +40,8 @@
       },
       "dotnet": {
         "env": {
-          "ActiveSync__Providers__Auth": "Default",
-          "ActiveSync__Runtime__ServerPeerPubkeyHex": ""
+          "NodalMerge__Providers__Auth": "Default",
+          "NodalMerge__Runtime__ServerPeerPubkeyHex": ""
         }
       },
       "rust": {
@@ -73,8 +73,8 @@
       },
       "dotnet": {
         "env": {
-          "ActiveSync__Providers__Auth": "Default",
-          "ActiveSync__Runtime__ServerPeerPubkeyHex": ""
+          "NodalMerge__Providers__Auth": "Default",
+          "NodalMerge__Runtime__ServerPeerPubkeyHex": ""
         }
       },
       "rust": {
@@ -93,15 +93,15 @@
       },
       "dotnet": {
         "env": {
-          "ActiveSync__Providers__Auth": "Default",
-          "ActiveSync__Auth__CapabilityComposition__Enabled": "true",
-          "ActiveSync__Auth__CapabilityComposition__ProfilePath": "./benchmarks/profiles/capability-profile.v1.json"
+          "NodalMerge__Providers__Auth": "Default",
+          "NodalMerge__Auth__CapabilityComposition__Enabled": "true",
+          "NodalMerge__Auth__CapabilityComposition__ProfilePath": "./benchmarks/profiles/capability-profile.v1.json"
         }
       },
       "rust": {
         "env": {
           "ACTIVESYNC_CAPABILITY_COMPOSITION_ENABLED": "true",
-          "ACTIVESYNC_CAPABILITY_PROFILE_PATH": "./benchmarks/profiles/capability-profile.v1.json"
+          "NODALMERGE_CAPABILITY_PROFILE_PATH": "./benchmarks/profiles/capability-profile.v1.json"
         }
       }
     },
@@ -117,13 +117,13 @@
       },
       "dotnet": {
         "env": {
-          "ActiveSync__Providers__Auth": "Default"
+          "NodalMerge__Providers__Auth": "Default"
         }
       },
       "rust": {
         "env": {
-          "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_NODES": "48",
-          "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_BYTES": "196608"
+          "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_NODES": "48",
+          "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_BYTES": "196608"
         }
       }
     },
@@ -139,8 +139,8 @@
       },
       "dotnet": {
         "env": {
-          "ActiveSync__Providers__Auth": "Default",
-          "ActiveSync__Runtime__Dag__Compaction__Enabled": "false"
+          "NodalMerge__Providers__Auth": "Default",
+          "NodalMerge__Runtime__Dag__Compaction__Enabled": "false"
         }
       },
       "rust": {
@@ -159,8 +159,8 @@
       },
       "dotnet": {
         "env": {
-          "ActiveSync__Providers__Auth": "Default",
-          "ActiveSync__Runtime__ServerPeerPubkeyHex": ""
+          "NodalMerge__Providers__Auth": "Default",
+          "NodalMerge__Runtime__ServerPeerPubkeyHex": ""
         }
       },
       "rust": {
@@ -179,8 +179,8 @@
       },
       "dotnet": {
         "env": {
-          "ActiveSync__Providers__Auth": "Default",
-          "ActiveSync__Runtime__ServerPeerPubkeyHex": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+          "NodalMerge__Providers__Auth": "Default",
+          "NodalMerge__Runtime__ServerPeerPubkeyHex": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
         }
       },
       "rust": {
@@ -199,19 +199,19 @@
       },
       "dotnet": {
         "env": {
-          "ActiveSync__Providers__Auth": "JwtBridgeEmbedded",
-          "ActiveSync__Runtime__ServerPeerPubkeyHex": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-          "ActiveSync__Runtime__Dag__Compaction__Enabled": "true",
-          "ActiveSync__Auth__CapabilityComposition__Enabled": "true",
-          "ActiveSync__Auth__CapabilityComposition__ProfilePath": "./benchmarks/profiles/capability-profile.v1.json"
+          "NodalMerge__Providers__Auth": "JwtBridgeEmbedded",
+          "NodalMerge__Runtime__ServerPeerPubkeyHex": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+          "NodalMerge__Runtime__Dag__Compaction__Enabled": "true",
+          "NodalMerge__Auth__CapabilityComposition__Enabled": "true",
+          "NodalMerge__Auth__CapabilityComposition__ProfilePath": "./benchmarks/profiles/capability-profile.v1.json"
         }
       },
       "rust": {
         "env": {
           "ACTIVESYNC_CAPABILITY_COMPOSITION_ENABLED": "true",
-          "ACTIVESYNC_CAPABILITY_PROFILE_PATH": "./benchmarks/profiles/capability-profile.v1.json",
-          "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_NODES": "128",
-          "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_BYTES": "1048576"
+          "NODALMERGE_CAPABILITY_PROFILE_PATH": "./benchmarks/profiles/capability-profile.v1.json",
+          "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_NODES": "128",
+          "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_BYTES": "1048576"
         }
       }
     }

@@ -62,7 +62,11 @@ impl SyncStore {
         let mut seed = [0u8; 32];
         seed.copy_from_slice(author_key);
         let signing_key = SigningKey::from_bytes(&seed);
-        Ok(SyncStore { graph: StateGraph::new(), signing_key, blobs: MemoryBlobStore::new(), room_key: None, tick_config: None, pending_tick_ops: Vec::new(), conflicts_seen: HashSet::new(), conflicts_seen_order: VecDeque::new() })
+        let mut graph = StateGraph::new();
+        // Collect conflicts incrementally from the first op — take_conflicts_json
+        // drains this stream instead of rescanning history.
+        graph.set_conflict_stream_enabled(true);
+        Ok(SyncStore { graph, signing_key, blobs: MemoryBlobStore::new(), room_key: None, tick_config: None, pending_tick_ops: Vec::new(), conflicts_seen: HashSet::new(), conflicts_seen_order: VecDeque::new() })
     }
 
     /// Hex-encoded Ed25519 public key — the peer's stable identity.
@@ -261,7 +265,13 @@ impl SyncStore {
     /// long-lived rooms may see older events re-surface; apps should
     /// dedup on their side if they care.
     pub fn take_conflicts_json(&mut self) -> String {
-        let conflicts = self.graph.detect_conflicts();
+        // Incremental conflict stream: O(ops since last drain) instead of
+        // the legacy full-history rescan (O(total nodes)) — the SDK polls
+        // this after every local mutation, so the rescan made long editing
+        // sessions quadratic. Same switch host-core flipped in 2387162d.
+        // Enabling is idempotent and covers graphs created before this call.
+        self.graph.set_conflict_stream_enabled(true);
+        let conflicts = self.graph.drain_pending_conflicts();
         let mut fresh: Vec<&ConflictEvent> = Vec::new();
         for c in &conflicts {
             let fp = c.fingerprint();
@@ -424,33 +434,20 @@ impl SyncStore {
     pub fn insert_text(&mut self, key: &str, pos: u32, ch_str: &str) -> Result<(), JsValue> {
         let ch = ch_str.chars().next()
             .ok_or_else(|| JsValue::from_str("ch must be a non-empty string"))?;
-
-        let seq = self.graph.resolve_text_seq_with_chars(key);
-        let pos = pos as usize;
-        let after = if pos == 0 {
-            None
-        } else if pos <= seq.len() {
-            Some(seq[pos - 1].0)
-        } else {
-            seq.last().map(|(id, _)| *id)
-        };
-
-        let now_ms = js_sys::Date::now() as u64;
-        // Bypass tick buffer — each character needs its own unique (lamport, author) id.
-        let op = Op::Text(TextOp::Insert { key: key.to_string(), after, ch });
-        self.commit_ops_immediate(vec![op], now_ms).map(|_| ())
+        // Delegate to the offset-anchored range op: the chunked-RGA index
+        // resolves `pos` in O(log n). The previous implementation
+        // materialized the whole visible glyph sequence per call (O(doc)),
+        // which made every editing session quadratic.
+        let mut buf = [0u8; 4];
+        self.insert_text_range(key, pos, ch.encode_utf8(&mut buf))
     }
 
     /// Delete the character at position `pos` (0-based) in the RGA text
-    /// sequence for `key`.  Returns an error if `pos` is out of range.
+    /// sequence for `key`. Out-of-range positions are a no-op (matching
+    /// range-op semantics).
     pub fn delete_text(&mut self, key: &str, pos: u32) -> Result<(), JsValue> {
-        let seq = self.graph.resolve_text_seq_with_chars(key);
-        let target = seq.get(pos as usize)
-            .map(|(id, _)| *id)
-            .ok_or_else(|| JsValue::from_str("delete_text: position out of range"))?;
-        let op = Op::Text(TextOp::Delete { key: key.to_string(), target });
-        let now_ms = js_sys::Date::now() as u64;
-        self.commit_ops_immediate(vec![op], now_ms).map(|_| ())
+        // Same O(log n) delegation as insert_text.
+        self.delete_text_range(key, pos, 1)
     }
 
     /// Resolve the RGA text for `key` as a plain UTF-8 string.
@@ -964,6 +961,94 @@ impl SyncStore {
         serde_json::to_string(&out).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
+    /// Local DAG map-op history for a key prefix, op values included — the
+    /// LWW-map sibling of `read_replay_range_local_json` (and of
+    /// `resolve_text_at_lamport` on the text side). Reads the in-memory graph
+    /// only, so history reaches back to the last snapshot rebuild
+    /// (`apply_snapshot_pack_json` / compact-room), not before it.
+    ///
+    /// Items are ordered by (lamport, node_id) — causal order, with the same
+    /// deterministic tie-break every peer computes. Returns JSON:
+    /// ```json
+    /// { "type": "map.history.result",
+    ///   "key_prefix": "px/", "from_lamport": 0,
+    ///   "items": [{ "lamport": 1, "wall_ms": 123, "author": "<hex64>",
+    ///               "node_id": "<hex64>", "op": "set" | "delete",
+    ///               "key": "px/1,2", "value_b64": "<base64>" | null }],
+    ///   "next_cursor": "offset:N" | null }
+    /// ```
+    pub fn map_history_json(
+        &self,
+        key_prefix: &str,
+        from_lamport: u64,
+        limit: u32,
+        cursor: &str,
+    ) -> Result<String, JsValue> {
+        let key_prefix = key_prefix.trim();
+        if key_prefix.is_empty() {
+            return Err(JsValue::from_str("key_prefix is required"));
+        }
+        let limit = (limit.max(1)) as usize;
+        let offset = replay_read_range_offset(cursor);
+
+        let mut events: Vec<(u64, String, serde_json::Value)> = Vec::new();
+        for node in self.graph.all_nodes() {
+            let tx = &node.transaction;
+            if tx.lamport < from_lamport {
+                continue;
+            }
+            let mut node_hex: Option<String> = None;
+            let mut author_hex: Option<String> = None;
+            for op in &tx.ops {
+                let (kind, key, value_b64) = match op {
+                    Op::Map(MapOp::Set { key, value }) => ("set", key, Some(base64_encode(value))),
+                    Op::Map(MapOp::Delete { key }) => ("delete", key, None),
+                    _ => continue,
+                };
+                if !key.starts_with(key_prefix) {
+                    continue;
+                }
+                let node_id = node_hex.get_or_insert_with(|| node.id.to_hex()).clone();
+                let author = author_hex
+                    .get_or_insert_with(|| tx.author.iter().map(|b| format!("{:02x}", b)).collect())
+                    .clone();
+                events.push((
+                    tx.lamport,
+                    node_id.clone(),
+                    serde_json::json!({
+                        "lamport":   tx.lamport,
+                        "wall_ms":   tx.wall_ms,
+                        "author":    author,
+                        "node_id":   node_id,
+                        "op":        kind,
+                        "key":       key,
+                        "value_b64": value_b64,
+                    }),
+                ));
+            }
+        }
+
+        // Stable sort keeps multi-op nodes in their in-transaction op order.
+        events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let end = offset.saturating_add(limit).min(events.len());
+        let page = if offset < events.len() {
+            &events[offset..end]
+        } else {
+            &[]
+        };
+        let next_cursor = (end < events.len()).then(|| format!("offset:{end}"));
+
+        let items: Vec<serde_json::Value> = page.iter().map(|(_, _, item)| item.clone()).collect();
+        let out = serde_json::json!({
+            "type": "map.history.result",
+            "key_prefix": key_prefix,
+            "from_lamport": from_lamport,
+            "items": items,
+            "next_cursor": next_cursor
+        });
+        serde_json::to_string(&out).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
     /// Import nodes received from a remote peer.
     /// Accepts a base64-encoded postcard byte string (A3 wire format).
     /// Handles out-of-order delivery by retrying nodes whose parents haven't
@@ -1181,6 +1266,110 @@ impl SyncStore {
         let missing = self.graph.missing_hashes(&known);
         let nodes = self.graph.get_nodes(&missing);
         Ok(base64_encode(&pack_nodes(&nodes)))
+    }
+
+    /// Like [`export_nodes_missing_from`], but returns a JSON array of
+    /// base64 pack strings, each at most `max_chunk_b64_len` base64
+    /// characters, in parent-before-child (topological) order.
+    ///
+    /// Use this when the receiving host caps inbound frame sizes (embedded
+    /// runtime hosts reject frames over 64 KiB): each chunk can be sent as
+    /// its own `pack` message, and because parents never appear in a later
+    /// chunk than their children, a server that drops unknown-parent nodes
+    /// accepts every chunk incrementally.
+    ///
+    /// A single node larger than the budget still becomes its own
+    /// (oversized) chunk — nodes are not splittable.
+    pub fn export_nodes_missing_from_chunked(
+        &self,
+        known_ids_json: &str,
+        max_chunk_b64_len: u32,
+    ) -> Result<String, JsValue> {
+        let known_hex: Vec<String> = serde_json::from_str(known_ids_json)
+            .unwrap_or_default();
+        let known: std::collections::HashSet<nodalmerge_core::NodeId> = known_hex
+            .iter()
+            .filter_map(|h| parse_hex_hash(h))
+            .collect();
+        let missing = self.graph.missing_hashes(&known);
+        let nodes = self.graph.get_nodes(&missing);
+
+        // Kahn's algorithm over the exported subset. Parents outside the
+        // subset (already known to the receiver) count as satisfied.
+        let by_id: std::collections::HashMap<nodalmerge_core::NodeId, &nodalmerge_core::SyncNode> =
+            nodes.iter().map(|n| (n.id, *n)).collect();
+        let mut indegree: std::collections::HashMap<nodalmerge_core::NodeId, usize> =
+            std::collections::HashMap::with_capacity(nodes.len());
+        let mut children: std::collections::HashMap<nodalmerge_core::NodeId, Vec<nodalmerge_core::NodeId>> =
+            std::collections::HashMap::new();
+        for node in &nodes {
+            let degree = node
+                .transaction
+                .parents
+                .iter()
+                .filter(|p| by_id.contains_key(p))
+                .count();
+            indegree.insert(node.id, degree);
+            for parent in &node.transaction.parents {
+                if by_id.contains_key(parent) {
+                    children.entry(*parent).or_default().push(node.id);
+                }
+            }
+        }
+        let mut ready: VecDeque<nodalmerge_core::NodeId> = indegree
+            .iter()
+            .filter(|(_, d)| **d == 0)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut ordered: Vec<&nodalmerge_core::SyncNode> = Vec::with_capacity(nodes.len());
+        while let Some(id) = ready.pop_front() {
+            ordered.push(by_id[&id]);
+            if let Some(kids) = children.get(&id) {
+                for kid in kids {
+                    if let Some(d) = indegree.get_mut(kid) {
+                        *d -= 1;
+                        if *d == 0 {
+                            ready.push_back(*kid);
+                        }
+                    }
+                }
+            }
+        }
+        // A DAG always drains fully; keep any stragglers anyway (defensive).
+        if ordered.len() < nodes.len() {
+            let seen: std::collections::HashSet<_> = ordered.iter().map(|n| n.id).collect();
+            for node in &nodes {
+                if !seen.contains(&node.id) {
+                    ordered.push(node);
+                }
+            }
+        }
+
+        // Greedy size packing. b64 expands raw bytes by 4/3, so budget the
+        // raw postcard size accordingly. Per-node sizes measured exactly
+        // (single-node packs slightly overestimate the shared vec header —
+        // errs on the safe side).
+        let max_b64 = max_chunk_b64_len.max(1024) as usize;
+        let raw_budget = max_b64 / 4 * 3;
+        let mut chunks_b64: Vec<String> = Vec::new();
+        let mut current: Vec<&nodalmerge_core::SyncNode> = Vec::new();
+        let mut current_raw = 0usize;
+        for node in ordered {
+            let node_raw = pack_nodes(&[node]).len();
+            if !current.is_empty() && current_raw + node_raw > raw_budget {
+                chunks_b64.push(base64_encode(&pack_nodes(&current)));
+                current.clear();
+                current_raw = 0;
+            }
+            current.push(node);
+            current_raw += node_raw;
+        }
+        if !current.is_empty() {
+            chunks_b64.push(base64_encode(&pack_nodes(&current)));
+        }
+
+        serde_json::to_string(&chunks_b64)
+            .map_err(|e| JsValue::from_str(&format!("chunk serialization failed: {e}")))
     }
 }
 

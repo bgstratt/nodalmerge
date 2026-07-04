@@ -189,6 +189,19 @@ export interface NodalMergeRejectionError extends Error {
   serverEnvelope?: Record<string, unknown>;
 }
 
+export interface MapHistoryItem {
+  lamport: number;
+  wallMs: number;
+  /** Author pubkey (64-char hex). */
+  author: string;
+  /** DAG node id (64-char hex). */
+  nodeId: string;
+  op: 'set' | 'delete';
+  key: string;
+  /** Decoded like `map().get()`; undefined for deletes. */
+  value: unknown;
+}
+
 export interface UndoManager {
   undo(): boolean;
   redo(): boolean;
@@ -236,6 +249,20 @@ export interface Doc {
   onConflict(cb: (ev: ConflictEvent) => void): Unsubscribe;
   /** Return buffered conflicts newer than `sinceMs` (default 5 minutes). */
   recentConflicts(sinceMs?: number): ConflictEvent[];
+
+  /**
+   * Local DAG map-op history for keys under `prefix`, ordered by
+   * (lamport, node id) — deterministic causal order, identical on every
+   * peer. Late-join catch-up delivers real op nodes, so this includes
+   * history from before this peer joined; it reaches back to the last
+   * snapshot rebuild (compact-room), not before it.
+   */
+  history(opts: {
+    prefix: string;
+    fromLamport?: number;
+    limit?: number;
+    cursor?: string | null;
+  }): { items: MapHistoryItem[]; nextCursor: string | null };
 
   /** E3 app-layer undo/redo manager using compensating ops. */
   undoManager(opts?: {

@@ -3046,7 +3046,7 @@ checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
 
 [[package]]
 name = "nodalmerge-bridge"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "ed25519-dalek",
  "js-sys",

@@ -164,6 +164,10 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
   // Refresh GET URLs this many ms before they expire so an in-flight
   // fetch doesn't 403.
   const URL_REFRESH_LEAD_MS = 60_000;
+  // Catch-up pack chunk budget (base64 chars). Embedded runtime hosts cap
+  // inbound frames at 64 KiB; 48 KiB of payload leaves generous room for
+  // the JSON envelope.
+  const CATCHUP_CHUNK_B64_MAX = 48 * 1024;
 
   function refreshSentToServer() {
     sentToServer.clear();
@@ -339,13 +343,31 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
       // known nodes cheaply) and request whatever it has that we don't.
       // Without this, mutations made while disconnected are stranded after
       // reconnect and late joiners never receive room history.
+      //
+      // Embedded runtime hosts also cap inbound frames (64 KiB), so the
+      // push goes out as multiple topologically-ordered packs when the
+      // bridge supports chunked export; a single whole-graph pack would be
+      // rejected outright once the room outgrows the frame cap.
       try {
         const knownIds = JSON.parse(store.all_node_ids_json());
         if (knownIds.length > 0) {
-          const delta = store.export_nodes_missing_from(JSON.stringify([]));
-          if (delta && delta.length > 0) send({ type: 'pack', nodes: delta });
+          if (typeof store.export_nodes_missing_from_chunked === 'function') {
+            const chunks = JSON.parse(
+              store.export_nodes_missing_from_chunked(JSON.stringify([]), CATCHUP_CHUNK_B64_MAX)
+            );
+            for (const chunk of chunks) {
+              if (chunk && chunk.length > 0) send({ type: 'pack', nodes: chunk });
+            }
+          } else {
+            const delta = store.export_nodes_missing_from(JSON.stringify([]));
+            if (delta && delta.length > 0) send({ type: 'pack', nodes: delta });
+          }
         }
-        send({ type: 'request', known: knownIds });
+        // The request's known-list must also fit the host's frame cap
+        // (~67 bytes per hex id). Past that, ask for everything and let
+        // import_pack dedupe — wasteful downstream, but correct.
+        const knownFits = knownIds.length * 67 < CATCHUP_CHUNK_B64_MAX;
+        send({ type: 'request', known: knownFits ? knownIds : [] });
       } catch (e) { log('warn', '[sdk] welcome catch-up (minimal welcome)', e); }
     } else if (msg.root && msg.root !== store.merkle_root_hex()) {
       // Roots differ but server didn't tell us what it wants (IBF decode
@@ -601,8 +623,13 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
       closed = true;
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
+      const wasConnected = connected;
       if (ws) { try { ws.close(); } catch (_) {} ws = null; }
       connected = false;
+      // The socket's onclose sees connected=false by then and stays silent,
+      // so notify listeners of a manual disconnect here — doc.onDisconnect
+      // should fire for deliberate disconnects too, not just drops.
+      if (wasConnected) onDisconnect();
     },
     sendLocalDelta,
     sendBlobs,
@@ -1087,6 +1114,13 @@ function makePeerMesh({
       for (const p of peers.values()) if (p.broadcastPack(nodesB64)) count++;
       return count;
     },
+    /// Cheap pre-check so callers can skip building a pack (an O(graph)
+    /// export) when no data channel is actually open to receive it.
+    hasSyncPeers() {
+      if (!enabled) return false;
+      for (const p of peers.values()) if (p.syncReady) return true;
+      return false;
+    },
     broadcastBlobs(hashes) {
       let count = 0;
       if (!enabled) return 0;
@@ -1492,6 +1526,7 @@ export async function createDoc(opts) {
         enabled: false,
         onWelcomePeers() {}, onPeerJoined() {}, onPeerLeft() {}, onSignal() {},
         broadcastPack() { return 0; }, broadcastBlobs() { return 0; },
+        hasSyncPeers() { return false; },
         peers() { return []; }, shutdown() {},
       }
     : makePeerMesh({
@@ -1533,10 +1568,15 @@ export async function createDoc(opts) {
     queueMicrotask(() => {
       transport.sendLocalDelta();
       // Also push over any open data channels. Remote peers dedupe by node id.
-      try {
-        const nodesB64 = store.export_nodes_missing_from(JSON.stringify([]));
-        mesh.broadcastPack(nodesB64);
-      } catch (_) {}
+      // Check for open channels BEFORE exporting: the export serializes the
+      // whole graph (O(nodes)), which would otherwise run on every mutation
+      // even with no mesh peer connected — O(n²) across a long session.
+      if (mesh.hasSyncPeers()) {
+        try {
+          const nodesB64 = store.export_nodes_missing_from(JSON.stringify([]));
+          mesh.broadcastPack(nodesB64);
+        } catch (_) {}
+      }
       emitChange(ev);
       // G8 — op_apply_latency is the local-apply -> local-broadcast round
       // trip. Cheap (<1ms typically); useful for spotting regressions.
@@ -1817,16 +1857,29 @@ export async function createDoc(opts) {
     return {
       insert(pos, str) {
         if (typeof str !== 'string') throw new TypeError('text.insert: str must be a string');
+        if (str.length === 0) return;
         // E3: snapshot insertion site for undo (positional undo; breaks under concurrency).
         preMutationE.emit({ type: 'text-insert', path: key, pos, len: str.length });
-        for (let i = 0; i < str.length; i++) store.insert_text(key, pos + i, str[i]);
+        // Offset-anchored range op: one node for the whole string, position
+        // resolved in O(log n) by the chunked-RGA index. The per-char loop
+        // (O(doc) anchor lookup per character) remains only as a fallback
+        // for pre-range bridges.
+        if (typeof store.insert_text_range === 'function') {
+          store.insert_text_range(key, pos, str);
+        } else {
+          for (let i = 0; i < str.length; i++) store.insert_text(key, pos + i, str[i]);
+        }
         afterLocalMutation({ source: 'local', type: 'text', path: key, op: 'insert', pos, len: str.length });
       },
       delete(pos, len = 1) {
         // E3: snapshot deleted text for undo (content-preserving re-insert is not supported
         // in RGA; undo of text delete is intentionally skipped by the undo manager).
         preMutationE.emit({ type: 'text-delete', path: key, pos, len });
-        for (let i = 0; i < len; i++) store.delete_text(key, pos);
+        if (typeof store.delete_text_range === 'function') {
+          store.delete_text_range(key, pos, len);
+        } else {
+          for (let i = 0; i < len; i++) store.delete_text(key, pos);
+        }
         afterLocalMutation({ source: 'local', type: 'text', path: key, op: 'delete', pos, len });
       },
       toString() { return store.resolve_text(key); },
@@ -2145,6 +2198,39 @@ export async function createDoc(opts) {
     recentConflicts(sinceMs = 5 * 60 * 1000) {
       const cutoff = Date.now() - sinceMs;
       return conflictBuffer.filter(ev => ev.at >= cutoff).slice();
+    },
+
+    /**
+     * Local DAG map-op history for keys under `prefix`, ordered by
+     * (lamport, node id) — the same deterministic causal order every peer
+     * computes, values decoded like `map().get()`. Backed entirely by the
+     * in-memory graph (late-join catch-up delivers real op nodes, so this
+     * includes history from before this peer joined). Reaches back to the
+     * last snapshot rebuild (compact-room), not before it.
+     *
+     * @param {{ prefix: string, fromLamport?: number, limit?: number, cursor?: string|null }} opts
+     *   prefix      — required key prefix, e.g. "px/".
+     *   fromLamport — inclusive lower bound (default 0).
+     *   limit       — max items per page (default 1000).
+     *   cursor      — nextCursor from the previous page (default none).
+     * @returns {{ items: Array<{ lamport:number, wallMs:number, author:string,
+     *   nodeId:string, op:'set'|'delete', key:string, value:any }>, nextCursor: string|null }}
+     */
+    history({ prefix, fromLamport = 0, limit = 1000, cursor = '' } = {}) {
+      if (typeof prefix !== 'string' || prefix.trim().length === 0) {
+        throw new Error('doc.history: prefix is required (e.g. "px/")');
+      }
+      const raw = JSON.parse(store.map_history_json(prefix, BigInt(fromLamport), limit, cursor ?? ''));
+      const items = (raw.items ?? []).map(item => ({
+        lamport: item.lamport,
+        wallMs:  item.wall_ms,
+        author:  item.author,
+        nodeId:  item.node_id,
+        op:      item.op,
+        key:     item.key,
+        value:   item.value_b64 == null ? undefined : decodeResolvedValue(item.value_b64),
+      }));
+      return { items, nextCursor: raw.next_cursor ?? null };
     },
 
     persistence: {

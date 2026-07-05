@@ -18,7 +18,7 @@ public static class ServiceCollectionExtensions
         ["WsOnly", "File", "S3Direct", "S3Delegated"];
 
     private static readonly HashSet<string> SupportedAuthProviders =
-        ["Default", "JwtBridgeEmbedded", "JwtBridgeSidecar"];
+        ["Default", "JwtBridgeEmbedded", "JwtBridgeSidecar", "RoomTokenEmbedded"];
 
     public static IServiceCollection AddNodalMergeHostProviders(
         this IServiceCollection services,
@@ -62,6 +62,20 @@ public static class ServiceCollectionExtensions
 
             services.AddSingleton(jwtOptions);
             services.AddSingleton<IRoomTokenAuthProvider, JwtBridgeEmbeddedRoomTokenAuthProvider>();
+            return;
+        }
+
+        if (string.Equals(options.AuthProvider, "RoomTokenEmbedded", StringComparison.Ordinal))
+        {
+            // Real ed25519 RoomToken mint/validate via the shared Rust
+            // implementation (nodalmerge_host_ffi) — interoperable with the
+            // Rust server, unlike JwtBridgeEmbedded's HS256 JWTs. Requires a
+            // native-supported RID (win-x64/linux-x64 today).
+            var roomTokenOptions = RoomTokenEmbeddedAuthOptions.FromConfiguration(configuration);
+            roomTokenOptions.Validate();
+
+            services.AddSingleton(roomTokenOptions);
+            services.AddSingleton<IRoomTokenAuthProvider, RoomTokenEmbeddedRoomTokenAuthProvider>();
             return;
         }
 

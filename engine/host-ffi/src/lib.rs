@@ -504,6 +504,213 @@ pub unsafe extern "C" fn as_host_submit_command_json_ex(
     as_status::AS_OK
 }
 
+// ---------------------------------------------------------------------------
+// RoomToken mint/validate (S2 — shared ed25519 auth for all hosts)
+//
+// These expose `nodalmerge_core::RoomToken` sign/verify over the C ABI so
+// non-Rust hosts (the .NET embedded provider) mint and validate the *same*
+// ed25519 credential the Rust server understands, instead of a host-local
+// scheme. JSON in / JSON out, matching the `_json` command functions above.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct FfiRoomTokenMintRequest {
+    room_id: String,
+    /// 64-hex (32-byte) ed25519 signing-key seed for the room.
+    room_signing_key_hex: String,
+    /// 64-hex (32-byte) ed25519 public key of the peer being granted access.
+    peer_pubkey_hex: String,
+    expiry_unix_secs: u64,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct FfiRoomTokenMintResponse {
+    peer_pubkey: String,
+    expiry: u64,
+    caps: Vec<String>,
+    sig: String,
+    /// 64-hex room public key derived from the signing key — what the Rust
+    /// server's `set-room-key` expects, so hosts can lock the room to match.
+    room_pubkey_hex: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfiRoomTokenValidateRequest {
+    room_id: String,
+    /// Exactly one of these must be provided. Prefer `room_pubkey_hex` so
+    /// validators never need to hold the signing key.
+    #[serde(default)]
+    room_pubkey_hex: Option<String>,
+    #[serde(default)]
+    room_signing_key_hex: Option<String>,
+    peer_pubkey_hex: String,
+    expiry_unix_secs: u64,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    sig_hex: String,
+    /// Unix seconds to evaluate expiry against; omit for system time.
+    #[serde(default)]
+    now_unix_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct FfiRoomTokenValidateResponse {
+    valid: bool,
+    reason: Option<String>,
+}
+
+fn parse_hex_32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let hi = char::from(chunk[0]).to_digit(16)?;
+        let lo = char::from(chunk[1]).to_digit(16)?;
+        out[i] = ((hi << 4) | lo) as u8;
+    }
+    Some(out)
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+unsafe fn read_view<'a>(view: as_bytes_view) -> Option<&'a [u8]> {
+    if view.len == 0 {
+        return Some(&[]);
+    }
+    if view.ptr.is_null() {
+        return None;
+    }
+    // SAFETY: non-null pointer with caller-provided length.
+    Some(unsafe { std::slice::from_raw_parts(view.ptr, view.len) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn as_room_token_mint_json(
+    request_json: as_bytes_view,
+    out_token_json: *mut as_bytes_owned,
+) -> as_status {
+    if out_token_json.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+    let Some(request_bytes) = (unsafe { read_view(request_json) }) else {
+        return as_status::AS_ERR_INVALID_ARG;
+    };
+    let request: FfiRoomTokenMintRequest = match serde_json::from_slice(request_bytes) {
+        Ok(r) => r,
+        Err(_) => return as_status::AS_ERR_INVALID_ARG,
+    };
+    let Some(seed) = parse_hex_32(&request.room_signing_key_hex) else {
+        return as_status::AS_ERR_INVALID_ARG;
+    };
+    let Some(peer_pubkey) = parse_hex_32(&request.peer_pubkey_hex) else {
+        return as_status::AS_ERR_INVALID_ARG;
+    };
+
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let token = nodalmerge_core::RoomToken::sign(
+        &request.room_id,
+        &peer_pubkey,
+        request.expiry_unix_secs,
+        &request.capabilities,
+        &signing_key,
+    );
+
+    let response = FfiRoomTokenMintResponse {
+        peer_pubkey: token.peer_pubkey_hex(),
+        expiry: token.expiry_secs,
+        caps: token.capabilities.clone(),
+        sig: token.sig_hex(),
+        room_pubkey_hex: hex_of(&signing_key.verifying_key().to_bytes()),
+    };
+    let bytes = match serde_json::to_vec(&response) {
+        Ok(b) => b,
+        Err(_) => return as_status::AS_ERR_INTERNAL,
+    };
+    // SAFETY: out pointer validated as non-null above.
+    unsafe {
+        *out_token_json = make_owned_bytes(bytes);
+    }
+    as_status::AS_OK
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn as_room_token_validate_json(
+    request_json: as_bytes_view,
+    out_result_json: *mut as_bytes_owned,
+) -> as_status {
+    if out_result_json.is_null() {
+        return as_status::AS_ERR_INVALID_ARG;
+    }
+    let Some(request_bytes) = (unsafe { read_view(request_json) }) else {
+        return as_status::AS_ERR_INVALID_ARG;
+    };
+    let request: FfiRoomTokenValidateRequest = match serde_json::from_slice(request_bytes) {
+        Ok(r) => r,
+        Err(_) => return as_status::AS_ERR_INVALID_ARG,
+    };
+
+    let verifying_key = match (&request.room_pubkey_hex, &request.room_signing_key_hex) {
+        (Some(pubkey_hex), _) => {
+            let Some(pk) = parse_hex_32(pubkey_hex) else {
+                return as_status::AS_ERR_INVALID_ARG;
+            };
+            match ed25519_dalek::VerifyingKey::from_bytes(&pk) {
+                Ok(vk) => vk,
+                Err(_) => return as_status::AS_ERR_INVALID_ARG,
+            }
+        }
+        (None, Some(seed_hex)) => {
+            let Some(seed) = parse_hex_32(seed_hex) else {
+                return as_status::AS_ERR_INVALID_ARG;
+            };
+            ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key()
+        }
+        (None, None) => return as_status::AS_ERR_INVALID_ARG,
+    };
+
+    let token = match nodalmerge_core::RoomToken::from_wire(
+        &request.peer_pubkey_hex,
+        request.expiry_unix_secs,
+        request.capabilities.clone(),
+        &request.sig_hex,
+    ) {
+        Ok(t) => t,
+        Err(_) => return as_status::AS_ERR_INVALID_ARG,
+    };
+
+    let Some(connecting_peer) = parse_hex_32(&request.peer_pubkey_hex) else {
+        return as_status::AS_ERR_INVALID_ARG;
+    };
+    let now = request.now_unix_secs.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    });
+
+    let response = match token.verify(&request.room_id, &verifying_key, &connecting_peer, now) {
+        Ok(()) => FfiRoomTokenValidateResponse { valid: true, reason: None },
+        Err(e) => FfiRoomTokenValidateResponse {
+            valid: false,
+            reason: Some(e.to_string()),
+        },
+    };
+    let bytes = match serde_json::to_vec(&response) {
+        Ok(b) => b,
+        Err(_) => return as_status::AS_ERR_INTERNAL,
+    };
+    // SAFETY: out pointer validated as non-null above.
+    unsafe {
+        *out_result_json = make_owned_bytes(bytes);
+    }
+    as_status::AS_OK
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn as_bytes_owned_free(bytes: as_bytes_owned) {
     if bytes.ptr.is_null() || bytes.len == 0 {

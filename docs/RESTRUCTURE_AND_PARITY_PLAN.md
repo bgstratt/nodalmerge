@@ -4,7 +4,16 @@ Status: **mechanical phase (M1–M5) complete** on branch `restructure-m1`;
 **S1 (command registry) complete** on branch `s1-command-registry`
 (2026-07-05): `engine/commands/` crate + `registry.json` are live, both
 parity tests are registry-driven, `ws_command_name` gives compile-time
-exhaustiveness over `HostCommand`. S2–S5 not started.
+exhaustiveness over `HostCommand`.
+**S2 (ed25519 auth via FFI) complete** on branch `s2-roomtoken-ffi`
+(2026-07-05): `as_room_token_mint_json`/`as_room_token_validate_json` in
+host-ffi expose `nodalmerge_core::RoomToken` (no jwt-bridge dependency
+needed — mint/verify live in core); new config-gated
+`Auth:Provider = "RoomTokenEmbedded"` provider in Host.Composition with its
+own resolver (NODALMERGE_HOST_FFI_DLL override + default NuGet probing).
+JwtBridgeEmbedded (HS256) unchanged as the non-native-RID fallback.
+Interop proven both directions in engine/host-ffi/tests/room_token_ffi.rs.
+S3–S5 not started.
 M5 deviation: root-level ps1 entry points stayed at root (they derive
 repoRoot from their own location; relocation was churn without gain).
 Known pre-existing issue surfaced during M1 verification: `nodalmerge-server`

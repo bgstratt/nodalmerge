@@ -11,17 +11,16 @@ categories = ["api-bindings", "network-programming"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+nodalmerge-core = { version = "0.1.0", path = "../../core/crdt" }
 nodalmerge-host-core = { version = "0.1.0", path = "../host-core" }
+ed25519-dalek = { workspace = true }
 postcard = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-nodalmerge-core = { version = "0.1.0", path = "../../core/crdt" }
-nodalmerge-host-core = { version = "0.1.0", path = "../host-core" }
 base64 = "0.22"
 criterion = { workspace = true }
-ed25519-dalek = { workspace = true }
 
 [[bench]]
 name = "host_runtime_vs_ffi"

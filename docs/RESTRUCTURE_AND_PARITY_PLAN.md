@@ -1,6 +1,13 @@
 # Repository Restructure & Host-Parity Plan
 
-Status: **approved direction, not yet started** (2026-07-05)
+Status: **mechanical phase (M1–M5) complete** on branch `restructure-m1`
+(2026-07-05); structural phase (S1–S5) not started.
+M5 deviation: root-level ps1 entry points stayed at root (they derive
+repoRoot from their own location; relocation was churn without gain).
+Known pre-existing issue surfaced during M1 verification: `nodalmerge-server`
+lib test `archive_profile_002_object_manifest_parity_reports_p50_p95` races
+on `std::env::set_var(NODALMERGE_ARCHIVE_OBJECT_ROOT)` under parallel test
+threads — fails in full-suite runs, passes isolated, identical pre-move.
 Owner: Bradley / Claude pairing sessions
 Prereq reading: `benchmarks/results/runtime-attribution-dotnet-vs-rust-engine-ffi.md`,
 `server/tests/control_plane_capability_parity.rs` (and its .NET mirror test).

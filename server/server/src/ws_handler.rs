@@ -1610,6 +1610,73 @@ async fn handle_client_message(
             }
         }
 
+        // graph.* introspection routes (plan S4): semantics live in the
+        // shared engine layer (nodalmerge_host_core::engine::graph_*), same
+        // implementation the FFI/.NET path runs; envelopes match the .NET
+        // host's event mapping byte-for-byte.
+        ClientDispatchCommand::GraphGetFrontier => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "graph.get-frontier",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let response = crate::graph_query::process_graph_get_frontier(room.as_ref(), room_id).await;
+            if !emit_query_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
+        ClientDispatchCommand::GraphGetCausalParents => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "graph.get-causal-parents",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let response =
+                crate::graph_query::process_graph_get_causal_parents(room.as_ref(), room_id, msg).await;
+            if !emit_query_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
+        ClientDispatchCommand::GraphGetCanonicalResolution => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "graph.get-canonical-resolution",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let response =
+                crate::graph_query::process_graph_get_canonical_resolution(room.as_ref(), room_id).await;
+            if !emit_query_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
+        ClientDispatchCommand::GraphComputeSyncDiff => {
+            if let Err(rejection) = evaluate_control_plane_authorization(
+                is_server_peer,
+                session_caps,
+                "graph.compute-sync-diff",
+            ) {
+                send_error(sink, &rejection).await;
+                return true;
+            }
+            let response =
+                crate::graph_query::process_graph_compute_sync_diff(room.as_ref(), room_id, msg).await;
+            if !emit_query_response(sink, room_id, &response).await {
+                return false;
+            }
+        }
+
         ClientDispatchCommand::TopologyCreateChild => {
             if let Err(rejection) = evaluate_control_plane_authorization(
                 is_server_peer,
@@ -2004,6 +2071,10 @@ pub fn required_capability_for_control_plane_command(command: &str) -> Option<&'
         "archive.describe" => Some("archive.read"),
         "archive.validate" | "archive.import" | "archive.export" => Some("archive.admin"),
         "query.register" | "projection.build" | "projection.invalidate" => Some("query.admin"),
+        "graph.get-frontier"
+        | "graph.get-causal-parents"
+        | "graph.get-canonical-resolution"
+        | "graph.compute-sync-diff" => Some("query.admin"),
         "projection.read" | "projection.list" | "replay.read-range" => Some("query.read"),
         "topology.create-child"
         | "topology.describe-lineage"

@@ -425,6 +425,80 @@ fn empty_rows_canonical_hash() -> String {
     content_canonical_hash(&BTreeMap::new())
 }
 
+// ---------------------------------------------------------------------------
+// Shared graph-query brains (S4).
+//
+// These pure functions over `&StateGraph` are the single implementation of
+// the `graph.*`/sync-diff query semantics: `HostEngine::apply` (FFI/.NET
+// path) calls them above, and `nodalmerge-server`'s WS routes
+// (`server/server/src/graph_query.rs`) call them against `Room::graph`.
+// Change behavior here and every host changes together.
+// ---------------------------------------------------------------------------
+
+/// Current frontier heads as hex ids.
+pub fn graph_frontier_heads_hex(graph: &StateGraph) -> Vec<String> {
+    graph.frontier().to_hex_vec()
+}
+
+/// Causal parents of `node_id_hex` as hex ids, plus whether the node exists.
+/// Malformed or unknown ids report `(vec![], false)` rather than erroring —
+/// the query is diagnostic, not a write path.
+pub fn graph_causal_parents_hex(graph: &StateGraph, node_id_hex: &str) -> (Vec<String>, bool) {
+    match parse_node_id_hex(node_id_hex) {
+        Some(id) => match graph.get_nodes(&[id]).into_iter().next() {
+            Some(node) => (
+                node.transaction
+                    .parents
+                    .iter()
+                    .map(|h| h.to_hex())
+                    .collect(),
+                true,
+            ),
+            None => (Vec::new(), false),
+        },
+        None => (Vec::new(), false),
+    }
+}
+
+/// Canonical resolution of the graph as sorted key → base64(value) entries.
+pub fn graph_canonical_resolution_entries(graph: &StateGraph) -> Vec<CanonicalMapEntry> {
+    let mut entries: Vec<CanonicalMapEntry> = graph
+        .resolve_canonical()
+        .into_iter()
+        .map(|(key, value)| CanonicalMapEntry {
+            key,
+            value_bytes_b64: base64_encode(&value),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.key.cmp(&b.key));
+    entries
+}
+
+/// Set difference between this graph's node ids and a peer's claimed ids.
+/// Returns `(only_in_server, only_in_peer)`, both sorted for deterministic
+/// wire output. Malformed peer ids are ignored.
+pub fn graph_sync_diff_hex(
+    graph: &StateGraph,
+    peer_node_ids_hex: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let peer_ids: HashSet<Hash> = peer_node_ids_hex
+        .iter()
+        .filter_map(|hex| parse_node_id_hex(hex))
+        .collect();
+    let server_ids: HashSet<Hash> = graph.all_node_ids().into_iter().collect();
+    let mut only_in_server: Vec<String> = server_ids
+        .difference(&peer_ids)
+        .map(|id| id.to_hex())
+        .collect();
+    let mut only_in_peer: Vec<String> = peer_ids
+        .difference(&server_ids)
+        .map(|id| id.to_hex())
+        .collect();
+    only_in_server.sort_unstable();
+    only_in_peer.sort_unstable();
+    (only_in_server, only_in_peer)
+}
+
 fn room_latest_snapshot(
     room_id: &str,
     room_canonical_snapshots: &HashMap<String, HashMap<u64, CanonicalSnapshotState>>,
@@ -1941,7 +2015,7 @@ impl HostEngine {
                     return Err(HostCoreError::RoomNotFound);
                 }
                 let graph = self.room_sync_graphs.entry(envelope.room_id.clone()).or_default();
-                let frontier_heads_hex = graph.frontier().to_hex_vec();
+                let frontier_heads_hex = graph_frontier_heads_hex(graph);
                 Ok(CommandResult {
                     events: vec![HostEvent::FrontierQueried {
                         room_id: envelope.room_id,
@@ -1953,23 +2027,8 @@ impl HostEngine {
                 if !self.rooms.contains(&envelope.room_id) {
                     return Err(HostCoreError::RoomNotFound);
                 }
-                let parsed_id = parse_node_id_hex(&node_id_hex);
                 let graph = self.room_sync_graphs.entry(envelope.room_id.clone()).or_default();
-                let (parent_ids_hex, node_found) = match parsed_id {
-                    Some(id) => {
-                        let nodes = graph.get_nodes(&[id]);
-                        match nodes.into_iter().next() {
-                            Some(node) => {
-                                let parents = node.transaction.parents.iter()
-                                    .map(|h| h.to_hex())
-                                    .collect();
-                                (parents, true)
-                            }
-                            None => (Vec::new(), false),
-                        }
-                    }
-                    None => (Vec::new(), false),
-                };
+                let (parent_ids_hex, node_found) = graph_causal_parents_hex(graph, &node_id_hex);
                 Ok(CommandResult {
                     events: vec![HostEvent::CausalParentsQueried {
                         room_id: envelope.room_id,
@@ -1984,15 +2043,7 @@ impl HostEngine {
                     return Err(HostCoreError::RoomNotFound);
                 }
                 let graph = self.room_sync_graphs.entry(envelope.room_id.clone()).or_default();
-                let resolved = graph.resolve_canonical();
-                let mut entries: Vec<CanonicalMapEntry> = resolved
-                    .into_iter()
-                    .map(|(key, value)| CanonicalMapEntry {
-                        key,
-                        value_bytes_b64: base64_encode(&value),
-                    })
-                    .collect();
-                entries.sort_by(|a, b| a.key.cmp(&b.key));
+                let entries = graph_canonical_resolution_entries(graph);
                 let entry_count = entries.len();
                 Ok(CommandResult {
                     events: vec![HostEvent::CanonicalResolutionQueried {
@@ -2006,17 +2057,8 @@ impl HostEngine {
                 if !self.rooms.contains(&envelope.room_id) {
                     return Err(HostCoreError::RoomNotFound);
                 }
-                let peer_ids: HashSet<Hash> = peer_node_ids_hex.iter()
-                    .filter_map(|hex| parse_node_id_hex(hex))
-                    .collect();
                 let graph = self.room_sync_graphs.entry(envelope.room_id.clone()).or_default();
-                let server_ids: HashSet<Hash> = graph.all_node_ids().into_iter().collect();
-                let only_in_server: Vec<String> = server_ids.difference(&peer_ids)
-                    .map(|id| id.to_hex())
-                    .collect();
-                let only_in_peer: Vec<String> = peer_ids.difference(&server_ids)
-                    .map(|id| id.to_hex())
-                    .collect();
+                let (only_in_server, only_in_peer) = graph_sync_diff_hex(graph, &peer_node_ids_hex);
                 Ok(CommandResult {
                     events: vec![HostEvent::SyncDiffComputed {
                         room_id: envelope.room_id,

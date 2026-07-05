@@ -5,147 +5,248 @@
     {
       "command": "set-policy",
       "required_capability": "policy.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" }
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      }
     },
     {
       "command": "set-room-key",
       "required_capability": "room.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" }
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      }
     },
     {
       "command": "start-tick",
       "required_capability": "tick.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" },
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      },
       "notes": "Transport-level command; no HostCommand enum variant (tick loop lives in the host runtime, not the engine)."
     },
     {
       "command": "stop-tick",
       "required_capability": "tick.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" },
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      },
       "notes": "Transport-level command; no HostCommand enum variant."
     },
     {
       "command": "archive.describe",
       "required_capability": "archive.read",
       "scope": "deferred",
-      "surfaces": { "rust_server": "real", "host_core": "stub", "dotnet_host": "stub" },
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "stub",
+        "dotnet_host": "stub"
+      },
       "notes": "host-core's checkpoint hash is now content-derived (S3), but nodes/blobs digests remain labels over row text, not real payload digests. Real impl: server/server/src/archive_adapter.rs. Deferred: operator backup/restore feature."
     },
     {
       "command": "archive.validate",
       "required_capability": "archive.admin",
       "scope": "deferred",
-      "surfaces": { "rust_server": "real", "host_core": "stub", "dotnet_host": "stub" },
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "stub",
+        "dotnet_host": "stub"
+      },
       "notes": "host-core unconditionally accepts unless archive_ref contains the literal test hook 'invalid-manifest'. Deferred: operator backup/restore feature."
     },
     {
       "command": "archive.import",
       "required_capability": "archive.admin",
       "scope": "deferred",
-      "surfaces": { "rust_server": "real", "host_core": "stub", "dotnet_host": "stub" },
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "stub",
+        "dotnet_host": "stub"
+      },
       "notes": "host-core loads no manifest and applies nothing; since S3 the reported canonical_hash is at least the room's real content hash, but success is still faked. Deferred: operator backup/restore feature."
     },
     {
       "command": "archive.export",
       "required_capability": "archive.admin",
       "scope": "deferred",
-      "surfaces": { "rust_server": "real", "host_core": "absent", "dotnet_host": "absent" },
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "absent",
+        "dotnet_host": "absent"
+      },
       "notes": "No ExportArchive HostCommand exists. Real impl only in server/server/src/archive_adapter.rs + archive_export.rs. Deferred: operator backup/restore feature."
     },
     {
       "command": "query.register",
       "required_capability": "query.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" },
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      },
       "notes": "host-core canonical_hash in the registration ack is a deterministic placeholder; registration bookkeeping itself is real."
     },
     {
       "command": "projection.build",
       "required_capability": "query.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" }
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      }
     },
     {
       "command": "projection.invalidate",
       "required_capability": "query.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" }
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      }
     },
     {
       "command": "projection.read",
       "required_capability": "query.read",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" }
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      }
     },
     {
       "command": "projection.list",
       "required_capability": "query.read",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" }
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      }
     },
     {
       "command": "replay.read-range",
       "required_capability": "query.read",
-      "surfaces": { "rust_server": "real", "host_core": "absent", "dotnet_host": "absent" },
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "absent",
+        "dotnet_host": "absent"
+      },
       "notes": "Rust-only today. Cheapest port of the Rust-only pair (pure read); best done as a new HostCommand so all hosts gain it. Plan S4 candidate."
     },
     {
       "command": "topology.create-child",
       "required_capability": "topology.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" }
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      }
     },
     {
       "command": "topology.describe-lineage",
       "required_capability": "topology.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" }
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      }
     },
     {
       "command": "topology.list-children",
       "required_capability": "topology.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" }
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      }
     },
     {
       "command": "topology.propose-promotion",
       "required_capability": "topology.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" },
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      },
       "notes": "De-stubbed in S3 (blake3 digests, checkpoint linkage enforced at validate). proposal_digest covers the proposal tuple, not the content behind payload_ref - that stays host responsibility."
     },
     {
       "command": "topology.validate-promotion",
       "required_capability": "topology.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" },
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      },
       "notes": "De-stubbed in S3: rejects (PromotionValidationRejected, reject.promotion_checkpoint_not_found) unless child_checkpoint_hash identifies a real content-derived canonical snapshot of the child room."
     },
     {
       "command": "topology.apply-promotion",
       "required_capability": "topology.admin",
-      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" },
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      },
       "notes": "De-stubbed in S3: materializes the validated child checkpoint's rows into the parent's canonical state; parent_new_canonical_hash is the parent's real resulting content hash."
     },
     {
       "command": "checkpoint.promote",
       "required_capability": "query.admin",
-      "surfaces": { "rust_server": "absent", "host_core": "real", "dotnet_host": "real" },
-      "notes": ".NET-only WS route today; nodalmerge-server has no route for the existing PromoteCheckpointToGraph engine command. Plan S4 closes this."
+      "surfaces": {
+        "rust_server": "absent",
+        "host_core": "real",
+        "dotnet_host": "real"
+      },
+      "notes": ".NET/host-core only: nodalmerge-server has no Canonical Checkpoint plane to promote from - adding one is an architectural decision, not route wiring. Deferred at S4 (2026-07-05).",
+      "scope": "deferred"
     },
     {
       "command": "graph.get-frontier",
       "required_capability": "query.admin",
-      "surfaces": { "rust_server": "absent", "host_core": "real", "dotnet_host": "real" },
-      "notes": ".NET-only WS route today. Plan S4 closes this."
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      },
+      "notes": "Routed on all surfaces since S4; semantics are the shared nodalmerge_host_core::engine::graph_* functions, envelopes match the .NET event mapping."
     },
     {
       "command": "graph.get-causal-parents",
       "required_capability": "query.admin",
-      "surfaces": { "rust_server": "absent", "host_core": "real", "dotnet_host": "real" },
-      "notes": ".NET-only WS route today. Plan S4 closes this."
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      },
+      "notes": "Routed on all surfaces since S4; semantics are the shared nodalmerge_host_core::engine::graph_* functions, envelopes match the .NET event mapping."
     },
     {
       "command": "graph.get-canonical-resolution",
       "required_capability": "query.admin",
-      "surfaces": { "rust_server": "absent", "host_core": "real", "dotnet_host": "real" },
-      "notes": ".NET-only WS route today. Plan S4 closes this."
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      },
+      "notes": "Routed on all surfaces since S4; semantics are the shared nodalmerge_host_core::engine::graph_* functions, envelopes match the .NET event mapping."
     },
     {
       "command": "graph.compute-sync-diff",
       "required_capability": "query.admin",
-      "surfaces": { "rust_server": "absent", "host_core": "real", "dotnet_host": "real" },
-      "notes": ".NET-only WS route today. Plan S4 closes this."
+      "surfaces": {
+        "rust_server": "real",
+        "host_core": "real",
+        "dotnet_host": "real"
+      },
+      "notes": "Routed on all surfaces since S4; semantics are the shared nodalmerge_host_core::engine::graph_* functions, envelopes match the .NET event mapping."
     }
   ]
 }

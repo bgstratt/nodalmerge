@@ -8,6 +8,7 @@ pub mod archive_adapter;
 pub mod archive_export;
 pub mod capability_profile;
 pub mod gc_adapter;
+pub mod graph_query;
 pub mod keypair;
 pub mod lineage;
 pub mod lineage_store;

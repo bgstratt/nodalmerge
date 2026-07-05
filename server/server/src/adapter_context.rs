@@ -38,6 +38,10 @@ pub enum ClientDispatchCommand {
     TopologyProposePromotion,
     TopologyValidatePromotion,
     TopologyApplyPromotion,
+    GraphGetFrontier,
+    GraphGetCausalParents,
+    GraphGetCanonicalResolution,
+    GraphComputeSyncDiff,
     Relay,
     Unknown,
 }
@@ -114,6 +118,10 @@ pub fn route_client_dispatch_command(message_type: &str) -> ClientDispatchComman
         "topology.propose-promotion" => ClientDispatchCommand::TopologyProposePromotion,
         "topology.validate-promotion" => ClientDispatchCommand::TopologyValidatePromotion,
         "topology.apply-promotion" => ClientDispatchCommand::TopologyApplyPromotion,
+        "graph.get-frontier" => ClientDispatchCommand::GraphGetFrontier,
+        "graph.get-causal-parents" => ClientDispatchCommand::GraphGetCausalParents,
+        "graph.get-canonical-resolution" => ClientDispatchCommand::GraphGetCanonicalResolution,
+        "graph.compute-sync-diff" => ClientDispatchCommand::GraphComputeSyncDiff,
         _ if classify_webrtc_relay_branch(message_type)
             == WebRtcRelayBranchClassification::Relay =>
         {

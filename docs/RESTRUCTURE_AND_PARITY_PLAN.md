@@ -22,7 +22,19 @@ de-stubbed: validate enforces child-checkpoint linkage (new
 `PromotionValidationRejected` event, `reject.promotion_checkpoint_not_found`),
 apply materializes the child snapshot into the parent with a real resulting
 hash. Archive family formally deferred via new registry `scope: deferred`
-field (import's reported hash is at least honest now). S4–S5 not started.
+field (import's reported hash is at least honest now).
+**S4 (server→engine convergence) complete** on branch `s4-graph-routes`
+(2026-07-05): the four `graph.*` commands are routed on nodalmerge-server,
+gated with `query.admin`, with semantics extracted into shared
+`nodalmerge_host_core::engine::graph_*` functions that both `HostEngine`
+(FFI/.NET) and the server's `graph_query.rs` call — one brain, two hosts.
+Envelopes match the .NET event mapping. `checkpoint.promote` stays
+rust_server-absent and is marked `scope: deferred` in the registry: the
+server has no Canonical Checkpoint plane, and adding one is an
+architectural decision, not route wiring.
+S5 (persistence schema) not started; direction decided 2026-07-05: the
+schema split was inadvertent drift, converge to one canonical schema
+unless a concrete reason to differ emerges.
 M5 deviation: root-level ps1 entry points stayed at root (they derive
 repoRoot from their own location; relocation was churn without gain).
 Known pre-existing issue surfaced during M1 verification: `nodalmerge-server`
@@ -310,8 +322,12 @@ real requirement or a nice-to-have? (Open decision, §7.)
 
 1. npm wrapper direction (`nodalmerge-*` wraps `activesync-*` — backwards
    vs. the Rust wrappers). Resolve or delete with compat/.
-2. Is cross-runtime persistence interop (same Mongo DB usable by both
-   hosts) actually required? Drives S5 scope.
+2. ~~Is cross-runtime persistence interop actually required?~~ Decided
+   2026-07-05: yes in direction — the schemas diverged inadvertently while
+   standing up the .NET host for SpeechSlate/Studio/demos; converge to one
+   canonical schema unless a concrete reason to differ emerges. Which
+   schema wins (richer .NET `accepted_nodes` vs Rust compound-`_id`+seq)
+   is the remaining S5 design question.
 3. When does the activesync compat window close (deletes `compat/` and the
    dual metric meters in the .NET host)?
 4. Whether `nodalmerge-server`'s core sync path ever migrates onto

@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::hash::Hasher;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nodalmerge_core::{Frontier, Hash, MapOp, MerkleSearchTree, NodeId, Op, Policy, PolicyDefault, PolicyRule, RoomToken, StateGraph, SyncCapabilities, SyncNode, Transaction, pack_nodes, unpack_nodes};
+use nodalmerge_core::{Frontier, Hash, MapOp, MerkleSearchTree, NodeId, Op, Policy, PolicyDefault, PolicyRule, RoomToken, StateGraph, SyncCapabilities, SyncNode, Transaction, canonical_hash, pack_nodes, unpack_nodes};
 use nodalmerge_core::conflicts::ConflictFingerprint;
 use crate::api::{
     BlobEntry, BlobRedirectEntry, CanonicalMapEntry, CapabilitySet, CommandEnvelope, CommandResult,
@@ -422,8 +421,8 @@ fn is_hex64(input: &str) -> bool {
     input.len() == 64 && input.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn canonical_hash_for_sequence(room_id: &str, sequence: u64) -> String {
-    deterministic_hex64(&format!("{room_id}:{sequence}"))
+fn empty_rows_canonical_hash() -> String {
+    content_canonical_hash(&BTreeMap::new())
 }
 
 fn room_latest_snapshot(
@@ -525,24 +524,34 @@ fn resolve_canonical_checkpoint(
     }
 }
 
+/// Deterministic 64-hex digest of a label string. Blake3 (S3 de-stub) —
+/// previously this was `DefaultHasher` (SipHash), i.e. not cryptographic.
+/// Used for identifier-shaped digests (proposal/validation digests,
+/// projection digests, archive payload labels). For checkpoint hashes over
+/// actual row content use [`content_canonical_hash`] instead.
 fn deterministic_hex64(input: &str) -> String {
-    let mut h1 = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&input, &mut h1);
-    let p1 = h1.finish();
+    Hash::of(input.as_bytes()).to_hex()
+}
 
-    let mut h2 = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&format!("{input}|salt"), &mut h2);
-    let p2 = h2.finish();
-
-    let mut h3 = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&format!("{input}|pepper"), &mut h3);
-    let p3 = h3.finish();
-
-    let mut h4 = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&format!("{input}|room"), &mut h4);
-    let p4 = h4.finish();
-
-    format!("{p1:016x}{p2:016x}{p3:016x}{p4:016x}")
+/// Content-derived canonical hash over a room's resolved rows — the same
+/// `nodalmerge_core::canonical_hash` (blake3 over the sorted key/value map)
+/// the Rust server uses for checkpoint/archive hashes, with the same
+/// value-byte convention as `PromoteCheckpointToGraph` (strings raw,
+/// everything else JSON-serialized). This replaces the old
+/// `canonical_hash_for_sequence(room_id, seq)` label, which hashed the room
+/// id + sequence number and therefore said nothing about room content.
+fn content_canonical_hash(rows: &BTreeMap<String, Value>) -> String {
+    let byte_rows: BTreeMap<String, Vec<u8>> = rows
+        .iter()
+        .map(|(k, v)| {
+            let bytes = match v {
+                Value::String(s) => s.clone().into_bytes(),
+                other => other.to_string().into_bytes(),
+            };
+            (k.clone(), bytes)
+        })
+        .collect();
+    canonical_hash(&byte_rows).to_hex()
 }
 
 impl HostEngine {
@@ -606,7 +615,7 @@ impl HostEngine {
                 self.room_canonical_seq
                     .entry(envelope.room_id.clone())
                     .or_insert(0);
-                let initial_hash = canonical_hash_for_sequence(&envelope.room_id, 0);
+                let initial_hash = empty_rows_canonical_hash();
                 self.room_canonical_snapshots
                     .entry(envelope.room_id.clone())
                     .or_default()
@@ -763,7 +772,7 @@ impl HostEngine {
                         *seq += 1;
                         *seq
                     };
-                    let canonical_hash = canonical_hash_for_sequence(&envelope.room_id, next_seq);
+                    let canonical_hash = content_canonical_hash(canonical_rows);
                     let snapshot = CanonicalSnapshotState {
                         sequence: next_seq,
                         rows: canonical_rows.clone(),
@@ -818,7 +827,7 @@ impl HostEngine {
                         *seq += 1;
                         *seq
                     };
-                    let canonical_hash = canonical_hash_for_sequence(&envelope.room_id, next_seq);
+                    let canonical_hash = content_canonical_hash(canonical_rows);
                     let snapshot = CanonicalSnapshotState {
                         sequence: next_seq,
                         rows: canonical_rows.clone(),
@@ -2290,15 +2299,16 @@ impl HostEngine {
                     }],
                 })
             }
-            // KNOWN STUB (this command through ApplyTopologyPromotion below):
-            // `proposal_digest` is a `deterministic_hex64` hash of the room
-            // ids/checkpoint hash/payload_ref strings, not a real digest of
-            // the actual payload content. `ValidateTopologyPromotion` doesn't
-            // check anything — it unconditionally sets `validated = true`.
-            // `ApplyTopologyPromotion`'s `parent_new_canonical_hash` is
-            // another fake hash, not a real derived canonical state. Real
-            // promotion validation exists only in `server/src/promotion.rs`,
-            // used directly by nodalmerge-server.
+            // De-stubbed in S3: `ValidateTopologyPromotion` now requires the
+            // proposed child_checkpoint_hash to identify a real canonical
+            // snapshot of the child room (checkpoint hashes are
+            // content-derived — see `content_canonical_hash`), and
+            // `ApplyTopologyPromotion` materializes that snapshot's rows into
+            // the parent's canonical state with a real resulting hash.
+            // Remaining known limit: `proposal_digest` covers the proposal
+            // tuple (rooms/checkpoint-hash/payload_ref), not the content
+            // behind `payload_ref` — the server's fuller pipeline lives in
+            // `server/server/src/promotion.rs`.
             HostCommand::ProposeTopologyPromotion {
                 parent_room_id,
                 child_room_id,
@@ -2343,13 +2353,40 @@ impl HostEngine {
                 })
             }
             HostCommand::ValidateTopologyPromotion { proposal_id } => {
-                let Some(promotion) = self.topology_promotions.get_mut(&proposal_id) else {
+                let Some(promotion) = self.topology_promotions.get(&proposal_id) else {
                     return Err(HostCoreError::InvalidCommand);
                 };
+                let child_room_id = promotion.child_room_id.clone();
+                let child_checkpoint_hash = promotion.child_checkpoint_hash.clone();
+                let proposal_digest = promotion.proposal_digest.clone();
 
-                let validation_digest =
-                    deterministic_hex64(&format!("validate:{proposal_id}:{}", promotion.proposal_digest));
-                promotion.validated = true;
+                // Real validation (S3 de-stub): the proposed child checkpoint
+                // hash must identify an actual canonical snapshot of the child
+                // room. Checkpoint hashes are content-derived (see
+                // `content_canonical_hash`), so this ties the proposal to real
+                // child state, not just a well-formed string.
+                let checkpoint_known = self
+                    .room_canonical_hash_index
+                    .get(&child_room_id)
+                    .is_some_and(|index| index.contains_key(&child_checkpoint_hash));
+                if !checkpoint_known {
+                    return Ok(CommandResult {
+                        events: vec![HostEvent::PromotionValidationRejected {
+                            proposal_id,
+                            reason_class: "reject.promotion_checkpoint_not_found".to_string(),
+                            reason_message:
+                                "child_checkpoint_hash does not identify a known canonical snapshot of the child room"
+                                    .to_string(),
+                        }],
+                    });
+                }
+
+                let validation_digest = deterministic_hex64(&format!(
+                    "validate:{proposal_id}:{proposal_digest}:{child_checkpoint_hash}"
+                ));
+                if let Some(promotion) = self.topology_promotions.get_mut(&proposal_id) {
+                    promotion.validated = true;
+                }
                 Ok(CommandResult {
                     events: vec![HostEvent::PromotionValidated {
                         proposal_id,
@@ -2358,37 +2395,85 @@ impl HostEngine {
                 })
             }
             HostCommand::ApplyTopologyPromotion { proposal_id } => {
-                let Some(promotion) = self.topology_promotions.get_mut(&proposal_id) else {
-                    return Err(HostCoreError::InvalidCommand);
+                let (parent_room_id, child_room_id, child_checkpoint_hash, payload_ref, proposal_digest) = {
+                    let Some(promotion) = self.topology_promotions.get_mut(&proposal_id) else {
+                        return Err(HostCoreError::InvalidCommand);
+                    };
+                    if !promotion.validated {
+                        return Err(HostCoreError::InvalidCommand);
+                    }
+                    promotion.applied = true;
+                    (
+                        promotion.parent_room_id.clone(),
+                        promotion.child_room_id.clone(),
+                        promotion.child_checkpoint_hash.clone(),
+                        promotion.payload_ref.clone(),
+                        promotion.proposal_digest.clone(),
+                    )
                 };
 
-                if !promotion.validated {
-                    return Err(HostCoreError::InvalidCommand);
-                }
+                // Real apply (S3 de-stub): materialize the validated child
+                // checkpoint's rows into the parent room's canonical state and
+                // derive the parent's new content hash from the result —
+                // previously this emitted a placeholder hash and moved no data.
+                let child_rows = self
+                    .room_canonical_hash_index
+                    .get(&child_room_id)
+                    .and_then(|index| index.get(&child_checkpoint_hash))
+                    .and_then(|seq| {
+                        self.room_canonical_snapshots
+                            .get(&child_room_id)
+                            .and_then(|snapshots| snapshots.get(seq))
+                    })
+                    .map(|snapshot| snapshot.rows.clone())
+                    .unwrap_or_default();
 
-                promotion.applied = true;
-                let parent_new_canonical_hash = deterministic_hex64(&format!(
-                    "apply:{}:{}:{}",
-                    proposal_id, promotion.parent_room_id, promotion.proposal_digest
-                ));
+                let parent_rows = self
+                    .room_canonical_rows
+                    .entry(parent_room_id.clone())
+                    .or_default();
+                for (key, value) in child_rows {
+                    parent_rows.insert(key, value);
+                }
+                let parent_new_canonical_hash = content_canonical_hash(parent_rows);
+                let parent_rows_snapshot = parent_rows.clone();
+                let next_seq = {
+                    let seq = self.room_canonical_seq.entry(parent_room_id.clone()).or_insert(0);
+                    *seq += 1;
+                    *seq
+                };
+                self.room_canonical_snapshots
+                    .entry(parent_room_id.clone())
+                    .or_default()
+                    .insert(next_seq, CanonicalSnapshotState {
+                        sequence: next_seq,
+                        rows: parent_rows_snapshot,
+                        canonical_hash: parent_new_canonical_hash.clone(),
+                        frontier: vec![format!("seq:{next_seq}")],
+                    });
+                self.room_canonical_hash_index
+                    .entry(parent_room_id.clone())
+                    .or_default()
+                    .insert(parent_new_canonical_hash.clone(), next_seq);
+
                 let audit_key = format!("_topology/promotion/{proposal_id}");
                 let audit_value = serde_json::json!({
                     "proposal_id": proposal_id,
-                    "parent_room_id": promotion.parent_room_id,
-                    "child_room_id": promotion.child_room_id,
-                    "child_checkpoint_hash": promotion.child_checkpoint_hash,
-                    "payload_ref": promotion.payload_ref,
-                    "proposal_digest": promotion.proposal_digest,
+                    "parent_room_id": parent_room_id,
+                    "child_room_id": child_room_id,
+                    "child_checkpoint_hash": child_checkpoint_hash,
+                    "payload_ref": payload_ref,
+                    "proposal_digest": proposal_digest,
                     "validation_applied": true
                 });
                 self.room_maps
-                    .entry(promotion.parent_room_id.clone())
+                    .entry(parent_room_id.clone())
                     .or_default()
                     .insert(audit_key.clone(), audit_value);
                 Ok(CommandResult {
                     events: vec![HostEvent::PromotionApplied {
                         proposal_id,
-                        parent_room_id: promotion.parent_room_id.clone(),
+                        parent_room_id,
                         parent_new_canonical_hash,
                         audit_key,
                     }],
@@ -2703,7 +2788,7 @@ impl HostEngine {
                     )
                 } else {
                     (
-                        canonical_hash_for_sequence(&envelope.room_id, 0),
+                        empty_rows_canonical_hash(),
                         vec!["seq:0".to_string()],
                         0,
                         String::new(),
@@ -2794,7 +2879,7 @@ impl HostEngine {
             // independent of whatever persistence backend is live).
             HostCommand::ImportArchive {
                 archive_ref,
-                import_mode,
+                import_mode: _,
                 expected_checkpoint,
             } => {
                 if !self.rooms.contains(&envelope.room_id) || archive_ref.is_empty() {
@@ -2810,16 +2895,18 @@ impl HostEngine {
                         }],
                     });
                 }
-                let imported_nodes = self
-                    .room_canonical_rows
-                    .entry(envelope.room_id.clone())
-                    .or_default()
-                    .len() as i64;
+                let (imported_nodes, canonical_hash) = {
+                    let rows = self
+                        .room_canonical_rows
+                        .entry(envelope.room_id.clone())
+                        .or_default();
+                    // Still a stub overall (no manifest is loaded or applied),
+                    // but the reported hash is now the room's real
+                    // content-derived canonical hash rather than a hash of
+                    // the request parameters.
+                    (rows.len() as i64, content_canonical_hash(rows))
+                };
                 let imported_blobs = 0i64;
-                let canonical_hash = deterministic_hex64(&format!(
-                    "import:{}:{}:{}",
-                    envelope.room_id, archive_ref, import_mode
-                ));
                 if let Some(expected) = expected_checkpoint
                     .as_ref()
                     .and_then(|v| v.get("canonical_hash"))

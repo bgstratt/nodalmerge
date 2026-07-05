@@ -13,7 +13,16 @@ needed — mint/verify live in core); new config-gated
 own resolver (NODALMERGE_HOST_FFI_DLL override + default NuGet probing).
 JwtBridgeEmbedded (HS256) unchanged as the non-native-RID fallback.
 Interop proven both directions in engine/host-ffi/tests/room_token_ffi.rs.
-S3–S5 not started.
+**S3 (de-stub or de-scope) complete** on branch `s2-roomtoken-ffi`
+(2026-07-05): root stub was host-core's hashing — `deterministic_hex64` was
+DefaultHasher (now blake3 via `Hash::of`) and checkpoint hashes were labels
+over room-id+seq (now content-derived via `content_canonical_hash`, same
+`nodalmerge_core::canonical_hash` the server uses). Topology promotion trio
+de-stubbed: validate enforces child-checkpoint linkage (new
+`PromotionValidationRejected` event, `reject.promotion_checkpoint_not_found`),
+apply materializes the child snapshot into the parent with a real resulting
+hash. Archive family formally deferred via new registry `scope: deferred`
+field (import's reported hash is at least honest now). S4–S5 not started.
 M5 deviation: root-level ps1 entry points stayed at root (they derive
 repoRoot from their own location; relocation was churn without gain).
 Known pre-existing issue surfaced during M1 verification: `nodalmerge-server`

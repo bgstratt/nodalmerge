@@ -555,6 +555,11 @@ pub enum HostEvent {
         proposal_id: String,
         validation_digest: String,
     },
+    PromotionValidationRejected {
+        proposal_id: String,
+        reason_class: String,
+        reason_message: String,
+    },
     PromotionApplied {
         proposal_id: String,
         parent_room_id: String,

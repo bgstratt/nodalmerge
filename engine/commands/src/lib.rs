@@ -38,10 +38,22 @@ pub struct Surfaces {
     pub dotnet_host: SurfaceStatus,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// Gaps on this row (if any) are pending work.
+    #[default]
+    Active,
+    /// Gaps on this row are a recorded decision (plan S3), not an accident.
+    Deferred,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommandRow {
     pub command: String,
     pub required_capability: String,
+    #[serde(default)]
+    pub scope: Scope,
     pub surfaces: Surfaces,
     #[serde(default)]
     pub notes: Option<String>,

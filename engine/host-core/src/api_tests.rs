@@ -1783,7 +1783,35 @@ fn topology_promotion_roundtrip_emits_proposed_validated_applied() {
         .apply(CommandEnvelope::new("child-a", HostCommand::EnsureRoom))
         .expect("ensure child should succeed");
 
-    let proposed = engine
+    // Give the child real canonical state and read back its content-derived
+    // checkpoint hash (S3: validation requires the proposed hash to identify
+    // an actual child snapshot, so a made-up hash no longer validates).
+    engine
+        .apply(CommandEnvelope::new(
+            "child-a",
+            HostCommand::MapSet {
+                namespace: "".to_string(),
+                key: "world/x".to_string(),
+                value: serde_json::json!("promoted-value"),
+            },
+        ))
+        .expect("child map set should succeed");
+    let described = engine
+        .apply(CommandEnvelope::new(
+            "child-a",
+            HostCommand::DescribeArchive {
+                archive_ref: "room://child-a".to_string(),
+            },
+        ))
+        .expect("describe child should succeed");
+    let HostEvent::ArchiveDescribed { checkpoint, .. } = &described.events[0] else {
+        panic!("expected ArchiveDescribed event");
+    };
+    let child_checkpoint_hash = checkpoint["canonical_hash"].as_str().unwrap().to_string();
+
+    // A proposal against a checkpoint the child never produced must be
+    // rejected at validation time.
+    engine
         .apply(CommandEnvelope::new(
             "parent-a",
             HostCommand::ProposeTopologyPromotion {
@@ -1792,6 +1820,33 @@ fn topology_promotion_roundtrip_emits_proposed_validated_applied() {
                 child_checkpoint_hash:
                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         .to_string(),
+                payload_ref: "artifact://bogus".to_string(),
+                idempotency_key: Some("prop-bogus".to_string()),
+            },
+        ))
+        .expect("propose (bogus) should succeed");
+    let rejected = engine
+        .apply(CommandEnvelope::new(
+            "parent-a",
+            HostCommand::ValidateTopologyPromotion {
+                proposal_id: "prop-bogus".to_string(),
+            },
+        ))
+        .expect("validate (bogus) should return a rejection event");
+    assert!(matches!(
+        &rejected.events[0],
+        HostEvent::PromotionValidationRejected { proposal_id, reason_class, .. }
+            if proposal_id == "prop-bogus"
+                && reason_class == "reject.promotion_checkpoint_not_found"
+    ));
+
+    let proposed = engine
+        .apply(CommandEnvelope::new(
+            "parent-a",
+            HostCommand::ProposeTopologyPromotion {
+                parent_room_id: "parent-a".to_string(),
+                child_room_id: "child-a".to_string(),
+                child_checkpoint_hash: child_checkpoint_hash.clone(),
                 payload_ref: "artifact://dotnet".to_string(),
                 idempotency_key: Some("prop-dotnet".to_string()),
             },
@@ -1843,6 +1898,28 @@ fn topology_promotion_roundtrip_emits_proposed_validated_applied() {
         HostEvent::MapValueRead { value: Some(v), .. }
             if v["proposal_id"] == "prop-dotnet" && v["payload_ref"] == "artifact://dotnet"
     ));
+
+    // S3: apply materializes the child checkpoint into the parent's canonical
+    // state — the reported hash must be the parent's real content hash.
+    let HostEvent::PromotionApplied { parent_new_canonical_hash, .. } = &applied.events[0] else {
+        panic!("expected PromotionApplied event");
+    };
+    let parent_described = engine
+        .apply(CommandEnvelope::new(
+            "parent-a",
+            HostCommand::DescribeArchive {
+                archive_ref: "room://parent-a".to_string(),
+            },
+        ))
+        .expect("describe parent should succeed");
+    let HostEvent::ArchiveDescribed { checkpoint, .. } = &parent_described.events[0] else {
+        panic!("expected ArchiveDescribed event");
+    };
+    assert_eq!(
+        checkpoint["canonical_hash"].as_str().unwrap(),
+        parent_new_canonical_hash,
+        "parent's describable canonical hash must match the applied promotion hash"
+    );
 }
 
 #[test]

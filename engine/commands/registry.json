@@ -1,5 +1,5 @@
 {
-  "$comment": "Canonical control-plane command-surface registry. One row per WS control-plane command. Consumed by: engine/commands/src/lib.rs (typed access + HostCommand exhaustiveness guard), server/server/tests/control_plane_capability_parity.rs (asserts the Rust server's live gating), hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs (asserts the .NET host's live gating). Surface status values: 'real' = implemented and trustworthy; 'stub' = wire-compatible placeholder that fakes success (see KNOWN STUB comments in engine/host-core/src/engine.rs); 'absent' = no route/implementation on that surface. If you add, remove, or re-gate a command on ANY surface, update this file in the same change - the parity tests on both runtimes assert against it.",
+  "$comment": "Canonical control-plane command-surface registry. One row per WS control-plane command. Consumed by: engine/commands/src/lib.rs (typed access + HostCommand exhaustiveness guard), server/server/tests/control_plane_capability_parity.rs (asserts the Rust server's live gating), hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs (asserts the .NET host's live gating). Surface status values: 'real' = implemented and trustworthy; 'stub' = wire-compatible placeholder that fakes success (see KNOWN STUB comments in engine/host-core/src/engine.rs); 'absent' = no route/implementation on that surface. Optional 'scope': 'deferred' marks rows whose gaps are a recorded decision (plan S3), not an accident awaiting work. If you add, remove, or re-gate a command on ANY surface, update this file in the same change - the parity tests on both runtimes assert against it.",
   "version": 1,
   "commands": [
     {
@@ -27,26 +27,30 @@
     {
       "command": "archive.describe",
       "required_capability": "archive.read",
+      "scope": "deferred",
       "surfaces": { "rust_server": "real", "host_core": "stub", "dotnet_host": "stub" },
-      "notes": "host-core digests are deterministic placeholders, not real content hashes. Real impl: server/server/src/archive_adapter.rs."
+      "notes": "host-core's checkpoint hash is now content-derived (S3), but nodes/blobs digests remain labels over row text, not real payload digests. Real impl: server/server/src/archive_adapter.rs. Deferred: operator backup/restore feature."
     },
     {
       "command": "archive.validate",
       "required_capability": "archive.admin",
+      "scope": "deferred",
       "surfaces": { "rust_server": "real", "host_core": "stub", "dotnet_host": "stub" },
-      "notes": "host-core unconditionally accepts unless archive_ref contains the literal test hook 'invalid-manifest'."
+      "notes": "host-core unconditionally accepts unless archive_ref contains the literal test hook 'invalid-manifest'. Deferred: operator backup/restore feature."
     },
     {
       "command": "archive.import",
       "required_capability": "archive.admin",
+      "scope": "deferred",
       "surfaces": { "rust_server": "real", "host_core": "stub", "dotnet_host": "stub" },
-      "notes": "host-core loads no manifest, verifies nothing, applies nothing; fakes success from existing room state. Deferred per plan S3 (operator backup/restore feature)."
+      "notes": "host-core loads no manifest and applies nothing; since S3 the reported canonical_hash is at least the room's real content hash, but success is still faked. Deferred: operator backup/restore feature."
     },
     {
       "command": "archive.export",
       "required_capability": "archive.admin",
+      "scope": "deferred",
       "surfaces": { "rust_server": "real", "host_core": "absent", "dotnet_host": "absent" },
-      "notes": "No ExportArchive HostCommand exists. Real impl only in server/server/src/archive_adapter.rs + archive_export.rs. Deferred per plan S3."
+      "notes": "No ExportArchive HostCommand exists. Real impl only in server/server/src/archive_adapter.rs + archive_export.rs. Deferred: operator backup/restore feature."
     },
     {
       "command": "query.register",
@@ -98,20 +102,20 @@
     {
       "command": "topology.propose-promotion",
       "required_capability": "topology.admin",
-      "surfaces": { "rust_server": "real", "host_core": "stub", "dotnet_host": "stub" },
-      "notes": "host-core proposal_digest is a placeholder hash of ids, not the payload. Real impl: server/server/src/promotion.rs."
+      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" },
+      "notes": "De-stubbed in S3 (blake3 digests, checkpoint linkage enforced at validate). proposal_digest covers the proposal tuple, not the content behind payload_ref - that stays host responsibility."
     },
     {
       "command": "topology.validate-promotion",
       "required_capability": "topology.admin",
-      "surfaces": { "rust_server": "real", "host_core": "stub", "dotnet_host": "stub" },
-      "notes": "host-core validates nothing; unconditionally sets validated=true."
+      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" },
+      "notes": "De-stubbed in S3: rejects (PromotionValidationRejected, reject.promotion_checkpoint_not_found) unless child_checkpoint_hash identifies a real content-derived canonical snapshot of the child room."
     },
     {
       "command": "topology.apply-promotion",
       "required_capability": "topology.admin",
-      "surfaces": { "rust_server": "real", "host_core": "stub", "dotnet_host": "stub" },
-      "notes": "host-core parent_new_canonical_hash is a placeholder hash, not derived canonical state."
+      "surfaces": { "rust_server": "real", "host_core": "real", "dotnet_host": "real" },
+      "notes": "De-stubbed in S3: materializes the validated child checkpoint's rows into the parent's canonical state; parent_new_canonical_hash is the parent's real resulting content hash."
     },
     {
       "command": "checkpoint.promote",

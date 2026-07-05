@@ -269,6 +269,9 @@ jobs:
       - name: Build host ffi release library
         run: cargo build -p nodalmerge-host-ffi --release
 
+      - name: Restore NodalMerge.DotNetHost.Native.linux-x64
+        run: dotnet restore nodalmerge-host/src/NodalMerge.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj
+
       - name: Pack NodalMerge.DotNetHost.Native.linux-x64
         run: dotnet pack nodalmerge-host/src/NodalMerge.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
 
@@ -307,6 +310,9 @@ jobs:
 
       - name: Build host ffi release library
         run: cargo build -p nodalmerge-host-ffi --release
+
+      - name: Restore NodalMerge.DotNetHost.Native.win-x64
+        run: dotnet restore nodalmerge-host/src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj
 
       - name: Pack NodalMerge.DotNetHost.Native.win-x64
         run: dotnet pack nodalmerge-host/src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj -c Release -o "$env:NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}

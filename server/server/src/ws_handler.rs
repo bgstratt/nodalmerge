@@ -446,14 +446,14 @@ fn scoped_catchup_budget() -> ScopeCatchupBudget {
     *BUDGET.get_or_init(|| ScopeCatchupBudget {
         max_filtered_node_count: env_var_primary_legacy(
             "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_NODES",
-            "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_NODES",
+            "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_NODES",
         )
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(4096),
         max_filtered_payload_bytes: env_var_primary_legacy(
             "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_BYTES",
-            "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_BYTES",
+            "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_BYTES",
         )
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -2359,7 +2359,7 @@ static CAPABILITY_PROFILE_CACHE: OnceLock<Result<Option<CapabilityProfile>, Stri
 fn configured_capability_profile() -> Result<Option<&'static CapabilityProfile>, String> {
     let loaded = CAPABILITY_PROFILE_CACHE.get_or_init(|| {
         let path_raw = std::env::var_os("NODALMERGE_CAPABILITY_PROFILE_PATH")
-            .or_else(|| std::env::var_os("ACTIVESYNC_CAPABILITY_PROFILE_PATH"));
+            .or_else(|| std::env::var_os("NODALMERGE_CAPABILITY_PROFILE_PATH"));
         let Some(path_raw) = path_raw else {
             return Ok(None);
         };

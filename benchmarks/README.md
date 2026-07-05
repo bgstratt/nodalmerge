@@ -132,7 +132,7 @@ If a target is unreachable, it is skipped and benchmarking continues.
 ## Notes
 
 1. `rust-integrated-hosted-server` is optional and requires `MONGO_URI` when starting.
-2. `.NET host` needs `ACTIVESYNC_HOST_FFI_DLL`; the starter script auto-resolves from local `target/debug` or `target/release` when available.
+2. `.NET host` needs `NODALMERGE_HOST_FFI_DLL`; the starter script auto-resolves from local `target/debug` or `target/release` when available.
 3. The current Rust websocket path includes a small stabilization delay before welcome send, so absolute values are best used for trend tracking unless probe semantics are fully normalized across targets.
 4. This is a practical smoke benchmark harness, not a full load/stress framework. Use it for local comparisons and regression trending.
 5. `Run-SdkScenarioBenchmarks.mjs` is the preferred apples-to-apples comparison because all targets are exercised through the same SDK semantics rather than target-specific probe messages.

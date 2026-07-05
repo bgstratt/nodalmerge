@@ -57,7 +57,7 @@ $started = New-Object System.Collections.Generic.List[object]
 try {
     if ($StartRustCombined) {
         Write-Host "Starting rust-combined-server on $RustCombinedBind"
-        $envMap = @{ AS_BIND_ADDR = $RustCombinedBind }
+        $envMap = @{ NODALMERGE_BIND_ADDR = $RustCombinedBind }
         $proc = Start-Process cargo -ArgumentList @("run", "-p", "nodalmerge-server", "--bin", "nodalmerge-server") -PassThru -NoNewWindow -Env $envMap
         $started.Add([pscustomobject]@{ Name = "rust-combined-server"; Process = $proc })
     }
@@ -69,7 +69,7 @@ try {
 
         Write-Host "Starting rust-integrated-hosted-server on $RustIntegratedBind"
         $envMap = @{
-            AS_BIND_ADDR = $RustIntegratedBind
+            NODALMERGE_BIND_ADDR = $RustIntegratedBind
             MONGO_URI = $MongoUri
             MONGO_DATABASE = $MongoDatabase
         }

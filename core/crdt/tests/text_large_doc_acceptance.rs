@@ -195,15 +195,15 @@ fn large_doc_windowed_reads_and_allocation_behavior() {
     ) = estimate_projection_memory(&stats);
 
     let max_full_rebuilds = env_u64(
-        "ACTIVESYNC_TEXT_LARGE_DOC_MAX_FULL_REBUILDS",
+        "NODALMERGE_TEXT_LARGE_DOC_MAX_FULL_REBUILDS",
         DEFAULT_MAX_FULL_REBUILDS,
     );
     let max_capacity_ratio = env_f64(
-        "ACTIVESYNC_TEXT_LARGE_DOC_MAX_CAPACITY_RATIO",
+        "NODALMERGE_TEXT_LARGE_DOC_MAX_CAPACITY_RATIO",
         DEFAULT_MAX_CAPACITY_RATIO,
     );
     let max_duration_ms = env_u64(
-        "ACTIVESYNC_TEXT_LARGE_DOC_MAX_DURATION_MS",
+        "NODALMERGE_TEXT_LARGE_DOC_MAX_DURATION_MS",
         DEFAULT_MAX_DURATION_MS,
     );
 
@@ -230,7 +230,7 @@ fn large_doc_windowed_reads_and_allocation_behavior() {
         max_duration_ms
     );
 
-    if let Ok(path) = std::env::var("ACTIVESYNC_TEXT_LARGE_DOC_METRICS_PATH") {
+    if let Ok(path) = std::env::var("NODALMERGE_TEXT_LARGE_DOC_METRICS_PATH") {
         let payload = serde_json::json!({
             "test": "large_doc_windowed_reads_and_allocation_behavior",
             "duration_ms": elapsed_ms,
@@ -417,13 +417,13 @@ fn long_lived_projection_memory_telemetry_profile() {
     // Sanity guardrails for the profile: all keys should remain populated.
     assert!(total_visible_chars > 0, "expected visible characters in profile");
 
-    let max_bytes_per_visible = env_f64("ACTIVESYNC_TEXT_MEMORY_MAX_BYTES_PER_VISIBLE", 256.0);
+    let max_bytes_per_visible = env_f64("NODALMERGE_TEXT_MEMORY_MAX_BYTES_PER_VISIBLE", 256.0);
     assert!(
         global_bytes_per_visible <= max_bytes_per_visible,
         "global bytes/visible too high: actual={global_bytes_per_visible:.3}, max={max_bytes_per_visible:.3}"
     );
 
-    if let Ok(path) = std::env::var("ACTIVESYNC_TEXT_MEMORY_TELEMETRY_PATH") {
+    if let Ok(path) = std::env::var("NODALMERGE_TEXT_MEMORY_TELEMETRY_PATH") {
         let payload = serde_json::json!({
             "test": "long_lived_projection_memory_telemetry_profile",
             "global": {

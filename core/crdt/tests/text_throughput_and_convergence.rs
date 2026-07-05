@@ -325,12 +325,12 @@ fn replay_trace_unsigned_batched(trace: &EditingTrace, max_ops: Option<usize>) -
 // `can_fast_append` path already handles efficiently — so the 50k default
 // mostly lands *inside* the case batching doesn't help. Batching only shows
 // its ~1.6x win once scattered/non-append edits dominate, around 150k+ ops.
-// Use ACTIVESYNC_TEXT_THROUGHPUT_MAX_OPS=150000 (or higher / "full") to see
+// Use NODALMERGE_TEXT_THROUGHPUT_MAX_OPS=150000 (or higher / "full") to see
 // that regime; expect several minutes at that size.
 const DEFAULT_MAX_OPS: usize = 50_000;
 
 fn resolve_max_ops() -> Option<usize> {
-    match std::env::var("ACTIVESYNC_TEXT_THROUGHPUT_MAX_OPS") {
+    match std::env::var("NODALMERGE_TEXT_THROUGHPUT_MAX_OPS") {
         Ok(v) if v.eq_ignore_ascii_case("full") || v == "0" => None,
         Ok(v) => v.parse::<usize>().ok().or(Some(DEFAULT_MAX_OPS)),
         Err(_) => Some(DEFAULT_MAX_OPS),
@@ -425,7 +425,7 @@ fn text_trace_throughput_wire_cost_and_cold_start_convergence() {
         "text_throughput_and_convergence: trace_op_count={applied_ops}, unbatched_ops_per_sec={unbatched_ops_per_sec:.1}, batched_ops_per_sec={batched_ops_per_sec:.1}, batched_speedup_x={batched_speedup_x:.2}, unbatched_wall_ms={unbatched_wall_ms:.3}, batched_wall_ms={batched_wall_ms:.3}, mean_bytes_per_op={mean_bytes_per_op:.2}, min_bytes_per_op={min_bytes_per_op}, max_bytes_per_op={max_bytes_per_op}, total_wire_bytes={total_wire_bytes}, batch_apply_ms={batch_apply_ms:.3}, converged={converged}"
     );
 
-    if let Ok(path) = std::env::var("ACTIVESYNC_TEXT_THROUGHPUT_METRICS_PATH") {
+    if let Ok(path) = std::env::var("NODALMERGE_TEXT_THROUGHPUT_METRICS_PATH") {
         let payload = serde_json::json!({
             "test": "text_trace_throughput_wire_cost_and_cold_start_convergence",
             "trace_op_count": applied_ops,

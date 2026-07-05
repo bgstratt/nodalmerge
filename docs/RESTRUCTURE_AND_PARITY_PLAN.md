@@ -354,7 +354,7 @@ gaps found after S5, with disposition:
 | CAPCOMP dual implementation (Rust `capability_profile.rs` vs .NET `CapabilityProfileExpander`) with no parity coverage | Open — highest-value next parity target; fits the shared-vectors pattern (registry-style data file both runtimes assert against) |
 | No JS/SDK-side parity coverage since Check-SdkRejectionParity died with the doc cleanup | Open — lower stakes (clients, not authorities); scope after CAPCOMP |
 | Blob storage layout parity unaudited (Rust file/S3 layout vs .NET FileBlobStoreProvider/S3Delegated) | Open — audit-sized, not build-sized; needed before any cross-runtime blob sharing claim |
-| `activesync-*` naming still live (compat/ crates, npm direction inconsistency, legacy metric meters, ACTIVESYNC_* env vars, ARCHITECTURE.md) | Open — next quick win per 2026-07-05 decision: purge activesync naming entirely |
+| `activesync-*` naming still live (compat/ crates, npm direction inconsistency, legacy metric meters, NODALMERGE_* env vars, ARCHITECTURE.md) | Open — next quick win per 2026-07-05 decision: purge activesync naming entirely |
 | Consumer validation (Studio/demos on repacked NuGets) | Open — gates merge to main |
 
 ## 9. Session-verified facts this plan relies on

@@ -7,7 +7,7 @@ on:
       - 'hosts/dotnet/src/**'
       - 'hosts/dotnet/NodalMerge.DotNetHost.slnx'
       - 'engine/host-ffi/**'
-      - 'compat/**'
+      - 'clients/sdk-js/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/nuget-build-push.yml'
@@ -89,12 +89,10 @@ jobs:
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/artifacts/npm"
 
-          pushd compat/npm/nodalmerge-bridge >/dev/null
-          npm pack --dry-run
-          npm pack --pack-destination "$GITHUB_WORKSPACE/artifacts/npm"
-          popd >/dev/null
-
-          pushd compat/npm/nodalmerge-sdk-js >/dev/null
+          # nodalmerge-bridge is wasm-pack output (clients/bridge-wasm/pkg),
+          # built + packed locally by pack-local-artifacts.ps1; CI packs the
+          # JS SDK package only.
+          pushd clients/sdk-js >/dev/null
           npm pack --dry-run
           npm pack --pack-destination "$GITHUB_WORKSPACE/artifacts/npm"
           popd >/dev/null
@@ -173,7 +171,6 @@ jobs:
             echo "NPM_TOKEN is required for publishNpmWrappers=true"
             exit 1
           fi
-          npm publish "$GITHUB_WORKSPACE/artifacts/npm/nodalmerge-bridge-"*.tgz --access public
           npm publish "$GITHUB_WORKSPACE/artifacts/npm/nodalmerge-sdk-js-"*.tgz --access public
 
   publish-crate-wrappers:

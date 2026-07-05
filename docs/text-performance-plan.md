@@ -128,7 +128,7 @@ benchmarks/benchmarks.md.
 
 - S0.1: Promote `core/tests/text_throughput_and_convergence.rs` numbers into a scripted
   baseline (5k/50k/150k, unbatched+batched, JSON out via
-  `ACTIVESYNC_TEXT_THROUGHPUT_METRICS_PATH`) so each phase has an A/B artifact.
+  `NODALMERGE_TEXT_THROUGHPUT_METRICS_PATH`) so each phase has an A/B artifact.
 - S0.2: Add a randomized two-peer concurrent-edit fuzz test that asserts
   projection == legacy replay (extends ParityCheck coverage beyond sampling), so
   Phases 1–3 refactors can't silently change merge order.

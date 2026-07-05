@@ -41,4 +41,4 @@ pwsh -File .\verify.ps1 -UseNuGetPackages -NodalMergePackageVersion 0.1.0-local
 
 - Default project build mode uses project references.
 - Package mode is opt-in through `ActiveSyncUseNuGetPackages=true`.
-- Native runtime can be overridden via `NODALMERGE_HOST_FFI_DLL` (legacy `ACTIVESYNC_HOST_FFI_DLL` fallback remains).
+- Native runtime can be overridden via `NODALMERGE_HOST_FFI_DLL` (legacy `NODALMERGE_HOST_FFI_DLL` fallback remains).

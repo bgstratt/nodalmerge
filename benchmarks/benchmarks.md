@@ -86,7 +86,7 @@ Command shape used for each row (with env var toggles):
 & "C:\Users\bgstr\.cargo\bin\cargo.exe" run --release --manifest-path ".\core\Cargo.toml" --bin text_trace_rustcode_oneshot
 ```
 
-All rows below use `ACTIVESYNC_TEXT_TRACE_MAX_OPS=260000`.
+All rows below use `NODALMERGE_TEXT_TRACE_MAX_OPS=260000`.
 
 ### Environment comparability note
 
@@ -195,7 +195,7 @@ sizes — this is a separate question from the batching finding above.
 
 ### Test scope note
 
-The test defaults to a 50k-op bound (`ACTIVESYNC_TEXT_THROUGHPUT_MAX_OPS=150000`
+The test defaults to a 50k-op bound (`NODALMERGE_TEXT_THROUGHPUT_MAX_OPS=150000`
 or `=full` to see the regime where batching wins, `=<N>` for anything else)
 because the full trace is impractical for a normal `cargo test` run given
 Finding 2. Note the 50k default lands almost entirely inside the append-heavy

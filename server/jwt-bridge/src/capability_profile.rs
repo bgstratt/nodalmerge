@@ -91,7 +91,7 @@ fn expand_minted_capabilities_with_profile(
 }
 
 fn load_profile_from_env() -> Result<Option<CapabilityProfile>, CapabilityProfileError> {
-    let Some(path_raw) = std::env::var_os("ACTIVESYNC_CAPABILITY_PROFILE_PATH") else {
+    let Some(path_raw) = std::env::var_os("NODALMERGE_CAPABILITY_PROFILE_PATH") else {
         return Ok(None);
     };
 

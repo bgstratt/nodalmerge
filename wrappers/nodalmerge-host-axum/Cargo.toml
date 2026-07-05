@@ -1,9 +1,0 @@
-[package]
-name = "activesync-host-axum"
-version = "0.1.0"
-edition = "2021"
-description = "Compatibility wrapper crate re-exporting nodalmerge-host-axum during rename migration"
-license = "MIT OR Apache-2.0"
-
-[dependencies]
-nodalmerge-host-axum = { version = "0.1.0", path = "../../host-axum" }

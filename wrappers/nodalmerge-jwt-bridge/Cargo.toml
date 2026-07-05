@@ -1,9 +1,0 @@
-[package]
-name = "activesync-jwt-bridge"
-version = "0.1.0"
-edition = "2021"
-description = "Compatibility wrapper crate re-exporting nodalmerge-jwt-bridge during rename migration"
-license = "MIT OR Apache-2.0"
-
-[dependencies]
-nodalmerge-jwt-bridge = { version = "0.1.0", path = "../../jwt-bridge" }

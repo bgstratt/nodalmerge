@@ -1,7 +1,7 @@
 # Build artifacts — by far the largest offenders.
 target/
 **/target/
-node-stores/*/target/
+server/stores/*/target/
 
 # Git history / tooling.
 .git/

@@ -4,10 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - 'nodalmerge-host/src/**'
-      - 'nodalmerge-host/NodalMerge.DotNetHost.slnx'
-      - 'host-ffi/**'
-      - 'wrappers/**'
+      - 'hosts/dotnet/src/**'
+      - 'hosts/dotnet/NodalMerge.DotNetHost.slnx'
+      - 'engine/host-ffi/**'
+      - 'compat/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/nuget-build-push.yml'
@@ -89,12 +89,12 @@ jobs:
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/artifacts/npm"
 
-          pushd wrappers/npm/nodalmerge-bridge >/dev/null
+          pushd compat/npm/nodalmerge-bridge >/dev/null
           npm pack --dry-run
           npm pack --pack-destination "$GITHUB_WORKSPACE/artifacts/npm"
           popd >/dev/null
 
-          pushd wrappers/npm/nodalmerge-sdk-js >/dev/null
+          pushd compat/npm/nodalmerge-sdk-js >/dev/null
           npm pack --dry-run
           npm pack --pack-destination "$GITHUB_WORKSPACE/artifacts/npm"
           popd >/dev/null
@@ -230,13 +230,13 @@ jobs:
           fi
 
       - name: Restore solution
-        run: dotnet restore nodalmerge-host/NodalMerge.DotNetHost.slnx
+        run: dotnet restore hosts/dotnet/NodalMerge.DotNetHost.slnx
 
       - name: Pack NodalMerge.Host.Abstractions
-        run: dotnet pack nodalmerge-host/src/NodalMerge.Host.Abstractions/NodalMerge.Host.Abstractions.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
+        run: dotnet pack hosts/dotnet/src/NodalMerge.Host.Abstractions/NodalMerge.Host.Abstractions.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
 
       - name: Pack NodalMerge.Host.Composition
-        run: dotnet pack nodalmerge-host/src/NodalMerge.Host.Composition/NodalMerge.Host.Composition.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
+        run: dotnet pack hosts/dotnet/src/NodalMerge.Host.Composition/NodalMerge.Host.Composition.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
 
       - name: Upload managed artifacts
         uses: actions/upload-artifact@v4
@@ -274,10 +274,10 @@ jobs:
         run: cargo build -p nodalmerge-host-ffi -p nodalmerge-runtime-local-ffi --release
 
       - name: Restore NodalMerge.DotNetHost.Native.linux-x64
-        run: dotnet restore nodalmerge-host/src/NodalMerge.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj
+        run: dotnet restore hosts/dotnet/src/NodalMerge.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj
 
       - name: Pack NodalMerge.DotNetHost.Native.linux-x64
-        run: dotnet pack nodalmerge-host/src/NodalMerge.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
+        run: dotnet pack hosts/dotnet/src/NodalMerge.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj -c Release -o "$NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
 
       - name: Upload linux native artifacts
         uses: actions/upload-artifact@v4
@@ -316,10 +316,10 @@ jobs:
         run: cargo build -p nodalmerge-host-ffi -p nodalmerge-runtime-local-ffi --release
 
       - name: Restore NodalMerge.DotNetHost.Native.win-x64
-        run: dotnet restore nodalmerge-host/src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj
+        run: dotnet restore hosts/dotnet/src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj
 
       - name: Pack NodalMerge.DotNetHost.Native.win-x64
-        run: dotnet pack nodalmerge-host/src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj -c Release -o "$env:NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
+        run: dotnet pack hosts/dotnet/src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj -c Release -o "$env:NUGET_OUTPUT_DIR" --no-restore /p:Version=${{ steps.version.outputs.value }}
 
       - name: Upload windows native artifacts
         uses: actions/upload-artifact@v4
@@ -380,7 +380,7 @@ jobs:
 
       - name: Pack NodalMerge.DotNetHost
         run: |
-          dotnet pack nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj -c Release -o "$NUGET_OUTPUT_DIR" \
+          dotnet pack hosts/dotnet/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj -c Release -o "$NUGET_OUTPUT_DIR" \
             /p:Version=${{ steps.version.outputs.value }} \
             /p:NodalMergeUseNuGetPackages=true \
             /p:NodalMergePackageVersion=${{ steps.version.outputs.value }} \

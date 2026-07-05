@@ -49,16 +49,21 @@ artifacts/
 BenchmarkDotNet.Artifacts/
 dotnet-host/artifacts/
 
-# Generated at pack time from web/sdk.js by sdk-js/scripts/gen-doc-module.mjs
-sdk-js/doc.js
-sdk-js/doc.d.ts
+# Generated at pack time from clients/web/sdk.js by clients/sdk-js/scripts/gen-doc-module.mjs
+clients/sdk-js/doc.js
+clients/sdk-js/doc.d.ts
 
 # Local npm pack artifacts (generated tarballs)
 **/*.tgz
-bridge/pkg/*.tgz
-sdk-js/*.tgz
-wrappers/**/*.tgz
+clients/bridge-wasm/pkg/*.tgz
+clients/sdk-js/*.tgz
+compat/**/*.tgz
 artifacts/package-local/npm/*.tgz
 
 # Local test execution logs
 .tmp-testlogs/
+
+# Local dev server artifacts (dev keypair + logs, never tracked)
+server.key
+server.log
+tmp/

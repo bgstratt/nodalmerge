@@ -17,7 +17,7 @@ function Start-MongoContainer {
 
 function Resolve-DotnetHostProjectPath {
     $candidates = @(
-        "nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj"
+        "hosts/dotnet/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj"
     )
 
     foreach ($candidate in $candidates) {
@@ -26,7 +26,7 @@ function Resolve-DotnetHostProjectPath {
         }
     }
 
-    throw "Unable to locate DotNet host project at nodalmerge-host/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj."
+    throw "Unable to locate DotNet host project at hosts/dotnet/src/NodalMerge.DotNetHost/NodalMerge.DotNetHost.csproj."
 }
 
 Cleanup-Ports

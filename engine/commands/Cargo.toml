@@ -1,0 +1,10 @@
+[package]
+name = "nodalmerge-command-registry"
+version = "0.1.0"
+edition = "2021"
+description = "Canonical control-plane command-surface registry shared by all NodalMerge hosts"
+
+[dependencies]
+nodalmerge-host-core = { version = "0.1.0", path = "../host-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }

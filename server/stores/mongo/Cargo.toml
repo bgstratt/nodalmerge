@@ -1,0 +1,24 @@
+[package]
+name = "nodalmerge-mongo-store"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "MongoDB NodePersistence adapter for NodalMerge (F7)"
+
+[dependencies]
+nodalmerge-core   = { path = "../../../core/crdt" }
+nodalmerge-server = { path = "../../server" }
+mongodb = { version = "3.6.0", default-features = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+tracing = "0.1"
+metrics = "0.23"
+thiserror = { workspace = true }
+futures-util = "0.3"
+[dev-dependencies]
+tokio = { workspace = true }
+testcontainers = { version = "0.23", features = ["blocking"] }
+tracing-subscriber = "0.3"
+nodalmerge-nodestore-conformance = { path = "../conformance" }
+nodalmerge-core = { path = "../../../core/crdt" }
+ed25519-dalek = { workspace = true }

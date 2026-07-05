@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <PackageId>NodalMerge.DotNetHost.Native.win-x64</PackageId>
+    <Description>Native host FFI runtime for NodalMerge .NET host on win-x64.</Description>
+    <PackageTags>nodalmerge;sync;crdt;native;ffi;windows</PackageTags>
+    <PackageReadmeFile>NUGET_README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\NUGET_README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="..\..\..\..\target\release\nodalmerge_host_ffi.dll"
+          Pack="true"
+          PackagePath="runtimes/win-x64/native/"
+          Visible="false" />
+    <None Include="..\..\..\..\target\release\nodalmerge_runtime_local_ffi.dll"
+          Pack="true"
+          PackagePath="runtimes/win-x64/native/"
+          Visible="false" />
+  </ItemGroup>
+
+</Project>

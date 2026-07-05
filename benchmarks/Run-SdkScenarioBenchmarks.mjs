@@ -2,13 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { initSync, room_pubkey_hex } from "../web/pkg/nodalmerge_bridge.js";
-import { createDoc } from "../web/sdk.js";
+import { initSync, room_pubkey_hex } from "../clients/web/pkg/nodalmerge_bridge.js";
+import { createDoc } from "../clients/web/sdk.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const wasmPath = path.resolve(__dirname, "../web/pkg/nodalmerge_bridge_bg.wasm");
+const wasmPath = path.resolve(__dirname, "../clients/web/pkg/nodalmerge_bridge_bg.wasm");
 const wasmBytes = fs.readFileSync(wasmPath);
 initSync(wasmBytes);
 

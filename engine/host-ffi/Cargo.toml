@@ -1,0 +1,27 @@
+[package]
+name = "nodalmerge-host-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "C ABI wrapper for NodalMerge host-core"
+readme = "README.md"
+keywords = ["crdt", "sync", "ffi", "host"]
+categories = ["api-bindings", "network-programming"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nodalmerge-core = { version = "0.1.0", path = "../../core/crdt" }
+nodalmerge-host-core = { version = "0.1.0", path = "../host-core" }
+ed25519-dalek = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+base64 = "0.22"
+criterion = { workspace = true }
+
+[[bench]]
+name = "host_runtime_vs_ffi"
+harness = false

@@ -1,0 +1,9 @@
+[package]
+name = "activesync-core"
+version = "0.1.0"
+edition = "2021"
+description = "Compatibility wrapper crate re-exporting nodalmerge-core during rename migration"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+nodalmerge-core = { version = "0.1.0", path = "../../../core/crdt" }

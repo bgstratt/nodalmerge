@@ -5,8 +5,8 @@ edition = "2021"
 description = "S3-compatible BlobPersistence backend for nodalmerge-server (AWS, R2, MinIO, GCS, Azure)."
 
 [dependencies]
-nodalmerge-core = { path = "../core" }
-nodalmerge-server = { path = "../server" }
+nodalmerge-core = { version = "0.1.0", path = "../core" }
+nodalmerge-server = { version = "0.1.0", path = "../server" }
 object_store = { version = "0.11", features = ["aws"] }
 tokio = { workspace = true }
 serde = { workspace = true }

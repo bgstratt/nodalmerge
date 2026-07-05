@@ -11,8 +11,14 @@ namespace NodalMerge.Host.Composition;
 
 public static class ServiceCollectionExtensions
 {
+    // "Postgres" was advertised here without any provider implementation or
+    // registration branch behind it — selecting it passed validation and then
+    // failed downstream. Removed until a PostgresNodeStoreProvider exists
+    // (tracked as a gap in docs/RESTRUCTURE_AND_PARITY_PLAN.md §9; the Rust
+    // postgres store also still predates the canonical schema in
+    // docs/PERSISTENCE_SCHEMA.md, so both sides should land together).
     private static readonly HashSet<string> SupportedNodeProviders =
-        ["InMemory", "Sqlite", "Mongo", "Postgres"];
+        ["InMemory", "Sqlite", "Mongo"];
 
     private static readonly HashSet<string> SupportedBlobProviders =
         ["WsOnly", "File", "S3Direct", "S3Delegated"];

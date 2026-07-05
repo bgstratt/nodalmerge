@@ -257,6 +257,15 @@ pub enum HostCommand {
         selector: Option<Value>,
     },
     /// Read the current CRDT frontier (leaf node ids) for a room's sync graph.
+    ReplayReadRange {
+        key_prefix: String,
+        #[serde(default)]
+        from_lamport: u64,
+        #[serde(default)]
+        limit: Option<u64>,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
     GetFrontier,
     /// Read the causal parents of a specific node in a room's sync graph.
     GetCausalParents {
@@ -557,6 +566,18 @@ pub enum HostEvent {
     },
     PromotionValidationRejected {
         proposal_id: String,
+        reason_class: String,
+        reason_message: String,
+    },
+    ReplayRangeRead {
+        room_id: String,
+        key_prefix: String,
+        from_lamport: u64,
+        items: Vec<Value>,
+        next_cursor: Option<String>,
+    },
+    ReplayRangeRejected {
+        room_id: String,
         reason_class: String,
         reason_message: String,
     },

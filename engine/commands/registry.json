@@ -135,10 +135,10 @@
       "required_capability": "query.read",
       "surfaces": {
         "rust_server": "real",
-        "host_core": "absent",
-        "dotnet_host": "absent"
+        "host_core": "real",
+        "dotnet_host": "real"
       },
-      "notes": "Rust-only today. Cheapest port of the Rust-only pair (pure read); best done as a new HostCommand so all hosts gain it. Plan S4 candidate."
+      "notes": "Routed on all surfaces (post-S4 quick win): shared nodalmerge_host_core::engine::graph_replay_read_range brain; server route and HostCommand::ReplayReadRange run the same implementation, envelopes match (replay.read-range.result/rejected)."
     },
     {
       "command": "topology.create-child",

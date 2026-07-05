@@ -766,6 +766,39 @@ public sealed class RuntimeProtocolMapper
             ]);
         }
 
+        if (string.Equals(type, "replay.read-range", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!state.IsInitialized || string.IsNullOrWhiteSpace(state.RoomId))
+            {
+                return RuntimeMapResult.Failure("hello must be sent first");
+            }
+            if (!IsControlPlaneAllowed(state, "query.read"))
+            {
+                return RuntimeMapResult.Failure("reject.control_plane_forbidden: command=replay.read-range requires=query.read");
+            }
+
+            var replayPayload = new JsonObject
+            {
+                ["key_prefix"] = message.KeyPrefix ?? string.Empty,
+                ["from_lamport"] = message.FromLamport.GetValueOrDefault(0)
+            };
+            if (message.Limit is not null)
+            {
+                replayPayload["limit"] = message.Limit.Value;
+            }
+            if (!string.IsNullOrWhiteSpace(message.Cursor))
+            {
+                replayPayload["cursor"] = message.Cursor;
+            }
+
+            return RuntimeMapResult.Success([
+                SerializeEnvelope(state.RoomId, new JsonObject
+                {
+                    ["ReplayReadRange"] = replayPayload
+                })
+            ]);
+        }
+
         if (string.Equals(type, "archive.describe", StringComparison.OrdinalIgnoreCase))
         {
             if (!IsControlPlaneAllowed(state, "archive.read"))
@@ -2219,6 +2252,30 @@ public sealed class RuntimeProtocolMapper
                 continue;
             }
 
+            if (obj.TryGetPropertyValue("ReplayRangeRead", out var replayRangeReadNode) && replayRangeReadNode is JsonObject replayRangeRead)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "replay.read-range.result",
+                    ["key_prefix"] = replayRangeRead["key_prefix"]?.GetValue<string>(),
+                    ["from_lamport"] = replayRangeRead["from_lamport"]?.DeepClone(),
+                    ["items"] = replayRangeRead["items"]?.DeepClone() ?? new JsonArray(),
+                    ["next_cursor"] = replayRangeRead["next_cursor"]?.DeepClone()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("ReplayRangeRejected", out var replayRangeRejectedNode) && replayRangeRejectedNode is JsonObject replayRangeRejected)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "replay.read-range.rejected",
+                    ["reason_class"] = replayRangeRejected["reason_class"]?.GetValue<string>(),
+                    ["reason_message"] = replayRangeRejected["reason_message"]?.GetValue<string>()
+                }.ToJsonString());
+                continue;
+            }
+
             if (obj.TryGetPropertyValue("FrontierQueried", out var frontierQueriedNode) && frontierQueriedNode is JsonObject frontierQueried)
             {
                 outbound.Add(new JsonObject
@@ -2451,6 +2508,18 @@ public sealed class RuntimeProtocolMapper
                     ["type"] = "topology.validate-promotion.completed",
                     ["proposal_id"] = promotionValidated["proposal_id"]?.GetValue<string>(),
                     ["validation_digest"] = promotionValidated["validation_digest"]?.GetValue<string>()
+                }.ToJsonString());
+                continue;
+            }
+
+            if (obj.TryGetPropertyValue("PromotionValidationRejected", out var promotionValidationRejectedNode) && promotionValidationRejectedNode is JsonObject promotionValidationRejected)
+            {
+                outbound.Add(new JsonObject
+                {
+                    ["type"] = "topology.validate-promotion.rejected",
+                    ["proposal_id"] = promotionValidationRejected["proposal_id"]?.GetValue<string>(),
+                    ["reason_class"] = promotionValidationRejected["reason_class"]?.GetValue<string>(),
+                    ["reason_message"] = promotionValidationRejected["reason_message"]?.GetValue<string>()
                 }.ToJsonString());
                 continue;
             }
@@ -3636,6 +3705,12 @@ public sealed class RuntimeInboundMessage
     public string? PageToken { get; set; }
     [JsonPropertyName("limit")]
     public ulong? Limit { get; set; }
+    [JsonPropertyName("key_prefix")]
+    public string? KeyPrefix { get; set; }
+    [JsonPropertyName("from_lamport")]
+    public ulong? FromLamport { get; set; }
+    [JsonPropertyName("cursor")]
+    public string? Cursor { get; set; }
     [JsonPropertyName("reason")]
     public string? InvalidationReason { get; set; }
     [JsonPropertyName("state_filter")]

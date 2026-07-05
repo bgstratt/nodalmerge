@@ -541,34 +541,16 @@ pub async fn process_replay_read_range(room: &Room, msg: &Value) -> Value {
         .max(1) as usize;
     let offset = parse_offset(msg.get("cursor").and_then(Value::as_str));
 
+    // Shared brain (post-S4 quick win): the same implementation the FFI/.NET
+    // path runs via HostCommand::ReplayReadRange.
     let graph = room.graph.read().await;
-    let mut events = graph
-        .all_nodes()
-        .into_iter()
-        .filter(|node| node.transaction.lamport >= from_lamport)
-        .filter_map(|node| {
-            let touched: Vec<String> = node
-                .transaction
-                .ops
-                .iter()
-                .filter_map(|op| op.key().map(str::to_string))
-                .filter(|key| key.starts_with(&key_prefix))
-                .collect();
-            if touched.is_empty() {
-                return None;
-            }
-            Some((node.transaction.lamport, node.id.to_hex(), touched))
-        })
-        .collect::<Vec<(u64, String, Vec<String>)>>();
-
-    events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    let end = offset.saturating_add(limit).min(events.len());
-    let page = if offset < events.len() {
-        events[offset..end].to_vec()
-    } else {
-        Vec::new()
-    };
-    let next_cursor = (end < events.len()).then(|| format!("offset:{end}"));
+    let (page, next_cursor) = nodalmerge_host_core::engine::graph_replay_read_range(
+        &graph,
+        &key_prefix,
+        from_lamport,
+        limit,
+        offset,
+    );
 
     let items = page
         .into_iter()

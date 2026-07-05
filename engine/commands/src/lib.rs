@@ -111,6 +111,7 @@ pub fn ws_command_name(command: &HostCommand) -> Option<&'static str> {
         HostCommand::ProposeTopologyPromotion { .. } => Some("topology.propose-promotion"),
         HostCommand::ValidateTopologyPromotion { .. } => Some("topology.validate-promotion"),
         HostCommand::ApplyTopologyPromotion { .. } => Some("topology.apply-promotion"),
+        HostCommand::ReplayReadRange { .. } => Some("replay.read-range"),
         HostCommand::PromoteCheckpointToGraph { .. } => Some("checkpoint.promote"),
         HostCommand::GetFrontier => Some("graph.get-frontier"),
         HostCommand::GetCausalParents { .. } => Some("graph.get-causal-parents"),

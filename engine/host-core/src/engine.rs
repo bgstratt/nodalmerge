@@ -474,6 +474,58 @@ pub fn graph_canonical_resolution_entries(graph: &StateGraph) -> Vec<CanonicalMa
     entries
 }
 
+/// Paginated replay/audit query over the transaction log: nodes at or after
+/// `from_lamport` touching keys under `key_prefix`, ordered by
+/// `(lamport, node_id_hex)`, with `offset:<n>` cursor pagination. Shared
+/// brain for the `replay.read-range` command on every host.
+/// Returns `(page_items, next_cursor)` where each item is
+/// `(lamport, node_id_hex, touched_keys)`.
+pub fn graph_replay_read_range(
+    graph: &StateGraph,
+    key_prefix: &str,
+    from_lamport: u64,
+    limit: usize,
+    offset: usize,
+) -> (Vec<(u64, String, Vec<String>)>, Option<String>) {
+    let mut events = graph
+        .all_nodes()
+        .into_iter()
+        .filter(|node| node.transaction.lamport >= from_lamport)
+        .filter_map(|node| {
+            let touched: Vec<String> = node
+                .transaction
+                .ops
+                .iter()
+                .filter_map(|op| op.key().map(str::to_string))
+                .filter(|key| key.starts_with(key_prefix))
+                .collect();
+            if touched.is_empty() {
+                return None;
+            }
+            Some((node.transaction.lamport, node.id.to_hex(), touched))
+        })
+        .collect::<Vec<(u64, String, Vec<String>)>>();
+
+    events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let limit = limit.max(1);
+    let end = offset.saturating_add(limit).min(events.len());
+    let next_cursor = (end < events.len()).then(|| format!("offset:{end}"));
+    let page = if offset < events.len() {
+        events[offset..end].to_vec()
+    } else {
+        Vec::new()
+    };
+    (page, next_cursor)
+}
+
+/// Parse an `offset:<n>` pagination cursor; anything else means offset 0.
+pub fn parse_replay_cursor_offset(cursor: Option<&str>) -> usize {
+    cursor
+        .and_then(|token| token.strip_prefix("offset:"))
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
 /// Set difference between this graph's node ids and a peer's claimed ids.
 /// Returns `(only_in_server, only_in_peer)`, both sorted for deterministic
 /// wire output. Malformed peer ids are ignored.
@@ -2007,6 +2059,51 @@ impl HostEngine {
                     events: vec![HostEvent::RecentConflictsListed {
                         room_id: envelope.room_id,
                         entries,
+                    }],
+                })
+            }
+            HostCommand::ReplayReadRange {
+                key_prefix,
+                from_lamport,
+                limit,
+                cursor,
+            } => {
+                if !self.rooms.contains(&envelope.room_id) {
+                    return Err(HostCoreError::RoomNotFound);
+                }
+                let key_prefix = key_prefix.trim().to_string();
+                if key_prefix.is_empty() {
+                    return Ok(CommandResult {
+                        events: vec![HostEvent::ReplayRangeRejected {
+                            room_id: envelope.room_id,
+                            reason_class: "reject.invalid_payload".to_string(),
+                            reason_message: "replay.read-range requires non-empty key_prefix"
+                                .to_string(),
+                        }],
+                    });
+                }
+                let offset = parse_replay_cursor_offset(cursor.as_deref());
+                let limit = limit.unwrap_or(100).max(1) as usize;
+                let graph = self.room_sync_graphs.entry(envelope.room_id.clone()).or_default();
+                let (page, next_cursor) =
+                    graph_replay_read_range(graph, &key_prefix, from_lamport, limit, offset);
+                let items = page
+                    .into_iter()
+                    .map(|(lamport, node_id, touched_keys)| {
+                        serde_json::json!({
+                            "lamport": lamport,
+                            "node_id": node_id,
+                            "touched_keys": touched_keys
+                        })
+                    })
+                    .collect();
+                Ok(CommandResult {
+                    events: vec![HostEvent::ReplayRangeRead {
+                        room_id: envelope.room_id,
+                        key_prefix,
+                        from_lamport,
+                        items,
+                        next_cursor,
                     }],
                 })
             }

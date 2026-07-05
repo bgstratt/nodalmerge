@@ -47,7 +47,7 @@ jobs:
           name: core-text-large-doc-metrics
           # `cargo test` runs with cwd set to the crate dir (core/), not the
           # workspace root, so that's where the test writes the file.
-          path: core/core-text-large-doc-metrics.json
+          path: core/crdt/core-text-large-doc-metrics.json
           if-no-files-found: error
 
   core-tests-projection-disabled:

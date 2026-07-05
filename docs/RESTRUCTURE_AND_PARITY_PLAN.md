@@ -340,7 +340,24 @@ real requirement or a nice-to-have? (Open decision, §7.)
 4. Whether `nodalmerge-server`'s core sync path ever migrates onto
    `host-core` — revisit only after S4, with benchmarks.
 
-## 8. Session-verified facts this plan relies on
+## 8. Post-S5 gap inventory (2026-07-05 audit follow-up)
+
+Deferred items live in the registry (`scope: deferred`) and §6. Additional
+gaps found after S5, with disposition:
+
+| Gap | Status |
+|---|---|
+| .NET advertised "Postgres" node provider with no implementation behind it | **Fixed** (quick-wins): removed from SupportedNodeProviders until a real provider exists |
+| Rust postgres store (`server/stores/postgres`) still on pre-canonical `nodalmerge_nodes(seq, bytes)` schema | Open — converge alongside building the .NET Postgres provider (both sides land on docs/PERSISTENCE_SCHEMA.md together). Same audit owed to SQLite (Rust `DirPersistence` vs .NET `SqliteNodeStoreProvider`) though machine-local sharing is a weaker requirement |
+| `PromotionValidationRejected` (S3) unmapped in .NET protocol layer — clients got silence on rejection | **Fixed** (quick-wins): mapped to `topology.validate-promotion.rejected` |
+| `replay.read-range` Rust-only | **Fixed** (quick-wins): shared brain `graph_replay_read_range` in host-core; HostCommand + .NET route; registry flipped to real on all surfaces |
+| CAPCOMP dual implementation (Rust `capability_profile.rs` vs .NET `CapabilityProfileExpander`) with no parity coverage | Open — highest-value next parity target; fits the shared-vectors pattern (registry-style data file both runtimes assert against) |
+| No JS/SDK-side parity coverage since Check-SdkRejectionParity died with the doc cleanup | Open — lower stakes (clients, not authorities); scope after CAPCOMP |
+| Blob storage layout parity unaudited (Rust file/S3 layout vs .NET FileBlobStoreProvider/S3Delegated) | Open — audit-sized, not build-sized; needed before any cross-runtime blob sharing claim |
+| `activesync-*` naming still live (compat/ crates, npm direction inconsistency, legacy metric meters, ACTIVESYNC_* env vars, ARCHITECTURE.md) | Open — next quick win per 2026-07-05 decision: purge activesync naming entirely |
+| Consumer validation (Studio/demos on repacked NuGets) | Open — gates merge to main |
+
+## 9. Session-verified facts this plan relies on
 
 - Studio pins NuGet 0.1.4; consumer surface as listed in §3.
 - PWASoundboard.Api references the *old sibling activesync checkout* by

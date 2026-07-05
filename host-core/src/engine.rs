@@ -2290,6 +2290,15 @@ impl HostEngine {
                     }],
                 })
             }
+            // KNOWN STUB (this command through ApplyTopologyPromotion below):
+            // `proposal_digest` is a `deterministic_hex64` hash of the room
+            // ids/checkpoint hash/payload_ref strings, not a real digest of
+            // the actual payload content. `ValidateTopologyPromotion` doesn't
+            // check anything — it unconditionally sets `validated = true`.
+            // `ApplyTopologyPromotion`'s `parent_new_canonical_hash` is
+            // another fake hash, not a real derived canonical state. Real
+            // promotion validation exists only in `server/src/promotion.rs`,
+            // used directly by nodalmerge-server.
             HostCommand::ProposeTopologyPromotion {
                 parent_room_id,
                 child_room_id,
@@ -2665,6 +2674,13 @@ impl HostEngine {
                     }],
                 })
             }
+            // KNOWN STUB, same pattern as ImportArchive below: nodes_digest/
+            // blobs_digest are `deterministic_hex64` hashes of a format string
+            // (row content joined with `;`, or a room-id/count string), not
+            // real content digests. Nothing here verifies actual archive
+            // bytes. Real archive.describe lives only in
+            // `server/src/archive_adapter.rs`, used directly by
+            // nodalmerge-server's WS handler.
             HostCommand::DescribeArchive { archive_ref } => {
                 if !self.rooms.contains(&envelope.room_id) || archive_ref.is_empty() {
                     return Err(HostCoreError::InvalidCommand);
@@ -2728,6 +2744,10 @@ impl HostEngine {
                     }],
                 })
             }
+            // KNOWN STUB: unconditionally `accepted: true` unless `archive_ref`
+            // contains the literal test-hook substring "invalid-manifest".
+            // There is no real manifest/signature/digest validation here at
+            // all. See the note on ImportArchive above.
             HostCommand::ValidateArchive { archive_ref, mode } => {
                 if !self.rooms.contains(&envelope.room_id) || archive_ref.is_empty() {
                     return Err(HostCoreError::InvalidCommand);
@@ -2757,6 +2777,21 @@ impl HostEngine {
                     }],
                 })
             }
+            // KNOWN STUB, not a real implementation: this does not load a
+            // manifest, verify a signature, or apply any nodes/blobs. It
+            // fakes success from existing room state and a fake hash, with
+            // one hardcoded test hook (`archive_ref` containing the literal
+            // substring "digest-mismatch" forces a rejection). The real
+            // implementation lives only in `server/src/archive_adapter.rs`
+            // (used directly by nodalmerge-server's own WS handler, which
+            // does not go through host-core for archive commands at all).
+            // Anything reaching archive.import via host-core/FFI — i.e. the
+            // .NET host — currently gets this stub, not real import
+            // behavior. See RuntimeProtocolMapper.cs's archive.import
+            // handler for the other half of this note, and
+            // docs/operator.md's "Archive operations" section for what real
+            // import/export is supposed to do (portability/backup/restore,
+            // independent of whatever persistence backend is live).
             HostCommand::ImportArchive {
                 archive_ref,
                 import_mode,

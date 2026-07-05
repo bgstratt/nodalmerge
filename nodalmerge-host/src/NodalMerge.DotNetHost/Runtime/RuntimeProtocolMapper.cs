@@ -823,6 +823,20 @@ public sealed class RuntimeProtocolMapper
             ]);
         }
 
+        // NON-FUNCTIONAL TODAY: this maps and dispatches the request correctly,
+        // but the host-core/FFI command it forwards to (HostCommand::ImportArchive
+        // in host-core/src/engine.rs) is a known stub — it fakes success/failure
+        // from existing room state rather than loading a manifest, verifying a
+        // signature, or applying any nodes/blobs. There is also no ExportArchive
+        // command in host-core at all, so archive.export has no .NET path and
+        // isn't wired up here. The real implementation for both exists only in
+        // Rust's own server/src/archive_adapter.rs, used directly by
+        // nodalmerge-server's WS handler (which bypasses host-core for archive
+        // commands entirely). Real archive import/export is an operator
+        // backup/restore/portability feature (see docs/operator.md's "Archive
+        // operations" section), not part of the live sync path, and is
+        // currently deferred rather than ported — do not rely on this endpoint
+        // for anything that needs archives to actually round-trip.
         if (string.Equals(type, "archive.import", StringComparison.OrdinalIgnoreCase))
         {
             if (!IsControlPlaneAllowed(state, "archive.admin"))

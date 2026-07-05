@@ -295,32 +295,26 @@ dispatches through the same timeline path used by core tests.
 - **[../web/demo.js](../web/demo.js)** — full reference client: IndexedDB,
   blob caching, reconnect UI, presence.
 
-## 10. Authz Nightly Dispatch (Operator Quick Reference)
+## 10. Control-Plane Capability Parity (Operator Quick Reference)
 
-Use these examples to run `.github/workflows/authz-conformance-nightly.yml`
-with benchmark evidence inputs.
-
-Manual benchmark percentages:
-
-```bash
-gh workflow run authz-conformance-nightly.yml \
-  -f auth_path_benchmark_baseline_run_id=baseline-20260521 \
-  -f auth_path_benchmark_candidate_run_id=candidate-20260522 \
-  -f auth_path_benchmark_p50_regression_pct=1.4 \
-  -f auth_path_benchmark_p95_regression_pct=2.1 \
-  -f auth_path_benchmark_alloc_regression_pct=0.0
-```
-
-JSON-driven benchmark comparison:
+`.github/workflows/control-plane-capability-parity.yml` checks that the Rust
+server (`server/src/ws_handler.rs`) and the .NET host
+(`RuntimeProtocolMapper.cs`) require the same capability for the same
+control-plane commands (`set-policy`, `set-room-key`, `start-tick`, etc.),
+each asserted against the same canonical table via a real test on its own
+side — see `server/tests/control_plane_capability_parity.rs` and
+`nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs`.
+It runs on pushes/PRs touching those files, or on demand:
 
 ```bash
-gh workflow run authz-conformance-nightly.yml \
-  -f auth_path_benchmark_baseline_run_id=baseline-20260521 \
-  -f auth_path_benchmark_candidate_run_id=candidate-20260522 \
-  -f auth_path_benchmark_baseline_json_path=benchmarks/results/hosted-baseline.json \
-  -f auth_path_benchmark_candidate_json_path=benchmarks/results/hosted-candidate.json \
-  -f auth_path_benchmark_target=dotnet-host-runtime
+gh workflow run control-plane-capability-parity.yml
 ```
+
+It replaces the old `authz-conformance-nightly` workflow, which compared two
+placeholder oracles that never independently derived a result (the Rust
+runner echoed each vector's declared `expected` back as `actual`, and the
+.NET step mapped vector IDs to unrelated pre-existing unit tests) and so
+never caught a real regression.
 
 For full artifact schema and promotion-gate semantics, see
 [AUTHORIZATION_CONFORMANCE_SPEC.md](AUTHORIZATION_CONFORMANCE_SPEC.md).

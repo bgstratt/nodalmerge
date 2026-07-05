@@ -28,7 +28,7 @@ npm run smoke:demo
 
 ## Notes
 
-- The script auto-starts `cargo run --bin activesync-server` if `127.0.0.1:7878` is not already listening.
+- The script auto-starts `cargo run --bin nodalmerge-server` if `127.0.0.1:7878` is not already listening.
 - The script auto-starts `python web/serve.py 8080` if `127.0.0.1:8080` is not already listening.
 - If either service is already running, it reuses it.
 - On failure, the script prints peer status, state text, and recent event log lines for both peers.

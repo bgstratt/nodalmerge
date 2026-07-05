@@ -1,12 +1,8 @@
 # Operator runbook
 
-Steady-state operation of a deployed `activesync-server`. Covers every
+Steady-state operation of a deployed `nodalmerge-server`. Covers every
 CLI flag, every metric, backup/restore for each supported persistence
 backend, and the rolling-restart procedure.
-
-Migration note: this runbook is nodalmerge-first. During the compatibility
-window, `activesync-server` command forms and `activesync_*` identifiers remain
-supported aliases.
 
 > First-time readers: see [quickstart.md](./quickstart.md) and
 > [self-host.md](./self-host.md). For integration shapes, see
@@ -25,7 +21,7 @@ config file. Flags accept both `--flag value` and `--flag=value` form.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--store <path>` | *(in-memory)* | Durable persistence root. Creates `<path>/activesync.db` + `<path>/blobs/`. See [deployment.md](./deployment.md). |
+| `--store <path>` | *(in-memory)* | Durable persistence root. Creates `<path>/nodalmerge.db` + `<path>/blobs/`. See [deployment.md](./deployment.md). |
 | `--metrics-addr <ip:port>` | *(off)* | Admin HTTP listener for Prometheus scrape. Bind to loopback or a private VPC subnet — never the public WS port. |
 | `--idle-timeout <secs>` | `300` | Evict rooms with zero connected peers after N seconds. `0` disables. Gated on durable persistence; warns + skips without `--store`. |
 | `--broadcast-capacity <N>` | `512` | Per-room `broadcast::channel` ring size (G1). Larger = more slack for brief client stalls; smaller = faster divergence detection. `0` rejected. |
@@ -36,9 +32,9 @@ config file. Flags accept both `--flag value` and `--flag=value` form.
 
 **Environment.**
 
-- `RUST_LOG` — tracing filter. During migration, logger targets remain
-  `activesync_*` (for example `info,activesync_server=info,activesync_core=info`).
-- Server keypair: auto-generated at `~/.activesync/server.key` on
+- `RUST_LOG` — tracing filter (for example
+  `info,nodalmerge_server=info,nodalmerge_core=info`).
+- Server keypair: auto-generated at `server.key` in the server's working directory on
   first run; reused across restarts.
 
 ---
@@ -67,9 +63,6 @@ churn can't explode the series count.
 | `nodalmerge_topology_promotion_total` | counter | `stage`, `outcome`, `reason` (rejects only) | rejection rate by `reason`; see [Topology promotion metrics](#topology-promotion-metrics-wave-3) |
 | `nodalmerge_topology_promotion_seconds` | histogram | `stage`, `outcome` | handler latency; `p95` per stage when tuning promotion workflows |
 | `nodalmerge_room_bytes_resident` | gauge | `room` | capacity; approximate — per-node estimate is flat 512 B, under-counts large transactions |
-
-Compatibility note: legacy `activesync_*` metric names are still emitted while
-dashboards migrate.
 
 Histogram buckets are hand-tuned for the hot path:
 
@@ -210,16 +203,16 @@ Layout (see [deployment.md](./deployment.md) for full detail):
 
 ```
 <path>/
-  activesync.db              SQLite (legacy file name retained during migration)
+  nodalmerge.db              SQLite (legacy file name retained during migration)
   blobs/<sanitized_room>/<blake3_hex>
   blob-tombstones/<sanitized_room>/<blake3_hex>
 ```
 
-- **Hot backup:** `sqlite3 activesync.db ".backup '/dest/activesync.db'"`
+- **Hot backup:** `sqlite3 nodalmerge.db ".backup '/dest/nodalmerge.db'"`
   + a recursive copy of `blobs/`. SQLite is WAL, so the `.backup`
   command is consistent.
-- **Cold backup:** stop the server, copy `activesync.db`,
-  `activesync.db-wal`, `activesync.db-shm`, and `blobs/`.
+- **Cold backup:** stop the server, copy `nodalmerge.db`,
+  `nodalmerge.db-wal`, `nodalmerge.db-shm`, and `blobs/`.
 - **Restore:** point a new `--store <path>` at the copy.
 - **Consistency guarantee:** nodes and blobs are content-addressed;
   a partially restored `blobs/` only loses the blobs whose files are
@@ -230,7 +223,7 @@ Layout (see [deployment.md](./deployment.md) for full detail):
 
 - **Backup:** whatever your existing Postgres backup regime is (WAL
   archiving, logical dumps, managed provider snapshots). Tables to
-  include: `activesync_nodes` + the migration table sqlx generates.
+  include: `nodalmerge_nodes` + the migration table sqlx generates.
 - **Restore:** restore the DB; point
   `PostgresNodeStore::connect_and_migrate(cfg)` at it. Migrations
   are idempotent.
@@ -240,7 +233,7 @@ Layout (see [deployment.md](./deployment.md) for full detail):
 ### `MongoNodeStore`
 
 - **Backup:** `mongodump` or your managed provider's snapshot.
-  Include `activesync_nodes` + `activesync_seq`.
+  Include the `accepted_nodes` collection.
 - **Restore:** `mongorestore`. The `(room_id, seq)` compound index
   and compound `_id` are recreated on first connect.
 - **Consistency guarantee:** compound `_id = "<room>:<node_hex>"`
@@ -263,7 +256,7 @@ Layout (see [deployment.md](./deployment.md) for full detail):
 ## Capacity planning
 
 Rules of thumb, derived from the bench suite (`cargo bench -p
-activesync-core`, reference machine = Ryzen 9 5900X, 12 cores):
+nodalmerge-core`, reference machine = Ryzen 9 5900X, 12 cores):
 
 - **Merge throughput.** ~31 ms for a 10k-node batched pack
   (`merge_10k_batch`). Bottleneck is ed25519 `verify_batch`; ~95% of
@@ -290,7 +283,7 @@ with consistent hashing at the load balancer; rooms are independent.
 
 ## Upgrading sync-server
 
-ActiveSync's `A7` capability negotiation handles the mixed-version
+NodalMerge's `A7` capability negotiation handles the mixed-version
 window automatically. A rolling restart is:
 
 1. Pick a rollout cohort (one replica at a time, or a quartile).

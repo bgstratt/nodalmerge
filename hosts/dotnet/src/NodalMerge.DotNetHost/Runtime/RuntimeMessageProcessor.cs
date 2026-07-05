@@ -7,11 +7,7 @@ namespace NodalMerge.DotNetHost.Runtime;
 public sealed class RuntimeMessageProcessor
 {
     private static readonly Meter RuntimeControlPlaneMeter = new("NodalMerge.DotNetHost.RuntimeControlPlane", "1.0.0");
-    private static readonly Meter LegacyRuntimeControlPlaneMeter = new("NodalMerge.DotNetHost.RuntimeControlPlane", "1.0.0");
     private static readonly Counter<long> RuntimeControlPlaneDeniedCounter = RuntimeControlPlaneMeter.CreateCounter<long>(
-        "runtime_control_plane_denied_total"
-    );
-    private static readonly Counter<long> LegacyRuntimeControlPlaneDeniedCounter = LegacyRuntimeControlPlaneMeter.CreateCounter<long>(
         "runtime_control_plane_denied_total"
     );
 
@@ -355,14 +351,6 @@ public sealed class RuntimeMessageProcessor
         }
 
         RuntimeControlPlaneDeniedCounter.Add(
-            1,
-            KeyValuePair.Create<string, object?>("host", "dotnet-host"),
-            KeyValuePair.Create<string, object?>("command", command),
-            KeyValuePair.Create<string, object?>("required_capability", requiredCapability),
-            KeyValuePair.Create<string, object?>("reason_class", "reject.control_plane_forbidden")
-        );
-
-        LegacyRuntimeControlPlaneDeniedCounter.Add(
             1,
             KeyValuePair.Create<string, object?>("host", "dotnet-host"),
             KeyValuePair.Create<string, object?>("command", command),

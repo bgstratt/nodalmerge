@@ -4,14 +4,14 @@ This folder contains the PR7 prototype for a host-owned .NET runtime that calls 
 
 ## Projects
 
-- src/ActiveSync.DotNetHost: ASP.NET minimal host with FFI endpoints.
-- tests/ActiveSync.DotNetHost.Tests: smoke-style binding tests.
+- src/NodalMerge.DotNetHost: ASP.NET minimal host with FFI endpoints.
+- tests/NodalMerge.DotNetHost.Tests: smoke-style binding tests.
 
 ## Endpoints
 
 - GET /: host metadata.
-- GET /ffi/abi-version: returns ABI version from as_host_abi_version.
-- POST /ffi/submit: forwards raw binary command payload to as_host_submit_command and returns raw event bytes.
+- GET /ffi/abi-version: returns ABI version from nm_host_abi_version.
+- POST /ffi/submit: forwards raw binary command payload to nm_host_submit_command and returns raw event bytes.
 - GET /ws/ffi (WebSocket upgrade): host-owned websocket binary bridge.
 - GET /ws/runtime (WebSocket upgrade): typed runtime bridge (text JSON in/out) mapped to host commands/events.
 - GET /ws/{roomId} (WebSocket upgrade): compatibility alias to the runtime bridge so SDK/demo clients that connect to `/ws/<room>` can target this host without URL-shape changes.
@@ -69,7 +69,7 @@ This folder contains the PR7 prototype for a host-owned .NET runtime that calls 
 	- Conflict events from host-core map to `conflict` (streamed, one frame per entry) and `recent-conflicts` (snapshot list) for SDK `onConflict` and recent-history parity.
 - `session_id` behavior: if `hello`, `open-session`, `client-hello`, or `close-session` provides `session_id`, the runtime mapper persists that value in connection state and reuses it for subsequent commands when omitted.
 - `hello.token` is forwarded into the host `ClientHello` payload when provided (`peer_pubkey`, `expiry`, `caps[]`, `sig`, optional `continuity`). Missing required token fields are rejected by the mapper.
-- Server-peer control-plane bypass parity is configured via `NodalMerge:Runtime:ServerPeerPubkeyHex` (legacy `ActiveSync:Runtime:ServerPeerPubkeyHex` fallback supported during migration).
+- Server-peer control-plane bypass parity is configured via `NodalMerge:Runtime:ServerPeerPubkeyHex` (legacy `NodalMerge:Runtime:ServerPeerPubkeyHex` fallback supported during migration).
 	- When set, runtime handshake paths (`hello`, `open-session`, `client-hello`) mark a connection as server-peer only when the inbound `pubkey` exactly matches this trusted value (case-insensitive hex compare).
 	- Server-peer sessions can execute control-plane commands without explicit `policy.admin` / `room.admin` / `tick.admin` capability tokens.
 	- Leave unset (or empty) to disable bypass.
@@ -127,16 +127,16 @@ This folder contains the PR7 prototype for a host-owned .NET runtime that calls 
 
 ## Native Library Resolution
 
-The host resolves the native library name activesync_host_ffi.
+The host resolves the native library name nodalmerge_host_ffi.
 
 Before running the host, ensure the Rust FFI library is built:
 
-- `cargo build -p activesync-host-ffi`
+- `cargo build -p nodalmerge-host-ffi`
 
 Runtime resolution order:
 
 1. `NODALMERGE_HOST_FFI_DLL` environment variable (full path to compiled native library).
-2. Common local build paths (for example `target/debug/activesync_host_ffi.dll` on Windows).
+2. Common local build paths (for example `target/debug/nodalmerge_host_ffi.dll` on Windows).
 3. Platform default native loader search via library name.
 
 If loading still fails, set `NODALMERGE_HOST_FFI_DLL` explicitly to remove path ambiguity.
@@ -152,13 +152,13 @@ Use this flow to validate managed/native packaging locally before publishing.
 This writes packages to `artifacts/nuget-local`.
 
 2. Restore host in package-consumer mode:
-- `dotnet restore .\NodalMerge.DotNetHost.slnx --configfile .\NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
+- `dotnet restore .\NodalMerge.DotNetHost.slnx --configfile .\NuGet.Local.config -p:NodalMergeUseNuGetPackages=true -p:NodalMergePackageVersion=0.1.0-local`
 
 3. Run host against local packages:
-- `dotnet run --project .\src\ActiveSync.DotNetHost\ActiveSync.DotNetHost.csproj --no-launch-profile -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local`
+- `dotnet run --project .\src\NodalMerge.DotNetHost\NodalMerge.DotNetHost.csproj --no-launch-profile -p:NodalMergeUseNuGetPackages=true -p:NodalMergePackageVersion=0.1.0-local`
 
 Notes:
-- Default build uses project references; package mode is opt-in via `ActiveSyncUseNuGetPackages=true`.
+- Default build uses project references; package mode is opt-in via `NodalMergeUseNuGetPackages=true`.
 - Package mode includes native runtime package references (`win-x64`, `linux-x64`) so runtime assets resolve via NuGet instead of local cargo outputs.
 
 Dead-simple surface reference:
@@ -224,7 +224,7 @@ Default baseline artifact path:
 Use this to validate hosted AS service readiness before wiring full SpeechSlate web-react + API runs.
 
 1. From repo root, build host FFI:
-- `cargo build -p activesync-host-ffi`
+- `cargo build -p nodalmerge-host-ffi`
 2. Run verifier from `nodalmerge-host` folder:
 - `cd nodalmerge-host`
 - `pwsh -File .\verify.ps1`
@@ -246,7 +246,7 @@ Package-mode smoke (local NuGet feed):
 
 ## Auth Profile Mode
 
-The host auth provider is selected through `NodalMerge:Providers:Auth` (legacy `ActiveSync:Providers:Auth` fallback supported during migration):
+The host auth provider is selected through `NodalMerge:Providers:Auth` (legacy `NodalMerge:Providers:Auth` fallback supported during migration):
 
 - `Default`: pass-through validation semantics, `/sync/token` returns `501` (no mint support).
 - `JwtBridgeEmbedded`: in-host JWT mint + validate (no extra process required).

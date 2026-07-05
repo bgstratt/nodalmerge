@@ -5,11 +5,10 @@ namespace NodalMerge.Host.Composition;
 public sealed record MongoNodeStorageOptions(string ConnectionString, string DatabaseName)
 {
     public const string SectionName = "NodalMerge:Storage:Mongo";
-    public const string LegacySectionName = "NodalMerge:Storage:Mongo";
 
     public static MongoNodeStorageOptions FromConfiguration(IConfiguration? configuration)
     {
-        var section = ConfigurationKeyFallback.GetSection(configuration, SectionName, LegacySectionName);
+        var section = configuration?.GetSection(SectionName);
         return new MongoNodeStorageOptions(
             section?["ConnectionString"] ?? string.Empty,
             section?["DatabaseName"] ?? "nodalmerge"

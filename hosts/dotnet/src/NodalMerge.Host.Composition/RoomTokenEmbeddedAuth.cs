@@ -207,13 +207,13 @@ internal static partial class RoomTokenNative
         public nuint Len;
     }
 
-    [DllImport(LibraryName, EntryPoint = "as_room_token_mint_json")]
+    [DllImport(LibraryName, EntryPoint = "nm_room_token_mint_json")]
     private static extern uint AsRoomTokenMintJson(BytesView request, out BytesOwned outJson);
 
-    [DllImport(LibraryName, EntryPoint = "as_room_token_validate_json")]
+    [DllImport(LibraryName, EntryPoint = "nm_room_token_validate_json")]
     private static extern uint AsRoomTokenValidateJson(BytesView request, out BytesOwned outJson);
 
-    [DllImport(LibraryName, EntryPoint = "as_bytes_owned_free")]
+    [DllImport(LibraryName, EntryPoint = "nm_bytes_owned_free")]
     private static extern void AsBytesOwnedFree(BytesOwned bytes);
 
     internal delegate uint JsonCall(BytesView request, out BytesOwned outJson);

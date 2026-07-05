@@ -10,29 +10,16 @@ namespace NodalMerge.DotNetHost.Runtime;
 public sealed class RuntimeWebSocketLoopRunner
 {
     private static readonly Meter RuntimeWsMeter = new("NodalMerge.DotNetHost.RuntimeWs", "1.0.0");
-    private static readonly Meter LegacyRuntimeWsMeter = new("NodalMerge.DotNetHost.RuntimeWs", "1.0.0");
     private static readonly Counter<long> RuntimeWsConnectionsOpenedCounter = RuntimeWsMeter.CreateCounter<long>(
-        "runtime_ws_connections_opened_total"
-    );
-    private static readonly Counter<long> LegacyRuntimeWsConnectionsOpenedCounter = LegacyRuntimeWsMeter.CreateCounter<long>(
         "runtime_ws_connections_opened_total"
     );
     private static readonly Counter<long> RuntimeWsConnectionsClosedCounter = RuntimeWsMeter.CreateCounter<long>(
         "runtime_ws_connections_closed_total"
     );
-    private static readonly Counter<long> LegacyRuntimeWsConnectionsClosedCounter = LegacyRuntimeWsMeter.CreateCounter<long>(
-        "runtime_ws_connections_closed_total"
-    );
     private static readonly Counter<long> RuntimeWsInboundMessagesCounter = RuntimeWsMeter.CreateCounter<long>(
         "runtime_ws_inbound_messages_total"
     );
-    private static readonly Counter<long> LegacyRuntimeWsInboundMessagesCounter = LegacyRuntimeWsMeter.CreateCounter<long>(
-        "runtime_ws_inbound_messages_total"
-    );
     private static readonly Counter<long> RuntimeWsPackRelayCounter = RuntimeWsMeter.CreateCounter<long>(
-        "runtime_ws_pack_relay_total"
-    );
-    private static readonly Counter<long> LegacyRuntimeWsPackRelayCounter = LegacyRuntimeWsMeter.CreateCounter<long>(
         "runtime_ws_pack_relay_total"
     );
 
@@ -85,11 +72,6 @@ public sealed class RuntimeWebSocketLoopRunner
         peerLocalPersistenceService ??= null;
         var connectionTraceId = GetOrCreateTraceId(state);
         RuntimeWsConnectionsOpenedCounter.Add(
-            1,
-            KeyValuePair.Create<string, object?>("session", state.SessionId.ToString()),
-            KeyValuePair.Create<string, object?>("trace", connectionTraceId)
-        );
-        LegacyRuntimeWsConnectionsOpenedCounter.Add(
             1,
             KeyValuePair.Create<string, object?>("session", state.SessionId.ToString()),
             KeyValuePair.Create<string, object?>("trace", connectionTraceId)
@@ -230,12 +212,6 @@ public sealed class RuntimeWebSocketLoopRunner
                 if (result.MessageType == WebSocketMessageType.Text)
                 {
                     RuntimeWsInboundMessagesCounter.Add(
-                        1,
-                        KeyValuePair.Create<string, object?>("room", state.RoomId ?? inboundRoom ?? "<uninitialized>"),
-                        KeyValuePair.Create<string, object?>("type", inboundType ?? "<parse-error>"),
-                        KeyValuePair.Create<string, object?>("trace", traceId)
-                    );
-                    LegacyRuntimeWsInboundMessagesCounter.Add(
                         1,
                         KeyValuePair.Create<string, object?>("room", state.RoomId ?? inboundRoom ?? "<uninitialized>"),
                         KeyValuePair.Create<string, object?>("type", inboundType ?? "<parse-error>"),
@@ -382,11 +358,6 @@ public sealed class RuntimeWebSocketLoopRunner
                         KeyValuePair.Create<string, object?>("room", state.RoomId),
                         KeyValuePair.Create<string, object?>("trace", traceId)
                     );
-                    LegacyRuntimeWsPackRelayCounter.Add(
-                        1,
-                        KeyValuePair.Create<string, object?>("room", state.RoomId),
-                        KeyValuePair.Create<string, object?>("trace", traceId)
-                    );
                     _logger.LogInformation(
                         "runtime pack relay room={Room} from={Peer} session={Session} trace={Trace}",
                         state.RoomId,
@@ -434,13 +405,6 @@ public sealed class RuntimeWebSocketLoopRunner
                 KeyValuePair.Create<string, object?>("room", state.RoomId ?? "<uninitialized>"),
                 KeyValuePair.Create<string, object?>("trace", GetOrCreateTraceId(state))
             );
-            LegacyRuntimeWsConnectionsClosedCounter.Add(
-                1,
-                KeyValuePair.Create<string, object?>("session", state.SessionId.ToString()),
-                KeyValuePair.Create<string, object?>("room", state.RoomId ?? "<uninitialized>"),
-                KeyValuePair.Create<string, object?>("trace", GetOrCreateTraceId(state))
-            );
-
             if (registeredInRoom)
             {
                 var roomBecameEmpty = roomBroker.Unregister(state);

@@ -9,7 +9,6 @@ public sealed record NodalMergeHostProviderOptions(
 )
 {
     public const string SectionName = "NodalMerge:Providers";
-    public const string LegacySectionName = "NodalMerge:Providers";
 
     public static NodalMergeHostProviderOptions Defaults { get; } =
         new("InMemory", "WsOnly", "Default");
@@ -21,7 +20,7 @@ public sealed record NodalMergeHostProviderOptions(
             return Defaults;
         }
 
-        var section = ConfigurationKeyFallback.GetSection(configuration, SectionName, LegacySectionName);
+        var section = configuration?.GetSection(SectionName);
         if (!section.Exists())
         {
             return Defaults;

@@ -1,8 +1,8 @@
 use nodalmerge_host_core::api::{CommandEnvelope, HostCommand};
 use nodalmerge_host_core::engine::HostEngine;
 use nodalmerge_host_ffi::{
-    as_bytes_owned, as_bytes_owned_free, as_bytes_view, as_host_engine, as_host_engine_free,
-    as_host_engine_new, as_host_submit_command_json, as_status,
+    nm_bytes_owned, nm_bytes_owned_free, nm_bytes_view, nm_host_engine, nm_host_engine_free,
+    nm_host_engine_new, nm_host_submit_command_json, nm_host_status,
 };
 use base64::Engine;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
@@ -86,29 +86,29 @@ fn seed_host_engine(engine: &mut HostEngine) {
     }
 }
 
-fn submit_json(engine: *mut as_host_engine, payload: &[u8]) -> (as_status, usize) {
-    let view = as_bytes_view {
+fn submit_json(engine: *mut nm_host_engine, payload: &[u8]) -> (nm_host_status, usize) {
+    let view = nm_bytes_view {
         ptr: payload.as_ptr(),
         len: payload.len(),
     };
-    let mut out = as_bytes_owned {
+    let mut out = nm_bytes_owned {
         ptr: ptr::null_mut(),
         len: 0,
     };
 
     let status = unsafe {
-        // SAFETY: engine pointer is created by as_host_engine_new and remains valid
+        // SAFETY: engine pointer is created by nm_host_engine_new and remains valid
         // for the life of the benchmark state. payload points to immutable bytes
         // valid for this call, and out points to stack storage owned by this frame.
-        as_host_submit_command_json(engine, view, &mut out)
+        nm_host_submit_command_json(engine, view, &mut out)
     };
 
     let out_len = out.len;
 
     if !out.ptr.is_null() && out_len > 0 {
         unsafe {
-            // SAFETY: ownership of out is returned by as_host_submit_command_json.
-            as_bytes_owned_free(out)
+            // SAFETY: ownership of out is returned by nm_host_submit_command_json.
+            nm_bytes_owned_free(out)
         };
     }
 
@@ -116,7 +116,7 @@ fn submit_json(engine: *mut as_host_engine, payload: &[u8]) -> (as_status, usize
 }
 
 struct FfiBenchState {
-    engine: *mut as_host_engine,
+    engine: *mut nm_host_engine,
     noop: Vec<u8>,
     map_set: Vec<u8>,
     request_server_pack: Vec<u8>,
@@ -128,16 +128,16 @@ impl FfiBenchState {
         let mut engine = ptr::null_mut();
         let status = unsafe {
             // SAFETY: passing a valid pointer to receive the engine handle.
-            as_host_engine_new(&mut engine)
+            nm_host_engine_new(&mut engine)
         };
-        assert_eq!(status, as_status::AS_OK, "as_host_engine_new must succeed");
+        assert_eq!(status, nm_host_status::NM_HOST_OK, "nm_host_engine_new must succeed");
         assert!(!engine.is_null(), "engine handle must be non-null");
 
         let ensure_room = ensure_room_json_bytes();
         let (ensure_status, _) = submit_json(engine, &ensure_room);
         assert_eq!(
             ensure_status,
-            as_status::AS_OK,
+            nm_host_status::NM_HOST_OK,
             "ensure room must succeed for ffi benchmark state"
         );
 
@@ -150,7 +150,7 @@ impl FfiBenchState {
                 }
             }));
             let (seed_status, _) = submit_json(engine, &seed_cmd);
-            assert_eq!(seed_status, as_status::AS_OK, "seed map set must succeed");
+            assert_eq!(seed_status, nm_host_status::NM_HOST_OK, "seed map set must succeed");
         }
 
         Self {
@@ -170,8 +170,8 @@ impl Drop for FfiBenchState {
         }
 
         let _ = unsafe {
-            // SAFETY: engine was allocated by as_host_engine_new and is freed once here.
-            as_host_engine_free(self.engine)
+            // SAFETY: engine was allocated by nm_host_engine_new and is freed once here.
+            nm_host_engine_free(self.engine)
         };
         self.engine = ptr::null_mut();
     }
@@ -244,7 +244,7 @@ fn bench_ffi_json(c: &mut Criterion) {
     c.bench_function("ffi_submit_json_noop", |b| {
         b.iter(|| {
             let (status, out_len) = submit_json(state.engine, &state.noop);
-            assert_eq!(status, as_status::AS_OK, "noop ffi submit should succeed");
+            assert_eq!(status, nm_host_status::NM_HOST_OK, "noop ffi submit should succeed");
             black_box(out_len)
         })
     });
@@ -252,7 +252,7 @@ fn bench_ffi_json(c: &mut Criterion) {
     c.bench_function("ffi_submit_json_map_set", |b| {
         b.iter(|| {
             let (status, out_len) = submit_json(state.engine, &state.map_set);
-            assert_eq!(status, as_status::AS_OK, "map set ffi submit should succeed");
+            assert_eq!(status, nm_host_status::NM_HOST_OK, "map set ffi submit should succeed");
             black_box(out_len)
         })
     });
@@ -262,7 +262,7 @@ fn bench_ffi_json(c: &mut Criterion) {
             let (status, out_len) = submit_json(state.engine, &state.request_server_pack);
             assert_eq!(
                 status,
-                as_status::AS_OK,
+                nm_host_status::NM_HOST_OK,
                 "request server pack ffi submit should succeed"
             );
             black_box(out_len)
@@ -272,7 +272,7 @@ fn bench_ffi_json(c: &mut Criterion) {
     c.bench_function("ffi_submit_json_blob_set_50kb", |b| {
         b.iter(|| {
             let (status, out_len) = submit_json(state.engine, &state.blob_set_50kb);
-            assert_eq!(status, as_status::AS_OK, "blob set ffi submit should succeed");
+            assert_eq!(status, nm_host_status::NM_HOST_OK, "blob set ffi submit should succeed");
             black_box(out_len)
         })
     });

@@ -1,6 +1,6 @@
-# activesync-host-axum
+# nodalmerge-host-axum
 
-Paper-thin Axum adapter for embedding the ActiveSync host runtime.
+Paper-thin Axum adapter for embedding the NodalMerge host runtime.
 
 ## Design Goal
 
@@ -22,7 +22,7 @@ This crate only provides room/state wiring and route registration.
 ## Example
 
 ```rust
-use activesync_host_axum::{
+use nodalmerge_host_axum::{
     HostAxumConfig,
     load_or_generate_server_key,
     create_in_memory_rooms,

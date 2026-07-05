@@ -4,19 +4,19 @@
 //! must validate through the C ABI (what the .NET provider does).
 
 use nodalmerge_host_ffi::{
-    as_bytes_owned, as_bytes_view, as_room_token_mint_json, as_room_token_validate_json, as_status,
+    nm_bytes_owned, nm_bytes_view, nm_room_token_mint_json, nm_room_token_validate_json, nm_host_status,
 };
 
 fn call_json(
-    f: unsafe extern "C" fn(as_bytes_view, *mut as_bytes_owned) -> as_status,
+    f: unsafe extern "C" fn(nm_bytes_view, *mut nm_bytes_owned) -> nm_host_status,
     request: &serde_json::Value,
-) -> (as_status, Option<serde_json::Value>) {
+) -> (nm_host_status, Option<serde_json::Value>) {
     let body = serde_json::to_vec(request).unwrap();
-    let view = as_bytes_view {
+    let view = nm_bytes_view {
         ptr: body.as_ptr(),
         len: body.len(),
     };
-    let mut out = as_bytes_owned {
+    let mut out = nm_bytes_owned {
         ptr: std::ptr::null_mut(),
         len: 0,
     };
@@ -25,7 +25,7 @@ fn call_json(
         None
     } else {
         let bytes = unsafe { std::slice::from_raw_parts(out.ptr, out.len) }.to_vec();
-        unsafe { nodalmerge_host_ffi::as_bytes_owned_free(out) };
+        unsafe { nodalmerge_host_ffi::nm_bytes_owned_free(out) };
         Some(serde_json::from_slice(&bytes).unwrap())
     };
     (status, parsed)
@@ -48,7 +48,7 @@ fn peer_pubkey_hex(seed: u8) -> String {
 #[test]
 fn ffi_minted_token_verifies_via_core_directly() {
     let (status, token) = call_json(
-        as_room_token_mint_json,
+        nm_room_token_mint_json,
         &serde_json::json!({
             "room_id": "interop-room",
             "room_signing_key_hex": seed_hex(0x11),
@@ -57,7 +57,7 @@ fn ffi_minted_token_verifies_via_core_directly() {
             "capabilities": ["write:intent/**", "read:world/**"]
         }),
     );
-    assert_eq!(status, as_status::AS_OK);
+    assert_eq!(status, nm_host_status::NM_HOST_OK);
     let token = token.unwrap();
 
     // Verify exactly the way the Rust server does at hello.
@@ -99,7 +99,7 @@ fn core_minted_token_validates_via_ffi() {
     let token = nodalmerge_core::RoomToken::sign("interop-room", &peer, u64::MAX, &caps, &room_key);
 
     let (status, result) = call_json(
-        as_room_token_validate_json,
+        nm_room_token_validate_json,
         &serde_json::json!({
             "room_id": "interop-room",
             "room_pubkey_hex": hex(&room_key.verifying_key().to_bytes()),
@@ -110,7 +110,7 @@ fn core_minted_token_validates_via_ffi() {
             "now_unix_secs": 0
         }),
     );
-    assert_eq!(status, as_status::AS_OK);
+    assert_eq!(status, nm_host_status::NM_HOST_OK);
     let result = result.unwrap();
     assert_eq!(result["valid"], true, "reason: {:?}", result["reason"]);
 }
@@ -120,7 +120,7 @@ fn validate_rejects_tamper_expiry_and_wrong_room() {
     let room_key_hex = seed_hex(0x55);
     let peer_hex = peer_pubkey_hex(0x66);
     let (status, token) = call_json(
-        as_room_token_mint_json,
+        nm_room_token_mint_json,
         &serde_json::json!({
             "room_id": "room-a",
             "room_signing_key_hex": room_key_hex,
@@ -129,7 +129,7 @@ fn validate_rejects_tamper_expiry_and_wrong_room() {
             "capabilities": ["read:world/**"]
         }),
     );
-    assert_eq!(status, as_status::AS_OK);
+    assert_eq!(status, nm_host_status::NM_HOST_OK);
     let token = token.unwrap();
     let sig = token["sig"].as_str().unwrap();
 
@@ -144,28 +144,28 @@ fn validate_rejects_tamper_expiry_and_wrong_room() {
     });
 
     // Valid as-is (validating via signing key instead of pubkey also works).
-    let (s, r) = call_json(as_room_token_validate_json, &base);
-    assert_eq!(s, as_status::AS_OK);
+    let (s, r) = call_json(nm_room_token_validate_json, &base);
+    assert_eq!(s, nm_host_status::NM_HOST_OK);
     assert_eq!(r.unwrap()["valid"], true);
 
     // Capability tampering breaks the signature.
     let mut tampered = base.clone();
     tampered["capabilities"] = serde_json::json!(["write:world/**"]);
-    let (s, r) = call_json(as_room_token_validate_json, &tampered);
-    assert_eq!(s, as_status::AS_OK);
+    let (s, r) = call_json(nm_room_token_validate_json, &tampered);
+    assert_eq!(s, nm_host_status::NM_HOST_OK);
     assert_eq!(r.unwrap()["valid"], false);
 
     // Expired.
     let mut expired = base.clone();
     expired["now_unix_secs"] = serde_json::json!(100);
-    let (s, r) = call_json(as_room_token_validate_json, &expired);
-    assert_eq!(s, as_status::AS_OK);
+    let (s, r) = call_json(nm_room_token_validate_json, &expired);
+    assert_eq!(s, nm_host_status::NM_HOST_OK);
     assert_eq!(r.unwrap()["valid"], false);
 
     // Wrong room.
     let mut wrong_room = base.clone();
     wrong_room["room_id"] = serde_json::json!("room-b");
-    let (s, r) = call_json(as_room_token_validate_json, &wrong_room);
-    assert_eq!(s, as_status::AS_OK);
+    let (s, r) = call_json(nm_room_token_validate_json, &wrong_room);
+    assert_eq!(s, nm_host_status::NM_HOST_OK);
     assert_eq!(r.unwrap()["valid"], false);
 }

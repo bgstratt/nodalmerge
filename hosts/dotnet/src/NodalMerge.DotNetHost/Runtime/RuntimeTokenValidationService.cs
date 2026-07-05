@@ -9,11 +9,7 @@ namespace NodalMerge.DotNetHost.Runtime;
 public sealed class RuntimeTokenValidationService
 {
     private static readonly Meter RuntimeAuthMeter = new("NodalMerge.DotNetHost.RuntimeAuth", "1.0.0");
-    private static readonly Meter LegacyRuntimeAuthMeter = new("NodalMerge.DotNetHost.RuntimeAuth", "1.0.0");
     private static readonly Counter<long> RuntimeAuthValidationCounter = RuntimeAuthMeter.CreateCounter<long>(
-        "runtime_auth_validation_total"
-    );
-    private static readonly Counter<long> LegacyRuntimeAuthValidationCounter = LegacyRuntimeAuthMeter.CreateCounter<long>(
         "runtime_auth_validation_total"
     );
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -49,25 +45,12 @@ public sealed class RuntimeTokenValidationService
                 KeyValuePair.Create<string, object?>("room", state.RoomId ?? "<none>"),
                 KeyValuePair.Create<string, object?>("trace", stateTraceId)
             );
-            LegacyRuntimeAuthValidationCounter.Add(
-                1,
-                KeyValuePair.Create<string, object?>("outcome", "skipped"),
-                KeyValuePair.Create<string, object?>("room", state.RoomId ?? "<none>"),
-                KeyValuePair.Create<string, object?>("trace", stateTraceId)
-            );
             return RuntimeTokenValidationOutcome.AllowedResult;
         }
 
         if (requestResult.Request is null)
         {
             RuntimeAuthValidationCounter.Add(
-                1,
-                KeyValuePair.Create<string, object?>("outcome", "denied"),
-                KeyValuePair.Create<string, object?>("reason", requestResult.ErrorMessage ?? "invalid token"),
-                KeyValuePair.Create<string, object?>("room", state.RoomId ?? "<none>"),
-                KeyValuePair.Create<string, object?>("trace", stateTraceId)
-            );
-            LegacyRuntimeAuthValidationCounter.Add(
                 1,
                 KeyValuePair.Create<string, object?>("outcome", "denied"),
                 KeyValuePair.Create<string, object?>("reason", requestResult.ErrorMessage ?? "invalid token"),
@@ -94,12 +77,6 @@ public sealed class RuntimeTokenValidationService
                 KeyValuePair.Create<string, object?>("room", requestResult.Request.RoomId),
                 KeyValuePair.Create<string, object?>("trace", stateTraceId)
             );
-            LegacyRuntimeAuthValidationCounter.Add(
-                1,
-                KeyValuePair.Create<string, object?>("outcome", "allowed"),
-                KeyValuePair.Create<string, object?>("room", requestResult.Request.RoomId),
-                KeyValuePair.Create<string, object?>("trace", stateTraceId)
-            );
             _logger?.LogDebug(
                 "runtime auth validation outcome=allowed session={SessionId} room={Room} trace={Trace}",
                 state.SessionId,
@@ -113,13 +90,6 @@ public sealed class RuntimeTokenValidationService
             ? "token rejected"
             : $"token rejected: {validation.Reason}";
         RuntimeAuthValidationCounter.Add(
-            1,
-            KeyValuePair.Create<string, object?>("outcome", "denied"),
-            KeyValuePair.Create<string, object?>("reason", validation.Reason ?? "token rejected"),
-            KeyValuePair.Create<string, object?>("room", requestResult.Request.RoomId),
-            KeyValuePair.Create<string, object?>("trace", stateTraceId)
-        );
-        LegacyRuntimeAuthValidationCounter.Add(
             1,
             KeyValuePair.Create<string, object?>("outcome", "denied"),
             KeyValuePair.Create<string, object?>("reason", validation.Reason ?? "token rejected"),

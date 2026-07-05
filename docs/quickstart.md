@@ -1,4 +1,4 @@
-# ActiveSync Quickstart
+# NodalMerge Quickstart
 
 A 10-minute, end-to-end walkthrough: stand up a server, connect a browser
 client, and understand the three data types (Map, Text, Blob). For the full
@@ -11,7 +11,7 @@ API reference see [sdk.md](sdk.md); for deployment see
 
 ```bash
 # Native (from the repo root)
-cargo run -p activesync-server -- \
+cargo run -p nodalmerge-server -- \
   --store ./data \
   --metrics-addr 127.0.0.1:9090 \
   --idle-timeout 300
@@ -36,7 +36,7 @@ What each flag does:
 | `--blob-gc-interval <secs>` | `0` | Periodic blob GC sweep (G4). `0` disables. |
 | `--blob-gc-grace <secs>` | `86400` | Tombstone grace before a blob is deleted. |
 
-The server logs `ActiveSync server listening on ws://127.0.0.1:7878/ws/<room>`
+The server logs `NodalMerge server listening on ws://127.0.0.1:7878/ws/<room>`
 once ready. Hit `http://127.0.0.1:9090/metrics` for Prometheus scrape.
 
 ---
@@ -74,7 +74,7 @@ localStorage.setItem('seed', bytesToHex(doc.authorSeed));
 
 ## 3. Pick the right data type
 
-ActiveSync ships **three** primitives. Use the one whose merge semantics match
+NodalMerge ships **three** primitives. Use the one whose merge semantics match
 your data shape — you cannot change this per-key later.
 
 ### Map — LWW key/value store (objects, configs, references)
@@ -236,13 +236,13 @@ Use this when you need replay verification to match policy-at-time behavior.
 Replay with timeline from a JSON file:
 
 ```bash
-activesync-server replay ./pack.b64 --policy-timeline ./timeline.json
+nodalmerge-server replay ./pack.b64 --policy-timeline ./timeline.json
 ```
 
 Replay with inline timeline JSON:
 
 ```bash
-activesync-server replay ./pack.b64 --policy-timeline-json '[{"effective_lamport":2,"policy":{"rules":[{"path_glob":"protected/**","can_write":[[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]],"can_read":[],"can_derive":[]}],"default":"DenyAll"}}]'
+nodalmerge-server replay ./pack.b64 --policy-timeline-json '[{"effective_lamport":2,"policy":{"rules":[{"path_glob":"protected/**","can_write":[[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]],"can_read":[],"can_derive":[]}],"default":"DenyAll"}}]'
 ```
 
 Supported payload shapes:

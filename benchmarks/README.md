@@ -4,25 +4,25 @@ For a drift-aware interpretation playbook with go/no-go thresholds and a concret
 
 This folder provides a simple websocket round-trip benchmark harness for:
 
-1. rust-combined-server (`activesync-server`)
-2. rust-integrated-hosted-server (`activesync-dev-server`, optional, Mongo-backed)
-3. dotnet-host-runtime (`ActiveSync.DotNetHost`)
+1. rust-combined-server (`nodalmerge-server`)
+2. rust-integrated-hosted-server (`nodalmerge-dev-server`, optional, Mongo-backed)
+3. dotnet-host-runtime (`NodalMerge.DotNetHost`)
 
 ## Does the combined integrated Rust server still exist?
 
-Yes. The combined server is still present as `activesync-server`.
+Yes. The combined server is still present as `nodalmerge-server`.
 
 Evidence:
 
-1. `server/Cargo.toml` depends on both `activesync-core` and `activesync-host-core`.
+1. `server/Cargo.toml` depends on both `nodalmerge-core` and `nodalmerge-host-core`.
 2. The binary entrypoint remains `server/src/main.rs`.
 
 ## What is benchmarked?
 
 The harness measures websocket connect plus first-response latency using protocol-aware probes:
 
-1. rust targets (`activesync-server`, `activesync-dev-server`): connect, send `hello`, wait for first response (typically `welcome`)
-2. dotnet target (`ActiveSync.DotNetHost`): connect, send `hello`, send `noop`, wait for first response (typically `noop-ack`)
+1. rust targets (`nodalmerge-server`, `nodalmerge-dev-server`): connect, send `hello`, wait for first response (typically `welcome`)
+2. dotnet target (`NodalMerge.DotNetHost`): connect, send `hello`, send `noop`, wait for first response (typically `noop-ack`)
 3. each iteration uses a unique synthetic pubkey to avoid duplicate-peer churn effects
 4. record elapsed milliseconds
 

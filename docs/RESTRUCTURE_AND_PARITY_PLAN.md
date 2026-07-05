@@ -6,7 +6,7 @@ Status: **mechanical phase (M1–M5) complete** on branch `restructure-m1`;
 parity tests are registry-driven, `ws_command_name` gives compile-time
 exhaustiveness over `HostCommand`.
 **S2 (ed25519 auth via FFI) complete** on branch `s2-roomtoken-ffi`
-(2026-07-05): `as_room_token_mint_json`/`as_room_token_validate_json` in
+(2026-07-05): `nm_room_token_mint_json`/`nm_room_token_validate_json` in
 host-ffi expose `nodalmerge_core::RoomToken` (no jwt-bridge dependency
 needed — mint/verify live in core); new config-gated
 `Auth:Provider = "RoomTokenEmbedded"` provider in Host.Composition with its
@@ -185,9 +185,9 @@ Notes:
   live next to what they wrap (`engine/`, `peer/`).
 - Directory names ≠ crate names. Crate names are unchanged; only
   `Cargo.toml` `members` and `path =` deps update.
-- npm compat wrappers point the "wrong" way (nodalmerge-* wrapping
-  activesync-*); resolve direction or delete when compat window closes —
-  tracked as an open decision (§7).
+- npm compat wrappers were deleted with `compat/` in the 2026-07-05
+  activesync purge; `clients/sdk-js` and `clients/bridge-wasm/pkg` are the
+  only published npm packages.
 
 ## 5. Mechanical migration (phases M1–M5)
 
@@ -327,16 +327,18 @@ real requirement or a nice-to-have? (Open decision, §7.)
 
 ## 7. Open decisions
 
-1. npm wrapper direction (`nodalmerge-*` wraps `activesync-*` — backwards
-   vs. the Rust wrappers). Resolve or delete with compat/.
+1. ~~npm wrapper direction~~ Resolved 2026-07-05: `compat/` (Rust re-export
+   crates and both npm wrappers) deleted outright in the activesync purge.
 2. ~~Is cross-runtime persistence interop actually required?~~ Decided
    2026-07-05: yes in direction — the schemas diverged inadvertently while
    standing up the .NET host for SpeechSlate/Studio/demos; converge to one
    canonical schema unless a concrete reason to differ emerges. Which
    schema wins (richer .NET `accepted_nodes` vs Rust compound-`_id`+seq)
    is the remaining S5 design question.
-3. When does the activesync compat window close (deletes `compat/` and the
-   dual metric meters in the .NET host)?
+3. ~~When does the activesync compat window close?~~ Closed 2026-07-05:
+   `compat/` deleted, env vars renamed, `as_*` C ABI renamed to `nm_*`,
+   dual/legacy metric emission removed in both the .NET host and
+   `nodalmerge-server`, docs swept.
 4. Whether `nodalmerge-server`'s core sync path ever migrates onto
    `host-core` — revisit only after S4, with benchmarks.
 
@@ -354,7 +356,7 @@ gaps found after S5, with disposition:
 | CAPCOMP dual implementation (Rust `capability_profile.rs` vs .NET `CapabilityProfileExpander`) with no parity coverage | Open — highest-value next parity target; fits the shared-vectors pattern (registry-style data file both runtimes assert against) |
 | No JS/SDK-side parity coverage since Check-SdkRejectionParity died with the doc cleanup | Open — lower stakes (clients, not authorities); scope after CAPCOMP |
 | Blob storage layout parity unaudited (Rust file/S3 layout vs .NET FileBlobStoreProvider/S3Delegated) | Open — audit-sized, not build-sized; needed before any cross-runtime blob sharing claim |
-| `activesync-*` naming still live (compat/ crates, npm direction inconsistency, legacy metric meters, NODALMERGE_* env vars, ARCHITECTURE.md) | Open — next quick win per 2026-07-05 decision: purge activesync naming entirely |
+| `activesync-*` naming still live (compat/ crates, npm direction inconsistency, legacy metric meters, NODALMERGE_* env vars, ARCHITECTURE.md) | **Fixed** (activesync-purge, 2026-07-05): compat/ deleted; env vars renamed; `as_*` ABI → `nm_*`; legacy dual meters removed (.NET host + Rust server were double-counting after a blanket rename); docs/ARCHITECTURE.md rewritten |
 | Consumer validation (Studio/demos on repacked NuGets) | Open — gates merge to main |
 
 ## 9. Session-verified facts this plan relies on

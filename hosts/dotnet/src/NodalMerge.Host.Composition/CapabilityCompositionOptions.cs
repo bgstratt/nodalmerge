@@ -8,11 +8,10 @@ public sealed record CapabilityCompositionOptions(
 )
 {
     public const string SectionName = "NodalMerge:Auth:CapabilityComposition";
-    public const string LegacySectionName = "NodalMerge:Auth:CapabilityComposition";
 
     public static CapabilityCompositionOptions FromConfiguration(IConfiguration? configuration)
     {
-        var section = ConfigurationKeyFallback.GetSection(configuration, SectionName, LegacySectionName);
+        var section = configuration?.GetSection(SectionName);
         var enabled = bool.TryParse(section?["Enabled"], out var parsedEnabled) && parsedEnabled;
 
         return new CapabilityCompositionOptions(

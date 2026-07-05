@@ -161,8 +161,6 @@ impl Room {
         if plan.gauge_update == PeerCountGaugeUpdate::Increment {
             metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone())
                 .increment(1.0);
-            metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone())
-                .increment(1.0);
         }
         plan.gauge_update
     }
@@ -193,8 +191,6 @@ impl Room {
             *self.idle_since.lock().expect("idle_since poisoned") = Some(Instant::now());
         }
         if plan.gauge_update == PeerCountGaugeUpdate::Decrement {
-            metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone())
-                .decrement(1.0);
             metrics::gauge!("nodalmerge_peers_total", "room" => self.room_id.clone())
                 .decrement(1.0);
         }
@@ -450,7 +446,6 @@ impl Rooms {
             .clone();
         if created {
             metrics::gauge!("nodalmerge_rooms_total").increment(1.0);
-            metrics::gauge!("nodalmerge_rooms_total").increment(1.0);
             // Spawn background hydration so the WebSocket handshake doesn't
             // block on potentially slow persistence I/O (e.g. Mongo).
             let room_clone = Arc::clone(&room);
@@ -582,8 +577,6 @@ impl Rooms {
                             // stray broadcast subscriber) drops naturally.
                 evicted.push(id);
                 metrics::counter!("nodalmerge_eviction_total").increment(1);
-                metrics::counter!("nodalmerge_eviction_total").increment(1);
-                metrics::gauge!("nodalmerge_rooms_total").decrement(1.0);
                 metrics::gauge!("nodalmerge_rooms_total").decrement(1.0);
             }
         }
@@ -598,7 +591,7 @@ impl Rooms {
     /// their blob to catching-up peers) and calls
     /// [`ServerPersistence::blob_gc_sweep`] with the caller's grace
     /// window. Aggregates the total number of deleted blobs for logging
-    /// and bumps `nodalmerge_blob_gc_deleted_total{room}` (plus legacy alias) per room.
+    /// and bumps `nodalmerge_blob_gc_deleted_total{room}` per room.
     ///
     /// Rooms that are persisted on disk but not currently loaded are
     /// **not** swept — they will be covered the next time they hydrate
@@ -630,19 +623,11 @@ impl Rooms {
                 Ok(delta) => {
                     metrics::counter!("nodalmerge_gc_runs_total", "mode" => "mark-only", "status" => "ok")
                         .increment(1);
-                    metrics::counter!("nodalmerge_gc_runs_total", "mode" => "mark-only", "status" => "ok")
-                        .increment(1);
-                    metrics::counter!("nodalmerge_gc_marked_total", "room" => id.clone())
-                        .increment(delta.marked_count);
                     metrics::counter!("nodalmerge_gc_marked_total", "room" => id.clone())
                         .increment(delta.marked_count);
                 }
                 Err(e) => {
                     metrics::counter!("nodalmerge_gc_runs_total", "mode" => "mark-only", "status" => "error")
-                        .increment(1);
-                    metrics::counter!("nodalmerge_gc_runs_total", "mode" => "mark-only", "status" => "error")
-                        .increment(1);
-                    metrics::counter!("nodalmerge_gc_error_total", "room" => id.clone())
                         .increment(1);
                     metrics::counter!("nodalmerge_gc_error_total", "room" => id.clone())
                         .increment(1);
@@ -652,8 +637,6 @@ impl Rooms {
 
             let deleted = self.persistence.blob_gc_sweep(&id, &live, grace);
             if deleted > 0 {
-                metrics::counter!("nodalmerge_blob_gc_deleted_total", "room" => id.clone())
-                    .increment(deleted as u64);
                 metrics::counter!("nodalmerge_blob_gc_deleted_total", "room" => id.clone())
                     .increment(deleted as u64);
                 tracing::info!(room = %id, deleted, "blob GC reclaimed blobs");
@@ -893,19 +876,9 @@ pub async fn import_nodes(
                         "reason" => "ceiling"
                     )
                     .increment(1);
-                    metrics::counter!(
-                        "nodalmerge_lamport_rejected_total",
-                        "reason" => "ceiling"
-                    )
-                    .increment(1);
                     errors.push(e.to_string());
                 }
                 e @ nodalmerge_core::SyncError::WallClockSkew { .. } => {
-                    metrics::counter!(
-                        "nodalmerge_lamport_rejected_total",
-                        "reason" => "wall_skew"
-                    )
-                    .increment(1);
                     metrics::counter!(
                         "nodalmerge_lamport_rejected_total",
                         "reason" => "wall_skew"
@@ -948,10 +921,7 @@ pub async fn import_nodes(
     }
 
     metrics::histogram!("nodalmerge_merge_batch_seconds").record(t0.elapsed().as_secs_f64());
-    metrics::histogram!("nodalmerge_merge_batch_seconds").record(t0.elapsed().as_secs_f64());
     if accepted > 0 {
-        metrics::counter!("nodalmerge_nodes_accepted_total", "room" => room.room_id.clone())
-            .increment(accepted as u64);
         metrics::counter!("nodalmerge_nodes_accepted_total", "room" => room.room_id.clone())
             .increment(accepted as u64);
     }
@@ -976,11 +946,6 @@ pub async fn import_nodes(
         let resident = node_count
             .saturating_mul(NODE_EST_BYTES)
             .saturating_add(blob_bytes);
-        metrics::gauge!(
-            "nodalmerge_room_bytes_resident",
-            "room" => room.room_id.clone()
-        )
-        .set(resident as f64);
         metrics::gauge!(
             "nodalmerge_room_bytes_resident",
             "room" => room.room_id.clone()
@@ -1131,8 +1096,6 @@ pub fn spawn_snapshot_sweeper(
                 .to_string();
                 let _ = room.tx.send(msg);
 
-                metrics::counter!("nodalmerge_snapshot_total", "kind" => kind, "room" => room_id.clone())
-                    .increment(1);
                 metrics::counter!("nodalmerge_snapshot_total", "kind" => kind, "room" => room_id.clone())
                     .increment(1);
                 tracing::info!(

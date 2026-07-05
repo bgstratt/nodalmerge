@@ -402,8 +402,6 @@ impl NodePersistence for DirPersistence {
         let elapsed = t0.elapsed().as_secs_f64();
         metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "node")
             .record(elapsed);
-        metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "node")
-            .record(elapsed);
     }
 
     fn persist_nodes(&self, room_id: &str, nodes: &[&SyncNode]) {
@@ -468,8 +466,6 @@ impl NodePersistence for DirPersistence {
         let elapsed = t0.elapsed().as_secs_f64();
         metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "nodes_batch")
             .record(elapsed);
-        metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "nodes_batch")
-            .record(elapsed);
     }
 }
 
@@ -526,8 +522,6 @@ impl BlobPersistence for DirPersistence {
             let _ = std::fs::remove_file(&tmp);
         }
         let elapsed = t0.elapsed().as_secs_f64();
-        metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "blob")
-            .record(elapsed);
         metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "blob")
             .record(elapsed);
     }

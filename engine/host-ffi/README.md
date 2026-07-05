@@ -1,6 +1,6 @@
-# activesync-host-ffi
+# nodalmerge-host-ffi
 
-C ABI wrapper for `activesync-host-core`.
+C ABI wrapper for `nodalmerge-host-core`.
 
 ## Scope
 

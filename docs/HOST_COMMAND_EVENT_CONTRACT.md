@@ -2,15 +2,15 @@
 
 Status: Draft freeze candidate (Track B / PR-07)
 
-Purpose: define the host-owned runtime boundary for ActiveSync orchestration using typed commands and events, independent of transport/runtime choice.
+Purpose: define the host-owned runtime boundary for NodalMerge orchestration using typed commands and events, independent of transport/runtime choice.
 
 ## 1. Design constraints
 
 1. Transport-agnostic: no WebSocket framing assumptions in contract payloads.
 2. Runtime-agnostic: no Tokio task handles, async runtime types, or scheduler ownership in contract types.
-3. Deterministic core ownership: CRDT merge/resolve semantics remain in `activesync-core`.
+3. Deterministic core ownership: CRDT merge/resolve semantics remain in `nodalmerge-core`.
 4. Host ownership: socket lifecycle, auth issuance/validation policy, persistence wiring, timers, and process model are host responsibilities.
-5. Compatibility-first migration: `activesync-server` remains a host adapter and reference implementation.
+5. Compatibility-first migration: `nodalmerge-server` remains a host adapter and reference implementation.
 
 ## 2. Core model
 

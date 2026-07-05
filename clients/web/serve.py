@@ -38,12 +38,10 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self) -> None:  # noqa: D401 - stdlib override
-        if self.path.startswith("/__nodalmerge_config.js") or self.path.startswith("/__activesync_config.js"):
+        if self.path.startswith("/__nodalmerge_config.js"):
             env_server = (
                 os.environ.get("NODALMERGE_SERVER_URL")
                 or os.environ.get("NODALMERGE_DEMO_SERVER_URL")
-                or os.environ.get("ACTIVESYNC_SERVER_URL")
-                or os.environ.get("ACTIVESYNC_DEMO_SERVER_URL")
                 or ""
             ).strip()
             payload = {

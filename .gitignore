@@ -55,9 +55,10 @@ sdk-js/doc.d.ts
 
 # Local npm pack artifacts (generated tarballs)
 **/*.tgz
-bridge/pkg/*.tgz
+clients/bridge-wasm/pkg/*.tgz
 sdk-js/*.tgz
 wrappers/**/*.tgz
+compat/**/*.tgz
 artifacts/package-local/npm/*.tgz
 
 # Local test execution logs

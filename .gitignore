@@ -25,6 +25,12 @@ target
 **/obj/
 **/TestResults/
 
+# ...but not Rust's `src/bin/` convention for multiple binaries (e.g.
+# server/src/bin/authz_conformance_runner.rs) — .NET bin/ dirs are always
+# named after their project folder, never literally "src/bin".
+!**/src/bin/
+!**/src/bin/**
+
 # Test dumps and diagnostics
 *.dmp
 *.coverage

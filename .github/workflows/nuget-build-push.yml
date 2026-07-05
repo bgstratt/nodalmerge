@@ -122,14 +122,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo package --package nodalmerge-core --no-verify
-          cargo package --package nodalmerge-gc --no-verify
-          cargo package --package nodalmerge-host-core --no-verify
-          cargo package --package nodalmerge-host-axum --no-verify
-          cargo package --package nodalmerge-host-ffi --no-verify
-          cargo package --package nodalmerge-server --no-verify
-          cargo package --package nodalmerge-jwt-bridge --no-verify
-          cargo package --package nodalmerge-s3-blobs --no-verify
+          # --exclude-lockfile: these crates depend on each other by path within
+          # the workspace, none of which are published yet, so including a
+          # lockfile in the package would force cargo to resolve them against
+          # crates.io and fail with "no matching package named ... found".
+          cargo package --package nodalmerge-core --no-verify --exclude-lockfile
+          cargo package --package nodalmerge-gc --no-verify --exclude-lockfile
+          cargo package --package nodalmerge-host-core --no-verify --exclude-lockfile
+          cargo package --package nodalmerge-host-axum --no-verify --exclude-lockfile
+          cargo package --package nodalmerge-host-ffi --no-verify --exclude-lockfile
+          cargo package --package nodalmerge-server --no-verify --exclude-lockfile
+          cargo package --package nodalmerge-jwt-bridge --no-verify --exclude-lockfile
+          cargo package --package nodalmerge-s3-blobs --no-verify --exclude-lockfile
           mkdir -p "$GITHUB_WORKSPACE/artifacts/crates"
           cp target/package/nodalmerge-*.crate "$GITHUB_WORKSPACE/artifacts/crates/"
 
@@ -267,7 +271,7 @@ jobs:
           fi
 
       - name: Build host ffi release library
-        run: cargo build -p nodalmerge-host-ffi --release
+        run: cargo build -p nodalmerge-host-ffi -p nodalmerge-runtime-local-ffi --release
 
       - name: Restore NodalMerge.DotNetHost.Native.linux-x64
         run: dotnet restore nodalmerge-host/src/NodalMerge.DotNetHost.Native.linux-x64/NodalMerge.DotNetHost.Native.linux-x64.csproj
@@ -309,7 +313,7 @@ jobs:
           }
 
       - name: Build host ffi release library
-        run: cargo build -p nodalmerge-host-ffi --release
+        run: cargo build -p nodalmerge-host-ffi -p nodalmerge-runtime-local-ffi --release
 
       - name: Restore NodalMerge.DotNetHost.Native.win-x64
         run: dotnet restore nodalmerge-host/src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj

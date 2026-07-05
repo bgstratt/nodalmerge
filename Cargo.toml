@@ -5,6 +5,7 @@ members = [
     "core/gc",
     "compat/rust/nodalmerge-gc",
     "engine/host-core",
+    "engine/commands",
     "compat/rust/nodalmerge-host-core",
     "server/axum-embed",
     "compat/rust/nodalmerge-host-axum",

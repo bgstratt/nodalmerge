@@ -23,4 +23,13 @@
     <ProjectReference Include="..\..\src\NodalMerge.DotNetHost\NodalMerge.DotNetHost.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Canonical control-plane command registry; ControlPlaneCapabilityParityTests
+         derives its cases from this so the .NET host is asserted against the
+         same source of truth as the Rust server. -->
+    <None Include="..\..\..\..\engine\commands\registry.json"
+          Link="command-registry.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

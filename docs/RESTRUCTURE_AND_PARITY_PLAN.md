@@ -1,7 +1,10 @@
 # Repository Restructure & Host-Parity Plan
 
-Status: **mechanical phase (M1–M5) complete** on branch `restructure-m1`
-(2026-07-05); structural phase (S1–S5) not started.
+Status: **mechanical phase (M1–M5) complete** on branch `restructure-m1`;
+**S1 (command registry) complete** on branch `s1-command-registry`
+(2026-07-05): `engine/commands/` crate + `registry.json` are live, both
+parity tests are registry-driven, `ws_command_name` gives compile-time
+exhaustiveness over `HostCommand`. S2–S5 not started.
 M5 deviation: root-level ps1 entry points stayed at root (they derive
 repoRoot from their own location; relocation was churn without gain).
 Known pre-existing issue surfaced during M1 verification: `nodalmerge-server`

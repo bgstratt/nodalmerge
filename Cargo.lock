@@ -3077,6 +3077,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodalmerge-command-registry"
+version = "0.1.0"
+dependencies = [
+ "nodalmerge-host-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nodalmerge-core"
 version = "0.1.0"
 dependencies = [
@@ -3292,6 +3301,7 @@ dependencies = [
  "governor",
  "metrics 0.23.1",
  "metrics-exporter-prometheus 0.15.3",
+ "nodalmerge-command-registry",
  "nodalmerge-core",
  "nodalmerge-gc",
  "nodalmerge-host-core",

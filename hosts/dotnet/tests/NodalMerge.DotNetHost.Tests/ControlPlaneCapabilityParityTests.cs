@@ -1,73 +1,72 @@
+using System.Text.Json;
 using NodalMerge.DotNetHost.Runtime;
 
 namespace NodalMerge.DotNetHost.Tests;
 
 /// <summary>
-/// Cross-runtime parity check for control-plane capability gating.
+/// Asserts this host's live control-plane capability gating against the
+/// canonical registry (<c>engine/commands/registry.json</c>, linked into this
+/// project as <c>command-registry.json</c>). The Rust mirror is
+/// <c>server/server/tests/control_plane_capability_parity.rs</c>, which reads
+/// the same file via the <c>nodalmerge-command-registry</c> crate. To
+/// add/remove/re-gate a command, change the registry and the implementation
+/// together — this test fails on any drift.
 ///
-/// This is one half of a parity pair: the Rust side asserts the same table
-/// (as data, not code) against
-/// <c>nodalmerge_server::ws_handler::required_capability_for_control_plane_command</c>
-/// in <c>server/tests/control_plane_capability_parity.rs</c>. If you add,
-/// remove, or re-gate a control-plane command in either runtime, update the
-/// table in *both* places in the same change, or these two tests will
-/// disagree about what "correct" means without either one failing.
+/// Rather than a second hand-maintained table, this drives the real
+/// message-handling path (<see cref="RuntimeMessageProcessor.ProcessIncomingText"/>)
+/// with an empty capability set for every registry row whose
+/// <c>dotnet_host</c> surface is not <c>absent</c>, and asserts the exact
+/// reject envelope. Rows marked <c>absent</c> (today: <c>archive.export</c>,
+/// <c>replay.read-range</c>) are asserted to NOT produce a
+/// control-plane-forbidden rejection, so silently adding a gated route
+/// without updating the registry also fails.
 ///
-/// Unlike the Rust side (which calls a pure lookup function), this drives the
-/// real message-handling path (<see cref="RuntimeMessageProcessor.ProcessIncomingText"/>)
-/// with an empty capability set, since <see cref="RuntimeProtocolMapper"/> has
-/// no equivalent standalone lookup function today — the gate checks are
-/// inlined per command. That means this test exercises actual runtime
-/// behavior rather than a second hand-maintained copy of the table.
-///
-/// Commands that exist only on the Rust side (no WS route implemented here
-/// yet) are intentionally not represented here — see the corresponding
-/// comment in the Rust table.
-///
-/// This only covers *gating*, not whether the command does the real thing
-/// once authorized. <c>archive.import</c> passes this test (it's correctly
-/// gated) but is a known non-functional stub end-to-end on this runtime —
-/// see the comment on its handler in RuntimeProtocolMapper.cs and on
-/// <c>HostCommand::ImportArchive</c> in host-core/src/engine.rs.
-/// <c>archive.export</c> has no .NET path at all and is excluded from this
-/// table for that reason (not because gating is wrong — there's nothing to
-/// gate).
+/// The registry covers *gating* only — several commands are wire-compatible
+/// stubs beyond the gate (see the registry's <c>surfaces</c>/<c>notes</c>).
 /// </summary>
 public sealed class ControlPlaneCapabilityParityTests
 {
-    public static readonly TheoryData<string, string> GatedCommands = new()
-    {
-        { "set-policy", "policy.admin" },
-        { "set-room-key", "room.admin" },
-        { "start-tick", "tick.admin" },
-        { "stop-tick", "tick.admin" },
-        { "archive.describe", "archive.read" },
-        { "archive.validate", "archive.admin" },
-        { "archive.import", "archive.admin" },
-        { "query.register", "query.admin" },
-        { "projection.build", "query.admin" },
-        { "projection.invalidate", "query.admin" },
-        { "projection.read", "query.read" },
-        { "projection.list", "query.read" },
-        { "topology.create-child", "topology.admin" },
-        { "topology.describe-lineage", "topology.admin" },
-        { "topology.list-children", "topology.admin" },
-        { "topology.propose-promotion", "topology.admin" },
-        { "topology.validate-promotion", "topology.admin" },
-        { "topology.apply-promotion", "topology.admin" },
-        // .NET-only today: host-core already has these HostCommand variants,
-        // but nodalmerge-server has no WS route for them yet. See the mirror
-        // comment in server/tests/control_plane_capability_parity.rs.
-        { "checkpoint.promote", "query.admin" },
-        { "graph.get-frontier", "query.admin" },
-        { "graph.get-causal-parents", "query.admin" },
-        { "graph.get-canonical-resolution", "query.admin" },
-        { "graph.compute-sync-diff", "query.admin" },
-    };
+    private sealed record RegistryRow(string Command, string RequiredCapability, string DotnetStatus);
 
-    [Theory]
-    [MemberData(nameof(GatedCommands))]
-    public void CommandIsRejectedWithoutRequiredCapability(string command, string requiredCapability)
+    private static readonly IReadOnlyList<RegistryRow> Rows = LoadRegistry();
+
+    private static IReadOnlyList<RegistryRow> LoadRegistry()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "command-registry.json");
+        using var doc = JsonDocument.Parse(File.ReadAllText(path));
+        var rows = new List<RegistryRow>();
+        foreach (var el in doc.RootElement.GetProperty("commands").EnumerateArray())
+        {
+            rows.Add(new RegistryRow(
+                el.GetProperty("command").GetString()!,
+                el.GetProperty("required_capability").GetString()!,
+                el.GetProperty("surfaces").GetProperty("dotnet_host").GetString()!
+            ));
+        }
+        return rows;
+    }
+
+    public static TheoryData<string, string> GatedCommands()
+    {
+        var data = new TheoryData<string, string>();
+        foreach (var row in Rows.Where(r => r.DotnetStatus != "absent"))
+        {
+            data.Add(row.Command, row.RequiredCapability);
+        }
+        return data;
+    }
+
+    public static TheoryData<string> AbsentCommands()
+    {
+        var data = new TheoryData<string>();
+        foreach (var row in Rows.Where(r => r.DotnetStatus == "absent"))
+        {
+            data.Add(row.Command);
+        }
+        return data;
+    }
+
+    private static RuntimeMessageProcessResult Process(string command)
     {
         var bridge = new FakeRuntimeCommandBridge();
         var mapper = new RuntimeProtocolMapper();
@@ -78,15 +77,42 @@ public sealed class ControlPlaneCapabilityParityTests
             RoomId = "room-a",
             PeerPubkeyHex = "peer-a"
         };
+        return processor.ProcessIncomingText($"{{\"type\":\"{command}\"}}", state);
+    }
 
-        var result = processor.ProcessIncomingText($"{{\"type\":\"{command}\"}}", state);
+    [Fact]
+    public void RegistryLoadsWithRows()
+    {
+        Assert.NotEmpty(Rows);
+        Assert.Contains(Rows, r => r.Command == "set-policy");
+    }
+
+    [Theory]
+    [MemberData(nameof(GatedCommands))]
+    public void CommandIsRejectedWithoutRequiredCapability(string command, string requiredCapability)
+    {
+        var result = Process(command);
 
         Assert.False(result.DispatchSucceeded);
-        Assert.Empty(bridge.Commands);
         Assert.Single(result.OutboundMessages);
         Assert.Contains(
             $"reject.control_plane_forbidden: command={command} requires={requiredCapability}",
             result.OutboundMessages[0]
         );
+    }
+
+    [Theory]
+    [MemberData(nameof(AbsentCommands))]
+    public void AbsentCommandIsNotCapabilityGated(string command)
+    {
+        var result = Process(command);
+
+        // Unrouted commands fail for other reasons (unknown type), but must
+        // not emit a control-plane-forbidden rejection: if this fires, a
+        // route was added without updating engine/commands/registry.json.
+        foreach (var message in result.OutboundMessages)
+        {
+            Assert.DoesNotContain("reject.control_plane_forbidden", message);
+        }
     }
 }

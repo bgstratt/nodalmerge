@@ -4,9 +4,11 @@ name: control-plane-capability-parity
 # placeholder "oracles" (a Rust runner that echoed each vector's own expected
 # result back as "actual", and a .NET step that mapped vector IDs to
 # unrelated pre-existing unit tests) and therefore never caught a real
-# regression. This instead runs two small, real tests — one per runtime —
-# that each independently assert the live control-plane capability-gating
-# behavior against the same canonical table. See:
+# regression. This instead asserts each runtime's live control-plane
+# capability-gating behavior against one canonical registry:
+#   engine/commands/registry.json        (source of truth)
+#   engine/commands/src/lib.rs           (typed access + HostCommand
+#                                         exhaustiveness guard)
 #   server/server/tests/control_plane_capability_parity.rs
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs
 
@@ -14,6 +16,7 @@ on:
   push:
     branches: [main]
     paths:
+      - "engine/commands/**"
       - "server/server/src/ws_handler.rs"
       - "server/server/tests/control_plane_capability_parity.rs"
       - "hosts/dotnet/src/NodalMerge.DotNetHost/Runtime/RuntimeProtocolMapper.cs"
@@ -21,6 +24,7 @@ on:
       - ".github/workflows/control-plane-capability-parity.yml"
   pull_request:
     paths:
+      - "engine/commands/**"
       - "server/server/src/ws_handler.rs"
       - "server/server/tests/control_plane_capability_parity.rs"
       - "hosts/dotnet/src/NodalMerge.DotNetHost/Runtime/RuntimeProtocolMapper.cs"
@@ -44,6 +48,9 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Run registry self-tests (schema, exhaustiveness mapping)
+        run: cargo test -p nodalmerge-command-registry
 
       - name: Run control-plane capability parity test
         run: cargo test -p nodalmerge-server --test control_plane_capability_parity

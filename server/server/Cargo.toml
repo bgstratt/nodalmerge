@@ -31,3 +31,4 @@ governor = "0.7"
 [dev-dependencies]
 tokio-tungstenite = "0.24"
 base64 = "0.22"
+nodalmerge-command-registry = { version = "0.1.0", path = "../../engine/commands" }

@@ -21,3 +21,4 @@ testcontainers = { version = "0.23", features = ["blocking"] }
 tracing-subscriber = "0.3"
 nodalmerge-nodestore-conformance = { path = "../conformance" }
 nodalmerge-core = { path = "../../../core/crdt" }
+ed25519-dalek = { workspace = true }

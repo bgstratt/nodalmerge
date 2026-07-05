@@ -3201,6 +3201,7 @@ dependencies = [
 name = "nodalmerge-mongo-store"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "futures-util",
  "metrics 0.23.1",
  "mongodb",

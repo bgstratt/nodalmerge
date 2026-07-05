@@ -32,9 +32,16 @@ Envelopes match the .NET event mapping. `checkpoint.promote` stays
 rust_server-absent and is marked `scope: deferred` in the registry: the
 server has no Canonical Checkpoint plane, and adding one is an
 architectural decision, not route wiring.
-S5 (persistence schema) not started; direction decided 2026-07-05: the
-schema split was inadvertent drift, converge to one canonical schema
-unless a concrete reason to differ emerges.
+**S5 (persistence schema) complete** on branch `s5-store-schema`
+(2026-07-05): canonical schema is the .NET `accepted_nodes` shape plus the
+Rust idempotency win — deterministic compound `_id` via `$setOnInsert`, so
+legacy ObjectId docs stay valid and no migration is needed. Contract in
+docs/PERSISTENCE_SCHEMA.md. Rust store rewritten to it (seq counter
+retired, multi-node pack hydration, legacy `bytes` fallback); .NET write
+switched from replaceOne to $set/$setOnInsert upsert (read path untouched).
+Verified live against a real Mongo container: full conformance suite +
+cross-runtime interop assertions both directions.
+This closes the structural phase S1–S5.
 M5 deviation: root-level ps1 entry points stayed at root (they derive
 repoRoot from their own location; relocation was churn without gain).
 Known pre-existing issue surfaced during M1 verification: `nodalmerge-server`

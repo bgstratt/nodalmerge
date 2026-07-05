@@ -114,31 +114,37 @@ internal sealed class MongoNodeStoreProvider : INodeStoreProvider
                 Builders<BsonDocument>.Filter.Eq("node_id_hex", node.NodeIdHex)
             );
 
-            var doc = new BsonDocument
-            {
-                ["room_id"] = roomId,
-                ["node_id_hex"] = node.NodeIdHex,
-                ["payload"] = node.Payload,
-                ["payload_kind"] = string.IsNullOrWhiteSpace(node.PayloadKind) ? AcceptedNodeKinds.Pack : node.PayloadKind,
-                ["causal_parent_node_ids"] = node.CausalParentNodeIds is { Count: > 0 }
+            // Canonical cross-runtime write (docs/PERSISTENCE_SCHEMA.md,
+            // shared with the Rust MongoNodeStore): $set the record fields,
+            // $setOnInsert a deterministic compound _id and the original
+            // accepted_at_utc (the hydration sort key must not move on
+            // idempotent re-writes). Legacy documents keep their ObjectId
+            // _id — identity is the unique (room_id, node_id_hex) index
+            // either way.
+            var update = Builders<BsonDocument>.Update
+                .Set("room_id", roomId)
+                .Set("node_id_hex", node.NodeIdHex)
+                .Set("payload", node.Payload)
+                .Set("payload_kind", string.IsNullOrWhiteSpace(node.PayloadKind) ? AcceptedNodeKinds.Pack : node.PayloadKind)
+                .Set("causal_parent_node_ids", node.CausalParentNodeIds is { Count: > 0 }
                     ? new BsonArray(node.CausalParentNodeIds)
-                    : new BsonArray(),
-                ["frontier_hash_hex"] = string.IsNullOrWhiteSpace(node.FrontierHashHex)
+                    : new BsonArray())
+                .Set("frontier_hash_hex", string.IsNullOrWhiteSpace(node.FrontierHashHex)
                     ? BsonNull.Value
-                    : node.FrontierHashHex,
-                ["applied"] = node.Applied,
-                ["is_tombstone"] = node.IsTombstone,
-                ["accepted_at_utc"] = (node.AcceptedAtUtc ?? DateTimeOffset.UtcNow).UtcDateTime,
-                ["eligible_for_compaction_at_utc"] = node.EligibleForCompactionAtUtc is null
+                    : BsonValue.Create(node.FrontierHashHex))
+                .Set("applied", node.Applied)
+                .Set("is_tombstone", node.IsTombstone)
+                .Set("eligible_for_compaction_at_utc", node.EligibleForCompactionAtUtc is null
                     ? BsonNull.Value
-                    : node.EligibleForCompactionAtUtc.Value.UtcDateTime,
-                ["updated_at_utc"] = DateTime.UtcNow
-            };
+                    : BsonValue.Create(node.EligibleForCompactionAtUtc.Value.UtcDateTime))
+                .Set("updated_at_utc", DateTime.UtcNow)
+                .SetOnInsert("_id", $"{roomId}:{node.NodeIdHex}")
+                .SetOnInsert("accepted_at_utc", (node.AcceptedAtUtc ?? DateTimeOffset.UtcNow).UtcDateTime);
 
-            await _acceptedNodes.ReplaceOneAsync(
+            await _acceptedNodes.UpdateOneAsync(
                 filter,
-                doc,
-                new ReplaceOptions { IsUpsert = true },
+                update,
+                new UpdateOptions { IsUpsert = true },
                 cancellationToken
             );
         }

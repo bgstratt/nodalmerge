@@ -1,22 +1,33 @@
 //! F7 — `MongoNodeStore`: a `NodePersistence` adapter backed by MongoDB
 //! (mongodb 3.x async driver).
 //!
-//! Document shape (collection `nodalmerge_nodes`):
+//! # Canonical cross-runtime schema (plan S5)
+//!
+//! This store writes the same `accepted_nodes` document shape as the .NET
+//! host's `MongoNodeStoreProvider` (see docs/PERSISTENCE_SCHEMA.md), so both
+//! runtimes can share one database as a single source of truth:
 //!
 //! ```jsonc
 //! {
-//!   "_id":     "<room_id>:<node_id_hex>",   // compound key, idempotent re-insert
-//!   "room_id": "<room_id>",                 // indexed
-//!   "node_id": <BinData 32>,
-//!   "seq":     <i64 from per-room counter>, // ordered hydration
-//!   "bytes":   <BinData postcard SyncNode>,
-//!   "created_at": <ISODate>
+//!   "_id":          "<room_id>:<node_id_hex>",  // deterministic; set on insert only
+//!   "room_id":      "<room_id>",
+//!   "node_id_hex":  "<64-hex node id>",         // or "pack:<sha256>" for .NET pack records
+//!   "payload":      <BinData postcard pack (1..n nodes)>,
+//!   "payload_kind": "pack",
+//!   "causal_parent_node_ids": ["<hex>", ...],
+//!   "frontier_hash_hex": null | "<hex>",
+//!   "applied":      true,
+//!   "is_tombstone": false,
+//!   "accepted_at_utc": <ISODate>,               // hydration sort key (+ node_id_hex tiebreak)
+//!   "eligible_for_compaction_at_utc": null | <ISODate>,
+//!   "updated_at_utc": <ISODate>
 //! }
 //! ```
 //!
-//! Per-batch sequence allocation uses a counter collection (`nodalmerge_seq`)
-//! with `findOneAndUpdate $inc` — one round trip per `persist_nodes` call,
-//! not per node.
+//! Writes are `updateOne(filter: {room_id, node_id_hex}, {$set: ..,
+//! $setOnInsert: {_id}}, upsert)` — idempotent, and legacy documents written
+//! by earlier versions of either runtime (ObjectId `_id`, or this store's
+//! old `bytes`/`seq` shape) are upgraded in place / still readable.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,7 +50,7 @@ use nodalmerge_core::{pack_nodes, unpack_nodes, SyncNode};
 use nodalmerge_server::store::NodePersistence;
 use mongodb::bson::{self, doc, Binary, DateTime as BsonDateTime, Document};
 use mongodb::error::ErrorKind;
-use mongodb::options::{ClientOptions, FindOneAndUpdateOptions, FindOptions, IndexOptions, ReturnDocument};
+use mongodb::options::{ClientOptions, FindOptions, IndexOptions};
 use mongodb::{Client, Collection, IndexModel};
 use tokio::runtime::Runtime;
 
@@ -59,10 +70,9 @@ pub enum MongoStoreError {
 pub struct MongoNodeStoreConfig {
     pub connection_uri: String,
     pub database: String,
-    /// Default `"nodalmerge_nodes"`.
+    /// Default `"accepted_nodes"` — the canonical cross-runtime collection
+    /// shared with the .NET host (docs/PERSISTENCE_SCHEMA.md).
     pub collection: String,
-    /// Default `"nodalmerge_seq"`.
-    pub seq_collection: String,
 }
 
 impl MongoNodeStoreConfig {
@@ -70,8 +80,7 @@ impl MongoNodeStoreConfig {
         Self {
             connection_uri: connection_uri.into(),
             database: database.into(),
-            collection: "nodalmerge_nodes".into(),
-            seq_collection: "nodalmerge_seq".into(),
+            collection: "accepted_nodes".into(),
         }
     }
 }
@@ -81,7 +90,6 @@ pub struct MongoNodeStore {
     client_id: u64,
     db_name: String,
     collection_name: String,
-    seq_collection_name: String,
     rt: Arc<Runtime>,
 }
 
@@ -103,7 +111,6 @@ impl MongoNodeStore {
         let db_name = cfg.database.clone();
         let collection_name = cfg.collection.clone();
         let collection_name_for_init = collection_name.clone();
-        let seq_collection_name = cfg.seq_collection.clone();
         let connection_uri = cfg.connection_uri.clone();
         let database_for_thread = cfg.database.clone();
 
@@ -150,13 +157,32 @@ impl MongoNodeStore {
                 Err(e) => { tracing::warn!(?e, "Mongo init write failed (init test)"); }
             }
 
-            // Ensure the nodestore index exists.
+            // Ensure the canonical indexes exist — identical names/options to
+            // the .NET MongoNodeStoreProvider so both runtimes can boot
+            // against the same collection without index conflicts.
             let nodes: Collection<Document> = db.collection(&collection_name_for_init);
             nodes
                 .create_index(
                     IndexModel::builder()
-                        .keys(doc! { "room_id": 1i32, "seq": 1i32 })
-                        .options(IndexOptions::builder().name("room_seq".to_string()).build())
+                        .keys(doc! { "room_id": 1i32, "node_id_hex": 1i32 })
+                        .options(
+                            IndexOptions::builder()
+                                .unique(true)
+                                .name("ux_room_node".to_string())
+                                .build(),
+                        )
+                        .build(),
+                )
+                .await?;
+            nodes
+                .create_index(
+                    IndexModel::builder()
+                        .keys(doc! { "room_id": 1i32, "eligible_for_compaction_at_utc": 1i32 })
+                        .options(
+                            IndexOptions::builder()
+                                .name("ix_room_compaction_eligibility".to_string())
+                                .build(),
+                        )
                         .build(),
                 )
                 .await?;
@@ -168,7 +194,7 @@ impl MongoNodeStore {
         static CLIENT_COUNTER: AtomicU64 = AtomicU64::new(1);
         let cid = CLIENT_COUNTER.fetch_add(1, Ordering::Relaxed);
         tracing::info!(client_id = cid, "mongo client stored in MongoNodeStore");
-        Ok(Self { client, client_id: cid, db_name, collection_name, seq_collection_name, rt })
+        Ok(Self { client, client_id: cid, db_name, collection_name, rt })
     }
 
     /// Run a small test write (insert a transient doc) to verify connectivity
@@ -186,28 +212,31 @@ impl MongoNodeStore {
         }
     }
 
-    /// Reserve `count` consecutive sequence numbers for `room_id`. Returns
-    /// the first allocated `seq`; nodes use `first_seq + i`.
-    async fn reserve_seq(
-        seq_coll: &Collection<Document>,
+    /// Idempotent canonical-schema upsert for one node document.
+    /// `$setOnInsert` gives fresh documents the deterministic compound `_id`
+    /// while leaving legacy ObjectId documents (written by earlier .NET
+    /// versions) untouched — the unique `(room_id, node_id_hex)` index is the
+    /// real identity either way.
+    async fn upsert_node_doc(
+        nodes_coll: &Collection<Document>,
         room_id: &str,
-        count: u64,
-    ) -> Result<i64, mongodb::error::Error> {
-        let opts = FindOneAndUpdateOptions::builder()
-            .upsert(true)
-            .return_document(ReturnDocument::After)
-            .build();
-        let updated = seq_coll
-            .find_one_and_update(
-                doc! { "_id": room_id },
-                doc! { "$inc": { "next": count as i64 } },
+        node_id_hex: &str,
+        set_fields: Document,
+    ) -> Result<(), mongodb::error::Error> {
+        nodes_coll
+            .update_one(
+                doc! { "room_id": room_id, "node_id_hex": node_id_hex },
+                doc! {
+                    "$set": set_fields,
+                    "$setOnInsert": {
+                        "_id": doc_id(room_id, node_id_hex),
+                        "accepted_at_utc": BsonDateTime::now(),
+                    },
+                },
             )
-            .with_options(opts)
+            .upsert(true)
             .await?;
-        let after_next = updated
-            .and_then(|d| d.get_i64("next").ok())
-            .unwrap_or(count as i64);
-        Ok(after_next - count as i64)
+        Ok(())
     }
 }
 
@@ -215,21 +244,22 @@ fn doc_id(room_id: &str, node_id_hex: &str) -> String {
     format!("{room_id}:{node_id_hex}")
 }
 
-fn build_doc(
-    room_id: &str,
-    node: &SyncNode,
-    seq: i64,
-    bytes: Vec<u8>,
-) -> Document {
-    let node_id_bytes = node.id.as_bytes().to_vec();
-    let node_id_hex = node.id.to_hex();
+/// Canonical `$set` fields for a single-node record (docs/PERSISTENCE_SCHEMA.md).
+/// `accepted_at_utc` is set on insert only (it's the hydration sort key and
+/// must not move on idempotent re-writes); `updated_at_utc` always advances.
+fn build_set_fields(room_id: &str, node: &SyncNode, payload: Vec<u8>) -> Document {
+    let parents: Vec<String> = node.transaction.parents.iter().map(|h| h.to_hex()).collect();
     doc! {
-        "_id":     doc_id(room_id, &node_id_hex),
         "room_id": room_id,
-        "node_id": Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: node_id_bytes },
-        "seq":     seq,
-        "bytes":   Binary { subtype: bson::spec::BinarySubtype::Generic, bytes },
-        "created_at": BsonDateTime::now(),
+        "node_id_hex": node.id.to_hex(),
+        "payload": Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: payload },
+        "payload_kind": "pack",
+        "causal_parent_node_ids": parents,
+        "frontier_hash_hex": bson::Bson::Null,
+        "applied": true,
+        "is_tombstone": false,
+        "eligible_for_compaction_at_utc": bson::Bson::Null,
+        "updated_at_utc": BsonDateTime::now(),
     }
 }
 
@@ -242,14 +272,25 @@ impl NodePersistence for MongoNodeStore {
         let rt = self.rt.clone();
         let handle = std::thread::spawn(move || {
             rt.block_on(async move {
-                let opts = FindOptions::builder().sort(doc! { "seq": 1i32 }).build();
+                // Canonical hydration order, matching the .NET provider's
+                // LoadRoomSnapshotAsync: accepted_at_utc then node_id_hex.
+                // Documents without accepted_at_utc (legacy Rust `bytes`/`seq`
+                // shape) sort first, which is correct — they predate the
+                // canonical schema.
+                let opts = FindOptions::builder()
+                    .sort(doc! { "accepted_at_utc": 1i32, "node_id_hex": 1i32 })
+                    .build();
                 let mut attempt = 0u8;
                 loop {
                     match nodes_coll.find(doc! { "room_id": &rid }).with_options(opts.clone()).await {
                         Ok(mut cursor) => {
                             let mut out: Vec<Vec<u8>> = Vec::new();
                             while let Some(d) = cursor.try_next().await? {
-                                if let Ok(b) = d.get_binary_generic("bytes") {
+                                // Canonical field first, legacy fallback for
+                                // documents written before S5.
+                                if let Ok(b) = d.get_binary_generic("payload") {
+                                    out.push(b.clone());
+                                } else if let Ok(b) = d.get_binary_generic("bytes") {
                                     out.push(b.clone());
                                 }
                             }
@@ -284,9 +325,11 @@ impl NodePersistence for MongoNodeStore {
         let mut out = Vec::with_capacity(raw.len());
         for bytes in raw {
             match unpack_nodes(&bytes) {
-                Ok(mut ns) if ns.len() == 1 => out.push(ns.pop().unwrap()),
-                Ok(_) => tracing::warn!("mongo doc held != 1 nodes, skipping"),
-                Err(e) => tracing::warn!(?e, "unpack persisted node failed"),
+                // Canonical payloads are packs of 1..n nodes: this store
+                // writes single-node packs, the .NET host writes whole
+                // inbound/snapshot packs — accept both.
+                Ok(ns) => out.extend(ns),
+                Err(e) => tracing::warn!(?e, "unpack persisted node payload failed"),
             }
         }
         out
@@ -296,32 +339,24 @@ impl NodePersistence for MongoNodeStore {
         let t0 = Instant::now();
         tracing::debug!(client_id = self.client_id, "mongo persist_node using client");
         let nodes_coll = self.client.database(&self.db_name).collection::<Document>(&self.collection_name);
-        let seq_coll = self.client.database(&self.db_name).collection::<Document>(&self.seq_collection_name);
         let rid = room_id.to_string();
-        let bytes = pack_nodes(&[node]);
-        let node_clone = node.clone();
+        let payload = pack_nodes(&[node]);
+        let node_id_hex = node.id.to_hex();
+        let set_fields = build_set_fields(room_id, node, payload);
         let rt = self.rt.clone();
         let handle = std::thread::spawn(move || {
             rt.block_on(async move {
-                let seq = Self::reserve_seq(&seq_coll, &rid, 1).await?;
-                let d = build_doc(&rid, &node_clone, seq, bytes);
                 let mut attempt = 0u8;
                 loop {
-                    match nodes_coll.insert_one(d.clone()).await {
-                        Ok(_) => break Ok(()),
+                    match Self::upsert_node_doc(&nodes_coll, &rid, &node_id_hex, set_fields.clone()).await {
+                        Ok(()) => break Ok(()),
                         Err(e) if matches!(*e.kind, ErrorKind::ServerSelection { .. }) && attempt < 2 => {
                             attempt += 1;
                             tracing::warn!(error = ?e, attempt = attempt, "write retry after ServerSelection");
                             tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
                             continue;
                         }
-                        Err(e) => {
-                            let s = e.to_string();
-                            if s.contains("E11000") || s.contains("duplicate key") {
-                                break Ok(());
-                            }
-                            break Err(e);
-                        }
+                        Err(e) => break Err(e),
                     }
                 }
             })
@@ -352,44 +387,37 @@ impl NodePersistence for MongoNodeStore {
         let t0 = Instant::now();
         tracing::debug!(client_id = self.client_id, "mongo persist_nodes using client");
         let nodes_coll = self.client.database(&self.db_name).collection::<Document>(&self.collection_name);
-        let seq_coll = self.client.database(&self.db_name).collection::<Document>(&self.seq_collection_name);
         let rid = room_id.to_string();
-        let n = nodes.len() as u64;
 
-        let owned: Vec<(SyncNode, Vec<u8>)> = nodes
+        let owned: Vec<(String, Document)> = nodes
             .iter()
-            .map(|n| ((*n).clone(), pack_nodes(&[*n])))
+            .map(|n| {
+                (
+                    n.id.to_hex(),
+                    build_set_fields(room_id, n, pack_nodes(&[*n])),
+                )
+            })
             .collect();
 
         let rt = self.rt.clone();
         let handle = std::thread::spawn(move || {
             rt.block_on(async move {
-                let first_seq = Self::reserve_seq(&seq_coll, &rid, n).await?;
-                let docs: Vec<Document> = owned
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (node, bytes))| build_doc(&rid, &node, first_seq + i as i64, bytes))
-                    .collect();
-
-                let mut attempt = 0u8;
-                loop {
-                    match nodes_coll.insert_many(docs.clone()).ordered(false).await {
-                        Ok(_) => break Ok(()),
-                        Err(e) if matches!(*e.kind, ErrorKind::ServerSelection { .. }) && attempt < 2 => {
-                            attempt += 1;
-                            tracing::warn!(error = ?e, attempt = attempt, "batch write retry after ServerSelection");
-                            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
-                            continue;
-                        }
-                        Err(e) => {
-                            let s = e.to_string();
-                            if s.contains("E11000") || s.contains("duplicate key") {
-                                break Ok(());
+                for (node_id_hex, set_fields) in owned {
+                    let mut attempt = 0u8;
+                    loop {
+                        match Self::upsert_node_doc(&nodes_coll, &rid, &node_id_hex, set_fields.clone()).await {
+                            Ok(()) => break,
+                            Err(e) if matches!(*e.kind, ErrorKind::ServerSelection { .. }) && attempt < 2 => {
+                                attempt += 1;
+                                tracing::warn!(error = ?e, attempt = attempt, "batch write retry after ServerSelection");
+                                tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
+                                continue;
                             }
-                            break Err(e);
+                            Err(e) => return Err(e),
                         }
                     }
                 }
+                Ok(())
             })
         });
         let res: Result<(), mongodb::error::Error> = match handle.join() {
@@ -441,8 +469,7 @@ mod tests {
     #[test]
     fn config_defaults() {
         let cfg = MongoNodeStoreConfig::new("mongodb://x", "db");
-        assert_eq!(cfg.collection, "nodalmerge_nodes");
-        assert_eq!(cfg.seq_collection, "nodalmerge_seq");
+        assert_eq!(cfg.collection, "accepted_nodes");
     }
 
     #[test]

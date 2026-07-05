@@ -7,24 +7,24 @@ name: control-plane-capability-parity
 # regression. This instead runs two small, real tests — one per runtime —
 # that each independently assert the live control-plane capability-gating
 # behavior against the same canonical table. See:
-#   server/tests/control_plane_capability_parity.rs
-#   nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs
+#   server/server/tests/control_plane_capability_parity.rs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs
 
 on:
   push:
     branches: [main]
     paths:
-      - "server/src/ws_handler.rs"
-      - "server/tests/control_plane_capability_parity.rs"
-      - "nodalmerge-host/src/NodalMerge.DotNetHost/Runtime/RuntimeProtocolMapper.cs"
-      - "nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs"
+      - "server/server/src/ws_handler.rs"
+      - "server/server/tests/control_plane_capability_parity.rs"
+      - "hosts/dotnet/src/NodalMerge.DotNetHost/Runtime/RuntimeProtocolMapper.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs"
       - ".github/workflows/control-plane-capability-parity.yml"
   pull_request:
     paths:
-      - "server/src/ws_handler.rs"
-      - "server/tests/control_plane_capability_parity.rs"
-      - "nodalmerge-host/src/NodalMerge.DotNetHost/Runtime/RuntimeProtocolMapper.cs"
-      - "nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs"
+      - "server/server/src/ws_handler.rs"
+      - "server/server/tests/control_plane_capability_parity.rs"
+      - "hosts/dotnet/src/NodalMerge.DotNetHost/Runtime/RuntimeProtocolMapper.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs"
       - ".github/workflows/control-plane-capability-parity.yml"
   workflow_dispatch:
 
@@ -61,4 +61,4 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Run control-plane capability parity test
-        run: dotnet test nodalmerge-host/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ControlPlaneCapabilityParityTests"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ControlPlaneCapabilityParityTests"

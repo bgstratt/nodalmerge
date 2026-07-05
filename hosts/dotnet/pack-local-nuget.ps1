@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Version = "0.1.0-local",
-    [string]$OutputDir = "../artifacts/nuget-local"
+    [string]$OutputDir = "../../artifacts/nuget-local"
 )
 
 Set-StrictMode -Version Latest
@@ -94,9 +94,9 @@ try {
         dotnet pack ./src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version
     }
 
-    $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
-    $linuxLocalNative = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../target/release/libnodalmerge_runtime_local_ffi.so"))
-    $linuxNative = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../target/release/libnodalmerge_host_ffi.so"))
+    $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../.."))
+    $linuxLocalNative = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../../target/release/libnodalmerge_runtime_local_ffi.so"))
+    $linuxNative = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../../target/release/libnodalmerge_host_ffi.so"))
     $isWindowsRuntime = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
 
     if ($isWindowsRuntime) {

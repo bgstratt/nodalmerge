@@ -62,3 +62,8 @@ artifacts/package-local/npm/*.tgz
 
 # Local test execution logs
 .tmp-testlogs/
+
+# Local dev server artifacts (dev keypair + logs, never tracked)
+server.key
+server.log
+tmp/

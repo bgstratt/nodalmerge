@@ -9,10 +9,6 @@ description = "NodalMerge reflector server: authenticates peers and broadcasts s
 name = "nodalmerge-server"
 path = "src/nodalmerge_server_main.rs"
 
-[[bin]]
-name = "authz-conformance-runner"
-path = "src/bin/authz_conformance_runner.rs"
-
 [dependencies]
 nodalmerge-core = { version = "0.1.0", path = "../../core/crdt" }
 nodalmerge-gc = { version = "0.1.0", path = "../../core/gc" }

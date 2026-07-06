@@ -6,7 +6,7 @@ This breaks end-to-end host runtime cost into layers for identical command shape
 - Machine/runtime: Windows 11, Ryzen 9 5900X, .NET 10.0.4, release builds
 - Rust direct engine benchmarks: `engine_direct_*` from `host-ffi/benches/host_runtime_vs_ffi.rs`
 - Rust FFI benchmarks: `ffi_submit_json_*` from `host-ffi/benches/host_runtime_vs_ffi.rs`
-- DotNet hosted native benchmarks: `HostFfiBenchmarks.*` from `dotnet-host/bench/ActiveSync.DotNetHost.Benchmarks`
+- DotNet hosted native benchmarks: `HostFfiBenchmarks.*` from `dotnet-host/bench/NodalMerge.DotNetHost.Benchmarks`
 
 ## Combined Summary
 | Workload | Engine microbench winner | Realtime winner (30 ops) | 30-op delta |
@@ -56,16 +56,16 @@ Using:
 ## Repro Commands
 Rust direct/FFI microbench:
 ```powershell
-cargo bench -p activesync-host-ffi --bench host_runtime_vs_ffi engine_direct_noop engine_direct_map_set engine_direct_request_server_pack_1k engine_direct_blob_set_50kb ffi_submit_json_noop ffi_submit_json_map_set ffi_submit_json_request_server_pack_1k ffi_submit_json_blob_set_50kb -- --sample-size 20
+cargo bench -p nodalmerge-host-ffi --bench host_runtime_vs_ffi engine_direct_noop engine_direct_map_set engine_direct_request_server_pack_1k engine_direct_blob_set_50kb ffi_submit_json_noop ffi_submit_json_map_set ffi_submit_json_request_server_pack_1k ffi_submit_json_blob_set_50kb -- --sample-size 20
 ```
 
 DotNet hosted native microbench:
 ```powershell
-dotnet run --project dotnet-host/bench/ActiveSync.DotNetHost.Benchmarks/ActiveSync.DotNetHost.Benchmarks.csproj -c Release
+dotnet run --project dotnet-host/bench/NodalMerge.DotNetHost.Benchmarks/NodalMerge.DotNetHost.Benchmarks.csproj -c Release
 ```
 
 ## Other Core Benches (Fresh Run)
-These are from `cargo bench -p activesync-core` run by bench target.
+These are from `cargo bench -p nodalmerge-core` run by bench target.
 
 | Benchmark | Time |
 |---|---:|

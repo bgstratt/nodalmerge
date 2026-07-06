@@ -32,7 +32,7 @@ public sealed class HostFfiClient : IDisposable
 
         if (status != AsStatus.Ok || _engine == nint.Zero)
         {
-            throw new InvalidOperationException($"as_host_engine_new failed: {status}");
+            throw new InvalidOperationException($"nm_host_engine_new failed: {status}");
         }
     }
 

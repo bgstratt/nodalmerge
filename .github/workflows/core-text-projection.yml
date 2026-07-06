@@ -35,10 +35,10 @@ jobs:
 
       - name: Emit large-doc acceptance metrics
         env:
-          ACTIVESYNC_TEXT_LARGE_DOC_METRICS_PATH: core-text-large-doc-metrics.json
-          ACTIVESYNC_TEXT_LARGE_DOC_MAX_FULL_REBUILDS: "16"
-          ACTIVESYNC_TEXT_LARGE_DOC_MAX_CAPACITY_RATIO: "5.0"
-          ACTIVESYNC_TEXT_LARGE_DOC_MAX_DURATION_MS: "20000"
+          NODALMERGE_TEXT_LARGE_DOC_METRICS_PATH: core-text-large-doc-metrics.json
+          NODALMERGE_TEXT_LARGE_DOC_MAX_FULL_REBUILDS: "16"
+          NODALMERGE_TEXT_LARGE_DOC_MAX_CAPACITY_RATIO: "5.0"
+          NODALMERGE_TEXT_LARGE_DOC_MAX_DURATION_MS: "20000"
         run: cargo test -p nodalmerge-core large_doc_windowed_reads_and_allocation_behavior -- --nocapture
 
       - name: Upload large-doc acceptance metrics artifact
@@ -67,13 +67,13 @@ jobs:
     name: core parity profile
     runs-on: ubuntu-latest
     env:
-      ACTIVESYNC_TEXT_TRACE_MAX_OPS: "2000"
-      ACTIVESYNC_TEXT_TRACE_PROJECTION_MODE: parity
-      ACTIVESYNC_TEXT_TRACE_PARITY_SAMPLE_EVERY: "1"
-      ACTIVESYNC_TEXT_TRACE_RANGE_LEN: "256"
-      ACTIVESYNC_TEXT_TRACE_RANGE_STRIDE: "512"
-      ACTIVESYNC_TEXT_TRACE_RANGE_WINDOWS: "8"
-      ACTIVESYNC_PARITY_SOAK_RUNS: "20"
+      NODALMERGE_TEXT_TRACE_MAX_OPS: "2000"
+      NODALMERGE_TEXT_TRACE_PROJECTION_MODE: parity
+      NODALMERGE_TEXT_TRACE_PARITY_SAMPLE_EVERY: "1"
+      NODALMERGE_TEXT_TRACE_RANGE_LEN: "256"
+      NODALMERGE_TEXT_TRACE_RANGE_STRIDE: "512"
+      NODALMERGE_TEXT_TRACE_RANGE_WINDOWS: "8"
+      NODALMERGE_PARITY_SOAK_RUNS: "20"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -84,8 +84,8 @@ jobs:
       - name: Run deterministic parity soak gate
         run: |
           set -euo pipefail
-          for i in $(seq 1 "${ACTIVESYNC_PARITY_SOAK_RUNS}"); do
-            echo "[nodalmerge-parity-soak] iteration ${i}/${ACTIVESYNC_PARITY_SOAK_RUNS}"
+          for i in $(seq 1 "${NODALMERGE_PARITY_SOAK_RUNS}"); do
+            echo "[nodalmerge-parity-soak] iteration ${i}/${NODALMERGE_PARITY_SOAK_RUNS}"
             cargo test -p nodalmerge-core text_projection_parity_deterministic_corpus_has_zero_mismatches -- --exact --nocapture
           done
 
@@ -96,12 +96,12 @@ jobs:
     name: core cursor mapping ROI gate
     runs-on: ubuntu-latest
     env:
-      ACTIVESYNC_TEXT_TRACE_MAX_OPS: "2000"
-      ACTIVESYNC_TEXT_TRACE_PROJECTION_MODE: enabled
-      ACTIVESYNC_TEXT_TRACE_RANGE_LEN: "256"
-      ACTIVESYNC_TEXT_TRACE_RANGE_STRIDE: "512"
-      ACTIVESYNC_TEXT_TRACE_RANGE_WINDOWS: "8"
-      ACTIVESYNC_CURSOR_MAPPING_MAX_MEDIAN_NS: "50000"
+      NODALMERGE_TEXT_TRACE_MAX_OPS: "2000"
+      NODALMERGE_TEXT_TRACE_PROJECTION_MODE: enabled
+      NODALMERGE_TEXT_TRACE_RANGE_LEN: "256"
+      NODALMERGE_TEXT_TRACE_RANGE_STRIDE: "512"
+      NODALMERGE_TEXT_TRACE_RANGE_WINDOWS: "8"
+      NODALMERGE_CURSOR_MAPPING_MAX_MEDIAN_NS: "50000"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -125,7 +125,7 @@ jobs:
 
           data = json.loads(p.read_text(encoding="utf-8"))
           median_ns = float(data["median"]["point_estimate"])
-          max_ns = float(os.environ.get("ACTIVESYNC_CURSOR_MAPPING_MAX_MEDIAN_NS", "50000"))
+          max_ns = float(os.environ.get("NODALMERGE_CURSOR_MAPPING_MAX_MEDIAN_NS", "50000"))
 
           print(f"cursor_mapping_median_ns={median_ns:.2f}, threshold_ns={max_ns:.2f}")
           if median_ns > max_ns:

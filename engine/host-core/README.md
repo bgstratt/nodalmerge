@@ -1,6 +1,6 @@
-# activesync-host-core
+# nodalmerge-host-core
 
-Host-neutral orchestration crate for ActiveSync.
+Host-neutral orchestration crate for NodalMerge.
 
 ## Scope
 

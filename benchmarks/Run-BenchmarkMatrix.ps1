@@ -115,7 +115,7 @@ function Start-RowTargets {
         [hashtable]$DotnetEnv
     )
 
-    $rustEnvBase = @{ AS_BIND_ADDR = $RustBindAddress }
+    $rustEnvBase = @{ NODALMERGE_BIND_ADDR = $RustBindAddress }
     $dotnetEnvBase = @{
         ASPNETCORE_URLS = $DotnetUrl
         NODALMERGE_HOST_FFI_DLL = $FfiDll

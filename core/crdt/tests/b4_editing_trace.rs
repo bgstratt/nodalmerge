@@ -180,7 +180,7 @@ fn b4_real_world_editing_dataset() {
         trace.final_text.chars().count()
     );
 
-    if let Ok(path) = std::env::var("ACTIVESYNC_B4_METRICS_PATH") {
+    if let Ok(path) = std::env::var("NODALMERGE_B4_METRICS_PATH") {
         let payload = serde_json::json!({
             "test": "b4_real_world_editing_dataset",
             "edit_count": edit_count,

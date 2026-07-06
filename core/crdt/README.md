@@ -1,6 +1,6 @@
-# activesync-core
+# nodalmerge-core
 
-Deterministic core runtime for ActiveSync replication.
+Deterministic core runtime for NodalMerge replication.
 
 ## Scope
 

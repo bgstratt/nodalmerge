@@ -446,14 +446,14 @@ fn scoped_catchup_budget() -> ScopeCatchupBudget {
     *BUDGET.get_or_init(|| ScopeCatchupBudget {
         max_filtered_node_count: env_var_primary_legacy(
             "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_NODES",
-            "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_NODES",
+            "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_NODES",
         )
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(4096),
         max_filtered_payload_bytes: env_var_primary_legacy(
             "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_BYTES",
-            "ACTIVESYNC_SCOPE_MAX_FILTERED_CATCHUP_BYTES",
+            "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_BYTES",
         )
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -488,20 +488,8 @@ fn record_scope_filter_metrics(room_id: &str, stage: &str, outcome: &ScopeFilter
             "stage" => stage.to_string(),
         )
         .increment(filtered_nodes as u64);
-        metrics::counter!(
-            "nodalmerge_filtered_nodes_total",
-            "room" => room_id.to_string(),
-            "stage" => stage.to_string(),
-        )
-        .increment(filtered_nodes as u64);
     }
     if filtered_bytes > 0 {
-        metrics::counter!(
-            "nodalmerge_filtered_bytes_total",
-            "room" => room_id.to_string(),
-            "stage" => stage.to_string(),
-        )
-        .increment(filtered_bytes as u64);
         metrics::counter!(
             "nodalmerge_filtered_bytes_total",
             "room" => room_id.to_string(),
@@ -512,13 +500,6 @@ fn record_scope_filter_metrics(room_id: &str, stage: &str, outcome: &ScopeFilter
 }
 
 fn record_scope_filter_drop(room_id: &str, stage: &str, reason: &str) {
-    metrics::counter!(
-        "nodalmerge_filtered_pack_dropped_total",
-        "room" => room_id.to_string(),
-        "stage" => stage.to_string(),
-        "reason" => reason.to_string(),
-    )
-    .increment(1);
     metrics::counter!(
         "nodalmerge_filtered_pack_dropped_total",
         "room" => room_id.to_string(),
@@ -796,10 +777,6 @@ async fn handle_socket(
                     "nodalmerge_token_expired_disconnects_total",
                     "room" => room_id.clone(),
                 ).increment(1);
-                metrics::counter!(
-                    "nodalmerge_token_expired_disconnects_total",
-                    "room" => room_id.clone(),
-                ).increment(1);
                 tracing::info!(peer = %short, room = %room_id, "token expired — closing with 4002");
                 emit_close_frame(&mut sink, assemble_token_expired_close_frame()).await;
                 break;
@@ -865,10 +842,6 @@ async fn handle_socket(
                         // metric, send a 4001 close frame, and break so the
                         // SDK's exp-backoff reconnect path rebuilds via the
                         // normal hello → IBF diff → catch-up pack handshake.
-                        metrics::counter!(
-                            "nodalmerge_broadcast_lagged_total",
-                            "room" => room_id.clone(),
-                        ).increment(1);
                         metrics::counter!(
                             "nodalmerge_broadcast_lagged_total",
                             "room" => room_id.clone(),
@@ -2135,7 +2108,7 @@ async fn emit_close_frame(sink: &mut SplitSink<WebSocket, Message>, spec: CloseF
 // task until the OS times out — potentially minutes.
 //
 // On timeout we:
-//   1. increment `nodalmerge_ws_send_timeout_total{room}` (plus legacy alias),
+//   1. increment `nodalmerge_ws_send_timeout_total{room}`,
 //   2. best-effort deliver a `1011 server overload` close frame (bounded
 //      by another short timeout so a fully-wedged socket can't re-trap us),
 //   3. return `false` so the caller exits the loop, which triggers the
@@ -2151,11 +2124,6 @@ async fn ws_send(sink: &mut SplitSink<WebSocket, Message>, room_id: &str, text: 
         Ok(Ok(())) => true,
         Ok(Err(_)) => false,
         Err(_) => {
-            metrics::counter!(
-                "nodalmerge_ws_send_timeout_total",
-                "room" => room_id.to_string(),
-            )
-            .increment(1);
             metrics::counter!(
                 "nodalmerge_ws_send_timeout_total",
                 "room" => room_id.to_string(),
@@ -2189,8 +2157,7 @@ async fn send_close_with_timeout(sink: &mut SplitSink<WebSocket, Message>, spec:
 // success returns `Ok(())`. On either (a) `NotUntil` (rate exceeded) or
 // (b) `InsufficientCapacity` (single request larger than the 1-second
 // burst), the peer is closed with WS code `4008 rate limit exceeded`,
-// `nodalmerge_rate_limit_drops_total{peer=<12-char hex>}` is incremented
-// (plus legacy alias),
+// `nodalmerge_rate_limit_drops_total{peer=<12-char hex>}` is incremented,
 // and `Err(())` is returned so the handler can break out of its loop.
 //
 // The close frame itself is sent under the same bounded timeout used for
@@ -2230,11 +2197,6 @@ async fn deny_peer_rate(
     kind: &'static str,
 ) {
     let peer_label = crate::metrics::peer_label(peer_hex);
-    metrics::counter!(
-        "nodalmerge_rate_limit_drops_total",
-        "peer" => peer_label.clone(),
-    )
-    .increment(1);
     metrics::counter!(
         "nodalmerge_rate_limit_drops_total",
         "peer" => peer_label.clone(),
@@ -2358,9 +2320,7 @@ static CAPABILITY_PROFILE_CACHE: OnceLock<Result<Option<CapabilityProfile>, Stri
 
 fn configured_capability_profile() -> Result<Option<&'static CapabilityProfile>, String> {
     let loaded = CAPABILITY_PROFILE_CACHE.get_or_init(|| {
-        let path_raw = std::env::var_os("NODALMERGE_CAPABILITY_PROFILE_PATH")
-            .or_else(|| std::env::var_os("ACTIVESYNC_CAPABILITY_PROFILE_PATH"));
-        let Some(path_raw) = path_raw else {
+        let Some(path_raw) = std::env::var_os("NODALMERGE_CAPABILITY_PROFILE_PATH") else {
             return Ok(None);
         };
 

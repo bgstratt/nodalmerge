@@ -100,7 +100,6 @@
       },
       "rust": {
         "env": {
-          "ACTIVESYNC_CAPABILITY_COMPOSITION_ENABLED": "true",
           "NODALMERGE_CAPABILITY_PROFILE_PATH": "./benchmarks/profiles/capability-profile.v1.json"
         }
       }
@@ -208,7 +207,6 @@
       },
       "rust": {
         "env": {
-          "ACTIVESYNC_CAPABILITY_COMPOSITION_ENABLED": "true",
           "NODALMERGE_CAPABILITY_PROFILE_PATH": "./benchmarks/profiles/capability-profile.v1.json",
           "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_NODES": "128",
           "NODALMERGE_SCOPE_MAX_FILTERED_CATCHUP_BYTES": "1048576"

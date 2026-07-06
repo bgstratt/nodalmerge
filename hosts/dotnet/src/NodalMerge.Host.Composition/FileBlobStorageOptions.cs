@@ -5,11 +5,10 @@ namespace NodalMerge.Host.Composition;
 public sealed record FileBlobStorageOptions(string RootPath)
 {
     public const string SectionName = "NodalMerge:Storage:FileBlobs";
-    public const string LegacySectionName = "NodalMerge:Storage:FileBlobs";
 
     public static FileBlobStorageOptions FromConfiguration(IConfiguration? configuration)
     {
-        var section = ConfigurationKeyFallback.GetSection(configuration, SectionName, LegacySectionName);
+        var section = configuration?.GetSection(SectionName);
         var rootPath = section?["RootPath"] ?? "data/blobs";
         return new FileBlobStorageOptions(rootPath);
     }

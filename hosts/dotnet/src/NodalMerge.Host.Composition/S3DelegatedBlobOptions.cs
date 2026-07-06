@@ -15,11 +15,10 @@ public sealed record S3DelegatedBlobOptions(
 )
 {
     public const string SectionName = "NodalMerge:Storage:S3Delegated";
-    public const string LegacySectionName = "NodalMerge:Storage:S3Delegated";
 
     public static S3DelegatedBlobOptions FromConfiguration(IConfiguration? configuration)
     {
-        var section = ConfigurationKeyFallback.GetSection(configuration, SectionName, LegacySectionName);
+        var section = configuration?.GetSection(SectionName);
 
         var timeoutSeconds = 5;
         if (int.TryParse(section?["TimeoutSeconds"], out var parsedTimeout) && parsedTimeout > 0)

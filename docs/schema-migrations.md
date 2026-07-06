@@ -1,6 +1,6 @@
 # Schema Migrations (App Layer)
 
-ActiveSync treats `Op::Map` values as opaque bytes. Schema evolution is a
+NodalMerge treats `Op::Map` values as opaque bytes. Schema evolution is a
 product concern implemented in app payloads and key conventions.
 
 ## Rules of the road

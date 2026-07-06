@@ -10,11 +10,10 @@ public sealed record JwtBridgeSidecarAuthOptions(
 )
 {
     public const string SectionName = "NodalMerge:Auth:JwtBridgeSidecar";
-    public const string LegacySectionName = "NodalMerge:Auth:JwtBridgeSidecar";
 
     public static JwtBridgeSidecarAuthOptions FromConfiguration(IConfiguration? configuration)
     {
-        var section = ConfigurationKeyFallback.GetSection(configuration, SectionName, LegacySectionName);
+        var section = configuration?.GetSection(SectionName);
 
         var timeoutSeconds = 5;
         if (int.TryParse(section?["TimeoutSeconds"], out var parsedTimeout) && parsedTimeout > 0)

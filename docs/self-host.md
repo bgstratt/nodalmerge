@@ -4,9 +4,6 @@ This doc shows the shortest path from zero to a production-ish NodalMerge
 deployment with your existing auth provider (Clerk, Supabase, Auth0, or a
 homegrown JWT issuer) in front.
 
-Compatibility note: legacy `activesync-*` crate/package IDs and selected
-logger/config identifiers remain valid during the migration window.
-
 ## 1. Build & run the server
 
 ```sh
@@ -36,7 +33,7 @@ key. You have two options for where the signing happens:
 
 For the bridge flow — which is what this doc covers — your auth provider
 signs a **JWT** describing a peer's room + capabilities, and the
-[`activesync-jwt-bridge`](../jwt-bridge) crate converts that into a
+[`nodalmerge-jwt-bridge`](../jwt-bridge) crate converts that into a
 `RoomToken` the NodalMerge server will accept.
 
 ## 3. Stand up the JWT bridge
@@ -45,7 +42,7 @@ The bridge is a library, so you wrap it in a tiny HTTP service (10-ish
 lines of Axum). Minimum viable:
 
 ```rust
-use activesync_jwt_bridge::{mint_room_token, BridgeConfig, JwtVerifier};
+use nodalmerge_jwt_bridge::{mint_room_token, BridgeConfig, JwtVerifier};
 use axum::{extract::State, routing::post, Json, Router};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
@@ -134,7 +131,7 @@ JWTs.
 - Back up `/data` (see [deployment.md](./deployment.md)) — that's the
     entire durable state.
 - Tune logs via `RUST_LOG` (migration window still uses targets like
-    `RUST_LOG=activesync_server=debug,info`).
+    `RUST_LOG=nodalmerge_server=debug,info`).
 
 That's it. Five minutes of YAML/Terraform and you have a self-hosted
 NodalMerge deployment that plugs into whatever auth you already own.

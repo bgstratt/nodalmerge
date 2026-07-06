@@ -398,7 +398,7 @@ events.
 
 Note on persistence: this SDK release includes a built-in IndexedDB persistence
 adapter used for Free/offline flows. The runtime persists node packs to
-`activesync-sdk` → `nodes` and stores raw blob bytes in `activesync-sdk` →
+`nodalmerge-peer-local` → `nodes` and stores raw blob bytes in `nodalmerge-peer-local` →
 `blobs`. `createDoc` will hydrate from IndexedDB when available; call
 `doc.close()` to clear any live persistence hooks. The persistence is opt-out
 — if you prefer a different storage layer, you can replace or disable it in
@@ -509,7 +509,7 @@ identity and keep human labels in app-level data.
 
 ## **Testing & Validation**
 
-- **Run services:** Start the API, ActiveSync bridge, and the frontend/dev server
+- **Run services:** Start the API, NodalMerge bridge, and the frontend/dev server
   before end-to-end tests. Example commands (adjust paths/ports as needed):
 
 ```bash
@@ -517,8 +517,8 @@ identity and keep human labels in app-level data.
 cd PWASoundboard.Api
 dotnet run --urls http://0.0.0.0:8080
 
-# ActiveSync bridge (repo root)
-cd activesync
+# NodalMerge bridge (repo root)
+cd nodalmerge
 # depending on your dev workflow: cargo run or start the dev server that
 # hosts the bridge at the configured bridge URL
 cargo run

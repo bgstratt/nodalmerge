@@ -331,52 +331,52 @@ fn build_run_split_churn_graph(
 
 fn bench_text_trace_rustcode(c: &mut Criterion) {
     let trace = load_trace();
-    let max_ops = std::env::var("ACTIVESYNC_TEXT_TRACE_MAX_OPS")
+    let max_ops = std::env::var("NODALMERGE_TEXT_TRACE_MAX_OPS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok());
-    let range_len = std::env::var("ACTIVESYNC_TEXT_TRACE_RANGE_LEN")
+    let range_len = std::env::var("NODALMERGE_TEXT_TRACE_RANGE_LEN")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(256);
-    let range_stride = std::env::var("ACTIVESYNC_TEXT_TRACE_RANGE_STRIDE")
+    let range_stride = std::env::var("NODALMERGE_TEXT_TRACE_RANGE_STRIDE")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(512);
-    let range_windows = std::env::var("ACTIVESYNC_TEXT_TRACE_RANGE_WINDOWS")
+    let range_windows = std::env::var("NODALMERGE_TEXT_TRACE_RANGE_WINDOWS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(8);
-    let parity_sample_every = std::env::var("ACTIVESYNC_TEXT_TRACE_PARITY_SAMPLE_EVERY")
+    let parity_sample_every = std::env::var("NODALMERGE_TEXT_TRACE_PARITY_SAMPLE_EVERY")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(16);
-    let run_split_base_len = std::env::var("ACTIVESYNC_TEXT_TRACE_RUN_SPLIT_BASE_LEN")
+    let run_split_base_len = std::env::var("NODALMERGE_TEXT_TRACE_RUN_SPLIT_BASE_LEN")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(4096);
-    let run_split_churn_steps = std::env::var("ACTIVESYNC_TEXT_TRACE_RUN_SPLIT_CHURN_STEPS")
+    let run_split_churn_steps = std::env::var("NODALMERGE_TEXT_TRACE_RUN_SPLIT_CHURN_STEPS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1000);
-    let run_split_insert_len = std::env::var("ACTIVESYNC_TEXT_TRACE_RUN_SPLIT_INSERT_LEN")
+    let run_split_insert_len = std::env::var("NODALMERGE_TEXT_TRACE_RUN_SPLIT_INSERT_LEN")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(4);
-    let run_split_delete_span = std::env::var("ACTIVESYNC_TEXT_TRACE_RUN_SPLIT_DELETE_SPAN")
+    let run_split_delete_span = std::env::var("NODALMERGE_TEXT_TRACE_RUN_SPLIT_DELETE_SPAN")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(3);
-    let run_split_windows = std::env::var("ACTIVESYNC_TEXT_TRACE_RUN_SPLIT_WINDOWS")
+    let run_split_windows = std::env::var("NODALMERGE_TEXT_TRACE_RUN_SPLIT_WINDOWS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(16);
-    let projection_mode = std::env::var("ACTIVESYNC_TEXT_TRACE_PROJECTION_MODE")
+    let projection_mode = std::env::var("NODALMERGE_TEXT_TRACE_PROJECTION_MODE")
         .ok()
         .map(|v| parse_projection_mode(&v))
         .unwrap_or(TextProjectionMode::Disabled);

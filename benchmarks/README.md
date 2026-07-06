@@ -4,25 +4,25 @@ For a drift-aware interpretation playbook with go/no-go thresholds and a concret
 
 This folder provides a simple websocket round-trip benchmark harness for:
 
-1. rust-combined-server (`activesync-server`)
-2. rust-integrated-hosted-server (`activesync-dev-server`, optional, Mongo-backed)
-3. dotnet-host-runtime (`ActiveSync.DotNetHost`)
+1. rust-combined-server (`nodalmerge-server`)
+2. rust-integrated-hosted-server (`nodalmerge-dev-server`, optional, Mongo-backed)
+3. dotnet-host-runtime (`NodalMerge.DotNetHost`)
 
 ## Does the combined integrated Rust server still exist?
 
-Yes. The combined server is still present as `activesync-server`.
+Yes. The combined server is still present as `nodalmerge-server`.
 
 Evidence:
 
-1. `server/Cargo.toml` depends on both `activesync-core` and `activesync-host-core`.
+1. `server/Cargo.toml` depends on both `nodalmerge-core` and `nodalmerge-host-core`.
 2. The binary entrypoint remains `server/src/main.rs`.
 
 ## What is benchmarked?
 
 The harness measures websocket connect plus first-response latency using protocol-aware probes:
 
-1. rust targets (`activesync-server`, `activesync-dev-server`): connect, send `hello`, wait for first response (typically `welcome`)
-2. dotnet target (`ActiveSync.DotNetHost`): connect, send `hello`, send `noop`, wait for first response (typically `noop-ack`)
+1. rust targets (`nodalmerge-server`, `nodalmerge-dev-server`): connect, send `hello`, wait for first response (typically `welcome`)
+2. dotnet target (`NodalMerge.DotNetHost`): connect, send `hello`, send `noop`, wait for first response (typically `noop-ack`)
 3. each iteration uses a unique synthetic pubkey to avoid duplicate-peer churn effects
 4. record elapsed milliseconds
 
@@ -132,7 +132,7 @@ If a target is unreachable, it is skipped and benchmarking continues.
 ## Notes
 
 1. `rust-integrated-hosted-server` is optional and requires `MONGO_URI` when starting.
-2. `.NET host` needs `ACTIVESYNC_HOST_FFI_DLL`; the starter script auto-resolves from local `target/debug` or `target/release` when available.
+2. `.NET host` needs `NODALMERGE_HOST_FFI_DLL`; the starter script auto-resolves from local `target/debug` or `target/release` when available.
 3. The current Rust websocket path includes a small stabilization delay before welcome send, so absolute values are best used for trend tracking unless probe semantics are fully normalized across targets.
 4. This is a practical smoke benchmark harness, not a full load/stress framework. Use it for local comparisons and regression trending.
 5. `Run-SdkScenarioBenchmarks.mjs` is the preferred apples-to-apples comparison because all targets are exercised through the same SDK semantics rather than target-specific probe messages.

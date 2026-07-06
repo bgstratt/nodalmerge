@@ -1,6 +1,6 @@
-# activesync-bridge
+# nodalmerge-bridge
 
-Rust/WASM bridge exposing `activesync-core` to JavaScript runtimes.
+Rust/WASM bridge exposing `nodalmerge-core` to JavaScript runtimes.
 
 ## Scope
 

@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 
 const thisFile = fileURLToPath(import.meta.url);
 const repoRoot = path.resolve(path.dirname(thisFile), "..", "..");
-const wsUrl = process.env.ACTIVESYNC_SMOKE_WS_URL ?? "ws://127.0.0.1:7878";
-const webUrl = process.env.ACTIVESYNC_SMOKE_WEB_URL ?? "http://127.0.0.1:8080";
+const wsUrl = process.env.NODALMERGE_SMOKE_WS_URL ?? "ws://127.0.0.1:7878";
+const webUrl = process.env.NODALMERGE_SMOKE_WEB_URL ?? "http://127.0.0.1:8080";
 const pageUrl = `${webUrl}/?server=${encodeURIComponent(wsUrl)}`;
 
 function checkPort(host, port) {

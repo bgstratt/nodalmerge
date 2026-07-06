@@ -11,47 +11,25 @@ public sealed class RuntimeDagPersistenceService
 {
     private static readonly TimeSpan DefaultCompactionRetentionWindow = TimeSpan.FromDays(7);
     private static readonly Meter RuntimeDagMeter = new("NodalMerge.DotNetHost.RuntimeDag", "1.0.0");
-    private static readonly Meter LegacyRuntimeDagMeter = new("ActiveSync.DotNetHost.RuntimeDag", "1.0.0");
     private static readonly Counter<long> CompactionActionsCounter = RuntimeDagMeter.CreateCounter<long>(
-        "room_compaction_actions_total"
-    );
-    private static readonly Counter<long> LegacyCompactionActionsCounter = LegacyRuntimeDagMeter.CreateCounter<long>(
         "room_compaction_actions_total"
     );
     private static readonly Counter<long> CompactionRecordsRemovedCounter = RuntimeDagMeter.CreateCounter<long>(
         "room_compaction_records_removed_total"
     );
-    private static readonly Counter<long> LegacyCompactionRecordsRemovedCounter = LegacyRuntimeDagMeter.CreateCounter<long>(
-        "room_compaction_records_removed_total"
-    );
     private static readonly Histogram<double> CompactionDurationMsHistogram = RuntimeDagMeter.CreateHistogram<double>(
-        "room_compaction_duration_ms"
-    );
-    private static readonly Histogram<double> LegacyCompactionDurationMsHistogram = LegacyRuntimeDagMeter.CreateHistogram<double>(
         "room_compaction_duration_ms"
     );
     private static readonly Counter<long> RecoverySemanticMutationsCounter = RuntimeDagMeter.CreateCounter<long>(
         "room_recovery_semantic_mutations_total"
     );
-    private static readonly Counter<long> LegacyRecoverySemanticMutationsCounter = LegacyRuntimeDagMeter.CreateCounter<long>(
-        "room_recovery_semantic_mutations_total"
-    );
     private static readonly Counter<long> RecoveryIdempotentReplayCounter = RuntimeDagMeter.CreateCounter<long>(
-        "room_recovery_idempotent_replay_total"
-    );
-    private static readonly Counter<long> LegacyRecoveryIdempotentReplayCounter = LegacyRuntimeDagMeter.CreateCounter<long>(
         "room_recovery_idempotent_replay_total"
     );
     private static readonly Counter<long> RecoverySignalClassCounter = RuntimeDagMeter.CreateCounter<long>(
         "room_recovery_signal_class_total"
     );
-    private static readonly Counter<long> LegacyRecoverySignalClassCounter = LegacyRuntimeDagMeter.CreateCounter<long>(
-        "room_recovery_signal_class_total"
-    );
     private static readonly Counter<long> DuplicatePackReplaySuppressedCounter = RuntimeDagMeter.CreateCounter<long>(
-        "room_duplicate_pack_replay_suppressed_total"
-    );
-    private static readonly Counter<long> LegacyDuplicatePackReplaySuppressedCounter = LegacyRuntimeDagMeter.CreateCounter<long>(
         "room_duplicate_pack_replay_suppressed_total"
     );
 
@@ -286,10 +264,6 @@ public sealed class RuntimeDagPersistenceService
         if (await IsKnownPackReplayAsync(roomId, record.NodeIdHex, cancellationToken))
         {
             DuplicatePackReplaySuppressedCounter.Add(
-                1,
-                KeyValuePair.Create<string, object?>("room", roomId)
-            );
-            LegacyDuplicatePackReplaySuppressedCounter.Add(
                 1,
                 KeyValuePair.Create<string, object?>("room", roomId)
             );
@@ -546,24 +520,11 @@ public sealed class RuntimeDagPersistenceService
                 semanticMutations,
                 KeyValuePair.Create<string, object?>("room", roomId)
             );
-            LegacyRecoverySemanticMutationsCounter.Add(
-                semanticMutations,
-                KeyValuePair.Create<string, object?>("room", roomId)
-            );
             RecoveryIdempotentReplayCounter.Add(
                 idempotentReplay,
                 KeyValuePair.Create<string, object?>("room", roomId)
             );
-            LegacyRecoveryIdempotentReplayCounter.Add(
-                idempotentReplay,
-                KeyValuePair.Create<string, object?>("room", roomId)
-            );
             RecoverySignalClassCounter.Add(
-                1,
-                KeyValuePair.Create<string, object?>("room", roomId),
-                KeyValuePair.Create<string, object?>("signal_class", signalClass)
-            );
-            LegacyRecoverySignalClassCounter.Add(
                 1,
                 KeyValuePair.Create<string, object?>("room", roomId),
                 KeyValuePair.Create<string, object?>("signal_class", signalClass)
@@ -671,7 +632,6 @@ public sealed class RuntimeDagPersistenceService
 
             await _nodeStore.PersistCompactionSnapshotAsync(roomId, compactionSnapshot, cancellationToken);
             CompactionActionsCounter.Add(1, KeyValuePair.Create<string, object?>("room", roomId));
-            LegacyCompactionActionsCounter.Add(1, KeyValuePair.Create<string, object?>("room", roomId));
 
             if (_compactionOptions.EnablePruning)
             {
@@ -685,10 +645,6 @@ public sealed class RuntimeDagPersistenceService
                     await _nodeStore.DeleteAcceptedNodesAsync(roomId, removableNodeIds, cancellationToken);
                     removed = removableNodeIds.Length;
                     CompactionRecordsRemovedCounter.Add(
-                        removed,
-                        KeyValuePair.Create<string, object?>("room", roomId)
-                    );
-                    LegacyCompactionRecordsRemovedCounter.Add(
                         removed,
                         KeyValuePair.Create<string, object?>("room", roomId)
                     );
@@ -712,10 +668,6 @@ public sealed class RuntimeDagPersistenceService
         {
             var durationMs = (DateTimeOffset.UtcNow - startedAt).TotalMilliseconds;
             CompactionDurationMsHistogram.Record(
-                durationMs,
-                KeyValuePair.Create<string, object?>("room", roomId)
-            );
-            LegacyCompactionDurationMsHistogram.Record(
                 durationMs,
                 KeyValuePair.Create<string, object?>("room", roomId)
             );

@@ -1,16 +1,16 @@
 # Delegated Storage GC Interfaces (storage-agnostic)
 
 This spec defines the minimum contracts for safe CAS garbage collection
-across ActiveSync deployments without coupling core GC logic to any specific
+across NodalMerge deployments without coupling core GC logic to any specific
 state database (Mongo/Postgres/SQLite/KV).
 
-Use this when you run ActiveSync with delegated blob storage (S3/R2/MinIO)
+Use this when you run NodalMerge with delegated blob storage (S3/R2/MinIO)
 and need deterministic reclaim of unreferenced blob objects.
 
 ## Goals
 
 1. Keep GC logic backend-agnostic.
-2. Make reachability authoritative from ActiveSync room state.
+2. Make reachability authoritative from NodalMerge room state.
 3. Avoid daily dependence on ListBucket.
 4. Keep app/product field naming out of shared GC core.
 5. Keep GC transport-agnostic so WebSocket/WebRTC/HTTP streaming/in-process hosts share identical lifecycle semantics.
@@ -50,7 +50,7 @@ The rules in this section are normative for pre-host-extraction work.
 
 ## Architecture
 
-1. `LiveHashSource`: authoritative mark input from ActiveSync state.
+1. `LiveHashSource`: authoritative mark input from NodalMerge state.
 2. `AssetInventoryStore`: persistent inventory of known blob objects.
 3. `GcRunStore`: run ledger and counters for audit/rerun safety.
 4. `BlobObjectStore`: object HEAD/DELETE (LIST optional, low-frequency drift job only).
@@ -215,7 +215,7 @@ Notes:
 
 ## HTTP fallback contract
 
-Use this when GC scheduler and ActiveSync state access are split across services.
+Use this when GC scheduler and NodalMerge state access are split across services.
 
 ### Endpoint
 

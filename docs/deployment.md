@@ -8,10 +8,6 @@ The `nodalmerge-server` binary is a websocket reflector: it multiplexes peers
 by room, merges and relays packs, and (optionally) persists room state to
 disk. This document covers the operational basics.
 
-Compatibility note: during the migration window, `activesync-server` remains a
-supported alias and many internal crate/logger identifiers still use
-`activesync_*` naming.
-
 > For a 5-minute Docker + JWT walkthrough, see [self-host.md](./self-host.md).
 
 ## Quick start
@@ -34,7 +30,7 @@ room is hydrated from disk *before* its first client connects.
 
 ```
 <path>/
-  activesync.db              SQLite — one row per (room, node)
+  nodalmerge.db              SQLite — one row per (room, node)
   blobs/
     <sanitized_room_id>/
       <blake3_hex>            one file per blob
@@ -59,8 +55,8 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
 
 ### Backups
 
-- **Nodes:** `.backup` the SQLite DB, or copy the file (`activesync.db`,
-  `activesync.db-wal`, `activesync.db-shm`) while the server is stopped.
+- **Nodes:** `.backup` the SQLite DB, or copy the file (`nodalmerge.db`,
+  `nodalmerge.db-wal`, `nodalmerge.db-shm`) while the server is stopped.
 - **Blobs:** a plain recursive copy of `blobs/` works because each file is
   content-addressed and self-verifying.
 - **Restore:** point a new `--store` at the copy.
@@ -76,9 +72,8 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
 ## Environment
 
 - `RUST_LOG` — overrides the default filter.
-  During migration, use legacy logger targets (for example
-  `info,activesync_server=info,activesync_core=info`).
-- Server keypair: auto-generated at `~/.activesync/server.key` on first run;
+  Example: `info,nodalmerge_server=info,nodalmerge_core=info`.
+- Server keypair: auto-generated at `server.key` in the server's working directory on first run;
   reused on subsequent starts (E1).
 
 ## Operational notes
@@ -103,11 +98,11 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
 - **Backpressure:** the per-room broadcast ring buffer holds
   `--broadcast-capacity <N>` messages (default `512`; `0` is rejected). A
   consumer that falls behind is closed with WS code `4001 resync required`
-  and bumps `activesync_broadcast_lagged_total{room}`; the SDK's
+  and bumps `nodalmerge_broadcast_lagged_total{room}`; the SDK's
   exp-backoff reconnect runs the normal recovery (hello → IBF → catch-up).
   Every application send is wrapped in a 5 s timeout — on timeout the
   peer is closed with `1011 server overload` and
-  `activesync_ws_send_timeout_total{room}` is incremented. Tradeoff:
+  `nodalmerge_ws_send_timeout_total{room}` is incremented. Tradeoff:
   larger capacity = more slack for brief stalls; smaller = faster
   divergence detection.
 - **Rate limiting:** every peer gets two independent token buckets,
@@ -118,7 +113,7 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
     decoded-pack bytes per second.
   On violation (quota exceeded *or* a single pack larger than the 1-second
   burst) the peer is closed with WS code `4008 rate limit exceeded` and
-  `activesync_rate_limit_drops_total{peer}` is incremented (`peer` = first
+  `nodalmerge_rate_limit_drops_total{peer}` is incremented (`peer` = first
   12 hex chars of the peer pubkey). The server's own signing key is
   exempt so the authoritative tick loop is never throttled. Well-behaved
   clients should split large packs; unsplit packs larger than the burst
@@ -135,7 +130,7 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
   `<store>/blob-tombstones/<room>/<hash>`. Subsequent visit: if the
   tombstone is older than the grace window **and** the blob is still
   orphaned, blob + tombstone are deleted together and
-  `activesync_blob_gc_deleted_total{room}` is incremented. If a blob
+  `nodalmerge_blob_gc_deleted_total{room}` is incremented. If a blob
   becomes live again (a peer re-publishes a `SetBlob` referencing it)
   the sweeper clears its tombstone instead. Set `--blob-gc-grace 0` to
   collapse the two phases into a single aggressive pass.
@@ -158,7 +153,7 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
     accepted. No tuning needed — the 24 h window absorbs client
     drift and NTP stumbles.
   Rejects surface in `import_nodes` logs and bump
-  `activesync_lamport_rejected_total{reason}` where `reason` is
+  `nodalmerge_lamport_rejected_total{reason}` where `reason` is
   `ceiling` or `wall_skew`. A sustained non-zero rate points at a
   misbehaving client or badly-synced clocks (often the server's own
   clock drift).
@@ -167,7 +162,7 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
   of each accepted `RoomToken` once at authentication time and holds
   it as a per-session deadline. When the deadline lapses the WS is
   closed with code `4002 token expired` and
-  `activesync_token_expired_disconnects_total{room}` is incremented.
+  `nodalmerge_token_expired_disconnects_total{room}` is incremented.
   Admission-time expiry (`now >= expiry_secs` at `hello`) still
   rejects with `4001 unauthorized` — `4002` is exclusively the
   mid-session signal. The SDK's `getToken` hook should refresh
@@ -194,7 +189,7 @@ Replay truncation watermark semantics:
 Rollback path (operator):
 
 1. Stop the server for the target deployment.
-2. Restore `activesync.db` (+ `-wal`/`-shm` when present) and `blobs/` from backup.
+2. Restore `nodalmerge.db` (+ `-wal`/`-shm` when present) and `blobs/` from backup.
 3. Start server with the restored `--store` path and same room auth policy configuration.
 4. Run the snapshot restore drill to verify deterministic restore/hash semantics:
    `pwsh -File .\docs\acceptance\Run-SnapshotRestoreDrill.ps1`
@@ -239,9 +234,6 @@ Baseline series (primary):
 | `nodalmerge_blob_gc_deleted_total` | counter | `room` |
 | `nodalmerge_lamport_rejected_total` | counter | `reason` |
 | `nodalmerge_token_expired_disconnects_total` | counter | `room` |
-
-Compatibility note: legacy `activesync_*` metric names are still emitted during
-the migration window.
 
 Histograms ship with hand-tuned buckets (µs-scale for merges and persistence
 writes) so Prometheus `histogram_quantile(0.99, …)` works without extra

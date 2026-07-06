@@ -11,11 +11,10 @@ public sealed record JwtBridgeEmbeddedAuthOptions(
 )
 {
     public const string SectionName = "NodalMerge:Auth:JwtBridgeEmbedded";
-    public const string LegacySectionName = "NodalMerge:Auth:JwtBridgeEmbedded";
 
     public static JwtBridgeEmbeddedAuthOptions FromConfiguration(IConfiguration? configuration)
     {
-        var section = ConfigurationKeyFallback.GetSection(configuration, SectionName, LegacySectionName);
+        var section = configuration?.GetSection(SectionName);
 
         var clockSkewSeconds = 5;
         if (int.TryParse(section?["ClockSkewSeconds"], out var parsedClockSkew) && parsedClockSkew >= 0)

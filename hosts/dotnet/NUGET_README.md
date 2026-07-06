@@ -11,7 +11,7 @@ NodalMerge host packages provide a package-first path for embedding a determinis
 
 Compatibility note:
 
-- Legacy `ActiveSync.*` package IDs are still supported during migration window.
+- Legacy `NodalMerge.*` package IDs are still supported during migration window.
 
 ## Dead-Simple Runtime Surface
 
@@ -33,12 +33,12 @@ Use local packages before any remote publish:
 ```powershell
 cd nodalmerge-host
 pwsh -File .\pack-local-nuget.ps1 -Version 0.1.0-local
-dotnet restore .\NodalMerge.DotNetHost.slnx --configfile .\NuGet.Local.config -p:ActiveSyncUseNuGetPackages=true -p:ActiveSyncPackageVersion=0.1.0-local
+dotnet restore .\NodalMerge.DotNetHost.slnx --configfile .\NuGet.Local.config -p:NodalMergeUseNuGetPackages=true -p:NodalMergePackageVersion=0.1.0-local
 pwsh -File .\verify.ps1 -UseNuGetPackages -NodalMergePackageVersion 0.1.0-local
 ```
 
 ## Notes
 
 - Default project build mode uses project references.
-- Package mode is opt-in through `ActiveSyncUseNuGetPackages=true`.
-- Native runtime can be overridden via `NODALMERGE_HOST_FFI_DLL` (legacy `ACTIVESYNC_HOST_FFI_DLL` fallback remains).
+- Package mode is opt-in through `NodalMergeUseNuGetPackages=true`.
+- Native runtime can be overridden via `NODALMERGE_HOST_FFI_DLL` (legacy `NODALMERGE_HOST_FFI_DLL` fallback remains).

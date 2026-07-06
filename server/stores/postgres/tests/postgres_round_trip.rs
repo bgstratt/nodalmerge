@@ -9,8 +9,8 @@ use testcontainers::{
     GenericImage, ImageExt,
 };
 
-const PG_USER: &str = "activesync";
-const PG_PASS: &str = "activesync";
+const PG_USER: &str = "nodalmerge";
+const PG_PASS: &str = "nodalmerge";
 const PG_DB: &str = "nodalmerge_test";
 
 fn start_postgres() -> Option<testcontainers::Container<GenericImage>> {

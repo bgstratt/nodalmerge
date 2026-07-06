@@ -115,71 +115,71 @@ fn emit_snapshot(label: &str, graph: &StateGraph) {
 }
 
 fn bench_text_write_path(c: &mut Criterion) {
-    let projection_mode = std::env::var("ACTIVESYNC_TEXT_WRITE_PROJECTION_MODE")
+    let projection_mode = std::env::var("NODALMERGE_TEXT_WRITE_PROJECTION_MODE")
         .ok()
         .map(|v| parse_projection_mode(&v))
         .unwrap_or(TextProjectionMode::Enabled);
     let mode_label = projection_mode_label(projection_mode);
 
-    let typing_ops = std::env::var("ACTIVESYNC_TEXT_WRITE_TYPING_OPS")
+    let typing_ops = std::env::var("NODALMERGE_TEXT_WRITE_TYPING_OPS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(2000);
-    let typing_read_every = std::env::var("ACTIVESYNC_TEXT_WRITE_TYPING_READ_EVERY")
+    let typing_read_every = std::env::var("NODALMERGE_TEXT_WRITE_TYPING_READ_EVERY")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(32);
-    let paste_bursts = std::env::var("ACTIVESYNC_TEXT_WRITE_PASTE_BURSTS")
+    let paste_bursts = std::env::var("NODALMERGE_TEXT_WRITE_PASTE_BURSTS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(128);
-    let paste_len = std::env::var("ACTIVESYNC_TEXT_WRITE_PASTE_LEN")
+    let paste_len = std::env::var("NODALMERGE_TEXT_WRITE_PASTE_LEN")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(32);
-    let remote_burst_nodes = std::env::var("ACTIVESYNC_TEXT_WRITE_REMOTE_BURST_NODES")
+    let remote_burst_nodes = std::env::var("NODALMERGE_TEXT_WRITE_REMOTE_BURST_NODES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(2000);
-    let mixed_steps = std::env::var("ACTIVESYNC_TEXT_WRITE_MIXED_STEPS")
+    let mixed_steps = std::env::var("NODALMERGE_TEXT_WRITE_MIXED_STEPS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(2000);
-    let mixed_remote_every = std::env::var("ACTIVESYNC_TEXT_WRITE_MIXED_REMOTE_EVERY")
+    let mixed_remote_every = std::env::var("NODALMERGE_TEXT_WRITE_MIXED_REMOTE_EVERY")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(3);
-    let emit_counters_snapshot = std::env::var("ACTIVESYNC_TEXT_WRITE_EMIT_SNAPSHOT")
+    let emit_counters_snapshot = std::env::var("NODALMERGE_TEXT_WRITE_EMIT_SNAPSHOT")
         .ok()
         .map(|v| {
             let lower = v.trim().to_ascii_lowercase();
             lower == "1" || lower == "true" || lower == "yes"
         })
         .unwrap_or(false);
-    let rebuild_doc_len = std::env::var("ACTIVESYNC_TEXT_WRITE_REBUILD_DOC_LEN")
+    let rebuild_doc_len = std::env::var("NODALMERGE_TEXT_WRITE_REBUILD_DOC_LEN")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(4096);
-    let rebuild_window = std::env::var("ACTIVESYNC_TEXT_WRITE_REBUILD_WINDOW")
+    let rebuild_window = std::env::var("NODALMERGE_TEXT_WRITE_REBUILD_WINDOW")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(256);
-    let churn_base_len = std::env::var("ACTIVESYNC_TEXT_WRITE_CHURN_BASE_LEN")
+    let churn_base_len = std::env::var("NODALMERGE_TEXT_WRITE_CHURN_BASE_LEN")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1024);
-    let churn_steps = std::env::var("ACTIVESYNC_TEXT_WRITE_CHURN_STEPS")
+    let churn_steps = std::env::var("NODALMERGE_TEXT_WRITE_CHURN_STEPS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1000);
-    let churn_insert_len = std::env::var("ACTIVESYNC_TEXT_WRITE_CHURN_INSERT_LEN")
+    let churn_insert_len = std::env::var("NODALMERGE_TEXT_WRITE_CHURN_INSERT_LEN")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(4);
-    let churn_delete_span = std::env::var("ACTIVESYNC_TEXT_WRITE_CHURN_DELETE_SPAN")
+    let churn_delete_span = std::env::var("NODALMERGE_TEXT_WRITE_CHURN_DELETE_SPAN")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)

@@ -229,58 +229,12 @@ try {
             Pop-Location
         }
 
-        Write-Host "[npm] Packing nodalmerge-bridge (primary wrapper) ..."
-        Push-Location (Join-Path $repoRoot "compat\npm\nodalmerge-bridge")
-        try {
-            Invoke-Checked -Name "npm pack wrapper nodalmerge-bridge" -Command { & $npmPath pack }
-            Get-ChildItem -Path . -Filter "*.tgz" | ForEach-Object {
-                Copy-Item -Path $_.FullName -Destination (Join-Path $npmOutput $_.Name) -Force
-            }
-        }
-        finally {
-            Pop-Location
-        }
-
-        Write-Host "[npm] Packing nodalmerge-sdk-js (primary wrapper) ..."
-        Push-Location (Join-Path $repoRoot "compat\npm\nodalmerge-sdk-js")
-        try {
-            Invoke-Checked -Name "npm pack wrapper nodalmerge-sdk-js" -Command { & $npmPath pack }
-            Get-ChildItem -Path . -Filter "*.tgz" | ForEach-Object {
-                Copy-Item -Path $_.FullName -Destination (Join-Path $npmOutput $_.Name) -Force
-            }
-        }
-        finally {
-            Pop-Location
-        }
-
-        # Wrapper packs are compatibility stubs. Re-stage the real WASM + SDK tarballs last.
-        Write-Host "[npm] Staging canonical bridge/pkg and sdk-js tarballs ..."
-        Push-Location (Join-Path $repoRoot "clients\bridge-wasm\pkg")
-        try {
-            Invoke-Checked -Name "npm pack bridge/pkg (canonical)" -Command { & $npmPath pack }
-            Get-ChildItem -Path . -Filter "nodalmerge-bridge-*.tgz" | ForEach-Object {
-                Copy-Item -Path $_.FullName -Destination (Join-Path $npmOutput $_.Name) -Force
-            }
-        }
-        finally {
-            Pop-Location
-        }
-        Push-Location (Join-Path $repoRoot "clients\sdk-js")
-        try {
-            Invoke-Checked -Name "npm pack sdk-js (canonical)" -Command { & $npmPath pack }
-            Get-ChildItem -Path . -Filter "nodalmerge-sdk-js-*.tgz" | ForEach-Object {
-                Copy-Item -Path $_.FullName -Destination (Join-Path $npmOutput $_.Name) -Force
-            }
-        }
-        finally {
-            Pop-Location
-        }
     }
 
     if (-not $SkipNuGet) {
         Write-Host "[nuget] Packing managed/native local packages ..."
         $packScript = Join-Path $repoRoot "hosts\dotnet\pack-local-nuget.ps1"
-        $dotnetHostDir = Join-Path $repoRoot "nodalmerge-host"
+        $dotnetHostDir = Join-Path $repoRoot "hosts\dotnet"
         $nugetOutputRelative = Get-RelativePathCompat -BasePath $dotnetHostDir -TargetPath $nugetOutput
         Invoke-Checked -Name "pack-local-nuget.ps1" -Command {
             & $packScript -Version $Version -OutputDir $nugetOutputRelative
@@ -299,21 +253,13 @@ try {
             "nodalmerge-server" = "server/server"
             "nodalmerge-jwt-bridge" = "server/jwt-bridge"
             "nodalmerge-s3-blobs" = "server/s3-blobs"
+            "nodalmerge-mongo-store" = "server/stores/mongo"
+            "nodalmerge-postgres-store" = "server/stores/postgres"
+            "nodalmerge-nodestore-conformance" = "server/stores/conformance"
             "nodalmerge-runtime-local" = "peer/runtime-local"
             "nodalmerge-runtime-local-ffi" = "peer/runtime-local-ffi"
             "nodalmerge-headless" = "peer/headless"
             "nodalmerge-cli" = "peer/cli"
-            "activesync-core" = "compat/rust/nodalmerge-core"
-            "activesync-gc" = "compat/rust/nodalmerge-gc"
-            "activesync-host-core" = "compat/rust/nodalmerge-host-core"
-            "activesync-host-axum" = "compat/rust/nodalmerge-host-axum"
-            "activesync-host-ffi" = "compat/rust/nodalmerge-host-ffi"
-            "activesync-server" = "compat/rust/nodalmerge-server"
-            "activesync-jwt-bridge" = "compat/rust/nodalmerge-jwt-bridge"
-            "activesync-s3-blobs" = "compat/rust/nodalmerge-s3-blobs"
-            "activesync-mongo-store" = "compat/rust/nodalmerge-mongo-store"
-            "activesync-postgres-store" = "compat/rust/nodalmerge-postgres-store"
-            "activesync-nodestore-conformance" = "compat/rust/nodalmerge-nodestore-conformance"
         }
         $crateIds = @(
             "nodalmerge-core",
@@ -325,21 +271,13 @@ try {
             "nodalmerge-server",
             "nodalmerge-jwt-bridge",
             "nodalmerge-s3-blobs",
+            "nodalmerge-mongo-store",
+            "nodalmerge-postgres-store",
+            "nodalmerge-nodestore-conformance",
             "nodalmerge-runtime-local",
             "nodalmerge-runtime-local-ffi",
             "nodalmerge-headless",
-            "nodalmerge-cli",
-            "activesync-core",
-            "activesync-gc",
-            "activesync-host-core",
-            "activesync-host-axum",
-            "activesync-host-ffi",
-            "activesync-server",
-            "activesync-jwt-bridge",
-            "activesync-s3-blobs",
-            "activesync-mongo-store",
-            "activesync-postgres-store",
-            "activesync-nodestore-conformance"
+            "nodalmerge-cli"
         )
 
         if ($crateIds.Count -ne ($crateIds | Select-Object -Unique).Count) {

@@ -10,9 +10,16 @@ Date: 2026-07-02
 > from impractical (10+ hours est.) to 46.6 s with exact `endContent`
 > convergence; engine-side apply cost near-flat (~2.4 → ~4.2 µs/op from 50k to
 > 980k). No public API, FFI, or wire changes. Remaining open items: Phase 0
-> scripted regression gates, Phase 4 S4.2/S4.3/S4.4 (client range-op adoption,
-> bridge per-keystroke fast path, snapshot cold-start), Phase 5 dmonad-parity
-> table, and the optional M5 blob transport work.
+> scripted regression gates, Phase 4 S4.2/S4.4 (client range-op adoption,
+> snapshot cold-start), Phase 5 dmonad-parity table, and the optional M5 blob
+> transport work.
+>
+> **S4.3 done (2026-07-06):** the bridge per-keystroke fast path landed as an
+> O(log n) Offset-anchor canonicalization in `apply_local_text_range_op`
+> (projection `id_at_visible_offset` instead of full-sequence
+> materialization). Browser full-trace B4: unsigned 78.83 s → 2.16 s
+> (8.3 µs/op), signed 88.86 s → 9.76 s (37.6 µs/op); see
+> `benchmarks/benchmarks.md` "[B4] Browser/WASM parity".
 Context: benchmarks/benchmarks.md "Text throughput, wire cost, and cold-start convergence
 (v1 spike)" — unbatched apply collapses from 384,947 ops/sec (5k ops) to 455 ops/sec
 (150k ops); mean wire cost is ~209 bytes per character op. yjs, diamond-types, and

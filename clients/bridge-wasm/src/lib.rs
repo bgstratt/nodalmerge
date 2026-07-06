@@ -334,6 +334,15 @@ impl SyncStore {
     /// Call `flush_tick()` from `setInterval(fn, interval_ms)` in JS to emit
     /// the batched node on a timer. The buffer also auto-flushes if
     /// `max_ops_per_tick` ops accumulate before the next timer fires.
+    /// Toggle Ed25519 signing of locally-authored nodes (default on).
+    ///
+    /// Benchmark/dev only: unsigned (zero-signature) nodes are valid for
+    /// local-only stores but rejected by servers that enforce signatures.
+    /// Lets the bench-trace demo isolate engine cost from signature cost.
+    pub fn set_local_signing(&mut self, enabled: bool) {
+        self.graph.set_local_signing(enabled);
+    }
+
     pub fn set_tick_config(&mut self, interval_ms: u64, max_ops_per_tick: u32) {
         self.tick_config = Some(TickConfig {
             interval_ms,

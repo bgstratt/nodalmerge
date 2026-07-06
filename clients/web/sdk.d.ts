@@ -348,6 +348,11 @@ export interface CreateDocOptions {
     debounceMs?: number;
     migrateLegacyDemo?: boolean;
   };
+  /** Bench/dev only: skip Ed25519 signing of locally-authored nodes. Unsigned
+   *  nodes are rejected by servers, so only use with local-only docs
+   *  (`autoConnect: false`). Lets benchmarks isolate engine cost from
+   *  signature cost. Default: false (sign everything). */
+  unsignedNodes?: boolean;
   /** wasm-bindgen InitInput (URL string, Request, Module, or bytes) for bundlers
    *  that relocate the bridge .wasm (e.g. Vite `?url` imports). Default: fetch
    *  relative to the bridge module. First init wins; later inputs are ignored. */

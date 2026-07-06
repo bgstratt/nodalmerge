@@ -354,6 +354,11 @@ pub struct StateGraph<N: NodeStore = MemoryNodeStore> {
     /// re-verification when the same node is re-broadcast (server echo,
     /// reconnect catchup, replay). Never persisted; cleared on process exit.
     verified_ids: HashSet<NodeId>,
+    /// Whether `apply_local*` signs the nodes it creates (default `true`).
+    /// `false` emits zero-signature nodes — the unsigned/legacy form that
+    /// `verify_signature` accepts but the server rejects. Benchmark/dev
+    /// only: lets a local-only run isolate engine cost from Ed25519 cost.
+    local_signing: bool,
     /// Per-key incremental text materializations.
     #[cfg(feature = "text_projection")]
     text_projections: HashMap<String, TextProjection>,
@@ -410,6 +415,7 @@ impl Default for StateGraph<MemoryNodeStore> {
             frontier: Frontier::default(),
             local_node_ids: HashSet::new(),
             verified_ids: HashSet::new(),
+            local_signing: true,
             #[cfg(feature = "text_projection")]
             text_projections: HashMap::new(),
             text_projection_mode: TextProjectionMode::Enabled,
@@ -458,6 +464,7 @@ impl<N: NodeStore> StateGraph<N> {
             frontier: Frontier::default(),
             local_node_ids: HashSet::new(),
             verified_ids: HashSet::new(),
+            local_signing: true,
             #[cfg(feature = "text_projection")]
             text_projections: HashMap::new(),
             text_projection_mode: TextProjectionMode::Enabled,
@@ -816,6 +823,16 @@ impl<N: NodeStore> StateGraph<N> {
         self.policy = policy;
     }
 
+    /// Toggle Ed25519 signing of locally-authored nodes (default `true`).
+    ///
+    /// With signing off, `apply_local*` emits zero-signature nodes: valid for
+    /// local-only use (compaction, benchmarks, tests) but rejected by servers
+    /// that enforce non-zero signatures. Intended for isolating engine cost
+    /// from signature cost in benchmarks — not a production mode.
+    pub fn set_local_signing(&mut self, enabled: bool) {
+        self.local_signing = enabled;
+    }
+
     /// Return a reference to the current room policy.
     pub fn policy(&self) -> &Policy {
         &self.policy
@@ -863,7 +880,13 @@ impl<N: NodeStore> StateGraph<N> {
         let author: [u8; 32] = signing_key.verifying_key().to_bytes();
         let parents: Vec<Hash> = self.leaves.iter().copied().collect();
         let tx = Transaction { author, lamport: tx_lamport, wall_ms, ops, parents };
-        let node = SyncNode::new_signed(tx, signing_key);
+        let node = if self.local_signing {
+            SyncNode::new_signed(tx, signing_key)
+        } else {
+            // Bench/dev mode: zero-signature (unsigned/legacy) node. Accepted
+            // locally and by `verify_signature`; rejected by the server.
+            SyncNode::new(tx)
+        };
         let id = node.id;
         self.insert_node(node.clone())?;
         // Speculative view only — locally-authored nodes are excluded from

@@ -308,6 +308,42 @@ long-lived room with overwrites sees orders of magnitude, not 3x. Text
 throughput re-measured after the cache hook landed: 213,897 ops/sec at 50k —
 no regression (cache update is a no-op match arm for text ops).
 
+## [B4] Browser/WASM parity: S4.3 Offset-anchor fast path
+
+Date: 2026-07-06
+Change: `apply_local_text_range_op` canonicalized every local `Offset` anchor by
+materializing the full visible sequence (`resolve_text_seq_with_chars`,
+O(document) per edit) — a cost the native B4 harness never paid (it feeds
+raw-Offset nodes to `apply_remote`, where the projection lowers in O(log n)).
+Now answered by the projection's chunk index (`id_at_visible_offset`), with the
+materializing path retained as fallback (feature off / no projection / id miss).
+Canonical anchors are byte-identical; `text_range_convergence` (7), core lib
+(203), and full-B4-`endContent` equality all pass.
+
+Harness: docs repo `apps/demos/bench-trace` (one signed or unsigned DAG node per
+edit via the real bridge/SDK path — same per-edit convention as the native
+test). Full trace = 259,778 edits. Laptop host (ProArt P16, Ryzen AI 9 HX 370).
+
+| Configuration | before (full trace) | after (full trace) | after µs/op |
+|---|---:|---:|---:|
+| Native engine (x86-64, unsigned) | 882 ms | 882 ms (unchanged) | 3.4 |
+| Browser WASM, unsigned | 78.83 s (303.5 µs/op) | **2.16 s** | 8.3 |
+| Browser WASM, signed | 88.86 s (342.1 µs/op) | **9.76 s** | 37.6 |
+
+Reading the decomposition:
+
+1. µs/op is now flat from 50k → 260k ops in both browser modes — the
+   O(document) write-path term is gone, not just smaller.
+2. Unsigned browser vs native = 2.4x: the honest WASM-codegen + JS boundary
+   gap, in line with expectations for per-call marshalling.
+3. Signed vs unsigned = ~29 µs/op: pure per-node Ed25519 in WASM. This is now
+   the dominant browser cost; next levers are tick-batching text ops (one
+   signature per flush) or deferred/WebCrypto signing — not engine work.
+4. Cross-system context (their README, different hardware): browser signed
+   9.76 s sits next to yjs's 5.7 s *unsigned pure-JS* run while carrying
+   per-node signatures + hash-linked DAG framing; unsigned 2.16 s is in the
+   loro/diamond-types tier.
+
 ## Full ecosystem benchmarks retained (.NET host vs Rust host)
 
 This microbench section is additive and does not replace host-level apples-to-apples measurements.

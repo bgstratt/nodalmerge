@@ -205,7 +205,9 @@ batching's real-world benefit.
 ## Text engine rewrite results (docs/text-performance-plan.md Phases 1-3)
 
 Date: 2026-07-02
-Host: same laptop-class host as above (ProArt P16, Ryzen AI 9 HX 370).
+Host: AMD Ryzen 9 5900X desktop (`BRAD-PC`) — mislabeled at the time as "same
+laptop-class host as above"; see the [B4] section below for how this was
+caught and confirmed by re-run.
 Same runner/trace as the v1 spike (`core/tests/text_throughput_and_convergence.rs`,
 `docs/rustcode.json`, `TextProjectionMode::Enabled`). Baseline re-measured same-day,
 same host, immediately before the change (`benchmarks/results/text-throughput-baseline-50k.json`).
@@ -245,6 +247,14 @@ Notes:
 ## [B4] Real-world editing dataset (dmonad/crdt-benchmarks parity)
 
 Date: 2026-07-02
+Host: AMD Ryzen 9 5900X desktop (`BRAD-PC`). Originally mislabeled in this
+file as the ProArt P16 laptop (Ryzen AI 9 HX 370) — this was the same
+copy-paste-stale-host-block error later caught and fixed for the S4.3 section
+below. Caught 2026-07-06 by re-running this exact test on the 5900X and
+getting 881.6 ms / 294,654 ops/sec, cold-start 933.0 ms — within noise of the
+"882 ms / 294,521 ops/sec" row below, far tighter than the laptop/desktop
+delta seen elsewhere on this page (e.g. the 2026-05-22 vs 2026-07-01 host
+switch), so the original run was almost certainly already on this desktop.
 Runner: `core/tests/b4_editing_trace.rs`
 Trace: `benchmarks/data/b4-editing-trace.json` — extracted 1:1 from
 `crdt-benchmarks/js-lib/b4-editing-trace.js` (the automerge-perf edit-by-index
@@ -262,8 +272,11 @@ parents + postcard) — integrity work the JS CRDTs don't do at all.
 | [B4] total update bytes (per-node postcard) | 46,542,513 (179.2 bytes/edit) |
 | [B4] cold-start: fresh peer applies full history + content check | 947 ms |
 
+Confirming re-run, 2026-07-06, same desktop: **881.6 ms** (294,654 ops/sec),
+cold-start 933.0 ms.
+
 Cross-system context (their README numbers, **different hardware** — desktop
-i5-8400/Node 20 vs this laptop Ryzen AI 9 HX 370 — so treat as order-of-
+i5-8400/Node 20 vs our Ryzen 9 5900X desktop — so treat as order-of-
 magnitude context, not a controlled comparison): yjs 5,714 ms, ywasm
 28,675 ms, loro 3,089 ms, automerge 14,326 ms for the same B4 "time" row.
 Our per-edit wire cost (179 bytes) is dominated by DAG node framing (author,
@@ -322,9 +335,10 @@ Canonical anchors are byte-identical; `text_range_convergence` (7), core lib
 
 Harness: docs repo `apps/demos/bench-trace` (one signed or unsigned DAG node per
 edit via the real bridge/SDK path — same per-edit convention as the native
-test). Full trace = 259,778 edits. Desktop host (AMD Ryzen 9 5900X) — note
-this differs from the laptop host used for the 2026-07-01/02 sections above;
-compare within this section only.
+test). Full trace = 259,778 edits. Desktop host (AMD Ryzen 9 5900X) — this
+turns out to be the same host as the 2026-07-01/02 sections above, not a
+different one; those sections' "laptop" host labels were themselves stale
+copy-paste and have been corrected in place.
 
 | Configuration | before (full trace) | after (full trace) | after µs/op |
 |---|---:|---:|---:|

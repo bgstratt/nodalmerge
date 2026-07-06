@@ -2969,7 +2969,7 @@ checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
 
 [[package]]
 name = "nodalmerge-bridge"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "js-sys",
@@ -2981,7 +2981,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-capability-profile"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2989,7 +2989,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -3009,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-command-registry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nodalmerge-host-core",
  "serde",
@@ -3018,7 +3018,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "blake3",
@@ -3036,7 +3036,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-dev-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "env_logger",
@@ -3052,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-gc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
@@ -3060,7 +3060,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-headless"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3082,7 +3082,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-host-axum"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "ed25519-dalek",
@@ -3092,7 +3092,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-host-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "nodalmerge-core",
@@ -3103,7 +3103,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-host-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "criterion",
@@ -3117,7 +3117,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-jwt-bridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "jsonwebtoken",
@@ -3131,7 +3131,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-mongo-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "futures-util",
@@ -3150,7 +3150,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-nodestore-conformance"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "nodalmerge-core",
@@ -3160,7 +3160,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-postgres-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "metrics 0.23.1",
@@ -3178,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-runtime-local"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "nodalmerge-core",
@@ -3188,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-runtime-local-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-s3-blobs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.22.1",

@@ -1,6 +1,8 @@
 # Blob Layout Convergence Plan — one canonical CAS across runtimes
 
-Status: planned 2026-07-06, ready for implementation.
+Status: implemented 2026-07-06. Canonical contract lives in
+`docs/BLOB_STORAGE_LAYOUT.md`; both runtimes converged, version-bumped to
+0.2.0 in lockstep, full workspace + solution regression green.
 Prerequisite reading: the S5 schema-contract pattern
 (`docs/PERSISTENCE_SCHEMA.md`) and the CAPCOMP vectors pattern
 (`docs/CAPCOMP_PARITY_PLAN.md`) — this plan is the third application of the

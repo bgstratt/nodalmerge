@@ -468,6 +468,12 @@ impl Rooms {
                         "async persistence hydrate stage: load_room_nodes"
                     );
 
+                    // Blobs are a global CAS pool addressed only by hash
+                    // (see docs/BLOB_STORAGE_LAYOUT.md) — this room's live
+                    // set must be computed from its own nodes before they
+                    // are moved into apply_remote_batch below.
+                    let referenced_hashes = blob_hashes_referenced_by(nodes.iter());
+
                     if !nodes.is_empty() {
                         let apply_nodes_start = Instant::now();
                         let res = room_clone.graph.write().await.apply_remote_batch(nodes);
@@ -484,9 +490,14 @@ impl Rooms {
                         }
                     }
 
-                    // Load blobs and insert into memory blob store.
+                    // Load this room's referenced blobs (point lookups
+                    // against the global pool) and insert into the
+                    // in-memory blob store.
                     let load_blobs_start = Instant::now();
-                    let blobs = persistence.load_room_blobs(&room_clone.room_id);
+                    let blobs: Vec<Vec<u8>> = referenced_hashes
+                        .iter()
+                        .filter_map(|h| persistence.get_blob(h))
+                        .collect();
                     let load_blobs_elapsed = load_blobs_start.elapsed();
                     tracing::info!(
                         room = %room_clone.room_id,
@@ -498,7 +509,7 @@ impl Rooms {
                     if !blobs.is_empty() {
                         let apply_blobs_start = Instant::now();
                         let mut store = room_clone.blobs.write().await;
-                        for (_h, bytes) in blobs {
+                        for bytes in blobs {
                             store.put(bytes);
                         }
                         let apply_blobs_elapsed = apply_blobs_start.elapsed();
@@ -599,51 +610,68 @@ impl Rooms {
     /// minimal and matches the "only GC what's hot" operational model.
     ///
     /// No-op on non-durable backends.
+    ///
+    /// Blobs are a single global CAS pool (no per-room directories — see
+    /// `docs/BLOB_STORAGE_LAYOUT.md`), so the live set fed to the sweep
+    /// must cover *every* room the store knows about, not just the ones
+    /// currently loaded in memory. A live set restricted to resident rooms
+    /// would cause the sweep to tombstone and eventually delete blobs that
+    /// belong only to idle/cold rooms — safe under the old per-room-dir
+    /// layout (a sweep only ever touched its own room's directory) and
+    /// actively dangerous under the flat layout. So this collects live
+    /// hashes from resident rooms via their in-memory graphs, then unions
+    /// in every other known room id via a fresh `load_room_nodes` scan.
     pub async fn sweep_blobs(&self, grace: Duration) -> usize {
         if !self.persistence.is_durable() {
             return 0;
         }
         // Snapshot the room list so we don't hold the outer lock while
         // reading per-room graphs.
-        let rooms: Vec<(String, Arc<Room>)> = {
+        let resident: Vec<(String, Arc<Room>)> = {
             let map = self.rooms.read().await;
             map.iter()
                 .map(|(k, v)| (k.clone(), Arc::clone(v)))
                 .collect()
         };
-        let mut total = 0;
-        for (id, room) in rooms {
-            let live = collect_live_blob_hashes(&room).await;
+        let resident_ids: std::collections::HashSet<&str> =
+            resident.iter().map(|(id, _)| id.as_str()).collect();
 
-            // PR-05 compatibility bridge: run shared GC coordinator in
-            // MarkOnly mode to exercise host-neutral contracts without
-            // changing deletion behavior. Legacy blob_gc_sweep remains the
-            // source of physical delete behavior for now.
-            match crate::gc_adapter::run_mark_only_preflight(&id, &live) {
-                Ok(delta) => {
-                    metrics::counter!("nodalmerge_gc_runs_total", "mode" => "mark-only", "status" => "ok")
-                        .increment(1);
-                    metrics::counter!("nodalmerge_gc_marked_total", "room" => id.clone())
-                        .increment(delta.marked_count);
-                }
-                Err(e) => {
-                    metrics::counter!("nodalmerge_gc_runs_total", "mode" => "mark-only", "status" => "error")
-                        .increment(1);
-                    metrics::counter!("nodalmerge_gc_error_total", "room" => id.clone())
-                        .increment(1);
-                    tracing::warn!(room = %id, ?e, "GC mark-only preflight failed; continuing with legacy sweep");
-                }
-            }
-
-            let deleted = self.persistence.blob_gc_sweep(&id, &live, grace);
-            if deleted > 0 {
-                metrics::counter!("nodalmerge_blob_gc_deleted_total", "room" => id.clone())
-                    .increment(deleted as u64);
-                tracing::info!(room = %id, deleted, "blob GC reclaimed blobs");
-            }
-            total += deleted;
+        let mut live = std::collections::HashSet::new();
+        for (_, room) in &resident {
+            live.extend(collect_live_blob_hashes(room).await);
         }
-        total
+        for id in self.persistence.known_room_ids() {
+            if resident_ids.contains(id.as_str()) {
+                continue; // already covered via the resident graph above
+            }
+            let nodes = self.persistence.load_room_nodes(&id);
+            live.extend(blob_hashes_referenced_by(nodes.iter()));
+        }
+
+        // PR-05 compatibility bridge: run the shared GC coordinator in
+        // MarkOnly mode once, globally, to exercise host-neutral contracts
+        // without changing delete behavior. Legacy blob_gc_sweep remains
+        // the source of physical delete behavior for now.
+        match crate::gc_adapter::run_mark_only_preflight("_global", &live) {
+            Ok(delta) => {
+                metrics::counter!("nodalmerge_gc_runs_total", "mode" => "mark-only", "status" => "ok")
+                    .increment(1);
+                metrics::counter!("nodalmerge_gc_marked_total").increment(delta.marked_count);
+            }
+            Err(e) => {
+                metrics::counter!("nodalmerge_gc_runs_total", "mode" => "mark-only", "status" => "error")
+                    .increment(1);
+                metrics::counter!("nodalmerge_gc_error_total").increment(1);
+                tracing::warn!(?e, "GC mark-only preflight failed; continuing with legacy sweep");
+            }
+        }
+
+        let deleted = self.persistence.blob_gc_sweep(&live, grace);
+        if deleted > 0 {
+            metrics::counter!("nodalmerge_blob_gc_deleted_total").increment(deleted as u64);
+            tracing::info!(deleted, "blob GC reclaimed blobs");
+        }
+        deleted
     }
 }
 
@@ -663,14 +691,17 @@ fn parse_optional_env_usize(name: &str) -> Option<usize> {
 
 /// G4 helper — union of every `SetBlob.blob_hash` across all nodes in the
 /// room's DAG. Called with a read lock on the graph; does no I/O.
-async fn collect_live_blob_hashes(
-    room: &Arc<Room>,
+/// Blob hashes referenced by any `Op::Map::SetBlob` across a set of nodes —
+/// the full DAG, not just `resolve()` output, since older SetBlob ops still
+/// need to carry their blob to catching-up peers. Used both for a resident
+/// room's live set (via its in-memory graph) and a non-resident room's (via
+/// its persisted nodes) — see [`collect_live_blob_hashes`] and
+/// [`crate::archive_adapter`]'s blob-digest summary.
+pub(crate) fn blob_hashes_referenced_by<'a>(
+    nodes: impl IntoIterator<Item = &'a SyncNode>,
 ) -> std::collections::HashSet<nodalmerge_core::Hash> {
-    use nodalmerge_core::{MapOp, Op};
     let mut live = std::collections::HashSet::new();
-    let graph = room.graph.read().await;
-    let ids = graph.all_node_ids();
-    for node in graph.get_nodes(&ids) {
+    for node in nodes {
         for op in &node.transaction.ops {
             if let Op::Map(MapOp::SetBlob { blob_hash, .. }) = op {
                 live.insert(*blob_hash);
@@ -678,6 +709,13 @@ async fn collect_live_blob_hashes(
         }
     }
     live
+}
+
+async fn collect_live_blob_hashes(
+    room: &Arc<Room>,
+) -> std::collections::HashSet<nodalmerge_core::Hash> {
+    // StateGraph caches this incrementally — O(1) here vs. a full node scan.
+    room.graph.read().await.referenced_blob_hashes()
 }
 
 /// Spawn the background idle-eviction sweeper.

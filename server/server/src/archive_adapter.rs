@@ -287,7 +287,7 @@ pub async fn process_archive_import(
         let mut store = room.blobs.write().await;
         for (hash, bytes) in &loaded.blobs {
             store.put(bytes.clone());
-            room.persistence.persist_blob(&room.room_id, hash, bytes);
+            room.persistence.persist_blob(hash, bytes);
         }
         loaded.blobs.len() as u64
     };
@@ -694,9 +694,16 @@ fn load_archive_from_ref(
         ));
     }
 
-    let blobs = room.persistence.load_room_blobs(&source_room);
-
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // Blobs are a global CAS pool (docs/BLOB_STORAGE_LAYOUT.md); recover
+    // the source room's blob set via point lookups against the hashes its
+    // own nodes reference.
+    let blobs: Vec<(Hash, Vec<u8>)> = crate::room::blob_hashes_referenced_by(nodes.iter())
+        .into_iter()
+        .filter_map(|hash| room.persistence.get_blob(&hash).map(|bytes| (hash, bytes)))
+        .collect();
+
     let (checkpoint_hash, nodes_digest, blobs_digest) = if include_summary_digests {
         let replayed = replay(&nodes, None).map_err(|_| {
             rejected(
@@ -720,10 +727,10 @@ fn load_archive_from_ref(
         let nodes_pack = pack_nodes(&node_refs);
         let nodes_digest = format!("sha256:{}", Hash::of(&nodes_pack).to_hex());
 
-        let mut blob_digest_map = BTreeMap::new();
-        for (hash, bytes) in &blobs {
-            blob_digest_map.insert(hash.to_hex(), bytes.clone());
-        }
+        let blob_digest_map: BTreeMap<String, Vec<u8>> = blobs
+            .iter()
+            .map(|(hash, bytes)| (hash.to_hex(), bytes.clone()))
+            .collect();
         let blobs_digest = format!("sha256:{}", canonical_hash(&blob_digest_map).to_hex());
         (
             Some(checkpoint_hash),
@@ -1227,16 +1234,25 @@ mod tests {
     }
 
     async fn seed_source_room(room: &Arc<Room>) {
+        let blob = b"archive-adapter-blob".to_vec();
+        let hash = Hash::of(&blob);
+
         let mut g = StateGraph::new();
         let sk = SigningKey::from_bytes(&[0x77; 32]);
         let id = g
             .apply_local(
                 &sk,
                 0,
-                vec![Op::Map(MapOp::Set {
-                    key: "world/a".to_string(),
-                    value: b"1".to_vec(),
-                })],
+                vec![
+                    Op::Map(MapOp::Set {
+                        key: "world/a".to_string(),
+                        value: b"1".to_vec(),
+                    }),
+                    Op::Map(MapOp::SetBlob {
+                        key: "world/blob".to_string(),
+                        blob_hash: hash,
+                    }),
+                ],
             )
             .expect("seed apply_local should succeed");
         let node = g
@@ -1248,10 +1264,8 @@ mod tests {
 
         let _ = import_nodes(room, vec![node]).await;
 
-        let blob = b"archive-adapter-blob".to_vec();
-        let hash = Hash::of(&blob);
         room.blobs.write().await.put(blob.clone());
-        room.persistence.persist_blob(&room.room_id, &hash, &blob);
+        room.persistence.persist_blob(&hash, &blob);
     }
 
     #[tokio::test]

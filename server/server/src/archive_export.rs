@@ -65,12 +65,10 @@ pub fn build_external_manifest_document(
     if nodes.is_empty() {
         return Err("archive source room has no persisted nodes".to_string());
     }
-    let blobs = persistence.load_room_blobs(source_room);
-
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     let checkpoint_hash = checkpoint_hash_for_nodes(&nodes)?;
     let nodes_digest = nodes_digest_for_nodes(&nodes);
-    let blobs_digest = blobs_digest_for_blobs(&blobs);
+    let blobs_digest = blobs_digest_for_referenced(persistence, &nodes);
 
     let compatibility_window = ExportManifestCompatibilityWindow {
         min_supported: EXPORT_COMPAT_MIN_SUPPORTED.to_string(),
@@ -200,10 +198,12 @@ fn nodes_digest_for_nodes(nodes: &[SyncNode]) -> String {
     format!("sha256:{}", Hash::of(&packed).to_hex())
 }
 
-fn blobs_digest_for_blobs(blobs: &[(Hash, Vec<u8>)]) -> String {
+fn blobs_digest_for_referenced(persistence: &dyn ServerPersistence, nodes: &[SyncNode]) -> String {
     let mut map = BTreeMap::new();
-    for (hash, bytes) in blobs {
-        map.insert(hash.to_hex(), bytes.clone());
+    for hash in crate::room::blob_hashes_referenced_by(nodes.iter()) {
+        if let Some(bytes) = persistence.get_blob(&hash) {
+            map.insert(hash.to_hex(), bytes);
+        }
     }
     format!("sha256:{}", canonical_hash(&map).to_hex())
 }
@@ -290,7 +290,7 @@ mod tests {
         let blob = b"export-blob".to_vec();
         let hash = Hash::of(&blob);
         room.blobs.write().await.put(blob.clone());
-        room.persistence.persist_blob(&room.room_id, &hash, &blob);
+        room.persistence.persist_blob(&hash, &blob);
     }
 
     #[tokio::test]

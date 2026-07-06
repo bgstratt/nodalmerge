@@ -1,6 +1,6 @@
 [package]
 name = "nodalmerge-host-ffi"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "C ABI wrapper for NodalMerge host-core"
 readme = "README.md"
@@ -11,8 +11,8 @@ categories = ["api-bindings", "network-programming"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-nodalmerge-core = { version = "0.1.0", path = "../../core/crdt" }
-nodalmerge-host-core = { version = "0.1.0", path = "../host-core" }
+nodalmerge-core = { version = "0.2.0", path = "../../core/crdt" }
+nodalmerge-host-core = { version = "0.2.0", path = "../host-core" }
 ed25519-dalek = { workspace = true }
 postcard = { workspace = true }
 serde = { workspace = true }

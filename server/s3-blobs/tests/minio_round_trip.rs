@@ -147,7 +147,7 @@ fn s3_blob_round_trip_via_minio() {
 
     // 4. GC sweep: empty live set ⇒ object is deleted.
     let live = std::collections::HashSet::new();
-    let deleted = store.blob_gc_sweep(room_id, &live, Duration::from_secs(0));
+    let deleted = store.blob_gc_sweep(&live, Duration::from_secs(0));
     assert!(deleted >= 1, "expected at least 1 deleted, got {deleted}");
 
     // 5. After GC, verify_uploaded reports missing.

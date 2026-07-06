@@ -100,6 +100,24 @@ fn make_map_set_node(sk: &SigningKey, key: &str, value: &[u8]) -> nodalmerge_cor
     g.get_nodes(&[id]).into_iter().next().unwrap().clone()
 }
 
+/// Blobs are a global CAS pool addressed only by hash (see
+/// docs/BLOB_STORAGE_LAYOUT.md); archive describe/import/validate discover
+/// a room's blobs via `SetBlob` ops in its nodes, not a directory listing.
+fn make_setblob_node(sk: &SigningKey, key: &str, blob_hash: nodalmerge_core::Hash) -> nodalmerge_core::SyncNode {
+    let mut g = StateGraph::new();
+    let id = g
+        .apply_local(
+            sk,
+            0,
+            vec![Op::Map(MapOp::SetBlob {
+                key: key.to_string(),
+                blob_hash,
+            })],
+        )
+        .unwrap();
+    g.get_nodes(&[id]).into_iter().next().unwrap().clone()
+}
+
 async fn spawn_server() -> (std::net::SocketAddr, Rooms) {
     let server_key = SigningKey::from_bytes(&[0x51u8; 32]);
     let persistence: SharedPersistence = Arc::new(NoPersistence);
@@ -699,10 +717,14 @@ async fn run_current_archive_flow(fx: &GoldenFixture) -> CanonicalTrace {
 
     let source_blob = b"archive-flow-blob".to_vec();
     let source_blob_hash = nodalmerge_core::Hash::of(&source_blob);
+    let blob_ref_node = make_setblob_node(&source_author, "world/archive-blob", source_blob_hash);
+    let (accepted, _, errs) = import_nodes(&source_room, vec![blob_ref_node]).await;
+    assert_eq!(accepted, 1);
+    assert!(errs.is_empty());
     source_room.blobs.write().await.put(source_blob.clone());
     source_room
         .persistence
-        .persist_blob(&source_room.room_id, &source_blob_hash, &source_blob);
+        .persist_blob(&source_blob_hash, &source_blob);
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
     let (ws, _resp) = tokio_tungstenite::connect_async(url)

@@ -1062,7 +1062,7 @@ async fn handle_client_message(
                     if actual == expected {
                         // F4: write-through persistence for accepted blobs.
                         room.persistence
-                            .persist_blob(&room.room_id, &actual, &bytes);
+                            .persist_blob(&actual, &bytes);
                         blob_store.put(bytes);
                         stored += 1;
                     }

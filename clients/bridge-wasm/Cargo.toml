@@ -1,6 +1,6 @@
 [package]
 name = "nodalmerge-bridge"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 description = "WASM bridge: exposes nodalmerge-core to JavaScript"
 readme = "README.md"
@@ -11,7 +11,7 @@ categories = ["wasm", "api-bindings"]
 crate-type = ["cdylib"]
 
 [dependencies]
-nodalmerge-core = { version = "0.1.0", path = "../../core/crdt" }
+nodalmerge-core = { version = "0.2.0", path = "../../core/crdt" }
 ed25519-dalek = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

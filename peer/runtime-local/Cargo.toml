@@ -1,6 +1,6 @@
 [package]
 name = "nodalmerge-runtime-local"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Peer-local persistence adapter contract and implementations for headless NodalMerge runtimes"
 readme = "README.md"

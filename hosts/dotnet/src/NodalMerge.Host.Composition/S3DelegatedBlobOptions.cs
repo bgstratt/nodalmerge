@@ -2,16 +2,24 @@ using Microsoft.Extensions.Configuration;
 
 namespace NodalMerge.Host.Composition;
 
+/// <summary>
+/// Config for the delegate presign protocol v1 (see
+/// docs/BLOB_STORAGE_LAYOUT.md §7): a single endpoint, operation in the
+/// request body. Breaking change from 0.1.x, which posted to two separate
+/// paths (<c>PutPath</c>/<c>GetPath</c>) with a different payload shape —
+/// 0.2.x deployments must point <see cref="PresignPath"/> at an endpoint
+/// that speaks v1.
+/// </summary>
 public sealed record S3DelegatedBlobOptions(
     string BaseUrl,
     int TimeoutSeconds,
-    string PutPath,
-    string GetPath,
+    string PresignPath,
     string? ApiKey,
     string ApiKeyHeader,
     int MaxRetries,
     int CircuitBreakerFailureThreshold,
-    int CircuitBreakerOpenSeconds
+    int CircuitBreakerOpenSeconds,
+    int DefaultTtlSeconds
 )
 {
     public const string SectionName = "NodalMerge:Storage:S3Delegated";
@@ -44,16 +52,22 @@ public sealed record S3DelegatedBlobOptions(
             circuitOpenSeconds = parsedOpenSeconds;
         }
 
+        var defaultTtlSeconds = 900;
+        if (int.TryParse(section?["DefaultTtlSeconds"], out var parsedTtl) && parsedTtl > 0)
+        {
+            defaultTtlSeconds = parsedTtl;
+        }
+
         return new S3DelegatedBlobOptions(
             BaseUrl: section?["BaseUrl"] ?? string.Empty,
             TimeoutSeconds: timeoutSeconds,
-            PutPath: section?["PutPath"] ?? "/v1/blobs/presign-put",
-            GetPath: section?["GetPath"] ?? "/v1/blobs/presign-get",
+            PresignPath: section?["PresignPath"] ?? "/v1/blobs/presign",
             ApiKey: section?["ApiKey"],
             ApiKeyHeader: section?["ApiKeyHeader"] ?? "X-Api-Key",
             MaxRetries: maxRetries,
             CircuitBreakerFailureThreshold: circuitFailureThreshold,
-            CircuitBreakerOpenSeconds: circuitOpenSeconds
+            CircuitBreakerOpenSeconds: circuitOpenSeconds,
+            DefaultTtlSeconds: defaultTtlSeconds
         );
     }
 
@@ -80,10 +94,10 @@ public sealed record S3DelegatedBlobOptions(
             );
         }
 
-        if (string.IsNullOrWhiteSpace(PutPath) || string.IsNullOrWhiteSpace(GetPath))
+        if (string.IsNullOrWhiteSpace(PresignPath))
         {
             throw new InvalidOperationException(
-                $"{SectionName}:PutPath and GetPath are required"
+                $"{SectionName}:PresignPath is required"
             );
         }
 
@@ -112,6 +126,13 @@ public sealed record S3DelegatedBlobOptions(
         {
             throw new InvalidOperationException(
                 $"{SectionName}:CircuitBreakerOpenSeconds must be between 1 and 3600"
+            );
+        }
+
+        if (DefaultTtlSeconds <= 0 || DefaultTtlSeconds > 3600)
+        {
+            throw new InvalidOperationException(
+                $"{SectionName}:DefaultTtlSeconds must be between 1 and 3600"
             );
         }
     }

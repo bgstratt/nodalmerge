@@ -127,19 +127,24 @@ pub enum S3Auth {
     /// Sync server POSTs to the app's own API to ask for URLs. The sync
     /// server never sees S3 keys.
     ///
-    /// The endpoint must accept JSON of the shape
+    /// The endpoint must accept the delegate presign protocol v1
+    /// (see `docs/BLOB_STORAGE_LAYOUT.md` §7):
     /// ```json
     /// { "op": "get" | "put",
-    ///   "room_id": "...",
+    ///   "room": "...",
     ///   "hash": "...",
+    ///   "algorithm": "blake3",
     ///   "size": 12345,
-    ///   "ttl_seconds": 3600 }
+    ///   "ttl_seconds": 3600,
+    ///   "content_type": "..." }
     /// ```
     /// and respond with
     /// ```json
-    /// { "url": "https://...", "expires_at_unix": 1738454400 }
+    /// { "url": "https://..." }
     /// ```
-    /// or HTTP 4xx/5xx (treated as "no URL — use WS fallback").
+    /// or HTTP 4xx/5xx (treated as "no URL — use WS fallback"). `room` is
+    /// metadata only — it MUST NOT influence the app's key derivation
+    /// (`<app-prefix>blake3/<hash>`).
     Delegate {
         /// Full URL of the app's presign endpoint.
         presign_endpoint: String,
@@ -265,30 +270,16 @@ impl S3BlobStore {
         Ok(Self { cfg, s3, http: reqwest::Client::new() })
     }
 
-    fn key_for(&self, room_id: &str, hash: &Hash) -> String {
-        // Sanitize to the same shape `DirPersistence::sanitize` would
-        // produce: any byte outside `[A-Za-z0-9_-]` becomes `_XX`. Keeps
-        // arbitrary room ids safe in S3 object keys.
-        let mut sanitized = String::with_capacity(room_id.len());
-        for b in room_id.as_bytes() {
-            let c = *b;
-            if c.is_ascii_alphanumeric() || c == b'-' || c == b'_' {
-                sanitized.push(c as char);
-            } else {
-                sanitized.push_str(&format!("_{:02X}", c));
-            }
-        }
-        format!("{}{}/{}", self.cfg.path_prefix, sanitized, hash.to_hex())
+    /// Canonical relative layout: `<path_prefix>blake3/<hex>` — no room
+    /// segment, no sharding. See `docs/BLOB_STORAGE_LAYOUT.md`.
+    fn key_for(&self, hash: &Hash) -> String {
+        format!("{}blake3/{}", self.cfg.path_prefix, hash.to_hex())
     }
 
     /// Presign a GET via object_store (Direct mode).
-    fn direct_presign_get(
-        &self,
-        room_id: &str,
-        hash: &Hash,
-    ) -> Result<String, S3BlobError> {
+    fn direct_presign_get(&self, hash: &Hash) -> Result<String, S3BlobError> {
         let s3 = self.s3.as_ref().expect("direct_presign_get without s3 client");
-        let path = ObjectPath::from(self.key_for(room_id, hash));
+        let path = ObjectPath::from(self.key_for(hash));
         let ttl = self.cfg.presign_get_ttl;
         let s3 = s3.clone();
         // Run the async call on a fresh runtime inside a spawned thread so
@@ -308,13 +299,9 @@ impl S3BlobStore {
     }
 
     /// Presign a PUT via object_store (Direct mode).
-    fn direct_presign_put(
-        &self,
-        room_id: &str,
-        hash: &Hash,
-    ) -> Result<String, S3BlobError> {
+    fn direct_presign_put(&self, hash: &Hash) -> Result<String, S3BlobError> {
         let s3 = self.s3.as_ref().expect("direct_presign_put without s3 client");
-        let path = ObjectPath::from(self.key_for(room_id, hash));
+        let path = ObjectPath::from(self.key_for(hash));
         let ttl = self.cfg.presign_put_ttl;
         let s3 = s3.clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -331,9 +318,9 @@ impl S3BlobStore {
     }
 
     /// HEAD an object — used by `verify_uploaded` (Direct mode only).
-    fn direct_head(&self, room_id: &str, hash: &Hash) -> Result<bool, S3BlobError> {
+    fn direct_head(&self, hash: &Hash) -> Result<bool, S3BlobError> {
         let s3 = self.s3.as_ref().expect("direct_head without s3 client");
-        let path = ObjectPath::from(self.key_for(room_id, hash));
+        let path = ObjectPath::from(self.key_for(hash));
         let s3 = s3.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -368,14 +355,16 @@ impl S3BlobStore {
             }
             _ => return Ok(None),
         };
+        // Delegate presign protocol v1 — see docs/BLOB_STORAGE_LAYOUT.md §7.
+        // `room` is metadata only; it must never influence the app's key
+        // derivation.
         #[derive(Serialize)]
         struct Req {
             op: &'static str,
-            room_id: String,
+            room: String,
             hash: String,
             size: Option<u64>,
             ttl_seconds: u64,
-            // Algorithm helps the app choose canonical S3 key layout (e.g. "blake3").
             algorithm: String,
             #[serde(skip_serializing_if = "Option::is_none")]
             content_type: Option<String>,
@@ -386,7 +375,7 @@ impl S3BlobStore {
         }
         let body = Req {
             op,
-            room_id: room_id.to_string(),
+            room: room_id.to_string(),
             hash: hash.to_hex(),
             size,
             ttl_seconds: ttl.as_secs(),
@@ -421,25 +410,25 @@ impl S3BlobStore {
 // ─── BlobPersistence impl ───────────────────────────────────────────────────
 
 impl BlobPersistence for S3BlobStore {
-    /// `S3BlobStore` does *not* hydrate every blob on room open — that
-    /// would defeat the purpose of offloading them. Returns empty; the
+    /// `S3BlobStore` does *not* hydrate blob bytes into the server process —
+    /// that would defeat the purpose of offloading them. Always `None`; the
     /// SDK pulls blobs lazily via `resolve_get_url`.
-    fn load_room_blobs(&self, _room_id: &str) -> Vec<(Hash, Vec<u8>)> {
-        Vec::new()
+    fn get_blob(&self, _hash: &Hash) -> Option<Vec<u8>> {
+        None
     }
 
     /// Fallback path: when a small blob arrives over the WS, push it up
     /// to S3 so a later peer's `resolve_get_url` finds something.
     /// Direct mode only — Delegate mode has no creds and treats this as
     /// a no-op (the client should be using `request-upload` instead).
-    fn persist_blob(&self, room_id: &str, hash: &Hash, bytes: &[u8]) {
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
         let Some(s3) = self.s3.clone() else {
             tracing::trace!(
                 "persist_blob skipped in Delegate mode; client should request-upload instead"
             );
             return;
         };
-        let path = ObjectPath::from(self.key_for(room_id, hash));
+        let path = ObjectPath::from(self.key_for(hash));
         let payload = Bytes::copy_from_slice(bytes);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -452,22 +441,13 @@ impl BlobPersistence for S3BlobStore {
         }
     }
 
-    fn blob_gc_sweep(
-        &self,
-        room_id: &str,
-        live: &std::collections::HashSet<Hash>,
-        _grace: Duration,
-    ) -> usize {
-        // S3 GC: list under prefix, drop any object whose hash isn't
-        // live. We collapse the two phases into one — S3 object versions
-        // (when enabled) act as their own grace period, and operators
-        // who want hard-delete can disable versioning.
+    fn blob_gc_sweep(&self, live: &std::collections::HashSet<Hash>, _grace: Duration) -> usize {
+        // S3 GC: list under the global blake3/ prefix, drop any object
+        // whose hash isn't live. We collapse the two phases into one — S3
+        // object versions (when enabled) act as their own grace period,
+        // and operators who want hard-delete can disable versioning.
         let Some(s3) = self.s3.clone() else { return 0; };
-        let prefix = ObjectPath::from(format!(
-            "{}{}",
-            self.cfg.path_prefix,
-            sanitize_room(room_id)
-        ));
+        let prefix = ObjectPath::from(format!("{}blake3", self.cfg.path_prefix));
         let live_set: std::collections::HashSet<String> =
             live.iter().map(|h| h.to_hex()).collect();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -503,7 +483,7 @@ impl BlobPersistence for S3BlobStore {
     ) -> Option<PresignedUrl> {
         let ttl = self.cfg.presign_get_ttl;
         let url = match &self.cfg.auth {
-            S3Auth::Direct { .. } => match self.direct_presign_get(room_id, hash) {
+            S3Auth::Direct { .. } => match self.direct_presign_get(hash) {
                 Ok(u) => u,
                 Err(e) => {
                     tracing::warn!(?e, "presign GET failed; falling back to WS");
@@ -542,7 +522,7 @@ impl BlobPersistence for S3BlobStore {
         }
         let ttl = self.cfg.presign_put_ttl;
         let url = match &self.cfg.auth {
-            S3Auth::Direct { .. } => match self.direct_presign_put(room_id, hash) {
+            S3Auth::Direct { .. } => match self.direct_presign_put(hash) {
                 Ok(u) => u,
                 Err(e) => {
                     tracing::warn!(?e, "presign PUT failed; falling back to WS");
@@ -568,9 +548,9 @@ impl BlobPersistence for S3BlobStore {
         Some(PresignedUrl::with_ttl(url, ttl))
     }
 
-    fn verify_uploaded(&self, room_id: &str, hash: &Hash) -> Result<(), String> {
+    fn verify_uploaded(&self, _room_id: &str, hash: &Hash) -> Result<(), String> {
         match &self.cfg.auth {
-            S3Auth::Direct { .. } => match self.direct_head(room_id, hash) {
+            S3Auth::Direct { .. } => match self.direct_head(hash) {
                 Ok(true) => Ok(()),
                 Ok(false) => Err("object missing after upload".into()),
                 Err(e) => Err(format!("HEAD failed: {e}")),
@@ -584,19 +564,6 @@ impl BlobPersistence for S3BlobStore {
     }
 
     fn blobs_durable(&self) -> bool { true }
-}
-
-fn sanitize_room(room_id: &str) -> String {
-    let mut sanitized = String::with_capacity(room_id.len());
-    for b in room_id.as_bytes() {
-        let c = *b;
-        if c.is_ascii_alphanumeric() || c == b'-' || c == b'_' {
-            sanitized.push(c as char);
-        } else {
-            sanitized.push_str(&format!("_{:02X}", c));
-        }
-    }
-    sanitized
 }
 
 #[cfg(test)]
@@ -642,17 +609,95 @@ mod tests {
         let _ = S3BlobStore::new(cfg).expect("builder should accept http when allowed");
     }
 
+    /// Asserts `S3BlobStore::key_for` against the canonical vectors
+    /// (`engine/commands/blob-layout-vectors.v1.json`). The Rust file-store
+    /// and .NET mirrors are `server/server/tests/blob_layout_vectors.rs`
+    /// and `hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs`.
     #[test]
-    fn key_layout_round_trips_funny_room_ids() {
+    fn blob_layout_vectors_match_s3_key_derivation() {
+        const VECTORS_JSON: &str =
+            include_str!("../../../engine/commands/blob-layout-vectors.v1.json");
+
+        #[derive(serde::Deserialize)]
+        struct VectorsFile {
+            path_vectors: Vec<PathVector>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct PathVector {
+            id: String,
+            hash: String,
+            #[serde(default)]
+            prefix: Option<String>,
+            #[serde(default)]
+            s3_key: Option<String>,
+        }
+
+        let file: VectorsFile = serde_json::from_str(VECTORS_JSON)
+            .expect("engine/commands/blob-layout-vectors.v1.json must parse");
+
+        let mut failures = Vec::new();
+        for vector in &file.path_vectors {
+            let (Some(prefix), Some(expected)) = (&vector.prefix, &vector.s3_key) else {
+                continue;
+            };
+
+            let mut cfg = S3BlobStoreConfig::default();
+            cfg.bucket = "b".into();
+            cfg.endpoint = Some("https://localhost:9000".into());
+            cfg.auth = S3Auth::direct_explicit("ak", "sk");
+            cfg.path_prefix = prefix.clone();
+            let store = S3BlobStore::new(cfg).unwrap();
+
+            let hash_hex = &vector.hash;
+            assert_eq!(hash_hex.len(), 64, "vector hash must be 64 hex chars");
+            let mut bytes = [0u8; 32];
+            for i in 0..32 {
+                let hi = (hash_hex.as_bytes()[2 * i] as char).to_digit(16).unwrap() as u8;
+                let lo = (hash_hex.as_bytes()[2 * i + 1] as char).to_digit(16).unwrap() as u8;
+                bytes[i] = (hi << 4) | lo;
+            }
+            let hash = Hash(bytes);
+
+            let actual = store.key_for(&hash);
+            if &actual != expected {
+                failures.push(format!(
+                    "vector `{}`: expected s3_key {expected}, got {actual}",
+                    vector.id
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "blob layout vectors drifted from S3 key derivation:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn key_layout_is_flat_global_cas_no_room_segment() {
         let mut cfg = S3BlobStoreConfig::default();
         cfg.bucket = "b".into();
         cfg.endpoint = Some("https://localhost:9000".into());
         cfg.auth = S3Auth::direct_explicit("ak", "sk");
         let store = S3BlobStore::new(cfg).unwrap();
         let h = Hash::of(b"hi");
-        let key = store.key_for("rooms/Alice & Bob!", &h);
-        assert!(key.starts_with("blobs/rooms_2FAlice_20_26_20Bob_21/"));
-        assert!(key.ends_with(&h.to_hex()));
+        let key = store.key_for(&h);
+        assert_eq!(key, format!("blobs/blake3/{}", h.to_hex()));
+    }
+
+    #[test]
+    fn key_layout_honors_configured_prefix() {
+        let mut cfg = S3BlobStoreConfig::default();
+        cfg.bucket = "b".into();
+        cfg.endpoint = Some("https://localhost:9000".into());
+        cfg.auth = S3Auth::direct_explicit("ak", "sk");
+        cfg.path_prefix = "assets/".into();
+        let store = S3BlobStore::new(cfg).unwrap();
+        let h = Hash::of(b"hi");
+        let key = store.key_for(&h);
+        assert_eq!(key, format!("assets/blake3/{}", h.to_hex()));
     }
 
     #[test]

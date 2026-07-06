@@ -1,0 +1,107 @@
+{
+  "$comment": "Canonical blob storage layout parity vectors. Pins the contract in docs/BLOB_STORAGE_LAYOUT.md: the relative file/tombstone path derived from a hash, the S3 key derived from a hash + prefix, which entry names under blake3/ are canonical vs. foreign (must be silently skipped by readers/GC, never touched), and the delegate presign protocol v1 request shape. Consumed by: server/server/tests/blob_layout_vectors.rs and server/s3-blobs/tests/blob_layout_vectors.rs (Rust) and hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs (.NET). If you change the layout or protocol, this file, both harnesses, and docs/BLOB_STORAGE_LAYOUT.md must move together.",
+  "schema_version": 1,
+  "canonical_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "path_vectors": [
+    {
+      "id": "default-file-layout",
+      "description": "the canonical relative blob path under a blob root, flat, no sharding, no extension",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "blob_relative_path": "blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "tombstone_relative_path": ".tombstones/blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "id": "s3-key-default-prefix",
+      "description": "S3 direct key with the default path_prefix (\"blobs/\")",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "prefix": "blobs/",
+      "s3_key": "blobs/blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "id": "s3-key-custom-prefix",
+      "description": "S3 direct key with an app-chosen prefix (e.g. SpeechSlate's \"assets/\") — the prefix is deployment config, never constrained by this contract",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "prefix": "assets/",
+      "s3_key": "assets/blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "id": "s3-key-empty-prefix",
+      "description": "S3 direct key with an empty prefix (bucket root) — also a valid, conformant configuration",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "prefix": "",
+      "s3_key": "blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ],
+  "name_conformance_vectors": [
+    {
+      "id": "valid-lowercase-64-hex",
+      "name": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "canonical": true
+    },
+    {
+      "id": "rejects-uppercase",
+      "description": "uppercase hex is not canonical, even though it round-trips as valid hex — writers must always produce lowercase; readers/GC must treat this as foreign and skip it, never adopt or delete it",
+      "name": "A123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "canonical": false
+    },
+    {
+      "id": "rejects-too-short",
+      "description": "63 chars — one short of a full Blake3 digest",
+      "name": "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "canonical": false
+    },
+    {
+      "id": "rejects-too-long",
+      "description": "65 chars — one over a full Blake3 digest",
+      "name": "00123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "canonical": false
+    },
+    {
+      "id": "rejects-non-hex-char",
+      "description": "contains 'g', outside [0-9a-f]",
+      "name": "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "canonical": false
+    },
+    {
+      "id": "rejects-extension",
+      "description": "legacy .blob extension is not canonical even though the first 64 chars are valid hex",
+      "name": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.blob",
+      "canonical": false
+    }
+  ],
+  "delegate_protocol_v1_vectors": [
+    {
+      "id": "put-request",
+      "description": "golden PUT request body — room/namespace are metadata only and must never influence the app's key derivation",
+      "request": {
+        "op": "put",
+        "room": "room-a",
+        "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "algorithm": "blake3",
+        "size": 1024,
+        "ttl_seconds": 900,
+        "content_type": "application/octet-stream",
+        "namespace": "assets"
+      }
+    },
+    {
+      "id": "get-request",
+      "description": "golden GET request body — no size/content_type field",
+      "request": {
+        "op": "get",
+        "room": "room-a",
+        "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "algorithm": "blake3",
+        "ttl_seconds": 900,
+        "namespace": "assets"
+      }
+    },
+    {
+      "id": "response-shape",
+      "description": "golden response — url only, no expiry field; the caller computes its own expiry from the ttl_seconds it sent",
+      "response": {
+        "url": "https://storage.example.com/blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef?X-Signature=..."
+      }
+    }
+  ]
+}

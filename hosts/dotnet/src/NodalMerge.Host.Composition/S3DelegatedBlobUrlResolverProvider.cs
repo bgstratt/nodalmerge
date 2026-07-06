@@ -40,16 +40,22 @@ internal sealed class S3DelegatedBlobUrlResolverProvider : IBlobUrlResolverProvi
         }
 
         var client = _httpClientFactory.CreateClient(HttpClientName);
+        // Delegate presign protocol v1 — see docs/BLOB_STORAGE_LAYOUT.md §7.
+        // `room`/`namespace` are metadata only; they must never influence
+        // the app's key derivation.
         var payload = new
         {
+            op = "put",
             room = request.RoomId,
-            @namespace = request.Namespace,
             hash = request.HashHex,
+            algorithm = "blake3",
             size = request.SizeBytes,
-            contentType = request.ContentType
+            ttl_seconds = _options.DefaultTtlSeconds,
+            content_type = request.ContentType,
+            @namespace = request.Namespace
         };
 
-        var response = await TryPostWithPolicyAsync(client, _options.PutPath, payload, cancellationToken);
+        var response = await TryPostWithPolicyAsync(client, _options.PresignPath, payload, cancellationToken);
         if (response is null)
         {
             _logger.LogWarning("S3 delegated PUT returned no presigned URL");
@@ -73,12 +79,15 @@ internal sealed class S3DelegatedBlobUrlResolverProvider : IBlobUrlResolverProvi
         var client = _httpClientFactory.CreateClient(HttpClientName);
         var payload = new
         {
+            op = "get",
             room = request.RoomId,
-            @namespace = request.Namespace,
-            hash = request.HashHex
+            hash = request.HashHex,
+            algorithm = "blake3",
+            ttl_seconds = _options.DefaultTtlSeconds,
+            @namespace = request.Namespace
         };
 
-        var response = await TryPostWithPolicyAsync(client, _options.GetPath, payload, cancellationToken);
+        var response = await TryPostWithPolicyAsync(client, _options.PresignPath, payload, cancellationToken);
         if (response is null)
         {
             _logger.LogWarning("S3 delegated GET returned no presigned URL");
@@ -88,26 +97,19 @@ internal sealed class S3DelegatedBlobUrlResolverProvider : IBlobUrlResolverProvi
         return ToPresignedUrl(response);
     }
 
-    private static PresignedBlobUrl? ToPresignedUrl(DelegatedUrlResponse response)
+    /// <summary>
+    /// Protocol v1 responses are <c>{"url": "..."}</c> only — no expiry
+    /// field. The resolver computes its own expiry from the TTL it sent,
+    /// matching the Rust delegate's <c>PresignedUrl::with_ttl</c>.
+    /// </summary>
+    private PresignedBlobUrl? ToPresignedUrl(DelegatedUrlResponse response)
     {
         if (string.IsNullOrWhiteSpace(response.Url))
         {
             return null;
         }
 
-        var expiry = response.ExpiresAtEpochSeconds ?? response.ExpiresAtEpochSecondsAlt;
-        var expiresAtUtc = response.ExpiresAtUtc ?? response.ExpiresAtUtcAlt;
-        if (expiry is null && expiresAtUtc is not null)
-        {
-            expiry = new DateTimeOffset(expiresAtUtc.Value).ToUnixTimeSeconds();
-        }
-
-        if (expiry is null)
-        {
-            return null;
-        }
-
-        return new PresignedBlobUrl(response.Url, DateTimeOffset.FromUnixTimeSeconds(expiry.Value));
+        return new PresignedBlobUrl(response.Url, DateTimeOffset.UtcNow.AddSeconds(_options.DefaultTtlSeconds));
     }
 
     private async Task<DelegatedUrlResponse?> TryPostWithPolicyAsync(
@@ -231,16 +233,4 @@ internal sealed class DelegatedUrlResponse
 {
     [JsonPropertyName("url")]
     public string Url { get; set; } = string.Empty;
-
-    [JsonPropertyName("expiresAt")]
-    public DateTime? ExpiresAtUtc { get; set; }
-
-    [JsonPropertyName("expires_at")]
-    public DateTime? ExpiresAtUtcAlt { get; set; }
-
-    [JsonPropertyName("expiresAtEpochSeconds")]
-    public long? ExpiresAtEpochSeconds { get; set; }
-
-    [JsonPropertyName("expires_at_epoch_seconds")]
-    public long? ExpiresAtEpochSecondsAlt { get; set; }
 }

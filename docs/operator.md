@@ -57,7 +57,7 @@ churn can't explode the series count.
 | `nodalmerge_broadcast_lagged_total` | counter | `room` | `rate > 0` = slow clients; chronic = bump `--broadcast-capacity` or investigate peer |
 | `nodalmerge_ws_send_timeout_total` | counter | `room` | any non-zero = TCP or client stalled; investigate network |
 | `nodalmerge_rate_limit_drops_total` | counter | `peer` | any non-zero = misbehaving (or misconfigured) client |
-| `nodalmerge_blob_gc_deleted_total` | counter | `room` | steady rate confirms GC is running |
+| `nodalmerge_blob_gc_deleted_total` | counter | — (global pool) | steady rate confirms GC is running |
 | `nodalmerge_lamport_rejected_total` | counter | `reason` (`ceiling` / `wall_skew`) | any non-zero = client clock broken or malicious |
 | `nodalmerge_token_expired_disconnects_total` | counter | `room` | trend; rate should correlate with token TTL |
 | `nodalmerge_topology_promotion_total` | counter | `stage`, `outcome`, `reason` (rejects only) | rejection rate by `reason`; see [Topology promotion metrics](#topology-promotion-metrics-wave-3) |
@@ -199,13 +199,14 @@ When a threshold triggers, use this flow:
 
 ### `DirPersistence` (SQLite + files)
 
-Layout (see [deployment.md](./deployment.md) for full detail):
+Layout (see [deployment.md](./deployment.md) and
+[BLOB_STORAGE_LAYOUT.md](./BLOB_STORAGE_LAYOUT.md) for full detail):
 
 ```
 <path>/
   nodalmerge.db              SQLite (legacy file name retained during migration)
-  blobs/<sanitized_room>/<blake3_hex>
-  blob-tombstones/<sanitized_room>/<blake3_hex>
+  blobs/blake3/<hex>         global CAS pool, no room segment
+  blobs/.tombstones/blake3/<hex>
 ```
 
 - **Hot backup:** `sqlite3 nodalmerge.db ".backup '/dest/nodalmerge.db'"`
@@ -218,6 +219,10 @@ Layout (see [deployment.md](./deployment.md) for full detail):
   a partially restored `blobs/` only loses the blobs whose files are
   missing — the DAG re-references them safely and peers will
   re-upload on demand.
+- **Upgrading a 0.1.x store:** the legacy per-room layout
+  (`blobs/<sanitized_room>/<hex>`) auto-migrates on first open after
+  upgrade; no operator action needed for file stores. Direct-S3 stores
+  migrate manually — see BLOB_STORAGE_LAYOUT.md §6.
 
 ### `PostgresNodeStore`
 
@@ -243,7 +248,9 @@ Layout (see [deployment.md](./deployment.md) for full detail):
 ### `S3BlobStore`
 
 - **Backup:** bucket-level versioning + cross-region replication in
-  your S3 provider. Path prefix is configurable per deployment.
+  your S3 provider. Keys are `<path_prefix>blake3/<hex>` — the prefix is
+  configurable per deployment; the `blake3/` segment is not (see
+  BLOB_STORAGE_LAYOUT.md §5).
 - **Restore:** no sync-server action needed. `S3BlobStore` looks up
   blobs on demand via `resolve_get_url`; missing blobs re-upload
   naturally on next `setBlob`.

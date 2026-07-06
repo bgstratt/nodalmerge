@@ -32,26 +32,31 @@ room is hydrated from disk *before* its first client connects.
 <path>/
   nodalmerge.db              SQLite — one row per (room, node)
   blobs/
-    <sanitized_room_id>/
-      <blake3_hex>            one file per blob
+    blake3/
+      <hex>                  one file per blob — global CAS, no room segment
+    .tombstones/
+      blake3/
+        <hex>                empty marker; blob GC (see below)
+    .layout-v2               empty marker; presence = already-canonical layout
 ```
 
 - **Engine:** bundled SQLite via `rusqlite`. No external SQLite install needed.
 - **Schema:** `nodes(room_id TEXT, node_id BLOB, bytes BLOB, seq INTEGER PK AUTOINCREMENT, UNIQUE(room_id, node_id))`.
   Rows are written in acceptance order; hydrate replays in `seq` order so the
   DAG re-builds deterministically.
-- **Blobs:** one file per blob. The filename is the hex Blake3 hash; the file
-  contents are the raw bytes. Integrity is re-checked on hydrate — tampered
-  files are logged and dropped.
+- **Blobs:** a single content-addressed pool shared across every room — see
+  [docs/BLOB_STORAGE_LAYOUT.md](BLOB_STORAGE_LAYOUT.md) for the full contract.
+  The filename is the hex Blake3 hash; the file contents are the raw bytes.
+  Integrity is re-checked on hydrate — tampered files are logged and dropped.
 - **Idempotency:** re-persisting the same node or blob is a no-op (`INSERT OR
-  IGNORE` for nodes; file existence check for blobs).
+  IGNORE` for nodes; file existence check for blobs — a blob shared by two
+  rooms is stored once).
 - **Durability:** the DB is opened in WAL + `synchronous=NORMAL`. Blob writes
   use write-tmp-then-rename.
-
-### Sanitization
-
-Room ids become directory names for blobs. Every byte outside `[A-Za-z0-9_-]`
-is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
+- **Upgrading from 0.1.x:** on first open, a legacy per-room blob layout
+  (`blobs/<sanitized_room_id>/<hex>`) is migrated automatically into the
+  layout above — see docs/BLOB_STORAGE_LAYOUT.md §6. No manual step for file
+  stores; direct-S3 deployments migrate manually (below).
 
 ### Backups
 
@@ -121,22 +126,25 @@ is escaped as `_HH` (two upper-hex digits). `my/room!` becomes `my_2Froom_21`.
 - **Blob garbage collection (G4):** `DirPersistence` never reclaimed old
   blob files on its own. Opt into a periodic sweep with:
   - `--blob-gc-interval <secs>` (default `0` = disabled): how often to
-    sweep each currently-loaded room.
+    sweep the store.
   - `--blob-gc-grace <secs>` (default `86400` = 24 h): minimum time a
     blob must be orphaned-on-disk before deletion.
-  The sweeper runs a **two-phase protocol**. First visit: any blob on
-  disk that isn't referenced by *any* `SetBlob` op in the room's DAG
-  gets an empty tombstone file written at
-  `<store>/blob-tombstones/<room>/<hash>`. Subsequent visit: if the
+  Blobs are a single global content-addressed pool (see
+  [docs/BLOB_STORAGE_LAYOUT.md](BLOB_STORAGE_LAYOUT.md)), so each sweep
+  covers *every* room the store knows about — currently-loaded rooms via
+  their in-memory graph, plus every other room with persisted nodes via a
+  fresh scan — not just resident ones. The sweeper runs a **two-phase
+  protocol**. First visit: any blob not referenced by *any* `SetBlob` op
+  in any room's DAG gets an empty tombstone file written at
+  `<store>/blobs/.tombstones/blake3/<hash>`. Subsequent visit: if the
   tombstone is older than the grace window **and** the blob is still
   orphaned, blob + tombstone are deleted together and
-  `nodalmerge_blob_gc_deleted_total{room}` is incremented. If a blob
-  becomes live again (a peer re-publishes a `SetBlob` referencing it)
-  the sweeper clears its tombstone instead. Set `--blob-gc-grace 0` to
-  collapse the two phases into a single aggressive pass.
-  Caveats: **only currently-loaded rooms are swept** (cold rooms wait
-  until something hydrates them); requires a durable store — the flag
-  is a warning-and-skip no-op with the default in-memory persistence.
+  `nodalmerge_blob_gc_deleted_total` is incremented. If a blob becomes
+  live again (a peer re-publishes a `SetBlob` referencing it) the
+  sweeper clears its tombstone instead. Set `--blob-gc-grace 0` to
+  collapse the two phases into a single aggressive pass. Requires a
+  durable store — the flag is a warning-and-skip no-op with the default
+  in-memory persistence.
 - **Node sanity checks (G5):** every inbound node is compared against
   two cheap ceilings *before* Ed25519 verification, so malformed
   floods never burn crypto CPU:
@@ -231,7 +239,7 @@ Baseline series (primary):
 | `nodalmerge_broadcast_lagged_total` | counter | `room` |
 | `nodalmerge_ws_send_timeout_total` | counter | `room` |
 | `nodalmerge_rate_limit_drops_total` | counter | `peer` |
-| `nodalmerge_blob_gc_deleted_total` | counter | `room` |
+| `nodalmerge_blob_gc_deleted_total` | counter | — (global pool, no room label) |
 | `nodalmerge_lamport_rejected_total` | counter | `reason` |
 | `nodalmerge_token_expired_disconnects_total` | counter | `room` |
 

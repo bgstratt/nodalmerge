@@ -122,8 +122,12 @@ cross-version compatibility aliases.
 
 The Mongo schema is deliberately identical between Rust and .NET (compound
 `_id = "<room>:<node_hex>"`, `$setOnInsert` upsert) so both runtimes can
-share one database. Blob file/S3 layout parity is still unaudited — do not
-assume cross-runtime blob sharing works until that audit closes.
+share one database. Blobs are likewise a single global content-addressed
+pool on both runtimes — flat `blake3/<hex>` layout, no room scoping, no
+sharding — canonicalized in
+[docs/BLOB_STORAGE_LAYOUT.md](docs/BLOB_STORAGE_LAYOUT.md) (0.2.0; breaking
+change from 0.1.x's two independently-diverged layouts, file stores
+self-migrate on first open).
 
 ## 6. Observability
 
@@ -143,6 +147,7 @@ as of the 2026-07-05 purge; nothing dual-emits.
 - [docs/integration.md](docs/integration.md) — embedding and store wiring
 - [docs/sdk.md](docs/sdk.md) — JS SDK API
 - [docs/protocol.md](docs/protocol.md) — wire protocol
+- [docs/BLOB_STORAGE_LAYOUT.md](docs/BLOB_STORAGE_LAYOUT.md) — canonical blob layout + delegate protocol v1
 - [docs/delegated-storage-gc.md](docs/delegated-storage-gc.md) — blob GC
 - [docs/schema-migrations.md](docs/schema-migrations.md) — store migrations
 - [benchmarks/README.md](benchmarks/README.md) — benchmark matrix

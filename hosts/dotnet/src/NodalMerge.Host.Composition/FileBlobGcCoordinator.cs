@@ -24,6 +24,12 @@ public sealed record FileBlobGcRunReport(
     IReadOnlyList<string> DeletedHashes
 );
 
+/// <summary>
+/// Two-phase mark-and-sweep GC over the global content-addressed pool at
+/// <c>&lt;root&gt;/blake3/&lt;hex&gt;</c>. See docs/BLOB_STORAGE_LAYOUT.md
+/// §4. <c>liveHashes</c> must already be the union across every room the
+/// caller knows about — this coordinator has no room concept at all.
+/// </summary>
 public sealed class FileBlobGcCoordinator
 {
     private readonly string _rootPath;
@@ -49,17 +55,21 @@ public sealed class FileBlobGcCoordinator
     private FileBlobGcRunReport RunCore(IReadOnlyCollection<string> liveHashes, DateTimeOffset nowUtc, bool applyChanges)
     {
         var liveSafe = new HashSet<string>(liveHashes.Select(SanitizeHash), StringComparer.Ordinal);
-        var blobFiles = Directory
-            .EnumerateFiles(_rootPath, "*.blob", SearchOption.AllDirectories)
-            .Where(path => !path.Contains(Path.DirectorySeparatorChar + ".gc-tombstones" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            .ToArray();
+
+        var blake3Dir = Path.Combine(_rootPath, "blake3");
+        var blobFiles = Directory.Exists(blake3Dir)
+            ? Directory
+                .EnumerateFiles(blake3Dir)
+                .Where(path => IsCanonicalHashName(Path.GetFileName(path)))
+                .ToArray()
+            : [];
 
         var marked = new List<string>();
         var cleared = new List<string>();
         var deleted = new List<string>();
         var deleteCandidates = 0;
 
-        var tombRoot = Path.Combine(_rootPath, ".gc-tombstones");
+        var tombRoot = Path.Combine(_rootPath, ".tombstones", "blake3");
         if (applyChanges)
         {
             Directory.CreateDirectory(tombRoot);
@@ -67,13 +77,9 @@ public sealed class FileBlobGcCoordinator
 
         foreach (var blobPath in blobFiles)
         {
-            var safeHash = Path.GetFileNameWithoutExtension(blobPath);
-            if (string.IsNullOrWhiteSpace(safeHash))
-            {
-                continue;
-            }
+            var safeHash = Path.GetFileName(blobPath);
 
-            var tombPath = Path.Combine(tombRoot, safeHash + ".tomb");
+            var tombPath = Path.Combine(tombRoot, safeHash);
 
             if (liveSafe.Contains(safeHash))
             {
@@ -137,11 +143,32 @@ public sealed class FileBlobGcCoordinator
         );
     }
 
+    /// <summary>
+    /// Anything under <c>blake3/</c> that is not exactly 64 lowercase hex
+    /// characters is foreign and must never be touched by GC — see
+    /// docs/BLOB_STORAGE_LAYOUT.md §3.
+    /// </summary>
+    private static bool IsCanonicalHashName(string name)
+    {
+        if (name.Length != 64)
+        {
+            return false;
+        }
+
+        foreach (var c in name)
+        {
+            var isLowerHex = (c is >= '0' and <= '9') || (c is >= 'a' and <= 'f');
+            if (!isLowerHex)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static string SanitizeHash(string hashHex)
     {
-        return hashHex
-            .Replace(':', '_')
-            .Replace('/', '_')
-            .Replace('\\', '_');
+        return FileBlobStoreProvider.SanitizeHash(hashHex);
     }
 }

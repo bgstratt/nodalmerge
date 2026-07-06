@@ -76,29 +76,59 @@ pub trait NodePersistence: Send + Sync + std::fmt::Debug {
     fn nodes_durable(&self) -> bool {
         true
     }
+
+    /// Every room id with at least one persisted node — including rooms
+    /// that are not currently loaded in memory.
+    ///
+    /// Used by global blob GC ([`BlobPersistence::blob_gc_sweep`]) to
+    /// compute the live blob set across *every* room, not just resident
+    /// ones — required now that blobs are a single global CAS pool rather
+    /// than per-room directories (see `docs/BLOB_STORAGE_LAYOUT.md` §4).
+    /// Default: empty, meaning a caller relying on this alone would only
+    /// see resident rooms — backends without a room index should override
+    /// if they want cold rooms protected from GC.
+    fn known_room_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Blob-side persistence. See module docs for rationale.
+///
+/// Blobs are a single global content-addressed pool — no room scoping, no
+/// sharding (see `docs/BLOB_STORAGE_LAYOUT.md`). `room_id` still appears on
+/// the presign-related methods below because it flows through as metadata
+/// to delegate protocols; it plays no role in where/how a blob's bytes are
+/// stored.
 pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
-    /// Return every previously-persisted blob for `room_id`.
-    fn load_room_blobs(&self, room_id: &str) -> Vec<(Hash, Vec<u8>)>;
-    /// Persist a single blob.
-    fn persist_blob(&self, room_id: &str, hash: &Hash, bytes: &[u8]);
+    /// Point lookup by hash. `None` if not present, or for backends (e.g.
+    /// S3) that never hydrate bytes into the server process — the SDK
+    /// pulls those lazily via `resolve_get_url`.
+    fn get_blob(&self, _hash: &Hash) -> Option<Vec<u8>> {
+        None
+    }
 
-    /// G4 — two-phase blob GC sweep for one room.
+    /// Persist a single blob, addressed only by its hash.
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]);
+
+    /// G4 — two-phase blob GC sweep across the whole store.
     ///
-    /// Walk every persisted blob for `room_id`. A blob is *live* when its
-    /// hash is in `live`. Non-live blobs are tombstoned on the first
-    /// sweep that sees them; they are deleted on a subsequent sweep once
-    /// the tombstone's age exceeds `grace`. A blob that reappears in
-    /// `live` after tombstoning has its tombstone cleared.
+    /// A blob is *live* when its hash is in `live`. Non-live blobs are
+    /// tombstoned on the first sweep that sees them; they are deleted on a
+    /// subsequent sweep once the tombstone's age exceeds `grace`. A blob
+    /// that reappears in `live` after tombstoning has its tombstone
+    /// cleared.
+    ///
+    /// `live` must be the union of every room's referenced blob hashes —
+    /// resident and non-resident alike (see
+    /// [`NodePersistence::known_room_ids`]) — since a single global pool
+    /// has no per-room boundary to protect a cold room's blobs from an
+    /// incomplete live set.
     ///
     /// `grace = Duration::ZERO` collapses the two phases. Returns the
     /// number of blobs actually deleted in this call. Default impl is a
     /// no-op (non-durable backends have nothing to GC).
     fn blob_gc_sweep(
         &self,
-        _room_id: &str,
         _live: &std::collections::HashSet<Hash>,
         _grace: Duration,
     ) -> usize {
@@ -228,19 +258,18 @@ impl<N: NodePersistence, B: BlobPersistence> NodePersistence for Composite<N, B>
 }
 
 impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B> {
-    fn load_room_blobs(&self, room_id: &str) -> Vec<(Hash, Vec<u8>)> {
-        self.blobs.load_room_blobs(room_id)
+    fn get_blob(&self, hash: &Hash) -> Option<Vec<u8>> {
+        self.blobs.get_blob(hash)
     }
-    fn persist_blob(&self, room_id: &str, hash: &Hash, bytes: &[u8]) {
-        self.blobs.persist_blob(room_id, hash, bytes)
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
+        self.blobs.persist_blob(hash, bytes)
     }
     fn blob_gc_sweep(
         &self,
-        room_id: &str,
         live: &std::collections::HashSet<Hash>,
         grace: Duration,
     ) -> usize {
-        self.blobs.blob_gc_sweep(room_id, live, grace)
+        self.blobs.blob_gc_sweep(live, grace)
     }
     fn resolve_get_url(
         &self,
@@ -285,10 +314,7 @@ impl NodePersistence for NoPersistence {
 }
 
 impl BlobPersistence for NoPersistence {
-    fn load_room_blobs(&self, _room_id: &str) -> Vec<(Hash, Vec<u8>)> {
-        Vec::new()
-    }
-    fn persist_blob(&self, _room_id: &str, _hash: &Hash, _bytes: &[u8]) {}
+    fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) {}
     fn blobs_durable(&self) -> bool {
         false
     }
@@ -298,19 +324,24 @@ impl BlobPersistence for NoPersistence {
 
 /// SQLite (nodes) + filesystem (blobs), all rooted at a single directory.
 ///
-/// Layout:
+/// Layout (v2 — see `docs/BLOB_STORAGE_LAYOUT.md`):
 ///
 /// ```text
 /// <root>/
 ///   nodalmerge.db                      ← SQLite: one row per (room, node)
 ///   topology-promotions.db             ← SQLite: promotion proposals (Wave 3)
 ///   blobs/
-///     <sanitized_room_id>/
-///       <hash_hex>                     ← one file per blob (content-addressed)
+///     blake3/
+///       <hash_hex>                     ← one file per blob, global CAS pool
+///     .tombstones/
+///       blake3/
+///         <hash_hex>                   ← empty marker; mtime = tombstone time
+///     .layout-v2                       ← empty marker; presence = migrated
 /// ```
 ///
-/// Sanitization: any byte outside `[A-Za-z0-9_-]` is escaped as `_XX` (hex)
-/// so arbitrary room ids round-trip through the filesystem safely.
+/// Blobs are content-addressed only — no room id anywhere in the path.
+/// `open()` auto-migrates a legacy (pre-v2, per-room-directory) layout the
+/// first time it sees one; see [`migrate_legacy_blob_layout`].
 #[derive(Debug)]
 pub struct DirPersistence {
     root: PathBuf,
@@ -324,11 +355,15 @@ impl DirPersistence {
     }
 
     /// Open (or create) the store rooted at `root`. Creates the directory,
-    /// opens the SQLite file, and ensures the schema.
+    /// opens the SQLite file, ensures the schema, and migrates a legacy
+    /// blob layout to v2 if one is found.
     pub fn open(root: impl AsRef<Path>) -> std::io::Result<Self> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
-        std::fs::create_dir_all(root.join("blobs"))?;
+        let blobs_root = root.join("blobs");
+        std::fs::create_dir_all(&blobs_root)?;
+        std::fs::create_dir_all(blobs_root.join("blake3"))?;
+        migrate_legacy_blob_layout(&blobs_root);
         let db_path = root.join("nodalmerge.db");
         let conn = Connection::open(&db_path)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -352,14 +387,16 @@ impl DirPersistence {
         })
     }
 
-    fn blobs_dir_for(&self, room_id: &str) -> PathBuf {
-        self.root.join("blobs").join(sanitize(room_id))
+    fn blake3_dir(&self) -> PathBuf {
+        self.root.join("blobs").join("blake3")
     }
 
-    /// G4: sibling directory tree for tombstones, kept out of
-    /// `blobs/<room>/` so `load_room_blobs` never has to skip them.
-    fn tombstones_dir_for(&self, room_id: &str) -> PathBuf {
-        self.root.join("blob-tombstones").join(sanitize(room_id))
+    fn blob_path(&self, hash: &Hash) -> PathBuf {
+        self.root.join("blobs").join(blob_relative_path(hash))
+    }
+
+    fn tombstones_dir(&self) -> PathBuf {
+        self.root.join("blobs").join(".tombstones").join("blake3")
     }
 }
 
@@ -467,47 +504,49 @@ impl NodePersistence for DirPersistence {
         metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "nodes_batch")
             .record(elapsed);
     }
+
+    fn known_room_ids(&self) -> Vec<String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare("SELECT DISTINCT room_id FROM nodes") {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(?e, "prepare known_room_ids failed");
+                return Vec::new();
+            }
+        };
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0));
+        match rows {
+            Ok(iter) => iter.flatten().collect(),
+            Err(e) => {
+                tracing::warn!(?e, "known_room_ids query failed");
+                Vec::new()
+            }
+        }
+    }
 }
 
 impl BlobPersistence for DirPersistence {
-    fn load_room_blobs(&self, room_id: &str) -> Vec<(Hash, Vec<u8>)> {
-        let dir = self.blobs_dir_for(room_id);
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for entry in rd.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let Some(hash) = hash_from_hex(name) else {
-                continue;
-            };
-            match std::fs::read(&path) {
-                Ok(bytes) => {
-                    // Verify integrity — reject tampered files.
-                    let actual = Hash::of(&bytes);
-                    if actual == hash {
-                        out.push((hash, bytes));
-                    } else {
-                        tracing::warn!(?path, "blob file hash mismatch, skipping");
-                    }
-                }
-                Err(e) => tracing::warn!(?e, ?path, "read blob file failed"),
-            }
+    fn get_blob(&self, hash: &Hash) -> Option<Vec<u8>> {
+        let path = self.blob_path(hash);
+        let bytes = std::fs::read(&path).ok()?;
+        // Verify integrity — reject tampered files.
+        let actual = Hash::of(&bytes);
+        if actual == *hash {
+            Some(bytes)
+        } else {
+            tracing::warn!(?path, "blob file hash mismatch, skipping");
+            None
         }
-        out
     }
 
-    fn persist_blob(&self, room_id: &str, hash: &Hash, bytes: &[u8]) {
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
         let t0 = Instant::now();
-        let dir = self.blobs_dir_for(room_id);
+        let dir = self.blake3_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
             tracing::warn!(?e, "persist_blob: create_dir_all failed");
             return;
         }
-        let path = dir.join(hash.to_hex());
+        let path = self.blob_path(hash);
         if path.exists() {
             return;
         }
@@ -526,14 +565,9 @@ impl BlobPersistence for DirPersistence {
             .record(elapsed);
     }
 
-    fn blob_gc_sweep(
-        &self,
-        room_id: &str,
-        live: &std::collections::HashSet<Hash>,
-        grace: Duration,
-    ) -> usize {
-        let blobs_dir = self.blobs_dir_for(room_id);
-        let tombs_dir = self.tombstones_dir_for(room_id);
+    fn blob_gc_sweep(&self, live: &std::collections::HashSet<Hash>, grace: Duration) -> usize {
+        let blobs_dir = self.blake3_dir();
+        let tombs_dir = self.tombstones_dir();
         let Ok(rd) = std::fs::read_dir(&blobs_dir) else {
             return 0;
         };
@@ -550,6 +584,9 @@ impl BlobPersistence for DirPersistence {
                 continue;
             }
             let Some(hash) = hash_from_hex(name) else {
+                // Foreign entry under blake3/ (not exactly 64 lowercase hex
+                // chars) — never touched by GC. See
+                // docs/BLOB_STORAGE_LAYOUT.md §3.
                 continue;
             };
             let tomb_path = tombs_dir.join(name);
@@ -575,7 +612,7 @@ impl BlobPersistence for DirPersistence {
                         .unwrap_or(false);
                     if aged {
                         if let Err(e) = std::fs::remove_file(&path) {
-                            tracing::warn!(?e, room = %room_id, blob = %name, "blob_gc_sweep: delete blob failed");
+                            tracing::warn!(?e, blob = %name, "blob_gc_sweep: delete blob failed");
                             continue;
                         }
                         let _ = std::fs::remove_file(&tomb_path);
@@ -595,7 +632,7 @@ impl BlobPersistence for DirPersistence {
                     }
                     if grace.is_zero() {
                         if let Err(e) = std::fs::remove_file(&path) {
-                            tracing::warn!(?e, room = %room_id, blob = %name, "blob_gc_sweep: immediate delete failed");
+                            tracing::warn!(?e, blob = %name, "blob_gc_sweep: immediate delete failed");
                             continue;
                         }
                         let _ = std::fs::remove_file(&tomb_path);
@@ -608,23 +645,128 @@ impl BlobPersistence for DirPersistence {
     }
 }
 
-/// Escape a room-id into a filesystem-safe name. `[A-Za-z0-9_-]` pass through;
-/// every other byte becomes `_HH` (two upper-hex digits).
-fn sanitize(room_id: &str) -> String {
-    let mut out = String::with_capacity(room_id.len());
-    for b in room_id.as_bytes() {
-        if b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-' {
-            out.push(*b as char);
-        } else {
-            out.push('_');
-            out.push_str(&format!("{:02X}", b));
+/// Auto-migrate a legacy (pre-v2, per-room-directory) blob layout to the
+/// canonical global layout, guarded by a `.layout-v2` marker so this scan
+/// runs at most once. See `docs/BLOB_STORAGE_LAYOUT.md` §6.
+///
+/// Idempotent and crash-safe: the marker is written last, already-migrated
+/// files are found at their destination and skipped (that collision *is*
+/// the cross-room dedup), and anything that fails hash verification or
+/// doesn't parse as a legacy blob filename is quarantined into
+/// `.migration-skipped/` rather than deleted.
+fn migrate_legacy_blob_layout(blobs_root: &Path) {
+    let marker = blobs_root.join(".layout-v2");
+    if marker.exists() {
+        return;
+    }
+
+    let blake3_dir = blobs_root.join("blake3");
+    let skipped_dir = blobs_root.join(".migration-skipped");
+    let mut migrated = 0usize;
+    let mut skipped = 0usize;
+
+    if let Ok(rd) = std::fs::read_dir(blobs_root) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            // Skip the canonical/reserved subtrees — everything else under
+            // blobs/ is presumed to be a legacy sanitized-room-id directory.
+            if name == "blake3" || name == ".tombstones" || name == ".migration-skipped" {
+                continue;
+            }
+
+            let Ok(room_rd) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for room_entry in room_rd.flatten() {
+                let room_path = room_entry.path();
+                if !room_path.is_file() {
+                    continue;
+                }
+                let Some(file_name) = room_path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if file_name.ends_with(".tmp") {
+                    continue;
+                }
+
+                let quarantine = |reason: &str| {
+                    tracing::warn!(?room_path, reason, "migrate_legacy_blob_layout: quarantining file");
+                    if std::fs::create_dir_all(&skipped_dir).is_ok() {
+                        let dest = skipped_dir.join(format!("{name}__{file_name}"));
+                        let _ = std::fs::rename(&room_path, &dest);
+                    }
+                };
+
+                let Some(hash) = hash_from_hex(file_name) else {
+                    quarantine("filename is not 64 lowercase hex chars");
+                    skipped += 1;
+                    continue;
+                };
+                let Ok(bytes) = std::fs::read(&room_path) else {
+                    quarantine("read failed");
+                    skipped += 1;
+                    continue;
+                };
+                if Hash::of(&bytes) != hash {
+                    quarantine("content hash mismatch");
+                    skipped += 1;
+                    continue;
+                }
+
+                if std::fs::create_dir_all(&blake3_dir).is_err() {
+                    continue;
+                }
+                let dest = blake3_dir.join(hash.to_hex());
+                if dest.exists() {
+                    // Already present — this collision IS the cross-room
+                    // dedup the v2 layout is for. Drop the duplicate.
+                    let _ = std::fs::remove_file(&room_path);
+                } else if std::fs::rename(&room_path, &dest).is_err() {
+                    // Cross-device rename can fail; fall back to copy+remove.
+                    if std::fs::write(&dest, &bytes).is_ok() {
+                        let _ = std::fs::remove_file(&room_path);
+                    } else {
+                        continue;
+                    }
+                }
+                migrated += 1;
+            }
+            // Best-effort cleanup of the now-empty legacy room directory.
+            let _ = std::fs::remove_dir(&path);
         }
     }
-    out
+
+    // Legacy tombstones lived in a sibling `blob-tombstones/` tree (one
+    // level up from `blobs/`, not under it) — discard entirely per the v2
+    // contract. Worst case: a blob that should already be tombstoned
+    // survives until the next GC pass notices it's unreferenced again.
+    if let Some(store_root) = blobs_root.parent() {
+        let _ = std::fs::remove_dir_all(store_root.join("blob-tombstones"));
+    }
+
+    if migrated > 0 || skipped > 0 {
+        tracing::info!(migrated, skipped, "migrated legacy blob layout to v2");
+    }
+    let _ = std::fs::write(&marker, b"");
 }
 
+/// Parse a filename back into a [`Hash`] — strictly lowercase, exactly 64
+/// hex chars. Uppercase is deliberately rejected (not just normalized):
+/// per `docs/BLOB_STORAGE_LAYOUT.md` §3 an uppercase name is *foreign*, to
+/// be silently skipped by readers/GC, never adopted. (This used to accept
+/// uppercase too — a latent divergence from the .NET side's equivalent
+/// check, caught while writing the cross-runtime layout vectors.)
 fn hash_from_hex(s: &str) -> Option<Hash> {
-    if s.len() != 64 {
+    if !is_canonical_blob_name(s) {
         return None;
     }
     let mut out = [0u8; 32];
@@ -637,13 +779,33 @@ fn hash_from_hex(s: &str) -> Option<Hash> {
     Some(Hash(out))
 }
 
+/// Whether `name` is exactly 64 lowercase hex characters — the canonical
+/// on-disk blob/tombstone filename shape. Anything else under `blake3/`
+/// is foreign per `docs/BLOB_STORAGE_LAYOUT.md` §3.
+pub fn is_canonical_blob_name(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 fn hex_digit(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+/// Canonical relative blob path (`blake3/<hex>`), independent of any store
+/// root. Pure/testable formula shared by [`DirPersistence`] and the
+/// cross-runtime layout parity vectors — see
+/// `docs/BLOB_STORAGE_LAYOUT.md` §2.
+pub fn blob_relative_path(hash: &Hash) -> PathBuf {
+    Path::new("blake3").join(hash.to_hex())
+}
+
+/// Canonical relative tombstone path (`.tombstones/blake3/<hex>`),
+/// independent of any store root. See `docs/BLOB_STORAGE_LAYOUT.md` §2.
+pub fn tombstone_relative_path(hash: &Hash) -> PathBuf {
+    Path::new(".tombstones").join("blake3").join(hash.to_hex())
 }
 
 /// Boxed handle used by `Rooms` — one instance is shared across all rooms.
@@ -726,11 +888,9 @@ mod tests {
         let store = DirPersistence::open(&dir).unwrap();
         let bytes = b"hello world".to_vec();
         let h = Hash::of(&bytes);
-        store.persist_blob("room-y", &h, &bytes);
-        let loaded = store.load_room_blobs("room-y");
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].0, h);
-        assert_eq!(loaded[0].1, bytes);
+        store.persist_blob(&h, &bytes);
+        let loaded = store.get_blob(&h);
+        assert_eq!(loaded, Some(bytes));
     }
 
     #[test]
@@ -739,17 +899,87 @@ mod tests {
         let store = DirPersistence::open(&dir).unwrap();
         let bytes = b"truthy".to_vec();
         let h = Hash::of(&bytes);
-        store.persist_blob("room-z", &h, &bytes);
+        store.persist_blob(&h, &bytes);
         // Overwrite with bogus content.
-        let p = store.blobs_dir_for("room-z").join(h.to_hex());
+        let p = store.blob_path(&h);
         std::fs::write(&p, b"LIES").unwrap();
-        assert!(store.load_room_blobs("room-z").is_empty());
+        assert!(store.get_blob(&h).is_none());
     }
 
     #[test]
-    fn sanitize_safe_chars() {
-        assert_eq!(sanitize("abc-ROOM_01"), "abc-ROOM_01");
-        assert_eq!(sanitize("a/b"), "a_2Fb");
-        assert_eq!(sanitize("hi!"), "hi_21");
+    fn blob_layout_is_flat_global_cas() {
+        let dir = tmpdir();
+        let store = DirPersistence::open(&dir).unwrap();
+        let bytes = b"shared across rooms".to_vec();
+        let h = Hash::of(&bytes);
+        store.persist_blob(&h, &bytes);
+        let expected = dir.join("blobs").join("blake3").join(h.to_hex());
+        assert!(expected.is_file(), "expected blob at {expected:?}");
+    }
+
+    #[test]
+    fn known_room_ids_lists_every_persisted_room() {
+        let dir = tmpdir();
+        let store = DirPersistence::open(&dir).unwrap();
+        let sk = SigningKey::from_bytes(&[0x33u8; 32]);
+        for room in ["room-a", "room-b"] {
+            let mut g = StateGraph::new();
+            let id = g
+                .apply_local(
+                    &sk,
+                    0,
+                    vec![Op::Map(MapOp::Set {
+                        key: "k".into(),
+                        value: b"v".to_vec(),
+                    })],
+                )
+                .unwrap();
+            let node = g.get_nodes(&[id]).into_iter().next().unwrap().clone();
+            store.persist_node(room, &node);
+        }
+        let mut rooms = store.known_room_ids();
+        rooms.sort();
+        assert_eq!(rooms, vec!["room-a".to_string(), "room-b".to_string()]);
+    }
+
+    #[test]
+    fn migrate_legacy_blob_layout_moves_and_dedupes() {
+        let dir = tmpdir();
+        let blobs_root = dir.join("blobs");
+        // Hand-construct a pre-v2 layout: two rooms, one shared blob.
+        let bytes = b"shared blob content".to_vec();
+        let h = Hash::of(&bytes);
+        for room in ["room-a", "room-b"] {
+            let room_dir = blobs_root.join(room);
+            std::fs::create_dir_all(&room_dir).unwrap();
+            std::fs::write(room_dir.join(h.to_hex()), &bytes).unwrap();
+        }
+        // A tampered/foreign file that must be quarantined, not adopted.
+        let bogus_dir = blobs_root.join("room-a");
+        std::fs::write(bogus_dir.join("not-a-hash"), b"junk").unwrap();
+
+        let store = DirPersistence::open(&dir).unwrap();
+
+        let migrated_path = blobs_root.join("blake3").join(h.to_hex());
+        assert!(migrated_path.is_file());
+        assert_eq!(std::fs::read(&migrated_path).unwrap(), bytes);
+        assert!(blobs_root.join(".layout-v2").is_file());
+        assert!(blobs_root
+            .join(".migration-skipped")
+            .join("room-a__not-a-hash")
+            .is_file());
+
+        // Re-opening must be a no-op (idempotent) and not error.
+        drop(store);
+        let _store2 = DirPersistence::open(&dir).unwrap();
+        assert!(migrated_path.is_file());
+    }
+
+    #[test]
+    fn migrate_legacy_blob_layout_is_noop_on_fresh_store() {
+        let dir = tmpdir();
+        let store = DirPersistence::open(&dir).unwrap();
+        assert!(dir.join("blobs").join(".layout-v2").is_file());
+        assert_eq!(store.get_blob(&Hash::of(b"anything")), None);
     }
 }

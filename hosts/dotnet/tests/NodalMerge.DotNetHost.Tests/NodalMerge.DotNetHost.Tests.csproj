@@ -36,6 +36,22 @@
     <None Include="..\..\..\..\engine\commands\capcomp-vectors.v1.json"
           Link="capcomp-vectors.v1.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- Canonical blob storage layout parity vectors; BlobLayoutParityTests
+         derives its cases from this so the .NET file store / delegate
+         resolver are asserted against the same source of truth as the
+         Rust nodalmerge-server / nodalmerge-s3-blobs crates. -->
+    <None Include="..\..\..\..\engine\commands\blob-layout-vectors.v1.json"
+          Link="blob-layout-vectors.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <!-- Golden cross-runtime blob fixture; BlobLayoutInteropTests proves
+         this host can read the same on-disk layout the Rust mirror
+         (server/server/tests/blob_layout_interop.rs) reads. Glob is `**`,
+         not `**\*.*` — several fixture entries (the hash-named blob files,
+         `.layout-v2`) have no conventional extension. -->
+    <None Include="..\..\..\..\engine\commands\fixtures\blob-layout-v1\**">
+      <Link>blob-layout-fixture-v1\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

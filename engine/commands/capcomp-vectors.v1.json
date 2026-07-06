@@ -1,0 +1,497 @@
+{
+  "$comment": "Canonical CAPCOMP (capability composition) parity vectors. Each vector pins one behavior of the profile-version gate + capability DAG expansion algorithm specified in docs/CAPCOMP_PARITY_PLAN.md §3. Consumed by: server/capability-profile/tests/capcomp_vectors.rs (Rust: nodalmerge-capability-profile, via expand_with_version_gate + CapabilityProfileError::class()), hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/CapcompParityTests.cs (.NET: CapabilityProfileExpander.TryExpand with the errorClass overload). 'mode':'expand' vectors supply a profile, assigned capabilities, and a claimed_profile_version, and expect either the flattened+sorted capability list ('expect.ok') or a stable error class ('expect.error'). 'mode':'passthrough' vectors have no profile and assert that a disabled/unconfigured expander returns assigned capabilities completely unchanged (no trim, no case-fold, no validation). Error classes are the parity contract; the human-readable message text is NOT shared and may differ per runtime. If you change the algorithm, this file, both harnesses, and docs/CAPCOMP_PARITY_PLAN.md must move together. Each field of a profile's 'limits' object may be omitted independently; both runtimes substitute that field's own default (128/128/8192/16/64) rather than requiring the whole object.",
+  "schema_version": 1,
+  "vectors": [
+    {
+      "id": "single-node",
+      "description": "single node with no inheritance expands to itself",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "room.member", "inherits": [] }]
+      },
+      "assigned": ["room.member"],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": ["room.member"] }
+    },
+    {
+      "id": "linear-chain",
+      "description": "a three-node linear inheritance chain fully expands",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [
+          { "capability": "a", "inherits": ["b"] },
+          { "capability": "b", "inherits": ["c"] },
+          { "capability": "c", "inherits": [] }
+        ]
+      },
+      "assigned": ["a"],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": ["a", "b", "c"] }
+    },
+    {
+      "id": "diamond-dedupe",
+      "description": "diamond inheritance (root -> a,b -> shared) is deduplicated",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [
+          { "capability": "root", "inherits": ["a", "b"] },
+          { "capability": "a", "inherits": ["shared"] },
+          { "capability": "b", "inherits": ["shared"] },
+          { "capability": "shared", "inherits": [] }
+        ]
+      },
+      "assigned": ["root"],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": ["a", "b", "root", "shared"] }
+    },
+    {
+      "id": "output-sort-order",
+      "description": "output is ordinal-sorted regardless of assigned input order",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [
+          { "capability": "zeta", "inherits": [] },
+          { "capability": "alpha", "inherits": [] }
+        ]
+      },
+      "assigned": ["zeta", "alpha"],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": ["alpha", "zeta"] }
+    },
+    {
+      "id": "whitespace-and-case-normalization",
+      "description": "capability tokens are trimmed and ASCII-lowercased in both the profile and the assigned list",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [
+          { "capability": " Room.Admin ", "inherits": [" Tick.Admin "] },
+          { "capability": "tick.admin", "inherits": [] }
+        ]
+      },
+      "assigned": [" ROOM.admin "],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": ["room.admin", "tick.admin"] }
+    },
+    {
+      "id": "duplicate-assigned-collapses",
+      "description": "repeated / re-cased assigned capabilities collapse to one entry",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": ["cap.a", "cap.a", " CAP.A "],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": ["cap.a"] }
+    },
+    {
+      "id": "empty-assigned-list",
+      "description": "an empty assigned list expands to an empty set (not an error)",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": [],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": [] }
+    },
+    {
+      "id": "version-exact-match",
+      "description": "a claimed version exactly equal to profile_version is accepted",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": ["cap.a"],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": ["cap.a"] }
+    },
+    {
+      "id": "version-supported-window-match",
+      "description": "a claimed version matching a supported_profile_versions entry is accepted",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "capprof-v3",
+        "supported_profile_versions": ["capprof-v2"],
+        "nodes": [{ "capability": "room.member", "inherits": [] }]
+      },
+      "assigned": ["room.member"],
+      "claimed_profile_version": "capprof-v2",
+      "expect": { "ok": ["room.member"] }
+    },
+    {
+      "id": "version-mismatch-unsupported",
+      "description": "a claimed version outside profile_version and supported_profile_versions is rejected",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "capprof-v3",
+        "supported_profile_versions": ["capprof-v2"],
+        "nodes": [{ "capability": "room.member", "inherits": [] }]
+      },
+      "assigned": ["room.member"],
+      "claimed_profile_version": "capprof-v1",
+      "expect": { "error": "profile_version_mismatch" }
+    },
+    {
+      "id": "version-missing",
+      "description": "an absent claimed_profile_version is rejected before any graph work",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": ["cap.a"],
+      "claimed_profile_version": null,
+      "expect": { "error": "missing_profile_version" }
+    },
+    {
+      "id": "version-whitespace-only-claimed",
+      "description": "a whitespace-only claimed version is treated as missing, not as an unknown version",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": ["cap.a"],
+      "claimed_profile_version": "   ",
+      "expect": { "error": "missing_profile_version" }
+    },
+    {
+      "id": "version-padded-trims-to-match",
+      "description": "leading/trailing whitespace around an otherwise-valid claimed version is trimmed before comparison",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": ["cap.a"],
+      "claimed_profile_version": "  v1  ",
+      "expect": { "ok": ["cap.a"] }
+    },
+    {
+      "id": "token-empty-string",
+      "description": "a whitespace-only assigned capability is an invalid token, not silently skipped",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": ["   "],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "invalid_token" }
+    },
+    {
+      "id": "token-leading-dot-invalid",
+      "description": "a token that does not start with [a-z0-9] is invalid",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": [".cap"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "invalid_token" }
+    },
+    {
+      "id": "token-interior-illegal-char",
+      "description": "a token containing a character outside [a-z0-9._-] is invalid",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": ["cap:a"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "invalid_token" }
+    },
+    {
+      "id": "token-kelvin-sign-not-ascii-folded",
+      "description": "the Kelvin sign (U+212A) must NOT be folded to ASCII 'k' on either runtime -- it stays invalid. Regression guard for .NET's old ToLowerInvariant behavior, which mapped U+212A to 'k' and let this token slip through as an accept where Rust rejected it.",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": ["K"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "invalid_token" }
+    },
+    {
+      "id": "token-uppercase-assigned-accepted",
+      "description": "an all-uppercase ASCII assigned capability is folded and accepted, not rejected",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": ["CAP.A"],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": ["cap.a"] }
+    },
+    {
+      "id": "graph-unknown-assigned-capability",
+      "description": "an assigned capability with no matching profile node is rejected",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "cap.a", "inherits": [] }]
+      },
+      "assigned": ["cap.missing"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "unknown_capability" }
+    },
+    {
+      "id": "graph-unknown-inherit-reference",
+      "description": "a node inheriting from a capability with no node definition is rejected at graph-build time",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [
+          { "capability": "compose.root", "inherits": ["compose.missing"] },
+          { "capability": "compose.leaf", "inherits": [] }
+        ]
+      },
+      "assigned": ["compose.root"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "unknown_capability" }
+    },
+    {
+      "id": "graph-duplicate-node-normalizes-same",
+      "description": "two profile nodes that canonicalize to the same token are a duplicate-capability error, even when spelled differently",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [
+          { "capability": "compose.root", "inherits": [] },
+          { "capability": " Compose.Root ", "inherits": [] }
+        ]
+      },
+      "assigned": ["compose.root"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "duplicate_capability" }
+    },
+    {
+      "id": "graph-self-cycle",
+      "description": "a node that inherits from itself is a cycle",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [{ "capability": "a", "inherits": ["a"] }]
+      },
+      "assigned": ["a"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "cycle" }
+    },
+    {
+      "id": "graph-two-node-cycle",
+      "description": "a two-node mutual inheritance cycle is rejected",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "nodes": [
+          { "capability": "a", "inherits": ["b"] },
+          { "capability": "b", "inherits": ["a"] }
+        ]
+      },
+      "assigned": ["a"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "cycle" }
+    },
+    {
+      "id": "graph-too-many-edges",
+      "description": "a node whose inherits list exceeds max_edges_per_node is rejected",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "limits": {
+          "max_capability_count": 128,
+          "max_capability_length": 128,
+          "max_flattened_payload_bytes": 8192,
+          "max_dag_depth": 16,
+          "max_edges_per_node": 2
+        },
+        "nodes": [
+          { "capability": "root", "inherits": ["a", "b", "c"] },
+          { "capability": "a", "inherits": [] },
+          { "capability": "b", "inherits": [] },
+          { "capability": "c", "inherits": [] }
+        ]
+      },
+      "assigned": ["root"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "too_many_edges" }
+    },
+    {
+      "id": "limits-depth-exceeded",
+      "description": "a 4-node inheritance chain exceeds a max_dag_depth of 2",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "limits": {
+          "max_capability_count": 128,
+          "max_capability_length": 128,
+          "max_flattened_payload_bytes": 8192,
+          "max_dag_depth": 2,
+          "max_edges_per_node": 64
+        },
+        "nodes": [
+          { "capability": "a", "inherits": ["b"] },
+          { "capability": "b", "inherits": ["c"] },
+          { "capability": "c", "inherits": ["d"] },
+          { "capability": "d", "inherits": [] }
+        ]
+      },
+      "assigned": ["a"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "depth_exceeded" }
+    },
+    {
+      "id": "limits-depth-at-exact-limit-passes",
+      "description": "a chain whose deepest edge sits exactly at max_dag_depth succeeds (the boundary is inclusive)",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "limits": {
+          "max_capability_count": 128,
+          "max_capability_length": 128,
+          "max_flattened_payload_bytes": 8192,
+          "max_dag_depth": 2,
+          "max_edges_per_node": 64
+        },
+        "nodes": [
+          { "capability": "a", "inherits": ["b"] },
+          { "capability": "b", "inherits": ["c"] },
+          { "capability": "c", "inherits": [] }
+        ]
+      },
+      "assigned": ["a"],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": ["a", "b", "c"] }
+    },
+    {
+      "id": "limits-count-exceeded",
+      "description": "an expansion producing more capabilities than max_capability_count is rejected",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "limits": {
+          "max_capability_count": 2,
+          "max_capability_length": 128,
+          "max_flattened_payload_bytes": 8192,
+          "max_dag_depth": 16,
+          "max_edges_per_node": 64
+        },
+        "nodes": [
+          { "capability": "root", "inherits": ["a", "b"] },
+          { "capability": "a", "inherits": [] },
+          { "capability": "b", "inherits": [] }
+        ]
+      },
+      "assigned": ["root"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "count_exceeded" }
+    },
+    {
+      "id": "limits-payload-exceeded",
+      "description": "an expansion whose comma-joined byte length exceeds max_flattened_payload_bytes is rejected ('alpha,root' is 10 bytes; limit is 9)",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "limits": {
+          "max_capability_count": 128,
+          "max_capability_length": 128,
+          "max_flattened_payload_bytes": 9,
+          "max_dag_depth": 16,
+          "max_edges_per_node": 64
+        },
+        "nodes": [
+          { "capability": "root", "inherits": ["alpha"] },
+          { "capability": "alpha", "inherits": [] }
+        ]
+      },
+      "assigned": ["root"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "payload_exceeded" }
+    },
+    {
+      "id": "limits-length-exceeded",
+      "description": "an assigned capability longer than max_capability_length is an invalid token",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "limits": {
+          "max_capability_count": 128,
+          "max_capability_length": 4,
+          "max_flattened_payload_bytes": 8192,
+          "max_dag_depth": 16,
+          "max_edges_per_node": 64
+        },
+        "nodes": [{ "capability": "cap", "inherits": [] }]
+      },
+      "assigned": ["abcde"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "invalid_token" }
+    },
+    {
+      "id": "limits-partial-specification-triggers-override",
+      "description": "a limits object specifying only max_edges_per_node still applies that override, while every other field falls back to its own default rather than requiring the whole object",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "limits": {
+          "max_edges_per_node": 2
+        },
+        "nodes": [
+          { "capability": "root", "inherits": ["a", "b", "c"] },
+          { "capability": "a", "inherits": [] },
+          { "capability": "b", "inherits": [] },
+          { "capability": "c", "inherits": [] }
+        ]
+      },
+      "assigned": ["root"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "too_many_edges" }
+    },
+    {
+      "id": "limits-partial-specification-ok-path",
+      "description": "a limits object specifying only max_capability_count still expands successfully, using every other field's own default",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "limits": {
+          "max_capability_count": 10
+        },
+        "nodes": [
+          { "capability": "root", "inherits": ["a", "b"] },
+          { "capability": "a", "inherits": ["shared"] },
+          { "capability": "b", "inherits": ["shared"] },
+          { "capability": "shared", "inherits": [] }
+        ]
+      },
+      "assigned": ["root"],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": ["a", "b", "root", "shared"] }
+    },
+    {
+      "id": "passthrough-disabled-returns-verbatim",
+      "description": "when capability composition is not configured/enabled, assigned capabilities pass through unchanged and unnormalized",
+      "mode": "passthrough",
+      "assigned": ["room.admin", "tick.admin"],
+      "expect": { "ok": ["room.admin", "tick.admin"] }
+    },
+    {
+      "id": "passthrough-disabled-with-invalid-token-untouched",
+      "description": "passthrough performs no validation -- an assigned value that would fail token grammar if composition were enabled is still returned exactly as-is",
+      "mode": "passthrough",
+      "assigned": ["Not Even Valid!", " ROOM.admin "],
+      "expect": { "ok": ["Not Even Valid!", " ROOM.admin "] }
+    }
+  ]
+}

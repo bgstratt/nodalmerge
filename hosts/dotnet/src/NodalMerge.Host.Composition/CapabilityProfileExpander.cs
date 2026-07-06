@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -49,14 +50,44 @@ public sealed class CapabilityProfileExpander
 
     public bool IsEnabled => _options.Enabled;
 
+    /// <summary>
+    /// Stable class strings shared with the Rust <c>nodalmerge-capability-profile</c>
+    /// crate and asserted by <c>engine/commands/capcomp-vectors.v1.json</c>. Never
+    /// change an existing mapping without updating the vectors file and both runtimes.
+    /// </summary>
+    private static class ErrorClass
+    {
+        public const string MissingProfileVersion = "missing_profile_version";
+        public const string ProfileVersionMismatch = "profile_version_mismatch";
+        public const string DuplicateCapability = "duplicate_capability";
+        public const string UnknownCapability = "unknown_capability";
+        public const string InvalidToken = "invalid_token";
+        public const string TooManyEdges = "too_many_edges";
+        public const string Cycle = "cycle";
+        public const string DepthExceeded = "depth_exceeded";
+        public const string CountExceeded = "count_exceeded";
+        public const string PayloadExceeded = "payload_exceeded";
+    }
+
     public bool TryExpand(
         IReadOnlyList<string>? assignedCapabilities,
         string? requestedProfileVersion,
         out IReadOnlyList<string> expandedCapabilities,
         out string? error)
     {
+        return TryExpand(assignedCapabilities, requestedProfileVersion, out expandedCapabilities, out error, out _);
+    }
+
+    public bool TryExpand(
+        IReadOnlyList<string>? assignedCapabilities,
+        string? requestedProfileVersion,
+        out IReadOnlyList<string> expandedCapabilities,
+        out string? error,
+        out string? errorClass)
+    {
         expandedCapabilities = assignedCapabilities ?? [];
         error = null;
+        errorClass = null;
 
         if (!IsEnabled)
         {
@@ -70,12 +101,14 @@ public sealed class CapabilityProfileExpander
         if (string.IsNullOrWhiteSpace(requested))
         {
             error = "missing capability_profile_version while capability composition is enabled";
+            errorClass = ErrorClass.MissingProfileVersion;
             return false;
         }
 
         if (!SupportsProfileVersion(profile, requested))
         {
             error = $"unknown capability_profile_version '{requested}'";
+            errorClass = ErrorClass.ProfileVersionMismatch;
             return false;
         }
 
@@ -87,12 +120,14 @@ public sealed class CapabilityProfileExpander
             if (capErr is not null)
             {
                 error = capErr;
+                errorClass = ErrorClass.InvalidToken;
                 return false;
             }
 
             if (graph.ContainsKey(cap!))
             {
                 error = $"duplicate capability node '{cap}'";
+                errorClass = ErrorClass.DuplicateCapability;
                 return false;
             }
 
@@ -103,6 +138,7 @@ public sealed class CapabilityProfileExpander
                 if (parentErr is not null)
                 {
                     error = parentErr;
+                    errorClass = ErrorClass.InvalidToken;
                     return false;
                 }
                 inherits.Add(parent!);
@@ -111,6 +147,7 @@ public sealed class CapabilityProfileExpander
             if (inherits.Count > limits.MaxEdgesPerNode)
             {
                 error = $"capability '{cap}' exceeds max edges per node ({limits.MaxEdgesPerNode})";
+                errorClass = ErrorClass.TooManyEdges;
                 return false;
             }
 
@@ -124,6 +161,7 @@ public sealed class CapabilityProfileExpander
                 if (!graph.ContainsKey(parent))
                 {
                     error = $"unknown inheritance reference '{parent}' (from '{node}')";
+                    errorClass = ErrorClass.UnknownCapability;
                     return false;
                 }
             }
@@ -138,16 +176,18 @@ public sealed class CapabilityProfileExpander
             if (sourceErr is not null)
             {
                 error = sourceErr;
+                errorClass = ErrorClass.InvalidToken;
                 return false;
             }
 
             if (!graph.ContainsKey(source!))
             {
                 error = $"unknown assigned capability '{source}'";
+                errorClass = ErrorClass.UnknownCapability;
                 return false;
             }
 
-            if (!TryExpandDfs(source!, 0, graph, visiting, expanded, limits, out error))
+            if (!TryExpandDfs(source!, 0, graph, visiting, expanded, limits, out error, out errorClass))
             {
                 return false;
             }
@@ -156,13 +196,15 @@ public sealed class CapabilityProfileExpander
         if (expanded.Count > limits.MaxCapabilityCount)
         {
             error = $"flattened capability count exceeded max ({limits.MaxCapabilityCount})";
+            errorClass = ErrorClass.CountExceeded;
             return false;
         }
 
-        var payloadBytes = string.Join(",", expanded).Length;
+        var payloadBytes = Encoding.UTF8.GetByteCount(string.Join(",", expanded));
         if (payloadBytes > limits.MaxFlattenedPayloadBytes)
         {
             error = $"flattened capability payload exceeded max bytes ({limits.MaxFlattenedPayloadBytes})";
+            errorClass = ErrorClass.PayloadExceeded;
             return false;
         }
 
@@ -177,19 +219,23 @@ public sealed class CapabilityProfileExpander
         HashSet<string> visiting,
         SortedSet<string> expanded,
         CapabilityProfileLimits limits,
-        out string? error)
+        out string? error,
+        out string? errorClass)
     {
         error = null;
+        errorClass = null;
 
         if (depth > limits.MaxDagDepth)
         {
             error = $"capability graph depth exceeded max ({limits.MaxDagDepth})";
+            errorClass = ErrorClass.DepthExceeded;
             return false;
         }
 
         if (visiting.Contains(cap))
         {
             error = $"cycle detected at capability '{cap}'";
+            errorClass = ErrorClass.Cycle;
             return false;
         }
 
@@ -204,7 +250,7 @@ public sealed class CapabilityProfileExpander
         {
             foreach (var parent in parents)
             {
-                if (!TryExpandDfs(parent, depth + 1, graph, visiting, expanded, limits, out error))
+                if (!TryExpandDfs(parent, depth + 1, graph, visiting, expanded, limits, out error, out errorClass))
                 {
                     return false;
                 }
@@ -216,6 +262,12 @@ public sealed class CapabilityProfileExpander
         return true;
     }
 
+    /// <summary>
+    /// Unicode-trim, then fold only ASCII <c>A-Z</c> to lowercase. Non-ASCII
+    /// characters are never folded into the accepted charset (e.g. the Kelvin
+    /// sign U+212A must NOT become ASCII 'k') — this must match the Rust
+    /// expander's normalization exactly, see docs/CAPCOMP_PARITY_PLAN.md §3.
+    /// </summary>
     private static string? NormalizeToken(string? raw, int maxLen, out string? error)
     {
         error = null;
@@ -225,7 +277,7 @@ public sealed class CapabilityProfileExpander
             return null;
         }
 
-        var token = raw.Trim().ToLowerInvariant();
+        var token = FoldAsciiLower(raw.Trim());
         if (token.Length > maxLen)
         {
             error = $"capability token exceeds max length ({maxLen})";
@@ -251,6 +303,18 @@ public sealed class CapabilityProfileExpander
         }
 
         return token;
+    }
+
+    private static string FoldAsciiLower(string value)
+    {
+        Span<char> buffer = value.Length <= 256 ? stackalloc char[value.Length] : new char[value.Length];
+        for (var i = 0; i < value.Length; i++)
+        {
+            var c = value[i];
+            buffer[i] = c is >= 'A' and <= 'Z' ? (char)(c + 32) : c;
+        }
+
+        return new string(buffer);
     }
 
     private static bool SupportsProfileVersion(CapabilityProfileDocument profile, string requested)

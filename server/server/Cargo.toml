@@ -13,6 +13,7 @@ path = "src/nodalmerge_server_main.rs"
 nodalmerge-core = { version = "0.1.0", path = "../../core/crdt" }
 nodalmerge-gc = { version = "0.1.0", path = "../../core/gc" }
 nodalmerge-host-core = { version = "0.1.0", path = "../../engine/host-core" }
+nodalmerge-capability-profile = { version = "0.1.0", path = "../capability-profile" }
 ed25519-dalek = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { workspace = true }

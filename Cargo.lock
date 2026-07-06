@@ -2980,6 +2980,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodalmerge-capability-profile"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nodalmerge-cli"
 version = "0.1.0"
 dependencies = [
@@ -3113,6 +3121,7 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "jsonwebtoken",
+ "nodalmerge-capability-profile",
  "nodalmerge-core",
  "rand 0.8.6",
  "serde",
@@ -3225,6 +3234,7 @@ dependencies = [
  "governor",
  "metrics 0.23.1",
  "metrics-exporter-prometheus 0.15.3",
+ "nodalmerge-capability-profile",
  "nodalmerge-command-registry",
  "nodalmerge-core",
  "nodalmerge-gc",

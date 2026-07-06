@@ -250,6 +250,7 @@ try {
             "nodalmerge-host-ffi" = "engine/host-ffi"
             "nodalmerge-host-axum" = "server/axum-embed"
             "nodalmerge-bridge" = "clients/bridge-wasm"
+            "nodalmerge-capability-profile" = "server/capability-profile"
             "nodalmerge-server" = "server/server"
             "nodalmerge-jwt-bridge" = "server/jwt-bridge"
             "nodalmerge-s3-blobs" = "server/s3-blobs"
@@ -268,6 +269,7 @@ try {
             "nodalmerge-host-ffi",
             "nodalmerge-host-axum",
             "nodalmerge-bridge",
+            "nodalmerge-capability-profile",
             "nodalmerge-server",
             "nodalmerge-jwt-bridge",
             "nodalmerge-s3-blobs",

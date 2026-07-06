@@ -1,3 +1,21 @@
+//! Shared capability-composition (CAPCOMP) profile loading and DAG
+//! expansion.
+//!
+//! A capability profile is a small inheritance DAG over capability tokens
+//! (`room.admin` inherits `tick.admin`, `policy.admin`, …). Given a set of
+//! *assigned* capabilities and a claimed profile version, [`flatten_capabilities`]
+//! expands the DAG into the full, deduplicated, sorted set of effective
+//! capabilities that should be embedded in a minted `RoomToken`.
+//!
+//! This crate is the single source of truth for that algorithm — it is
+//! consumed by both `nodalmerge-server` (inbound `hello` token validation)
+//! and `nodalmerge-jwt-bridge` (RoomToken minting from a third-party JWT).
+//! A parallel implementation lives in the .NET host
+//! (`NodalMerge.Host.Composition.CapabilityProfileExpander`); the two are
+//! kept in lockstep by the shared vectors file
+//! `engine/commands/capcomp-vectors.v1.json` — see
+//! `docs/CAPCOMP_PARITY_PLAN.md`.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -28,13 +46,43 @@ pub struct CapabilityNode {
     pub inherits: Vec<String>,
 }
 
+/// Every field defaults independently when omitted from a profile's
+/// `limits` object — matching the .NET expander, whose
+/// `CapabilityProfileLimits` properties each carry their own default. A
+/// `limits` object may therefore specify any subset of fields; unspecified
+/// ones fall back individually rather than requiring the whole object.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CapabilityProfileLimits {
+    #[serde(default = "default_max_capability_count")]
     pub max_capability_count: usize,
+    #[serde(default = "default_max_capability_length")]
     pub max_capability_length: usize,
+    #[serde(default = "default_max_flattened_payload_bytes")]
     pub max_flattened_payload_bytes: usize,
+    #[serde(default = "default_max_dag_depth")]
     pub max_dag_depth: usize,
+    #[serde(default = "default_max_edges_per_node")]
     pub max_edges_per_node: usize,
+}
+
+fn default_max_capability_count() -> usize {
+    DEFAULT_MAX_CAPABILITY_COUNT
+}
+
+fn default_max_capability_length() -> usize {
+    DEFAULT_MAX_CAPABILITY_LENGTH
+}
+
+fn default_max_flattened_payload_bytes() -> usize {
+    DEFAULT_MAX_FLATTENED_PAYLOAD_BYTES
+}
+
+fn default_max_dag_depth() -> usize {
+    DEFAULT_MAX_DAG_DEPTH
+}
+
+fn default_max_edges_per_node() -> usize {
+    DEFAULT_MAX_EDGES_PER_NODE
 }
 
 impl Default for CapabilityProfileLimits {
@@ -49,11 +97,16 @@ impl Default for CapabilityProfileLimits {
     }
 }
 
+/// A CAPCOMP failure, with a stable, cross-runtime [`class`](Self::class)
+/// string used by the parity vectors harnesses. Display text is free to
+/// carry human-friendly context and is *not* part of the parity contract.
 #[derive(Debug)]
 pub enum CapabilityProfileError {
     Io(String),
     Parse(String),
     InvalidProfileVersion,
+    MissingProfileVersion,
+    ProfileVersionMismatch,
     DuplicateCapability(String),
     UnknownCapability(String),
     InvalidCapabilityToken(String),
@@ -64,12 +117,38 @@ pub enum CapabilityProfileError {
     PayloadExceeded { max: usize },
 }
 
+impl CapabilityProfileError {
+    /// Stable class string, shared with the .NET expander and asserted by
+    /// `engine/commands/capcomp-vectors.v1.json`. Never change an existing
+    /// mapping without updating the vectors file and both runtimes.
+    pub fn class(&self) -> &'static str {
+        match self {
+            Self::Io(_) | Self::Parse(_) | Self::InvalidProfileVersion => "invalid_profile",
+            Self::MissingProfileVersion => "missing_profile_version",
+            Self::ProfileVersionMismatch => "profile_version_mismatch",
+            Self::DuplicateCapability(_) => "duplicate_capability",
+            Self::UnknownCapability(_) => "unknown_capability",
+            Self::InvalidCapabilityToken(_) => "invalid_token",
+            Self::TooManyEdges { .. } => "too_many_edges",
+            Self::CycleDetected(_) => "cycle",
+            Self::DepthExceeded { .. } => "depth_exceeded",
+            Self::CountExceeded { .. } => "count_exceeded",
+            Self::PayloadExceeded { .. } => "payload_exceeded",
+        }
+    }
+}
+
 impl fmt::Display for CapabilityProfileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(msg) => write!(f, "io error: {msg}"),
             Self::Parse(msg) => write!(f, "parse error: {msg}"),
             Self::InvalidProfileVersion => write!(f, "invalid profile version"),
+            Self::MissingProfileVersion => write!(
+                f,
+                "missing capability_profile_version while composition is enabled"
+            ),
+            Self::ProfileVersionMismatch => write!(f, "capability profile version mismatch"),
             Self::DuplicateCapability(cap) => write!(f, "duplicate capability in profile: {cap}"),
             Self::UnknownCapability(cap) => {
                 write!(f, "unknown capability in profile expansion input: {cap}")
@@ -122,6 +201,10 @@ pub fn load_capability_profile_from_value(
     Ok(profile)
 }
 
+/// Expand `assigned_capabilities` through `profile`'s inheritance DAG into
+/// the deduplicated, ordinal-sorted, effective capability set. Does not
+/// check the caller's claimed profile version — see
+/// [`expand_with_version_gate`] for the full mint/validate-time contract.
 pub fn flatten_capabilities(
     profile: &CapabilityProfile,
     assigned_capabilities: &[String],
@@ -207,6 +290,30 @@ pub fn profile_supports_version(profile: &CapabilityProfile, requested: &str) ->
         .any(|v| v.trim() == requested_trimmed)
 }
 
+/// The full mint/validate-time contract in one call: gate on the claimed
+/// profile version, then expand. This is the canonical entry point the
+/// cross-runtime parity vectors harness drives — see
+/// `docs/CAPCOMP_PARITY_PLAN.md` §3. Production call sites in
+/// `nodalmerge-server` and `nodalmerge-jwt-bridge` implement this same
+/// sequence inline (to preserve their existing error message text); if you
+/// change the sequence here, mirror the change there.
+pub fn expand_with_version_gate(
+    profile: &CapabilityProfile,
+    assigned_capabilities: &[String],
+    claimed_profile_version: Option<&str>,
+) -> Result<Vec<String>, CapabilityProfileError> {
+    let claimed = claimed_profile_version
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(CapabilityProfileError::MissingProfileVersion)?;
+
+    if !profile_supports_version(profile, claimed) {
+        return Err(CapabilityProfileError::ProfileVersionMismatch);
+    }
+
+    flatten_capabilities(profile, assigned_capabilities)
+}
+
 fn dfs_expand(
     cap: &str,
     graph: &HashMap<String, Vec<String>>,
@@ -281,6 +388,10 @@ fn resolved_limits(profile: &CapabilityProfile) -> CapabilityProfileLimits {
     profile.limits.clone().unwrap_or_default()
 }
 
+/// Canonicalize a capability token: Unicode-trim, then fold only ASCII
+/// `A-Z` to lowercase (non-ASCII characters are never folded into the
+/// accepted charset — this must match the .NET expander's normalization
+/// exactly, see `docs/CAPCOMP_PARITY_PLAN.md` §3).
 fn canonicalize_capability(raw: &str, max_len: usize) -> Result<String, CapabilityProfileError> {
     let token = raw.trim().to_ascii_lowercase();
     if token.is_empty() || token.len() > max_len {
@@ -368,6 +479,7 @@ mod tests {
 
         let err = flatten_capabilities(&profile, &["a".to_string()]).unwrap_err();
         assert!(matches!(err, CapabilityProfileError::CycleDetected(_)));
+        assert_eq!(err.class(), "cycle");
     }
 
     #[test]
@@ -400,5 +512,65 @@ mod tests {
 
         let err = flatten_capabilities(&profile, &["a".to_string()]).unwrap_err();
         assert!(matches!(err, CapabilityProfileError::DepthExceeded { .. }));
+        assert_eq!(err.class(), "depth_exceeded");
+    }
+
+    #[test]
+    fn expand_with_version_gate_rejects_missing_version() {
+        let profile = CapabilityProfile {
+            profile_version: "capprof-v1".to_string(),
+            supported_profile_versions: vec![],
+            nodes: vec![CapabilityNode {
+                capability: "room.member".to_string(),
+                inherits: vec![],
+            }],
+            limits: None,
+        };
+
+        let err = expand_with_version_gate(&profile, &["room.member".to_string()], None)
+            .unwrap_err();
+        assert_eq!(err.class(), "missing_profile_version");
+    }
+
+    #[test]
+    fn expand_with_version_gate_rejects_unsupported_version() {
+        let profile = CapabilityProfile {
+            profile_version: "capprof-v3".to_string(),
+            supported_profile_versions: vec!["capprof-v2".to_string()],
+            nodes: vec![CapabilityNode {
+                capability: "room.member".to_string(),
+                inherits: vec![],
+            }],
+            limits: None,
+        };
+
+        let err = expand_with_version_gate(
+            &profile,
+            &["room.member".to_string()],
+            Some("capprof-v1"),
+        )
+        .unwrap_err();
+        assert_eq!(err.class(), "profile_version_mismatch");
+    }
+
+    #[test]
+    fn expand_with_version_gate_accepts_compatibility_window_version() {
+        let profile = CapabilityProfile {
+            profile_version: "capprof-v3".to_string(),
+            supported_profile_versions: vec!["capprof-v2".to_string()],
+            nodes: vec![CapabilityNode {
+                capability: "room.member".to_string(),
+                inherits: vec![],
+            }],
+            limits: None,
+        };
+
+        let flattened = expand_with_version_gate(
+            &profile,
+            &["room.member".to_string()],
+            Some("capprof-v2"),
+        )
+        .expect("expected supported compatibility-window version to pass");
+        assert_eq!(flattened, vec!["room.member".to_string()]);
     }
 }

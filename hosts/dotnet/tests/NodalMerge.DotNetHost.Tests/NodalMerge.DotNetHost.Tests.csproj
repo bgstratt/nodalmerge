@@ -30,6 +30,12 @@
     <None Include="..\..\..\..\engine\commands\registry.json"
           Link="command-registry.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- Canonical CAPCOMP (capability composition) parity vectors; CapcompParityTests
+         derives its cases from this so the .NET expander is asserted against the
+         same source of truth as the Rust nodalmerge-capability-profile crate. -->
+    <None Include="..\..\..\..\engine\commands\capcomp-vectors.v1.json"
+          Link="capcomp-vectors.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

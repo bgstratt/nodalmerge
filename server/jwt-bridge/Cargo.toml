@@ -1,11 +1,12 @@
 [package]
 name = "nodalmerge-jwt-bridge"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Trusted-issuer JWT → NodalMerge RoomToken minting bridge"
 
 [dependencies]
-nodalmerge-core = { version = "0.1.0", path = "../../core/crdt" }
+nodalmerge-core = { version = "0.2.0", path = "../../core/crdt" }
+nodalmerge-capability-profile = { version = "0.2.0", path = "../capability-profile" }
 ed25519-dalek = { workspace = true }
 jsonwebtoken = "9"
 serde = { workspace = true }

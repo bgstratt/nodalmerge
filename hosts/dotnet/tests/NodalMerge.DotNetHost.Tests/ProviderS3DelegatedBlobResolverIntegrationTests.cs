@@ -17,8 +17,9 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
     [Fact]
     public async Task Sync_blob_url_returns_presigned_url_when_s3_delegated_resolver_returns_success()
     {
+        var handler = new DelegatedSuccessHandler();
         await using var app = BuildTestApp(
-            new DelegatedSuccessHandler(),
+            handler,
             config =>
             {
                 config.AddInMemoryCollection(
@@ -40,7 +41,26 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
         using var doc = await JsonDocument.ParseAsync(stream);
 
         Assert.Equal("https://upload.example/presigned", doc.RootElement.GetProperty("url").GetString());
-        Assert.Equal(1700000123L, doc.RootElement.GetProperty("expiresAt").GetInt64());
+        // Protocol v1 responses carry no expiry field (see
+        // docs/BLOB_STORAGE_LAYOUT.md §7) — the resolver computes its own
+        // from the configured TTL (default 900s), matching Rust's
+        // PresignedUrl::with_ttl.
+        var expiresAt = doc.RootElement.GetProperty("expiresAt").GetInt64();
+        var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        Assert.InRange(expiresAt, nowUnix + 890, nowUnix + 910);
+
+        // Pin the actual outbound request shape against protocol v1.
+        Assert.NotNull(handler.LastRequestBody);
+        using var reqDoc = JsonDocument.Parse(handler.LastRequestBody!);
+        var root = reqDoc.RootElement;
+        Assert.Equal("put", root.GetProperty("op").GetString());
+        Assert.Equal("room-a", root.GetProperty("room").GetString());
+        Assert.Equal("sha256:abc", root.GetProperty("hash").GetString());
+        Assert.Equal("blake3", root.GetProperty("algorithm").GetString());
+        Assert.Equal(1024, root.GetProperty("size").GetInt64());
+        Assert.Equal(900, root.GetProperty("ttl_seconds").GetInt64());
+        Assert.Equal("assets", root.GetProperty("namespace").GetString());
+        Assert.False(root.TryGetProperty("room_id", out _), "protocol v1 uses `room`, not `room_id`");
     }
 
     [Fact]
@@ -166,12 +186,18 @@ internal sealed class FakeDelegatedHttpClientFactory : IHttpClientFactory
 
 internal sealed class DelegatedSuccessHandler : HttpMessageHandler
 {
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    public string? LastRequestBody { get; private set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        LastRequestBody = request.Content is null
+            ? null
+            : await request.Content.ReadAsStringAsync(cancellationToken);
+
+        return new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent("{\"url\":\"https://upload.example/presigned\",\"expires_at_epoch_seconds\":1700000123}", Encoding.UTF8, "application/json")
-        });
+            Content = new StringContent("{\"url\":\"https://upload.example/presigned\"}", Encoding.UTF8, "application/json")
+        };
     }
 }
 

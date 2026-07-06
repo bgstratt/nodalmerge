@@ -6,6 +6,7 @@ members = [
     "engine/commands",
     "server/axum-embed",
     "engine/host-ffi",
+    "server/capability-profile",
     "server/server",
     "clients/bridge-wasm",
     "server/jwt-bridge",

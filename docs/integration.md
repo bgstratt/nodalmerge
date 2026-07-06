@@ -113,9 +113,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 **What the app's `/blobs/presign` endpoint must do.** Accept JSON of
-the shape `{ op: "get" | "put", room_id, hash, size, ttl_seconds }`
-and respond with `{ url, expires_at_unix }`. HTTP 4xx/5xx is treated
-as "no URL, fall back to WS".
+the shape `{ op: "get" | "put", room, hash, algorithm, size, ttl_seconds,
+content_type, namespace }` (delegate protocol v1 — see
+[docs/BLOB_STORAGE_LAYOUT.md](BLOB_STORAGE_LAYOUT.md#7-delegated-presign-protocol-v1))
+and respond with `{ "url": "<presigned url>" }`. The caller computes
+expiry locally from the `ttl_seconds` it sent — the response carries no
+expiry field. HTTP 4xx/5xx is treated as "no URL, fall back to WS".
 
 **Why Delegate mode.** SpeechSlate already owns S3 credentials and
 rotates them on a known schedule. The sync server becomes a dumb URL

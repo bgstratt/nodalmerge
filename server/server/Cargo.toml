@@ -1,6 +1,6 @@
 [package]
 name = "nodalmerge-server"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 autobins = false
 description = "NodalMerge reflector server: authenticates peers and broadcasts state packs"
@@ -10,9 +10,10 @@ name = "nodalmerge-server"
 path = "src/nodalmerge_server_main.rs"
 
 [dependencies]
-nodalmerge-core = { version = "0.1.0", path = "../../core/crdt" }
-nodalmerge-gc = { version = "0.1.0", path = "../../core/gc" }
-nodalmerge-host-core = { version = "0.1.0", path = "../../engine/host-core" }
+nodalmerge-core = { version = "0.2.0", path = "../../core/crdt" }
+nodalmerge-gc = { version = "0.2.0", path = "../../core/gc" }
+nodalmerge-host-core = { version = "0.2.0", path = "../../engine/host-core" }
+nodalmerge-capability-profile = { version = "0.2.0", path = "../capability-profile" }
 ed25519-dalek = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { workspace = true }
@@ -31,4 +32,4 @@ governor = "0.7"
 [dev-dependencies]
 tokio-tungstenite = "0.24"
 base64 = "0.22"
-nodalmerge-command-registry = { version = "0.1.0", path = "../../engine/commands" }
+nodalmerge-command-registry = { version = "0.2.0", path = "../../engine/commands" }

@@ -8,6 +8,9 @@
 //!   - delete the orphan on the second sweep once the grace window has
 //!     elapsed.
 //!
+//! Blobs are a single global CAS pool, not room-scoped (see
+//! docs/BLOB_STORAGE_LAYOUT.md) — paths below have no room segment.
+//!
 //! We drive `Rooms::sweep_blobs` directly instead of spawning the task
 //! so the test is synchronous, deterministic, and doesn't race `tokio::
 //! time::interval`. Grace is set to 50 ms so the two-phase behavior is
@@ -71,8 +74,8 @@ async fn blob_gc_two_phase_deletes_orphans_only() {
     let live_hash = Hash::of(&live_bytes);
     let orphan_bytes = b"never-referenced".to_vec();
     let orphan_hash = Hash::of(&orphan_bytes);
-    persistence.persist_blob(&room_id, &live_hash, &live_bytes);
-    persistence.persist_blob(&room_id, &orphan_hash, &orphan_bytes);
+    persistence.persist_blob(&live_hash, &live_bytes);
+    persistence.persist_blob(&orphan_hash, &orphan_bytes);
     room.blobs.write().await.put(live_bytes.clone());
     room.blobs.write().await.put(orphan_bytes.clone());
 
@@ -85,15 +88,15 @@ async fn blob_gc_two_phase_deletes_orphans_only() {
     // Short grace so we can observe the two phases in-test.
     let grace = Duration::from_millis(50);
 
+    let blake3_dir = dir.join("blobs").join("blake3");
+    let tombs_dir = dir.join("blobs").join(".tombstones").join("blake3");
+
     // --- Phase 1: tombstones the orphan, deletes nothing. -----------------
     let deleted = rooms.sweep_blobs(grace).await;
     assert_eq!(deleted, 0, "first sweep must only tombstone, not delete");
-    let live_path = dir.join("blobs").join(&room_id).join(live_hash.to_hex());
-    let orphan_path = dir.join("blobs").join(&room_id).join(orphan_hash.to_hex());
-    let orphan_tomb = dir
-        .join("blob-tombstones")
-        .join(&room_id)
-        .join(orphan_hash.to_hex());
+    let live_path = blake3_dir.join(live_hash.to_hex());
+    let orphan_path = blake3_dir.join(orphan_hash.to_hex());
+    let orphan_tomb = tombs_dir.join(orphan_hash.to_hex());
     assert!(live_path.exists(), "live blob must survive phase 1");
     assert!(
         orphan_path.exists(),
@@ -144,15 +147,15 @@ async fn blob_gc_clears_tombstone_when_blob_becomes_live_again() {
 
     let bytes = b"refound".to_vec();
     let hash = Hash::of(&bytes);
-    persistence.persist_blob(&room_id, &hash, &bytes);
+    persistence.persist_blob(&hash, &bytes);
     room.blobs.write().await.put(bytes.clone());
+
+    let blake3_dir = dir.join("blobs").join("blake3");
+    let tombs_dir = dir.join("blobs").join(".tombstones").join("blake3");
 
     // No SetBlob yet → sweep with grace=1h tombstones the blob.
     let _ = rooms.sweep_blobs(Duration::from_secs(3600)).await;
-    let tomb = dir
-        .join("blob-tombstones")
-        .join(&room_id)
-        .join(hash.to_hex());
+    let tomb = tombs_dir.join(hash.to_hex());
     assert!(
         tomb.exists(),
         "blob should be tombstoned while unreferenced"
@@ -167,11 +170,78 @@ async fn blob_gc_clears_tombstone_when_blob_becomes_live_again() {
     // delete: the live set wins.
     let deleted = rooms.sweep_blobs(Duration::ZERO).await;
     assert_eq!(deleted, 0);
-    let blob_path = dir.join("blobs").join(&room_id).join(hash.to_hex());
+    let blob_path = blake3_dir.join(hash.to_hex());
     assert!(blob_path.exists(), "blob must survive once it's live again");
     assert!(
         !tomb.exists(),
         "tombstone must be cleared once blob is live"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn blob_gc_protects_blobs_in_cold_non_resident_rooms() {
+    // The correctness landmine of moving to a global CAS pool: a sweep
+    // driven only by resident rooms would incorrectly tombstone (and
+    // eventually delete) blobs belonging to rooms nobody has loaded since
+    // the server started. `Rooms::sweep_blobs` must union in every room
+    // known to persistence, not just resident ones.
+    let dir = tmpdir("cold-room");
+    let persistence: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap());
+    let sk = SigningKey::from_bytes(&[0xCCu8; 32]);
+
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&[0x04u8; 32]),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    );
+
+    // Room A gets a blob referenced by a SetBlob node, then is dropped —
+    // simulating a room that hydrated once and is no longer resident.
+    let bytes = b"owned-by-a-cold-room".to_vec();
+    let hash = Hash::of(&bytes);
+    {
+        let room_a = rooms.get_or_create("room-a").await;
+        persistence.persist_blob(&hash, &bytes);
+        room_a.blobs.write().await.put(bytes.clone());
+        let node = make_setblob_node(&sk, "k", hash);
+        let (accepted, _, _) = import_nodes(&room_a, vec![node]).await;
+        assert_eq!(accepted, 1);
+    }
+    // Room A has no connected peers and is idle from the moment it's
+    // created (see Room::new), so any non-negative timeout evicts it —
+    // once the background hydrate task spawned by get_or_create releases
+    // its temporary Arc handle (see idle_eviction.rs for the same race).
+    let mut evicted = Vec::new();
+    for _ in 0..20 {
+        evicted = rooms
+            .sweep_idle(Duration::ZERO, std::time::Instant::now())
+            .await;
+        if evicted.contains(&"room-a".to_string()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        evicted.contains(&"room-a".to_string()),
+        "room-a must be evicted (non-resident) before the sweep below"
+    );
+
+    // Only room B is resident when the sweep runs.
+    let _room_b = rooms.get_or_create("room-b").await;
+
+    let deleted = rooms.sweep_blobs(Duration::ZERO).await;
+    assert_eq!(
+        deleted, 0,
+        "sweep must not delete a blob owned by a non-resident room"
+    );
+    let blob_path = dir.join("blobs").join("blake3").join(hash.to_hex());
+    assert!(
+        blob_path.exists(),
+        "cold room's blob must survive a sweep driven by a different resident room"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

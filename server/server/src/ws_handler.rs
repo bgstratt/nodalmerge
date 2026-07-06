@@ -120,7 +120,7 @@ use crate::archive_adapter::{
     process_archive_describe, process_archive_export, process_archive_import,
     process_archive_validate,
 };
-use crate::capability_profile::{
+use nodalmerge_capability_profile::{
     flatten_capabilities, load_capability_profile_from_path, profile_supports_version,
     CapabilityProfile,
 };
@@ -1062,7 +1062,7 @@ async fn handle_client_message(
                     if actual == expected {
                         // F4: write-through persistence for accepted blobs.
                         room.persistence
-                            .persist_blob(&room.room_id, &actual, &bytes);
+                            .persist_blob(&actual, &bytes);
                         blob_store.put(bytes);
                         stored += 1;
                     }
@@ -2741,7 +2741,7 @@ mod control_plane_auth_tests {
 #[cfg(test)]
 mod capability_profile_runtime_tests {
     use super::expand_profile_capabilities_with_profile;
-    use crate::capability_profile::{CapabilityNode, CapabilityProfile};
+    use nodalmerge_capability_profile::{CapabilityNode, CapabilityProfile};
 
     #[test]
     fn compatibility_window_accepts_supported_profile_version() {

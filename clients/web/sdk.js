@@ -1172,6 +1172,7 @@ function makePeerMesh({
  *   onMetric?: (ev) => void,           // G8: metric event hook. See docs/sdk.md.
  *   onDirectUpload?: (args: { hash: string; length: number }) => void | Promise<void>; // F6: callback after a direct presigned PUT completes
  *   persistence?: { enabled?: boolean, dbName?: string, dbVersion?: number, debounceMs?: number, migrateLegacyDemo?: boolean },
+ *   unsignedNodes?: boolean,           // bench/dev only: skip Ed25519 signing of local nodes (server rejects unsigned; local-only docs)
  *   wasmModule?: any,                  // wasm-bindgen InitInput (URL/module/bytes) for bundlers; default = fetch relative to the bridge module
  * }} opts
  */
@@ -1197,6 +1198,7 @@ export async function createDoc(opts) {
     onMetric = null,
     onDirectUpload = null,
     persistence: persistenceOpts = null,
+    unsignedNodes = false,
   } = opts;
 
   if (!serverUrl) throw new Error('createDoc: serverUrl is required');
@@ -1208,6 +1210,15 @@ export async function createDoc(opts) {
   const metrics = makeMetrics(onMetric);
 
   const store = new SyncStore(authorSeed);
+  if (unsignedNodes) {
+    // Bench/dev only: emit zero-signature nodes so benchmark runs can
+    // isolate engine cost from Ed25519 cost. Servers reject unsigned nodes,
+    // so this is only sane for local-only docs (autoConnect: false).
+    if (typeof store.set_local_signing !== 'function') {
+      throw new Error('createDoc: unsignedNodes requires a bridge with set_local_signing');
+    }
+    store.set_local_signing(false);
+  }
   const pubkeyHex = store.pubkey_hex();
 
   let peerLocalPersistence = null;

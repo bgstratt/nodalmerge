@@ -48,6 +48,24 @@ fn make_node(sk: &SigningKey, key: &str, val: &[u8]) -> nodalmerge_core::SyncNod
     g.get_nodes(&[id]).into_iter().next().unwrap().clone()
 }
 
+/// A blob is only rediscovered on hydration via a `SetBlob` op referencing
+/// its hash — blobs are a global CAS pool, addressed by hash alone (see
+/// docs/BLOB_STORAGE_LAYOUT.md), not a per-room directory listing.
+fn make_setblob_node(sk: &SigningKey, key: &str, blob_hash: Hash) -> nodalmerge_core::SyncNode {
+    let mut g = StateGraph::new();
+    let id = g
+        .apply_local(
+            sk,
+            0,
+            vec![Op::Map(MapOp::SetBlob {
+                key: key.into(),
+                blob_hash,
+            })],
+        )
+        .unwrap();
+    g.get_nodes(&[id]).into_iter().next().unwrap().clone()
+}
+
 #[tokio::test]
 async fn room_survives_restart_with_nodes_and_blobs() {
     init_test_tracing();
@@ -63,14 +81,19 @@ async fn room_survives_restart_with_nodes_and_blobs() {
         let n1 = make_node(&sk, "hello", b"world");
         let n2 = make_node(&sk, "answer", b"42");
         let n3 = make_node(&sk, "rust", b"ferris");
-        let (accepted, _, errs) =
-            import_nodes(&room, vec![n1.clone(), n2.clone(), n3.clone()]).await;
-        assert_eq!(accepted, 3);
-        assert!(errs.is_empty());
-        // Also persist a blob.
+        // Also persist a blob, referenced by a SetBlob node so hydration
+        // (which derives its blob set from SetBlob ops) can find it again.
         let blob_bytes = b"opaque payload".to_vec();
         let blob_hash = Hash::of(&blob_bytes);
-        persistence.persist_blob(&room_id, &blob_hash, &blob_bytes);
+        let n4 = make_setblob_node(&sk, "avatar", blob_hash);
+        let (accepted, _, errs) = import_nodes(
+            &room,
+            vec![n1.clone(), n2.clone(), n3.clone(), n4.clone()],
+        )
+        .await;
+        assert_eq!(accepted, 4);
+        assert!(errs.is_empty());
+        persistence.persist_blob(&blob_hash, &blob_bytes);
         drop(room);
     }
 

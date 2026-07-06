@@ -1,12 +1,12 @@
 [package]
 name = "nodalmerge-s3-blobs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "S3-compatible BlobPersistence backend for nodalmerge-server (AWS, R2, MinIO, GCS, Azure)."
 
 [dependencies]
-nodalmerge-core = { version = "0.1.0", path = "../../core/crdt" }
-nodalmerge-server = { version = "0.1.0", path = "../server" }
+nodalmerge-core = { version = "0.2.0", path = "../../core/crdt" }
+nodalmerge-server = { version = "0.2.0", path = "../server" }
 object_store = { version = "0.11", features = ["aws"] }
 tokio = { workspace = true }
 serde = { workspace = true }

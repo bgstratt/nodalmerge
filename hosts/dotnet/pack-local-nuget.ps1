@@ -104,11 +104,23 @@ try {
         if ($wslPath) {
             $repoRootWsl = (& wsl.exe -- wslpath -a ($repoRoot -replace '\\', '/')).Trim()
             Write-Host "Building linux-x64 native runtime via WSL (release)..."
+            # WSL cargo must NOT share target/ with Windows cargo: the two rustc versions
+            # can differ, and WSL-written dep artifacts make subsequent Windows builds fail
+            # with E0514 (crate compiled by an incompatible version of rustc).
             Invoke-Checked -Name "wsl cargo build host ffi runtime (nodalmerge-host-ffi)" -Command {
-                & wsl.exe -- bash -lc "cd '$repoRootWsl' && cargo build -p nodalmerge-host-ffi --release"
+                & wsl.exe -- bash -lc "cd '$repoRootWsl' && CARGO_TARGET_DIR=target-wsl cargo build -p nodalmerge-host-ffi --release"
             }
             Invoke-Checked -Name "wsl cargo build peer-local ffi runtime (nodalmerge-runtime-local-ffi)" -Command {
-                & wsl.exe -- bash -lc "cd '$repoRootWsl' && cargo build -p nodalmerge-runtime-local-ffi --release"
+                & wsl.exe -- bash -lc "cd '$repoRootWsl' && CARGO_TARGET_DIR=target-wsl cargo build -p nodalmerge-runtime-local-ffi --release"
+            }
+            # The Native.linux-x64 csproj expects the .so files under target/release.
+            $windowsReleaseDir = Join-Path $repoRoot "target\release"
+            New-Item -ItemType Directory -Force -Path $windowsReleaseDir | Out-Null
+            foreach ($soName in @("libnodalmerge_host_ffi.so", "libnodalmerge_runtime_local_ffi.so")) {
+                $wslBuilt = Join-Path $repoRoot "target-wsl\release\$soName"
+                if (Test-Path -LiteralPath $wslBuilt) {
+                    Copy-Item -LiteralPath $wslBuilt -Destination (Join-Path $windowsReleaseDir $soName) -Force
+                }
             }
         }
         else {

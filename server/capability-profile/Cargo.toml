@@ -1,0 +1,9 @@
+[package]
+name = "nodalmerge-capability-profile"
+version = "0.2.0"
+edition = "2021"
+description = "Shared capability-composition (CAPCOMP) profile loading and DAG expansion, used by nodalmerge-server and nodalmerge-jwt-bridge"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

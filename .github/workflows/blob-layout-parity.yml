@@ -1,0 +1,114 @@
+name: blob-layout-parity
+
+# Asserts the Rust and .NET blob storage implementations against one
+# canonical layout contract:
+#   docs/BLOB_STORAGE_LAYOUT.md                  (contract: file/S3 layout,
+#                                                 delegate protocol v1)
+#   docs/BLOB_LAYOUT_CONVERGENCE_PLAN.md         (rationale/history)
+#   engine/commands/blob-layout-vectors.v1.json  (path/key/name/delegate
+#                                                 vectors, source of truth)
+#   engine/commands/fixtures/blob-layout-v1/     (golden cross-runtime
+#                                                 fixture tree)
+#   server/server/tests/blob_layout_vectors.rs
+#   server/server/tests/blob_layout_interop.rs
+#   server/s3-blobs/src/lib.rs (blob_layout_vectors_match_s3_key_derivation)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "engine/commands/blob-layout-vectors.v1.json"
+      - "engine/commands/fixtures/blob-layout-v1/**"
+      - "server/server/src/store.rs"
+      - "server/server/src/room.rs"
+      - "server/server/tests/blob_layout_vectors.rs"
+      - "server/server/tests/blob_layout_interop.rs"
+      - "server/server/tests/blob_gc.rs"
+      - "server/s3-blobs/src/lib.rs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
+      - ".github/workflows/blob-layout-parity.yml"
+  pull_request:
+    paths:
+      - "engine/commands/blob-layout-vectors.v1.json"
+      - "engine/commands/fixtures/blob-layout-v1/**"
+      - "server/server/src/store.rs"
+      - "server/server/src/room.rs"
+      - "server/server/tests/blob_layout_vectors.rs"
+      - "server/server/tests/blob_layout_interop.rs"
+      - "server/server/tests/blob_gc.rs"
+      - "server/s3-blobs/src/lib.rs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
+      - ".github/workflows/blob-layout-parity.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: 10.0.x
+
+jobs:
+  rust-blob-layout:
+    name: rust blob layout + S3 key + interop
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run file-store unit tests (layout, migration, GC)
+        run: "cargo test -p nodalmerge-server --lib store::"
+
+      - name: Run blob GC integration tests
+        run: cargo test -p nodalmerge-server --test blob_gc
+
+      - name: Run blob layout vectors
+        run: cargo test -p nodalmerge-server --test blob_layout_vectors
+
+      - name: Run cross-runtime golden fixture interop test
+        run: cargo test -p nodalmerge-server --test blob_layout_interop
+
+      - name: Run S3 key layout vectors
+        run: cargo test -p nodalmerge-s3-blobs --lib
+
+  dotnet-blob-layout:
+    name: dotnet blob layout + delegate protocol + interop
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Run blob layout + delegate protocol vectors
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobLayoutParityTests"
+
+      - name: Run cross-runtime golden fixture interop test
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobLayoutInteropTests"
+
+      - name: Run file GC coordinator tests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobGcCoordinatorTests"
+
+      - name: Run file store migration tests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobStoreProviderMigrationTests"

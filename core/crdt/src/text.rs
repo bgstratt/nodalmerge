@@ -581,9 +581,18 @@ impl TextProjection {
         None
     }
 
-    fn id_at_visible_offset(&self, offset: usize) -> Option<OpId> {
+    /// `OpId` of the visible character at `offset`, via the chunk index —
+    /// O(log chunks + chunk size), no sequence materialization. Public so
+    /// `StateGraph` can canonicalize `Offset` range anchors without paying
+    /// an O(document) `resolve_seq` per local edit.
+    pub fn id_at_visible_offset(&self, offset: usize) -> Option<OpId> {
         let loc = self.loc_of_visible_offset(offset)?;
         self.item_at(loc).id.to_op_id(&self.actor_table)
+    }
+
+    /// Number of visible (non-tombstoned) characters.
+    pub fn visible_char_len(&self) -> usize {
+        self.visible_chars_total
     }
 
     /// Visible offset of `cid`, or `None` when unknown or tombstoned.

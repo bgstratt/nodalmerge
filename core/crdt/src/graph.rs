@@ -354,6 +354,11 @@ pub struct StateGraph<N: NodeStore = MemoryNodeStore> {
     /// re-verification when the same node is re-broadcast (server echo,
     /// reconnect catchup, replay). Never persisted; cleared on process exit.
     verified_ids: HashSet<NodeId>,
+    /// Whether `apply_local*` signs the nodes it creates (default `true`).
+    /// `false` emits zero-signature nodes — the unsigned/legacy form that
+    /// `verify_signature` accepts but the server rejects. Benchmark/dev
+    /// only: lets a local-only run isolate engine cost from Ed25519 cost.
+    local_signing: bool,
     /// Per-key incremental text materializations.
     #[cfg(feature = "text_projection")]
     text_projections: HashMap<String, TextProjection>,
@@ -410,6 +415,7 @@ impl Default for StateGraph<MemoryNodeStore> {
             frontier: Frontier::default(),
             local_node_ids: HashSet::new(),
             verified_ids: HashSet::new(),
+            local_signing: true,
             #[cfg(feature = "text_projection")]
             text_projections: HashMap::new(),
             text_projection_mode: TextProjectionMode::Enabled,
@@ -458,6 +464,7 @@ impl<N: NodeStore> StateGraph<N> {
             frontier: Frontier::default(),
             local_node_ids: HashSet::new(),
             verified_ids: HashSet::new(),
+            local_signing: true,
             #[cfg(feature = "text_projection")]
             text_projections: HashMap::new(),
             text_projection_mode: TextProjectionMode::Enabled,
@@ -816,6 +823,16 @@ impl<N: NodeStore> StateGraph<N> {
         self.policy = policy;
     }
 
+    /// Toggle Ed25519 signing of locally-authored nodes (default `true`).
+    ///
+    /// With signing off, `apply_local*` emits zero-signature nodes: valid for
+    /// local-only use (compaction, benchmarks, tests) but rejected by servers
+    /// that enforce non-zero signatures. Intended for isolating engine cost
+    /// from signature cost in benchmarks — not a production mode.
+    pub fn set_local_signing(&mut self, enabled: bool) {
+        self.local_signing = enabled;
+    }
+
     /// Return a reference to the current room policy.
     pub fn policy(&self) -> &Policy {
         &self.policy
@@ -863,7 +880,13 @@ impl<N: NodeStore> StateGraph<N> {
         let author: [u8; 32] = signing_key.verifying_key().to_bytes();
         let parents: Vec<Hash> = self.leaves.iter().copied().collect();
         let tx = Transaction { author, lamport: tx_lamport, wall_ms, ops, parents };
-        let node = SyncNode::new_signed(tx, signing_key);
+        let node = if self.local_signing {
+            SyncNode::new_signed(tx, signing_key)
+        } else {
+            // Bench/dev mode: zero-signature (unsigned/legacy) node. Accepted
+            // locally and by `verify_signature`; rejected by the server.
+            SyncNode::new(tx)
+        };
         let id = node.id;
         self.insert_node(node.clone())?;
         // Speculative view only — locally-authored nodes are excluded from
@@ -892,9 +915,16 @@ impl<N: NodeStore> StateGraph<N> {
             TextRangeOp::Insert { anchor, .. } | TextRangeOp::Delete { anchor, .. } => *anchor,
         };
         let canonical_anchor = match raw_anchor {
-            TextRangeAnchor::Offset(_) => {
-                let seq = self.resolve_text_seq_with_chars(&key);
-                Self::canonicalize_range_anchor(&seq, raw_anchor)
+            TextRangeAnchor::Offset(i) => {
+                // Fast path: O(log n) offset→anchor via the projection's
+                // chunk index. Falls back to the O(document) sequence
+                // materialization only when the projection can't answer
+                // (feature off, projection reads disabled, or no
+                // projection for this key yet).
+                self.canonicalize_offset_anchor_fast(&key, i).unwrap_or_else(|| {
+                    let seq = self.resolve_text_seq_with_chars(&key);
+                    Self::canonicalize_range_anchor(&seq, raw_anchor)
+                })
             }
             _ => raw_anchor,
         };
@@ -1005,6 +1035,38 @@ impl<N: NodeStore> StateGraph<N> {
         self.insert_node(node.clone())?;
         self.update_state_caches(&node, true);
         Ok(())
+    }
+
+    /// O(log n) equivalent of [`Self::canonicalize_range_anchor`] for
+    /// `Offset` anchors, answered by the text projection's chunk index
+    /// instead of a materialized `Vec<(OpId, char)>` of the whole document.
+    ///
+    /// Mirrors `canonicalize_range_anchor` exactly: `idx = min(offset, len)`;
+    /// `0` → `Start`; `>= len` → `End`; otherwise `After(id at idx - 1)`.
+    /// Returns `None` whenever the projection can't answer authoritatively
+    /// (projection reads disabled, no projection for the key, or an id that
+    /// fails actor-table resolution) — callers fall back to the slow path,
+    /// so behavior is unchanged in every such case.
+    #[cfg(feature = "text_projection")]
+    fn canonicalize_offset_anchor_fast(&self, key: &str, offset: usize) -> Option<TextRangeAnchor> {
+        if self.text_projection_mode == TextProjectionMode::Disabled {
+            return None;
+        }
+        let projection = self.text_projections.get(key)?;
+        let len = projection.visible_char_len();
+        let idx = offset.min(len);
+        if idx == 0 {
+            Some(TextRangeAnchor::Start)
+        } else if idx >= len {
+            Some(TextRangeAnchor::End)
+        } else {
+            projection.id_at_visible_offset(idx - 1).map(TextRangeAnchor::After)
+        }
+    }
+
+    #[cfg(not(feature = "text_projection"))]
+    fn canonicalize_offset_anchor_fast(&self, _key: &str, _offset: usize) -> Option<TextRangeAnchor> {
+        None
     }
 
     fn canonicalize_range_anchor(seq: &[(crate::op::OpId, char)], anchor: TextRangeAnchor) -> TextRangeAnchor {

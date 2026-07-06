@@ -1,6 +1,6 @@
 [package]
 name = "nodalmerge-mongo-store"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
 description = "MongoDB NodePersistence adapter for NodalMerge (F7)"

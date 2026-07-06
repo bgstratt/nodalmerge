@@ -322,7 +322,9 @@ Canonical anchors are byte-identical; `text_range_convergence` (7), core lib
 
 Harness: docs repo `apps/demos/bench-trace` (one signed or unsigned DAG node per
 edit via the real bridge/SDK path — same per-edit convention as the native
-test). Full trace = 259,778 edits. Laptop host (ProArt P16, Ryzen AI 9 HX 370).
+test). Full trace = 259,778 edits. Desktop host (AMD Ryzen 9 5900X) — note
+this differs from the laptop host used for the 2026-07-01/02 sections above;
+compare within this section only.
 
 | Configuration | before (full trace) | after (full trace) | after µs/op |
 |---|---:|---:|---:|

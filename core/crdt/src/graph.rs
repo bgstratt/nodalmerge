@@ -915,9 +915,16 @@ impl<N: NodeStore> StateGraph<N> {
             TextRangeOp::Insert { anchor, .. } | TextRangeOp::Delete { anchor, .. } => *anchor,
         };
         let canonical_anchor = match raw_anchor {
-            TextRangeAnchor::Offset(_) => {
-                let seq = self.resolve_text_seq_with_chars(&key);
-                Self::canonicalize_range_anchor(&seq, raw_anchor)
+            TextRangeAnchor::Offset(i) => {
+                // Fast path: O(log n) offset→anchor via the projection's
+                // chunk index. Falls back to the O(document) sequence
+                // materialization only when the projection can't answer
+                // (feature off, projection reads disabled, or no
+                // projection for this key yet).
+                self.canonicalize_offset_anchor_fast(&key, i).unwrap_or_else(|| {
+                    let seq = self.resolve_text_seq_with_chars(&key);
+                    Self::canonicalize_range_anchor(&seq, raw_anchor)
+                })
             }
             _ => raw_anchor,
         };
@@ -1028,6 +1035,38 @@ impl<N: NodeStore> StateGraph<N> {
         self.insert_node(node.clone())?;
         self.update_state_caches(&node, true);
         Ok(())
+    }
+
+    /// O(log n) equivalent of [`Self::canonicalize_range_anchor`] for
+    /// `Offset` anchors, answered by the text projection's chunk index
+    /// instead of a materialized `Vec<(OpId, char)>` of the whole document.
+    ///
+    /// Mirrors `canonicalize_range_anchor` exactly: `idx = min(offset, len)`;
+    /// `0` → `Start`; `>= len` → `End`; otherwise `After(id at idx - 1)`.
+    /// Returns `None` whenever the projection can't answer authoritatively
+    /// (projection reads disabled, no projection for the key, or an id that
+    /// fails actor-table resolution) — callers fall back to the slow path,
+    /// so behavior is unchanged in every such case.
+    #[cfg(feature = "text_projection")]
+    fn canonicalize_offset_anchor_fast(&self, key: &str, offset: usize) -> Option<TextRangeAnchor> {
+        if self.text_projection_mode == TextProjectionMode::Disabled {
+            return None;
+        }
+        let projection = self.text_projections.get(key)?;
+        let len = projection.visible_char_len();
+        let idx = offset.min(len);
+        if idx == 0 {
+            Some(TextRangeAnchor::Start)
+        } else if idx >= len {
+            Some(TextRangeAnchor::End)
+        } else {
+            projection.id_at_visible_offset(idx - 1).map(TextRangeAnchor::After)
+        }
+    }
+
+    #[cfg(not(feature = "text_projection"))]
+    fn canonicalize_offset_anchor_fast(&self, _key: &str, _offset: usize) -> Option<TextRangeAnchor> {
+        None
     }
 
     fn canonicalize_range_anchor(seq: &[(crate::op::OpId, char)], anchor: TextRangeAnchor) -> TextRangeAnchor {

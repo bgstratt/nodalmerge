@@ -1,6 +1,7 @@
 using NodalMerge.Host.Abstractions.Providers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Json;
@@ -21,7 +22,7 @@ public static class ServiceCollectionExtensions
         ["InMemory", "Sqlite", "Mongo"];
 
     private static readonly HashSet<string> SupportedBlobProviders =
-        ["WsOnly", "File", "S3Direct", "S3Delegated"];
+        ["WsOnly", "File", "S3Direct", "S3Delegated", "ChainedRemote"];
 
     private static readonly HashSet<string> SupportedAuthProviders =
         ["Default", "JwtBridgeEmbedded", "JwtBridgeSidecar", "RoomTokenEmbedded"];
@@ -218,6 +219,42 @@ public static class ServiceCollectionExtensions
             services.AddSingleton<WsOnlyBlobStoreProvider>();
             services.AddSingleton<IBlobStoreProvider>(sp => sp.GetRequiredService<WsOnlyBlobStoreProvider>());
             services.AddSingleton<IBlobUrlResolverProvider, S3DelegatedBlobUrlResolverProvider>();
+            return;
+        }
+
+        if (string.Equals(options.BlobStorageProvider, "ChainedRemote", StringComparison.Ordinal))
+        {
+            // Local FileBlobStoreProvider cache in front of a remote HTTP
+            // blob origin (docs/BLOB_HTTP_SURFACE.md), joined by
+            // ChainedBlobStoreProvider. The file provider still owns the
+            // IBlobUrlResolverProvider seam (Phase 4) — unchanged from the
+            // plain "File" branch.
+            var fileOptions = FileBlobStorageOptions.FromConfiguration(configuration);
+            fileOptions.Validate();
+
+            var remoteOptions = RemoteBlobOriginOptions.FromConfiguration(configuration);
+            remoteOptions.Validate();
+
+            services.AddSingleton(fileOptions);
+            services.AddSingleton(remoteOptions);
+
+            services.AddSingleton<FileBlobStoreProvider>();
+
+            services.AddHttpClient(HttpRemoteBlobStoreProvider.HttpClientName, (sp, httpClient) =>
+            {
+                var opts = sp.GetRequiredService<RemoteBlobOriginOptions>();
+                httpClient.BaseAddress = new Uri(opts.BaseUrl, UriKind.Absolute);
+                httpClient.Timeout = TimeSpan.FromSeconds(opts.TimeoutSeconds);
+            });
+            services.AddSingleton<HttpRemoteBlobStoreProvider>();
+            services.AddSingleton<IRemoteBlobPushTarget>(sp => sp.GetRequiredService<HttpRemoteBlobStoreProvider>());
+
+            services.AddSingleton<IBlobStoreProvider>(sp => new ChainedBlobStoreProvider(
+                sp.GetRequiredService<FileBlobStoreProvider>(),
+                sp.GetRequiredService<HttpRemoteBlobStoreProvider>(),
+                sp.GetRequiredService<ILogger<ChainedBlobStoreProvider>>()
+            ));
+            services.AddSingleton<IBlobUrlResolverProvider>(sp => sp.GetRequiredService<FileBlobStoreProvider>());
             return;
         }
 

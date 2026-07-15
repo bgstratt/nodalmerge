@@ -213,4 +213,52 @@ public sealed class ProviderCompositionTests
         var ex = Assert.Throws<InvalidOperationException>(() => services.AddNodalMergeHostProviders(config));
         Assert.Contains("NodalMerge:Storage:S3Delegated:BaseUrl", ex.Message);
     }
+
+    [Fact]
+    public void AddNodalMergeHostProviders_SelectsChainedRemoteProviders_WhenConfigured()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-provider-composition-chained", Guid.NewGuid().ToString("N"));
+
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["NodalMerge:Providers:BlobStorage"] = "ChainedRemote",
+                    ["NodalMerge:Storage:FileBlobs:RootPath"] = tempRoot,
+                    ["NodalMerge:Storage:RemoteOrigin:BaseUrl"] = "https://blob-origin.example"
+                }
+            )
+            .Build();
+
+        var services = new ServiceCollection();
+        services.AddNodalMergeHostProviders(config);
+        var serviceProvider = services.BuildServiceProvider();
+
+        var blobProvider = serviceProvider.GetRequiredService<IBlobStoreProvider>();
+        var pushTarget = serviceProvider.GetRequiredService<IRemoteBlobPushTarget>();
+        var urlResolver = serviceProvider.GetRequiredService<IBlobUrlResolverProvider>();
+
+        Assert.Equal("ChainedBlobStoreProvider", blobProvider.GetType().Name);
+        Assert.Equal("HttpRemoteBlobStoreProvider", pushTarget.GetType().Name);
+        Assert.Equal("FileBlobStoreProvider", urlResolver.GetType().Name);
+    }
+
+    [Fact]
+    public void AddNodalMergeHostProviders_ThrowsForMissingRemoteOriginBaseUrl_WhenChainedRemoteIsSelected()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["NodalMerge:Providers:BlobStorage"] = "ChainedRemote",
+                    ["NodalMerge:Storage:RemoteOrigin:BaseUrl"] = ""
+                }
+            )
+            .Build();
+
+        var services = new ServiceCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => services.AddNodalMergeHostProviders(config));
+        Assert.Contains("NodalMerge:Storage:RemoteOrigin:BaseUrl", ex.Message);
+    }
 }

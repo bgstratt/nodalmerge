@@ -1,4 +1,4 @@
-use nodalmerge_server::{keypair, metrics, room, store, ws_handler};
+use nodalmerge_server::{blob_http, keypair, metrics, room, store, ws_handler};
 
 use std::sync::Arc;
 use axum::{Router, routing::get};
@@ -147,6 +147,18 @@ async fn main() {
         );
     }
 
+    // S2.1b: blob HTTP origin (`GET`/`HEAD`/`PUT /blobs/:hash`). `--blob-token`
+    // (or `NODALMERGE_BLOB_TOKEN`) gates it behind a static bearer token;
+    // absent either, the endpoints are anonymous. `--blob-max-bytes` caps
+    // accepted PUT bodies (default 64 MiB). See docs/BLOB_HTTP_SURFACE.md.
+    let blob_token = parse_blob_token_arg(&args);
+    let blob_max_bytes = parse_usize_flag(&args, "--blob-max-bytes", 64 * 1024 * 1024)
+        .unwrap_or(64 * 1024 * 1024);
+    let blob_cfg = blob_http::BlobHttpConfig {
+        auth_token: blob_token,
+        max_blob_bytes: blob_max_bytes,
+    };
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_headers(Any)
@@ -154,12 +166,13 @@ async fn main() {
 
     let app = Router::new()
         .route("/ws/:room_id", get(ws_handler::handler))
+        .merge(blob_http::blob_routes(blob_cfg))
         .layer(cors)
         .with_state(rooms);
 
     let addr = std::env::var("NODALMERGE_BIND_ADDR").or_else(|_| std::env::var("AS_BIND_ADDR"))
         .unwrap_or_else(|_| "127.0.0.1:7878".to_string());
-    tracing::info!(%addr, "NodalMerge server listening on ws://{addr}/ws/<room>");
+    tracing::info!(%addr, "NodalMerge server listening on ws://{addr}/ws/<room> and http://{addr}/blobs/<hash>");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
@@ -179,6 +192,26 @@ fn parse_store_arg(args: &[String]) -> Option<std::path::PathBuf> {
         i += 1;
     }
     None
+}
+
+/// S2.1b: Parse `--blob-token <token>` (or `--blob-token=<token>`), falling
+/// back to the `NODALMERGE_BLOB_TOKEN` env var when the flag is absent.
+/// `None` means the blob HTTP origin is anonymous (no token configured).
+fn parse_blob_token_arg(args: &[String]) -> Option<String> {
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--blob-token" {
+            if let Some(v) = args.get(i + 1) {
+                return Some(v.clone());
+            }
+        }
+        if let Some(v) = a.strip_prefix("--blob-token=") {
+            return Some(v.to_string());
+        }
+        i += 1;
+    }
+    std::env::var("NODALMERGE_BLOB_TOKEN").ok().filter(|s| !s.is_empty())
 }
 
 /// Parse `--idle-timeout <seconds>` (or `--idle-timeout=<seconds>`).

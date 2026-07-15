@@ -110,6 +110,18 @@ pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
     /// Persist a single blob, addressed only by its hash.
     fn persist_blob(&self, hash: &Hash, bytes: &[u8]);
 
+    /// Cheap existence check — does this store already hold `hash`?
+    ///
+    /// Used by the blob HTTP origin (S2.1b) to implement idempotent PUT
+    /// (already-present → 200, newly stored → 201) without paying for a
+    /// full `get_blob` read+hash-verify when the backend can answer more
+    /// cheaply (e.g. a file `exists()` check). Default impl falls back to
+    /// `get_blob(...).is_some()`, which is correct for every backend even
+    /// if not the cheapest.
+    fn has_blob(&self, hash: &Hash) -> bool {
+        self.get_blob(hash).is_some()
+    }
+
     /// G4 — two-phase blob GC sweep across the whole store.
     ///
     /// A blob is *live* when its hash is in `live`. Non-live blobs are
@@ -260,6 +272,9 @@ impl<N: NodePersistence, B: BlobPersistence> NodePersistence for Composite<N, B>
 impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B> {
     fn get_blob(&self, hash: &Hash) -> Option<Vec<u8>> {
         self.blobs.get_blob(hash)
+    }
+    fn has_blob(&self, hash: &Hash) -> bool {
+        self.blobs.has_blob(hash)
     }
     fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
         self.blobs.persist_blob(hash, bytes)
@@ -539,6 +554,10 @@ impl BlobPersistence for DirPersistence {
         }
     }
 
+    fn has_blob(&self, hash: &Hash) -> bool {
+        self.blob_path(hash).is_file()
+    }
+
     fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
         let t0 = Instant::now();
         let dir = self.blake3_dir();
@@ -765,7 +784,7 @@ fn migrate_legacy_blob_layout(blobs_root: &Path) {
 /// be silently skipped by readers/GC, never adopted. (This used to accept
 /// uppercase too — a latent divergence from the .NET side's equivalent
 /// check, caught while writing the cross-runtime layout vectors.)
-fn hash_from_hex(s: &str) -> Option<Hash> {
+pub fn hash_from_hex(s: &str) -> Option<Hash> {
     if !is_canonical_blob_name(s) {
         return None;
     }

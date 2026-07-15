@@ -6,6 +6,7 @@
 pub mod adapter_context;
 pub mod archive_adapter;
 pub mod archive_export;
+pub mod blob_http;
 pub mod gc_adapter;
 pub mod graph_query;
 pub mod keypair;

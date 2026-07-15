@@ -33,3 +33,4 @@ governor = "0.7"
 tokio-tungstenite = "0.24"
 base64 = "0.22"
 nodalmerge-command-registry = { version = "0.2.0", path = "../../engine/commands" }
+tower = { version = "0.5", features = ["util"] }

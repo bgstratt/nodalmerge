@@ -1,31 +1,43 @@
 name: blob-layout-parity
 
-# Asserts the Rust and .NET blob storage implementations against one
-# canonical layout contract:
+# Asserts the Rust and .NET blob storage implementations against two
+# canonical contracts:
 #   docs/BLOB_STORAGE_LAYOUT.md                  (contract: file/S3 layout,
 #                                                 delegate protocol v1)
 #   docs/BLOB_LAYOUT_CONVERGENCE_PLAN.md         (rationale/history)
+#   docs/BLOB_HTTP_SURFACE.md                    (contract: GET/HEAD/PUT
+#                                                 /blobs/{hash} origin, S2.1b)
 #   engine/commands/blob-layout-vectors.v1.json  (path/key/name/delegate
 #                                                 vectors, source of truth)
+#   engine/commands/blob-http-surface-vectors.v1.json (HTTP origin vectors,
+#                                                 source of truth)
 #   engine/commands/fixtures/blob-layout-v1/     (golden cross-runtime
 #                                                 fixture tree)
 #   server/server/tests/blob_layout_vectors.rs
 #   server/server/tests/blob_layout_interop.rs
+#   server/server/tests/blob_http_surface.rs
 #   server/s3-blobs/src/lib.rs (blob_layout_vectors_match_s3_key_derivation)
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs
 
 on:
   push:
     branches: [main]
     paths:
       - "engine/commands/blob-layout-vectors.v1.json"
+      - "engine/commands/blob-http-surface-vectors.v1.json"
       - "engine/commands/fixtures/blob-layout-v1/**"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
+      - "server/server/src/blob_http.rs"
+      - "server/server/src/main.rs"
+      - "server/dev-server/src/main.rs"
+      - "server/axum-embed/src/lib.rs"
       - "server/server/tests/blob_layout_vectors.rs"
       - "server/server/tests/blob_layout_interop.rs"
       - "server/server/tests/blob_gc.rs"
+      - "server/server/tests/blob_http_surface.rs"
       - "server/s3-blobs/src/lib.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
@@ -35,16 +47,23 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   pull_request:
     paths:
       - "engine/commands/blob-layout-vectors.v1.json"
+      - "engine/commands/blob-http-surface-vectors.v1.json"
       - "engine/commands/fixtures/blob-layout-v1/**"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
+      - "server/server/src/blob_http.rs"
+      - "server/server/src/main.rs"
+      - "server/dev-server/src/main.rs"
+      - "server/axum-embed/src/lib.rs"
       - "server/server/tests/blob_layout_vectors.rs"
       - "server/server/tests/blob_layout_interop.rs"
       - "server/server/tests/blob_gc.rs"
+      - "server/server/tests/blob_http_surface.rs"
       - "server/s3-blobs/src/lib.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
@@ -54,6 +73,7 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   workflow_dispatch:
 
@@ -86,6 +106,9 @@ jobs:
       - name: Run cross-runtime golden fixture interop test
         run: cargo test -p nodalmerge-server --test blob_layout_interop
 
+      - name: Run blob HTTP surface vectors (GET/HEAD/PUT /blobs/{hash})
+        run: cargo test -p nodalmerge-server --test blob_http_surface
+
       - name: Run S3 key layout vectors
         run: cargo test -p nodalmerge-s3-blobs --lib
 
@@ -106,6 +129,9 @@ jobs:
 
       - name: Run cross-runtime golden fixture interop test
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobLayoutInteropTests"
+
+      - name: Run blob HTTP surface vectors (GET/HEAD/PUT /blobs/{hash})
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobHttpSurfaceTests"
 
       - name: Run file GC coordinator tests
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobGcCoordinatorTests"

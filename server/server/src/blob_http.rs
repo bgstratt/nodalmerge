@@ -116,6 +116,26 @@ async fn get_blob(
         Some(h) => h,
         None => return non_canonical_response(), // unreachable: canonical checked above
     };
+
+    // S3.1b (docs/BLOB_HTTP_SURFACE.md "Content encoding"): if the client
+    // advertises `Accept-Encoding: zstd` and the store holds the stored
+    // zstd form, serve those bytes as-is — no recompress-on-serve. Identity
+    // requests (no header, or the store has no `.zst` form) are unchanged.
+    if accepts_zstd(&headers) {
+        if let Some((bytes, encoding)) = rooms.persistence.get_blob_encoded(&hash) {
+            return (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                    (header::CONTENT_ENCODING, encoding.to_string()),
+                    (header::ETAG, format!("\"{hash_hex}\"")),
+                ],
+                bytes,
+            )
+                .into_response();
+        }
+    }
+
     match rooms.persistence.get_blob(&hash) {
         Some(bytes) => (
             StatusCode::OK,
@@ -128,6 +148,21 @@ async fn get_blob(
             .into_response(),
         None => not_found_response(),
     }
+}
+
+/// Whether the request's `Accept-Encoding` header lists `zstd` (case-
+/// insensitive; a comma-separated list per RFC 9110, `q`-values ignored —
+/// this is a MAY-serve optimization, not content negotiation with a
+/// fallback penalty).
+fn accepts_zstd(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .any(|tok| tok.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("zstd"))
+        })
+        .unwrap_or(false)
 }
 
 async fn put_blob(
@@ -145,6 +180,13 @@ async fn put_blob(
     // b. Auth.
     if let Some(resp) = check_auth(&headers, &cfg) {
         return resp;
+    }
+    // c. Content-Encoding on PUT is reserved (docs/BLOB_HTTP_SURFACE.md
+    // "Content encoding"): reject with 415 until pre-compressed uploads are
+    // implemented, rather than silently persisting compressed bytes under
+    // the identity hash.
+    if headers.contains_key(header::CONTENT_ENCODING) {
+        return unsupported_media_type_response();
     }
     let path_hash = match hash_from_hex(&hash_hex) {
         Some(h) => h,
@@ -218,4 +260,12 @@ fn unauthorized_response() -> Response {
 
 fn not_found_response() -> Response {
     (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()
+}
+
+fn unsupported_media_type_response() -> Response {
+    (
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        Json(json!({"error": "Content-Encoding not supported on PUT"})),
+    )
+        .into_response()
 }

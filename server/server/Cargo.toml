@@ -28,6 +28,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 metrics = "0.23"
 metrics-exporter-prometheus = { version = "0.15", default-features = false, features = ["http-listener"] }
 governor = "0.7"
+zstd = "0.13"
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

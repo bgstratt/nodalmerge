@@ -37,13 +37,44 @@ async fn main() {
     let server_pubkey = keypair::pubkey_hex(&server_key);
     tracing::info!(pubkey = %server_pubkey, "server keypair ready");
 
+    // S3.1b: `--blob-compression zstd|off` governs at-rest blob encoding
+    // (docs/BLOB_STORAGE_LAYOUT.md §8) for a `--store`-backed persistence.
+    // Default is `zstd` (on) — the doc's recommended default for a
+    // server-side durable store; pass `--blob-compression off` to opt out
+    // and keep writing identity bytes only. `--blob-compression-level <n>`
+    // (default 3) sets the zstd level used when compression is on. Neither
+    // flag has any effect without `--store` (in-memory persistence never
+    // touches disk).
+    let blob_compression_enabled = match parse_blob_compression_arg(&args).as_deref() {
+        Some("off") => false,
+        Some("zstd") => true,
+        Some(other) => {
+            eprintln!(
+                "warning: --blob-compression expects \"zstd\" or \"off\"; got {other:?}, using default zstd"
+            );
+            true
+        }
+        None => true,
+    };
+    let blob_compression_level = parse_i32_flag(&args, "--blob-compression-level", 3).unwrap_or(3);
+
     // F4: optional on-disk persistence. `--store <path>` enables a SQLite+files
     // backend rooted at `<path>`; absent it, the server is in-memory only.
     let persistence: store::SharedPersistence = match parse_store_arg(&args) {
         Some(path) => {
-            match store::DirPersistence::open(&path) {
+            let compression = store::BlobCompressionConfig {
+                enabled: blob_compression_enabled,
+                level: blob_compression_level,
+                ..store::BlobCompressionConfig::default()
+            };
+            match store::DirPersistence::open_with_compression(&path, compression) {
                 Ok(p) => {
-                    tracing::info!(store = %path.display(), "persistence enabled (SQLite + blobs)");
+                    tracing::info!(
+                        store = %path.display(),
+                        blob_compression = if blob_compression_enabled { "zstd" } else { "off" },
+                        blob_compression_level,
+                        "persistence enabled (SQLite + blobs)"
+                    );
                     std::sync::Arc::new(p)
                 }
                 Err(e) => {
@@ -188,6 +219,24 @@ fn parse_store_arg(args: &[String]) -> Option<std::path::PathBuf> {
         }
         if let Some(val) = a.strip_prefix("--store=") {
             return Some(std::path::PathBuf::from(val));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// S3.1b: Parse `--blob-compression <zstd|off>` (or `--blob-compression=<...>`).
+/// Returns `None` when absent, so the caller applies the default (`zstd`,
+/// i.e. on) — see `docs/BLOB_STORAGE_LAYOUT.md` §8.
+fn parse_blob_compression_arg(args: &[String]) -> Option<String> {
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--blob-compression" {
+            return args.get(i + 1).cloned();
+        }
+        if let Some(v) = a.strip_prefix("--blob-compression=") {
+            return Some(v.to_string());
         }
         i += 1;
     }
@@ -375,6 +424,35 @@ fn parse_usize_flag(args: &[String], flag: &str, default_for_msg: usize) -> Opti
                 Ok(n) => Some(n),
                 Err(_) => {
                     eprintln!("warning: {flag} expects a non-negative integer; got {s:?}, using default {default_for_msg}");
+                    None
+                }
+            };
+        }
+        i += 1;
+    }
+    None
+}
+
+/// S3.1b: Parse an `i32` CLI flag (e.g. `--blob-compression-level 3`).
+/// Mirrors `parse_usize_flag`; signed because zstd's C API takes a signed
+/// level (negative "fast" levels are valid, even though we default to 3).
+fn parse_i32_flag(args: &[String], flag: &str, default_for_msg: i32) -> Option<i32> {
+    let eq_prefix = format!("{flag}=");
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == flag {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match s.parse::<i32>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!("warning: {flag} expects an integer; got {s:?}, using default {default_for_msg}");
                     None
                 }
             };

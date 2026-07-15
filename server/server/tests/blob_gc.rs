@@ -248,6 +248,102 @@ async fn blob_gc_protects_blobs_in_cold_non_resident_rooms() {
 }
 
 #[tokio::test]
+async fn blob_gc_two_phase_handles_zstd_encoded_blobs_and_ignores_foreign_files() {
+    // S3.1b: the sweep's name recognizer (`parse_blob_entry_name`) must
+    // treat `<hex>.zst` exactly like `<hex>` for tombstone/delete purposes
+    // (tombstone keyed by bare hex, live-set check by bare hash), while a
+    // foreign `.gz` file must be left alone entirely — never tombstoned,
+    // never deleted.
+    use nodalmerge_server::store::BlobCompressionConfig;
+
+    let dir = tmpdir("zstd-encoded");
+    let cfg = BlobCompressionConfig {
+        enabled: true,
+        level: 3,
+        min_bytes: 16, // low threshold so small test payloads still compress
+    };
+    let persistence: SharedPersistence =
+        Arc::new(DirPersistence::open_with_compression(&dir, cfg).unwrap());
+    let sk = SigningKey::from_bytes(&[0xDDu8; 32]);
+    let room_id = "gc-zstd-room".to_string();
+
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&[0x05u8; 32]),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    );
+    let room = rooms.get_or_create(&room_id).await;
+
+    // Two highly compressible blobs — persist_blob's heuristic should store
+    // both as `<hex>.zst`. One is genuinely abandoned (deleted after grace);
+    // the other is re-referenced mid-grace (tombstone cleared).
+    let deleted_bytes = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec();
+    let deleted_hash = Hash::of(&deleted_bytes);
+    let revived_bytes = b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_vec();
+    let revived_hash = Hash::of(&revived_bytes);
+    persistence.persist_blob(&deleted_hash, &deleted_bytes);
+    persistence.persist_blob(&revived_hash, &revived_bytes);
+    room.blobs.write().await.put(deleted_bytes.clone());
+    room.blobs.write().await.put(revived_bytes.clone());
+
+    let blake3_dir = dir.join("blobs").join("blake3");
+    let tombs_dir = dir.join("blobs").join(".tombstones").join("blake3");
+    let deleted_encoded_path = blake3_dir.join(format!("{}.zst", deleted_hash.to_hex()));
+    let revived_encoded_path = blake3_dir.join(format!("{}.zst", revived_hash.to_hex()));
+    assert!(
+        deleted_encoded_path.is_file(),
+        "expected the blob to be stored zstd-encoded at {deleted_encoded_path:?}"
+    );
+    assert!(revived_encoded_path.is_file());
+
+    // A foreign file that must never be touched by GC, regardless of grace.
+    let foreign_path = blake3_dir.join("not-a-real-hash.gz");
+    std::fs::write(&foreign_path, b"unrelated file").unwrap();
+
+    let grace = Duration::from_millis(50);
+    let deleted_tomb = tombs_dir.join(deleted_hash.to_hex());
+    let revived_tomb = tombs_dir.join(revived_hash.to_hex());
+
+    // Phase 1: both are orphans (no SetBlob references either yet) — both
+    // get tombstoned, keyed by bare hex (not `<hex>.zst`).
+    let deleted_count = rooms.sweep_blobs(grace).await;
+    assert_eq!(deleted_count, 0, "first sweep only tombstones");
+    assert!(deleted_encoded_path.exists());
+    assert!(revived_encoded_path.exists());
+    assert!(deleted_tomb.exists(), "must be tombstoned under its bare hex");
+    assert!(revived_tomb.exists(), "must be tombstoned under its bare hex");
+    assert!(foreign_path.exists(), "foreign .gz must never be touched");
+
+    // Re-reference `revived_hash` before grace elapses.
+    let node = make_setblob_node(&sk, "avatar", revived_hash);
+    let (accepted, _, errs) = import_nodes(&room, vec![node]).await;
+    assert_eq!(accepted, 1);
+    assert!(errs.is_empty());
+
+    // Second sweep, still within grace for the tombstones created above:
+    // revived is now live -> tombstone cleared, nothing deleted yet.
+    let deleted_count = rooms.sweep_blobs(grace).await;
+    assert_eq!(deleted_count, 0, "still within grace for `deleted_hash`");
+    assert!(revived_encoded_path.exists(), "revived .zst blob must survive");
+    assert!(!revived_tomb.exists(), "tombstone cleared once live again");
+    assert!(foreign_path.exists());
+
+    // Let the grace window elapse, then sweep again: `deleted_hash` is
+    // still unreferenced and its tombstone is now old enough to delete.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let deleted_count = rooms.sweep_blobs(grace).await;
+    assert_eq!(deleted_count, 1, "exactly the still-orphaned .zst blob");
+    assert!(!deleted_encoded_path.exists(), "orphaned .zst blob must be gone");
+    assert!(!deleted_tomb.exists(), "its tombstone is cleaned up with it");
+    assert!(revived_encoded_path.exists(), "revived blob still safe");
+    assert!(foreign_path.exists(), "foreign .gz untouched throughout");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn blob_gc_is_noop_on_in_memory_persistence() {
     use nodalmerge_server::store::NoPersistence;
     let rooms = Rooms::new(

@@ -202,6 +202,18 @@ pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
     fn blobs_durable(&self) -> bool {
         true
     }
+
+    /// S3.1b — return this backend's own stored bytes for `hash` when it
+    /// holds them under an *alternate* at-rest encoding (currently only
+    /// zstd; see `docs/BLOB_STORAGE_LAYOUT.md` §8), alongside the
+    /// `Content-Encoding` token to serve. Used by the blob HTTP origin
+    /// (`blob_http.rs`) to serve stored `.zst` bytes as-is — no
+    /// decode+recompress round trip — when the client sent `Accept-Encoding:
+    /// zstd`. `None` means "no alternate encoding on hand"; the caller falls
+    /// back to `get_blob` (identity). Default: no backend supports this.
+    fn get_blob_encoded(&self, _hash: &Hash) -> Option<(Vec<u8>, &'static str)> {
+        None
+    }
 }
 
 /// The whole-persistence surface — everything `Rooms` needs. Existing call
@@ -310,6 +322,9 @@ impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B>
     fn blobs_durable(&self) -> bool {
         self.blobs.blobs_durable()
     }
+    fn get_blob_encoded(&self, hash: &Hash) -> Option<(Vec<u8>, &'static str)> {
+        self.blobs.get_blob_encoded(hash)
+    }
 }
 
 // ─── NoPersistence ──────────────────────────────────────────────────────────
@@ -337,9 +352,39 @@ impl BlobPersistence for NoPersistence {
 
 // ─── DirPersistence ─────────────────────────────────────────────────────────
 
+/// S3.1b — at-rest content-encoding config for `DirPersistence`, per
+/// `docs/BLOB_STORAGE_LAYOUT.md` §8. Only affects *writes*: readers
+/// (`get_blob`, `has_blob`, `blob_gc_sweep`) are always encoding-aware
+/// regardless of this config, so a store written with compression on
+/// remains fully readable by one opened with it off (and vice versa).
+///
+/// Default mirrors the doc's peer-local-cache guidance (compression off);
+/// callers that want the server-side-durable-store default (on, level 3)
+/// construct this explicitly — see `main.rs`'s `--blob-compression` wiring.
+#[derive(Debug, Clone, Copy)]
+pub struct BlobCompressionConfig {
+    /// Compress eligible blobs on write. `false` = always write identity
+    /// (byte-for-byte pre-v3 behavior).
+    pub enabled: bool,
+    /// zstd compression level passed to the encoder.
+    pub level: i32,
+    /// Blobs smaller than this are never compressed (guidance in §8).
+    pub min_bytes: usize,
+}
+
+impl Default for BlobCompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            level: 3,
+            min_bytes: 4096,
+        }
+    }
+}
+
 /// SQLite (nodes) + filesystem (blobs), all rooted at a single directory.
 ///
-/// Layout (v2 — see `docs/BLOB_STORAGE_LAYOUT.md`):
+/// Layout (v3 — see `docs/BLOB_STORAGE_LAYOUT.md`):
 ///
 /// ```text
 /// <root>/
@@ -347,7 +392,9 @@ impl BlobPersistence for NoPersistence {
 ///   topology-promotions.db             ← SQLite: promotion proposals (Wave 3)
 ///   blobs/
 ///     blake3/
-///       <hash_hex>                     ← one file per blob, global CAS pool
+///       <hash_hex>                     ← identity encoding, global CAS pool
+///       <hash_hex>.zst                 ← optional zstd encoding (§8); at most
+///                                          one of the two forms per hash
 ///     .tombstones/
 ///       blake3/
 ///         <hash_hex>                   ← empty marker; mtime = tombstone time
@@ -361,6 +408,7 @@ impl BlobPersistence for NoPersistence {
 pub struct DirPersistence {
     root: PathBuf,
     conn: Mutex<Connection>,
+    compression: BlobCompressionConfig,
 }
 
 impl DirPersistence {
@@ -369,10 +417,22 @@ impl DirPersistence {
         &self.root
     }
 
-    /// Open (or create) the store rooted at `root`. Creates the directory,
-    /// opens the SQLite file, ensures the schema, and migrates a legacy
-    /// blob layout to v2 if one is found.
+    /// Open (or create) the store rooted at `root`, with at-rest blob
+    /// compression disabled (byte-for-byte pre-v3 write behavior). Creates
+    /// the directory, opens the SQLite file, ensures the schema, and
+    /// migrates a legacy blob layout to v2 if one is found.
     pub fn open(root: impl AsRef<Path>) -> std::io::Result<Self> {
+        Self::open_with_compression(root, BlobCompressionConfig::default())
+    }
+
+    /// Same as [`Self::open`], but with an explicit
+    /// [`BlobCompressionConfig`] governing whether newly written blobs are
+    /// zstd-encoded at rest (§8). Reading is unaffected by this config —
+    /// both encodings are always recognized on read.
+    pub fn open_with_compression(
+        root: impl AsRef<Path>,
+        compression: BlobCompressionConfig,
+    ) -> std::io::Result<Self> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
         let blobs_root = root.join("blobs");
@@ -399,6 +459,7 @@ impl DirPersistence {
         Ok(Self {
             root,
             conn: Mutex::new(conn),
+            compression,
         })
     }
 
@@ -408,6 +469,14 @@ impl DirPersistence {
 
     fn blob_path(&self, hash: &Hash) -> PathBuf {
         self.root.join("blobs").join(blob_relative_path(hash))
+    }
+
+    /// S3.1b — path of the zstd-encoded form (§8), independent of whether
+    /// it currently exists.
+    fn blob_encoded_path(&self, hash: &Hash) -> PathBuf {
+        self.root
+            .join("blobs")
+            .join(blob_relative_encoded_path(hash))
     }
 
     fn tombstones_dir(&self) -> PathBuf {
@@ -542,20 +611,52 @@ impl NodePersistence for DirPersistence {
 
 impl BlobPersistence for DirPersistence {
     fn get_blob(&self, hash: &Hash) -> Option<Vec<u8>> {
+        // Identity path first — existing verify-on-read logic untouched.
         let path = self.blob_path(hash);
-        let bytes = std::fs::read(&path).ok()?;
-        // Verify integrity — reject tampered files.
+        if let Ok(bytes) = std::fs::read(&path) {
+            let actual = Hash::of(&bytes);
+            return if actual == *hash {
+                Some(bytes)
+            } else {
+                tracing::warn!(?path, "blob file hash mismatch, skipping");
+                None
+            };
+        }
+
+        // S3.1b: identity absent — fall back to the zstd-encoded form (§8).
+        // Both files existing is a writer bug we never produce, but if it
+        // happens the identity branch above already returned, so this is
+        // also where "identity wins" falls out for free.
+        let encoded_path = self.blob_encoded_path(hash);
+        let compressed = std::fs::read(&encoded_path).ok()?;
+        let bytes = match zstd::stream::decode_all(&compressed[..]) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(?e, ?encoded_path, "zstd blob decode failed, skipping");
+                return None;
+            }
+        };
+        // Invariant (§8): the hash is always Blake3 of the DECOMPRESSED bytes.
         let actual = Hash::of(&bytes);
         if actual == *hash {
             Some(bytes)
         } else {
-            tracing::warn!(?path, "blob file hash mismatch, skipping");
+            tracing::warn!(?encoded_path, "zstd blob decompressed hash mismatch, skipping");
             None
         }
     }
 
     fn has_blob(&self, hash: &Hash) -> bool {
-        self.blob_path(hash).is_file()
+        self.blob_path(hash).is_file() || self.blob_encoded_path(hash).is_file()
+    }
+
+    fn get_blob_encoded(&self, hash: &Hash) -> Option<(Vec<u8>, &'static str)> {
+        // Raw file bytes, no decode — the HTTP layer serves these as-is
+        // under `Content-Encoding: zstd`. No existence/verify duplication
+        // with `get_blob`: a corrupt frame here just fails to decode on a
+        // later identity-less `get_blob` call, which already warns+None's.
+        let bytes = std::fs::read(self.blob_encoded_path(hash)).ok()?;
+        Some((bytes, "zstd"))
     }
 
     fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
@@ -565,17 +666,44 @@ impl BlobPersistence for DirPersistence {
             tracing::warn!(?e, "persist_blob: create_dir_all failed");
             return;
         }
-        let path = self.blob_path(hash);
-        if path.exists() {
+        let identity_path = self.blob_path(hash);
+        let encoded_path = self.blob_encoded_path(hash);
+        // No-op if either encoding already exists (matches the pre-v3
+        // idempotent-persist contract, extended to both forms).
+        if identity_path.exists() || encoded_path.exists() {
             return;
         }
+
+        if self.compression.enabled && should_compress_blob(bytes, &self.compression) {
+            match zstd::stream::encode_all(bytes, self.compression.level) {
+                Ok(compressed) => {
+                    let tmp = dir.join(format!("{}.zst.tmp", hash.to_hex()));
+                    let wrote = std::fs::write(&tmp, &compressed).is_ok();
+                    if wrote && std::fs::rename(&tmp, &encoded_path).is_ok() {
+                        let elapsed = t0.elapsed().as_secs_f64();
+                        metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "blob")
+                            .record(elapsed);
+                        return;
+                    }
+                    // Encode/write/rename failed partway — clean up the temp
+                    // file and fall through to an identity write below so
+                    // the blob is never silently dropped.
+                    let _ = std::fs::remove_file(&tmp);
+                    tracing::warn!("persist_blob: zstd write failed, falling back to identity");
+                }
+                Err(e) => {
+                    tracing::warn!(?e, "persist_blob: zstd encode failed, falling back to identity");
+                }
+            }
+        }
+
         // Write+rename = atomic on POSIX; on Windows it's a best-effort replace.
         let tmp = dir.join(format!("{}.tmp", hash.to_hex()));
         if let Err(e) = std::fs::write(&tmp, bytes) {
             tracing::warn!(?e, "persist_blob: write tmp failed");
             return;
         }
-        if let Err(e) = std::fs::rename(&tmp, &path) {
+        if let Err(e) = std::fs::rename(&tmp, &identity_path) {
             tracing::warn!(?e, "persist_blob: rename failed");
             let _ = std::fs::remove_file(&tmp);
         }
@@ -598,17 +726,20 @@ impl BlobPersistence for DirPersistence {
             let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
             };
-            // Skip stray `.tmp` writes from a crashed persist_blob.
+            // Skip stray `.tmp` writes from a crashed persist_blob (matches
+            // both `<hex>.tmp` and `<hex>.zst.tmp`).
             if name.ends_with(".tmp") {
                 continue;
             }
-            let Some(hash) = hash_from_hex(name) else {
-                // Foreign entry under blake3/ (not exactly 64 lowercase hex
-                // chars) — never touched by GC. See
-                // docs/BLOB_STORAGE_LAYOUT.md §3.
+            let Some((hash, _encoding)) = parse_blob_entry_name(name) else {
+                // Foreign entry under blake3/ (not a recognized identity or
+                // v3 `.zst` name) — never touched by GC. See
+                // docs/BLOB_STORAGE_LAYOUT.md §3, §8.
                 continue;
             };
-            let tomb_path = tombs_dir.join(name);
+            // Tombstones are always keyed by bare hex (§8), regardless of
+            // which encoding this entry is — one tombstone covers both.
+            let tomb_path = tombs_dir.join(hash.to_hex());
 
             if live.contains(&hash) {
                 // Blob is referenced: clear any leftover tombstone so a brief
@@ -825,6 +956,71 @@ pub fn blob_relative_path(hash: &Hash) -> PathBuf {
 /// independent of any store root. See `docs/BLOB_STORAGE_LAYOUT.md` §2.
 pub fn tombstone_relative_path(hash: &Hash) -> PathBuf {
     Path::new(".tombstones").join("blake3").join(hash.to_hex())
+}
+
+/// S3.1b — canonical relative path of the zstd-encoded form
+/// (`blake3/<hex>.zst`), independent of any store root. Pure/testable
+/// formula shared by [`DirPersistence`] and the cross-runtime layout
+/// parity vectors — see `docs/BLOB_STORAGE_LAYOUT.md` §8.
+pub fn blob_relative_encoded_path(hash: &Hash) -> PathBuf {
+    Path::new("blake3").join(format!("{}.zst", hash.to_hex()))
+}
+
+/// S3.1b — which at-rest encoding a `blake3/` entry name represents. See
+/// `docs/BLOB_STORAGE_LAYOUT.md` §8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobEncoding {
+    /// Bare `<hex>` — raw bytes, `Blake3(bytes) == hex`.
+    Identity,
+    /// `<hex>.zst` — single zstd frame, `Blake3(decompressed bytes) == hex`.
+    Zstd,
+}
+
+/// Parse a `blake3/` entry filename into its hash and encoding. Recognizes
+/// exactly two canonical v3 shapes: the bare 64-lowercase-hex identity form
+/// and `<64-lowercase-hex>.zst`. Anything else — wrong length, uppercase,
+/// non-hex, an unrecognized suffix (`.gz`), or a doubled suffix
+/// (`.zst.zst`) — is foreign: `None`, to be left alone by readers and GC
+/// alike (§3, §8). This is the v3 sibling of [`is_canonical_blob_name`],
+/// used by [`DirPersistence::blob_gc_sweep`] and the layout parity vectors
+/// (`name_conformance_vectors_v3`).
+pub fn parse_blob_entry_name(name: &str) -> Option<(Hash, BlobEncoding)> {
+    if let Some(stem) = name.strip_suffix(".zst") {
+        hash_from_hex(stem).map(|h| (h, BlobEncoding::Zstd))
+    } else {
+        hash_from_hex(name).map(|h| (h, BlobEncoding::Identity))
+    }
+}
+
+/// S3.1b — whether `name` is canonical under the v3 naming rules (§3
+/// amended by §8): either the bare identity form or `<hex>.zst`. Thin
+/// wrapper over [`parse_blob_entry_name`] for callers that only care about
+/// the yes/no answer (e.g. `name_conformance_vectors_v3`).
+pub fn is_canonical_blob_name_v3(name: &str) -> bool {
+    parse_blob_entry_name(name).is_some()
+}
+
+/// S3.1b — recommended skip-compress heuristic from
+/// `docs/BLOB_STORAGE_LAYOUT.md` §8: never compress below `min_bytes`;
+/// otherwise sample-compress the first `min(64 KiB, len)` bytes and skip
+/// (store raw) if the sampled ratio is > 0.98. Content-type-based skipping
+/// (declared compressed media types) is guidance for callers that *have* a
+/// content type (the .NET/S3 side) — this seam has none, so it isn't
+/// implemented here.
+fn should_compress_blob(bytes: &[u8], cfg: &BlobCompressionConfig) -> bool {
+    if bytes.len() < cfg.min_bytes {
+        return false;
+    }
+    let sample_len = bytes.len().min(64 * 1024);
+    let sample = &bytes[..sample_len];
+    match zstd::stream::encode_all(sample, cfg.level) {
+        Ok(compressed_sample) => {
+            let ratio = compressed_sample.len() as f64 / sample.len() as f64;
+            ratio <= 0.98
+        }
+        // Sample-compression failure — don't gamble on the full blob either.
+        Err(_) => false,
+    }
 }
 
 /// Boxed handle used by `Rooms` — one instance is shared across all rooms.

@@ -17,7 +17,7 @@ use ed25519_dalek::SigningKey;
 use nodalmerge_core::Hash;
 use nodalmerge_server::blob_http::{self, BlobHttpConfig};
 use nodalmerge_server::room::Rooms;
-use nodalmerge_server::store::{DirPersistence, SharedPersistence};
+use nodalmerge_server::store::{BlobCompressionConfig, DirPersistence, SharedPersistence};
 use serde::Deserialize;
 use tower::ServiceExt;
 
@@ -236,6 +236,118 @@ async fn blob_http_surface_vectors_conform() {
             }
         }
     }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ─── S3.1b: content-encoding negotiation (docs/BLOB_HTTP_SURFACE.md ─────────
+// "Content encoding (reserved v1.1 — Phase 3)"). Hand-written rather than
+// vector-driven: the frozen vectors file (engine/commands/) has no
+// Accept-Encoding-aware vectors yet, and none of the existing 15 vectors
+// send that header, so they must stay green unchanged (asserted above).
+
+fn compressible_payload() -> Vec<u8> {
+    b"the quick brown fox jumps over the lazy dog. ".repeat(500)
+}
+
+#[tokio::test]
+async fn get_with_accept_encoding_zstd_serves_stored_zstd_bytes() {
+    let dir = tmpdir("content-encoding-get");
+    let persistence: SharedPersistence = Arc::new(
+        DirPersistence::open_with_compression(
+            &dir,
+            BlobCompressionConfig {
+                enabled: true,
+                level: 3,
+                min_bytes: 16,
+            },
+        )
+        .unwrap(),
+    );
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&[0x61u8; 32]),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    );
+    let router: Router = blob_http::blob_routes(BlobHttpConfig::default()).with_state(rooms.clone());
+
+    let payload = compressible_payload();
+    let hash = Hash::of(&payload);
+    let hash_hex = hash.to_hex();
+    persistence.persist_blob(&hash, &payload);
+    // Sanity: the compression-on store really did write the .zst form.
+    let encoded_path = dir.join("blobs").join("blake3").join(format!("{hash_hex}.zst"));
+    assert!(encoded_path.is_file(), "test setup expected a .zst write");
+
+    // GET with Accept-Encoding: zstd -> Content-Encoding: zstd, and the
+    // body zstd-decodes back to the original bytes.
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/blobs/{hash_hex}"))
+        .header(header::ACCEPT_ENCODING, "zstd")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
+        Some("zstd")
+    );
+    assert_eq!(
+        resp.headers().get(header::ETAG).and_then(|v| v.to_str().ok()),
+        Some(format!("\"{hash_hex}\"").as_str())
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let decoded = zstd::stream::decode_all(&body[..]).expect("response body must be a valid zstd frame");
+    assert_eq!(decoded, payload);
+
+    // GET without Accept-Encoding -> identity bytes, no Content-Encoding.
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/blobs/{hash_hex}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    assert!(
+        resp.headers().get(header::CONTENT_ENCODING).is_none(),
+        "identity response must not carry Content-Encoding"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), payload.as_slice());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn put_with_content_encoding_header_is_rejected_415() {
+    let dir = tmpdir("content-encoding-put-415");
+    let persistence: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap());
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&[0x62u8; 32]),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    );
+    let router: Router = blob_http::blob_routes(BlobHttpConfig::default()).with_state(rooms.clone());
+
+    let body = b"whatever bytes, never persisted".to_vec();
+    let hash_hex = Hash::of(&body).to_hex();
+
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/blobs/{hash_hex}"))
+        .header(header::CONTENT_ENCODING, "zstd")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let on_disk = dir.join("blobs").join("blake3").join(&hash_hex);
+    assert!(!on_disk.is_file(), "rejected PUT must never persist bytes");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

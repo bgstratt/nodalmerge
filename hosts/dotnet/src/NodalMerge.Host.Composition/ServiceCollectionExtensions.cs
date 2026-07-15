@@ -258,13 +258,69 @@ public static class ServiceCollectionExtensions
                 AutomaticDecompression = System.Net.DecompressionMethods.None
             });
             services.AddSingleton<HttpRemoteBlobStoreProvider>();
+            // The reconcile sweep's push target stays the relay link only —
+            // s3-direct's own PUT already confirms via /uploaded, and
+            // wiring it into IRemoteBlobPushTarget too (a multi-target
+            // sweep) is a follow-up, not required by slice 4.3's
+            // acceptance criteria (chain reads/writes + client-side zstd).
             services.AddSingleton<IRemoteBlobPushTarget>(sp => sp.GetRequiredService<HttpRemoteBlobStoreProvider>());
 
-            services.AddSingleton<IBlobStoreProvider>(sp => new ChainedBlobStoreProvider(
-                sp.GetRequiredService<FileBlobStoreProvider>(),
-                sp.GetRequiredService<HttpRemoteBlobStoreProvider>(),
-                sp.GetRequiredService<ILogger<ChainedBlobStoreProvider>>()
-            ));
+            // Slice 4.3: the s3-direct chain link
+            // (nodalmerge-studio/plans/cas-distribution-and-storage.md Phase
+            // 4). Off by default (S3Direct:Enabled=false) — that
+            // reproduces the pre-4.3 two-link chain exactly, byte for byte,
+            // with no extra services registered. Enabling it grows the
+            // chain to local -> server-relay -> s3-direct via
+            // RemoteBlobLinkAggregator, which — like HttpRemoteBlobStoreProvider
+            // alone before it — never verifies; ChainedBlobStoreProvider
+            // stays the one and only verification gate either way.
+            var s3DirectOptions = S3DirectBlobOriginOptions.FromConfiguration(configuration);
+            s3DirectOptions.Validate();
+            services.AddSingleton(s3DirectOptions);
+
+            if (s3DirectOptions.Enabled)
+            {
+                services.AddHttpClient(S3DirectBlobStoreProvider.BucketHttpClientName, httpClient =>
+                {
+                    // No BaseAddress: presigned bucket URLs are absolute and
+                    // point at whatever host the origin's presign backend
+                    // chose, not the origin itself. No default headers
+                    // either — see S3DirectBlobStoreProvider.SendToBucketAsync's
+                    // doc for why the origin's auth must never reach here.
+                    httpClient.Timeout = TimeSpan.FromSeconds(s3DirectOptions.TimeoutSeconds);
+                })
+                // Same rationale as the relay client above: this code
+                // inspects Content-Encoding itself and must see it
+                // untouched.
+                .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+                {
+                    AutomaticDecompression = System.Net.DecompressionMethods.None
+                });
+
+                services.AddSingleton<S3DirectBlobStoreProvider>();
+                services.AddSingleton<RemoteBlobLinkAggregator>(sp => new RemoteBlobLinkAggregator(
+                    [
+                        sp.GetRequiredService<HttpRemoteBlobStoreProvider>(),
+                        sp.GetRequiredService<S3DirectBlobStoreProvider>()
+                    ],
+                    sp.GetRequiredService<ILogger<RemoteBlobLinkAggregator>>()
+                ));
+
+                services.AddSingleton<IBlobStoreProvider>(sp => new ChainedBlobStoreProvider(
+                    sp.GetRequiredService<FileBlobStoreProvider>(),
+                    sp.GetRequiredService<RemoteBlobLinkAggregator>(),
+                    sp.GetRequiredService<ILogger<ChainedBlobStoreProvider>>()
+                ));
+            }
+            else
+            {
+                services.AddSingleton<IBlobStoreProvider>(sp => new ChainedBlobStoreProvider(
+                    sp.GetRequiredService<FileBlobStoreProvider>(),
+                    sp.GetRequiredService<HttpRemoteBlobStoreProvider>(),
+                    sp.GetRequiredService<ILogger<ChainedBlobStoreProvider>>()
+                ));
+            }
+
             services.AddSingleton<IBlobUrlResolverProvider>(sp => sp.GetRequiredService<FileBlobStoreProvider>());
             return;
         }

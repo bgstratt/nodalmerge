@@ -188,6 +188,24 @@ A blob with hash `<hex>` exists as **exactly one** of:
 - S3 stores: the client compresses before upload; key =
   `<prefix>blake3/<hex>.zst` with a `contentEncoding` object metadata
   entry. (Seam only until Phase 4 builds it.)
+  **Slice 4.3 clarification (2026-07-15):** the reference presign backend
+  (`nodalmerge-s3-blobs::S3BlobStore::key_for`) always signs
+  `<prefix>blake3/<hex>` — the bare hex key, never a `.zst` variant — for
+  both GET and PUT, regardless of client-side compression; there is no
+  key-selection step. The `.zst`-suffixed-key half of this bullet therefore
+  remains an unbuilt seam. What slice 4.3's client
+  (`S3DirectBlobStoreProvider`) actually does, and what makes the
+  `contentEncoding object metadata entry` half true today: it PUTs to the
+  one bare-hex key with a standard HTTP `Content-Encoding: zstd` request
+  header when it compressed, and reads that same header back verbatim on a
+  later presigned GET — S3-compatible object stores persist and return
+  `Content-Encoding` as object metadata unconditionally (they don't
+  negotiate the way an app server does), so this is sufficient to convey
+  the encoding without any key-suffix scheme. A future change that has the
+  presign backend itself choose between `<hex>` and `<hex>.zst` keys (e.g.
+  to let an operator distinguish encodings by listing the bucket) is still
+  open, and would need presign-time knowledge of whether the upcoming PUT
+  will be compressed.
 - HTTP surface: see `docs/BLOB_HTTP_SURFACE.md` §content-encoding — a
   server MAY serve stored `.zst` bytes with `Content-Encoding: zstd` when
   the client advertises `Accept-Encoding: zstd`; the client decompresses

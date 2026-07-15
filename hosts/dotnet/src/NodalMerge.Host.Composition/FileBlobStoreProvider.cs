@@ -115,7 +115,7 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
         }
 
         var compress = string.Equals(_options.Compression, "Zstd", StringComparison.Ordinal)
-            && BlobCompression.ShouldCompress(bytes, contentType, _options);
+            && BlobCompression.ShouldCompress(bytes, contentType, _options.CompressionMinBytes, _options.CompressionLevel);
 
         var targetPath = compress ? encodedPath : path;
         var payload = compress ? BlobCompression.Compress(bytes, _options.CompressionLevel) : bytes;

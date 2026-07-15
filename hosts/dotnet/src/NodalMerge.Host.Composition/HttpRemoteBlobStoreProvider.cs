@@ -81,7 +81,7 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
             // frame; decompress before the chain verifies BLAKE3 of these
             // bytes — the invariant (hash of uncompressed bytes) is
             // preserved by doing this here rather than in the chain.
-            if (HasZstdContentEncoding(response))
+            if (BlobCompression.HasZstdContentEncoding(response))
             {
                 var decompressed = BlobCompression.TryDecompress(bytes);
                 if (decompressed is null)
@@ -253,19 +253,6 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
         }
         ApplyAuth(request);
         return request;
-    }
-
-    private static bool HasZstdContentEncoding(HttpResponseMessage response)
-    {
-        foreach (var value in response.Content.Headers.ContentEncoding)
-        {
-            if (string.Equals(value, "zstd", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private HttpRequestMessage CreatePutRequest(string hashHex, byte[] bytes, string? contentType)

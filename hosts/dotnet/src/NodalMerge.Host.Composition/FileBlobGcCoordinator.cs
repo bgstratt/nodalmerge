@@ -57,12 +57,20 @@ public sealed class FileBlobGcCoordinator
         var liveSafe = new HashSet<string>(liveHashes.Select(SanitizeHash), StringComparer.Ordinal);
 
         var blake3Dir = Path.Combine(_rootPath, "blake3");
-        var blobFiles = Directory.Exists(blake3Dir)
+        var canonicalFiles = Directory.Exists(blake3Dir)
             ? Directory
                 .EnumerateFiles(blake3Dir)
-                .Where(path => IsCanonicalHashName(Path.GetFileName(path)))
+                .Select(path => (Path: path, BareHash: TryGetCanonicalBareHash(Path.GetFileName(path))))
+                .Where(entry => entry.BareHash is not null)
                 .ToArray()
             : [];
+
+        // Group by bare hash so a hash stored under both encodings (§8:
+        // "writers never do this", but GC must still cope) is processed
+        // once — the live-set / tombstone keying is always the bare hash.
+        var groups = canonicalFiles
+            .GroupBy(entry => entry.BareHash!, StringComparer.Ordinal)
+            .ToArray();
 
         var marked = new List<string>();
         var cleared = new List<string>();
@@ -75,17 +83,16 @@ public sealed class FileBlobGcCoordinator
             Directory.CreateDirectory(tombRoot);
         }
 
-        foreach (var blobPath in blobFiles)
+        foreach (var group in groups)
         {
-            var safeHash = Path.GetFileName(blobPath);
+            var bareHash = group.Key;
+            var tombPath = Path.Combine(tombRoot, bareHash);
 
-            var tombPath = Path.Combine(tombRoot, safeHash);
-
-            if (liveSafe.Contains(safeHash))
+            if (liveSafe.Contains(bareHash))
             {
                 if (File.Exists(tombPath))
                 {
-                    cleared.Add(safeHash);
+                    cleared.Add(bareHash);
                     if (applyChanges)
                     {
                         File.Delete(tombPath);
@@ -97,7 +104,7 @@ public sealed class FileBlobGcCoordinator
 
             if (!File.Exists(tombPath))
             {
-                marked.Add(safeHash);
+                marked.Add(bareHash);
                 if (applyChanges)
                 {
                     File.WriteAllText(tombPath, string.Empty);
@@ -120,10 +127,14 @@ public sealed class FileBlobGcCoordinator
                 continue;
             }
 
-            deleted.Add(safeHash);
+            deleted.Add(bareHash);
             if (applyChanges)
             {
-                File.Delete(blobPath);
+                // Deletes whichever encoding file(s) exist for this hash.
+                foreach (var entry in group)
+                {
+                    File.Delete(entry.Path);
+                }
                 if (File.Exists(tombPath))
                 {
                     File.Delete(tombPath);
@@ -132,7 +143,7 @@ public sealed class FileBlobGcCoordinator
         }
 
         return new FileBlobGcRunReport(
-            Scanned: blobFiles.Length,
+            Scanned: canonicalFiles.Length,
             Marked: marked.Count,
             Cleared: cleared.Count,
             DeleteCandidates: deleteCandidates,
@@ -145,9 +156,32 @@ public sealed class FileBlobGcCoordinator
 
     /// <summary>
     /// Anything under <c>blake3/</c> that is not exactly 64 lowercase hex
-    /// characters is foreign and must never be touched by GC — see
-    /// docs/BLOB_STORAGE_LAYOUT.md §3.
+    /// characters, or that (v3, §8) has exactly one <c>.zst</c> suffix over
+    /// 64 lowercase hex characters, is foreign and must never be touched by
+    /// GC — see docs/BLOB_STORAGE_LAYOUT.md §3 and §8's
+    /// <c>name_conformance_vectors_v3</c>. Returns the bare hash (suffix
+    /// stripped) for a canonical name, or <c>null</c> for a foreign one.
     /// </summary>
+    private static string? TryGetCanonicalBareHash(string name)
+    {
+        if (IsCanonicalHashName(name))
+        {
+            return name;
+        }
+
+        const string zstSuffix = ".zst";
+        if (name.EndsWith(zstSuffix, StringComparison.Ordinal))
+        {
+            var candidate = name[..^zstSuffix.Length];
+            if (IsCanonicalHashName(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
     private static bool IsCanonicalHashName(string name)
     {
         if (name.Length != 64)

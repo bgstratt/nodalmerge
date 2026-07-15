@@ -566,6 +566,26 @@ public static class WebApplicationExtensions
         BlobHttpOptions options,
         CancellationToken cancellationToken)
     {
+        var (validationStatus, validationError) = ValidateBlobRequest(context, hash, options);
+        if (validationStatus != StatusCodes.Status200OK)
+        {
+            return Results.Json(new { error = validationError }, statusCode: validationStatus);
+        }
+
+        // Content encoding (reserved v1.1, docs/BLOB_HTTP_SURFACE.md): serve
+        // the stored zstd frame as-is — no recompress-on-serve — when the
+        // client asked for it and the store can produce it directly.
+        if (AcceptsZstdEncoding(context) && blobStore is IEncodedBlobSource encodedSource)
+        {
+            var encoded = await encodedSource.TryGetEncodedBlobAsync(hash, cancellationToken);
+            if (encoded.Found && string.Equals(encoded.ContentEncoding, "zstd", StringComparison.Ordinal))
+            {
+                context.Response.Headers["ETag"] = $"\"{hash}\"";
+                context.Response.Headers["Content-Encoding"] = "zstd";
+                return Results.File(encoded.Bytes!, "application/octet-stream");
+            }
+        }
+
         var (status, bytes, error) = await ResolveBlobReadAsync(context, hash, blobStore, options, cancellationToken);
         if (status != StatusCodes.Status200OK)
         {
@@ -574,6 +594,37 @@ public static class WebApplicationExtensions
 
         context.Response.Headers["ETag"] = $"\"{hash}\"";
         return Results.File(bytes!, "application/octet-stream");
+    }
+
+    /// <summary>
+    /// True when the request's <c>Accept-Encoding</c> header lists
+    /// <c>zstd</c> as one of its (comma-separated, optionally
+    /// <c>;q=</c>-weighted) tokens.
+    /// </summary>
+    private static bool AcceptsZstdEncoding(HttpContext context)
+    {
+        var header = context.Request.Headers.AcceptEncoding.ToString();
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return false;
+        }
+
+        foreach (var rawToken in header.Split(','))
+        {
+            var token = rawToken.AsSpan().Trim();
+            var semicolon = token.IndexOf(';');
+            if (semicolon >= 0)
+            {
+                token = token[..semicolon].Trim();
+            }
+
+            if (token.Equals("zstd", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static async Task<IResult> HandleBlobHeadAsync(
@@ -596,6 +647,21 @@ public static class WebApplicationExtensions
         return Results.Empty;
     }
 
+    private static (int Status, string? Error) ValidateBlobRequest(HttpContext context, string hash, BlobHttpOptions options)
+    {
+        if (!IsCanonicalBlobHash(hash))
+        {
+            return (StatusCodes.Status400BadRequest, "non-canonical hash");
+        }
+
+        if (!IsAuthorizedBlobRequest(context, options))
+        {
+            return (StatusCodes.Status401Unauthorized, "unauthorized");
+        }
+
+        return (StatusCodes.Status200OK, null);
+    }
+
     private static async Task<(int Status, byte[]? Bytes, string? Error)> ResolveBlobReadAsync(
         HttpContext context,
         string hash,
@@ -603,14 +669,10 @@ public static class WebApplicationExtensions
         BlobHttpOptions options,
         CancellationToken cancellationToken)
     {
-        if (!IsCanonicalBlobHash(hash))
+        var (validationStatus, validationError) = ValidateBlobRequest(context, hash, options);
+        if (validationStatus != StatusCodes.Status200OK)
         {
-            return (StatusCodes.Status400BadRequest, null, "non-canonical hash");
-        }
-
-        if (!IsAuthorizedBlobRequest(context, options))
-        {
-            return (StatusCodes.Status401Unauthorized, null, "unauthorized");
+            return (validationStatus, null, validationError);
         }
 
         var result = await blobStore.TryGetBlobAsync(hash, cancellationToken);

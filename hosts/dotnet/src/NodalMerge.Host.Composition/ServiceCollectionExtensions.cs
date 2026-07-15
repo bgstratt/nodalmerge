@@ -245,6 +245,17 @@ public static class ServiceCollectionExtensions
                 var opts = sp.GetRequiredService<RemoteBlobOriginOptions>();
                 httpClient.BaseAddress = new Uri(opts.BaseUrl, UriKind.Absolute);
                 httpClient.Timeout = TimeSpan.FromSeconds(opts.TimeoutSeconds);
+            })
+            // Content encoding is negotiated explicitly via
+            // Accept-Encoding/Content-Encoding at the application layer
+            // (docs/BLOB_HTTP_SURFACE.md) — disable SocketsHttpHandler's own
+            // transparent gzip/deflate decompression so it never intercepts
+            // a "Content-Encoding: zstd" response (which it wouldn't
+            // understand anyway) or silently strips a header this code
+            // relies on inspecting.
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AutomaticDecompression = System.Net.DecompressionMethods.None
             });
             services.AddSingleton<HttpRemoteBlobStoreProvider>();
             services.AddSingleton<IRemoteBlobPushTarget>(sp => sp.GetRequiredService<HttpRemoteBlobStoreProvider>());

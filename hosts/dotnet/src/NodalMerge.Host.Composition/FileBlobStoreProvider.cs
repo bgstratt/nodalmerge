@@ -1,4 +1,5 @@
 using Blake3;
+using Microsoft.Extensions.Logging;
 using NodalMerge.Host.Abstractions.Providers;
 
 namespace NodalMerge.Host.Composition;
@@ -7,29 +8,94 @@ namespace NodalMerge.Host.Composition;
 /// Global content-addressed file blob store: <c>&lt;root&gt;/blake3/&lt;hex&gt;</c>,
 /// flat, no sharding, no extension, no room segment — see
 /// docs/BLOB_STORAGE_LAYOUT.md. Auto-migrates a legacy sharded
-/// <c>&lt;shard&gt;/&lt;hex&gt;.blob</c> layout on construction.
+/// <c>&lt;shard&gt;/&lt;hex&gt;.blob</c> layout on construction. Optionally
+/// stores blobs zstd-encoded at rest (§8) when
+/// <c>NodalMerge:Storage:FileBlobs:Compression = Zstd</c>.
 /// </summary>
-internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolverProvider
+internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolverProvider, IEncodedBlobSource
 {
     private readonly string _rootPath;
+    private readonly FileBlobStorageOptions _options;
+    private readonly ILogger<FileBlobStoreProvider>? _logger;
 
-    public FileBlobStoreProvider(FileBlobStorageOptions options)
+    public FileBlobStoreProvider(FileBlobStorageOptions options, ILogger<FileBlobStoreProvider>? logger = null)
     {
+        _options = options;
         _rootPath = Path.GetFullPath(options.RootPath);
+        _logger = logger;
         Directory.CreateDirectory(_rootPath);
         MigrateLegacyLayoutIfNeeded(_rootPath);
     }
 
     public async ValueTask<BlobReadResult> TryGetBlobAsync(string hashHex, CancellationToken cancellationToken = default)
     {
+        // Identity always wins when both encodings exist (contract:
+        // writers never do this, but readers must prefer identity).
         var path = GetPath(hashHex);
-        if (!File.Exists(path))
+        if (File.Exists(path))
         {
-            return BlobReadResult.Missing;
+            var identityBytes = await File.ReadAllBytesAsync(path, cancellationToken);
+            return BlobReadResult.Hit(identityBytes, contentType: null);
         }
 
-        var bytes = await File.ReadAllBytesAsync(path, cancellationToken);
-        return BlobReadResult.Hit(bytes, contentType: null);
+        var encodedPath = GetEncodedPath(hashHex);
+        if (File.Exists(encodedPath))
+        {
+            var compressed = await File.ReadAllBytesAsync(encodedPath, cancellationToken);
+            var decompressed = BlobCompression.TryDecompress(compressed);
+            if (decompressed is null)
+            {
+                _logger?.LogWarning(
+                    "Corrupt zstd frame for blob {Hash} at {Path}; treating as missing",
+                    hashHex,
+                    encodedPath
+                );
+                return BlobReadResult.Missing;
+            }
+
+            // Invariant (§8): the hash is always Blake3 of the
+            // uncompressed bytes. Never serve wrong bytes.
+            var actualHash = Hasher.Hash(decompressed).ToString();
+            if (!string.Equals(actualHash, hashHex, StringComparison.Ordinal))
+            {
+                _logger?.LogWarning(
+                    "Decompressed bytes for blob {Hash} at {Path} hash to {ActualHash} instead; treating as missing",
+                    hashHex,
+                    encodedPath,
+                    actualHash
+                );
+                return BlobReadResult.Missing;
+            }
+
+            return BlobReadResult.Hit(decompressed, contentType: null);
+        }
+
+        return BlobReadResult.Missing;
+    }
+
+    /// <summary>
+    /// Serves the stored encoding as-is (docs/BLOB_HTTP_SURFACE.md
+    /// "Content encoding"): identity bytes when that's what's on disk, the
+    /// raw zstd frame (never decompressed) when only the encoded form
+    /// exists. Identity still wins when both exist.
+    /// </summary>
+    public async ValueTask<EncodedBlobResult> TryGetEncodedBlobAsync(string hashHex, CancellationToken ct = default)
+    {
+        var path = GetPath(hashHex);
+        if (File.Exists(path))
+        {
+            var identityBytes = await File.ReadAllBytesAsync(path, ct);
+            return EncodedBlobResult.Identity(identityBytes);
+        }
+
+        var encodedPath = GetEncodedPath(hashHex);
+        if (File.Exists(encodedPath))
+        {
+            var compressed = await File.ReadAllBytesAsync(encodedPath, ct);
+            return EncodedBlobResult.Zstd(compressed);
+        }
+
+        return EncodedBlobResult.Missing;
     }
 
     public async ValueTask PutBlobAsync(
@@ -40,14 +106,21 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
     )
     {
         var path = GetPath(hashHex);
-        if (File.Exists(path))
+        var encodedPath = GetEncodedPath(hashHex);
+        if (File.Exists(path) || File.Exists(encodedPath))
         {
             // Content-addressed: an existing file with this hash already
-            // holds these bytes.
+            // holds these bytes, under either encoding.
             return;
         }
 
-        var parent = Path.GetDirectoryName(path);
+        var compress = string.Equals(_options.Compression, "Zstd", StringComparison.Ordinal)
+            && BlobCompression.ShouldCompress(bytes, contentType, _options);
+
+        var targetPath = compress ? encodedPath : path;
+        var payload = compress ? BlobCompression.Compress(bytes, _options.CompressionLevel) : bytes;
+
+        var parent = Path.GetDirectoryName(targetPath);
         if (!string.IsNullOrWhiteSpace(parent))
         {
             Directory.CreateDirectory(parent);
@@ -56,13 +129,13 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
         // Write via temp + rename so concurrent writers of the same blob
         // don't collide on the destination and readers never observe a
         // partially written file.
-        var temp = Path.Combine(parent!, "." + Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N") + ".tmp");
-        await File.WriteAllBytesAsync(temp, bytes, cancellationToken);
+        var temp = Path.Combine(parent!, "." + Path.GetFileName(targetPath) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+        await File.WriteAllBytesAsync(temp, payload, cancellationToken);
         try
         {
-            File.Move(temp, path);
+            File.Move(temp, targetPath);
         }
-        catch (IOException) when (File.Exists(path))
+        catch (IOException) when (File.Exists(targetPath))
         {
             // Lost the race to an identical write — that collision IS the
             // CAS dedup. Drop our temp copy.
@@ -89,6 +162,12 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
     private string GetPath(string hashHex)
     {
         return Path.Combine(_rootPath, "blake3", SanitizeHash(hashHex));
+    }
+
+    /// <summary>The v3 zstd-encoded sibling of <see cref="GetPath"/> (docs/BLOB_STORAGE_LAYOUT.md §8).</summary>
+    private string GetEncodedPath(string hashHex)
+    {
+        return GetPath(hashHex) + ".zst";
     }
 
     internal static string SanitizeHash(string hashHex)

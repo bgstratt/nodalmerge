@@ -75,6 +75,25 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
         {
             var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
             var contentType = response.Content.Headers.ContentType?.MediaType;
+
+            // Content encoding (reserved v1.1, docs/BLOB_HTTP_SURFACE.md): a
+            // "Content-Encoding: zstd" response carries the stored zstd
+            // frame; decompress before the chain verifies BLAKE3 of these
+            // bytes — the invariant (hash of uncompressed bytes) is
+            // preserved by doing this here rather than in the chain.
+            if (HasZstdContentEncoding(response))
+            {
+                var decompressed = BlobCompression.TryDecompress(bytes);
+                if (decompressed is null)
+                {
+                    throw new InvalidOperationException(
+                        $"remote blob origin GET /blobs/{hashHex} returned a corrupt zstd frame"
+                    );
+                }
+
+                return BlobReadResult.Hit(decompressed, contentType);
+            }
+
             return BlobReadResult.Hit(bytes, contentType);
         }
 
@@ -225,8 +244,28 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
     private HttpRequestMessage CreateRequest(HttpMethod method, string hashHex)
     {
         var request = new HttpRequestMessage(method, $"/blobs/{hashHex}");
+        if (method == HttpMethod.Get)
+        {
+            // Content encoding (reserved v1.1, docs/BLOB_HTTP_SURFACE.md):
+            // advertise zstd support so an origin that has the blob
+            // zstd-encoded at rest can serve it as-is.
+            request.Headers.AcceptEncoding.Add(new StringWithQualityHeaderValue("zstd"));
+        }
         ApplyAuth(request);
         return request;
+    }
+
+    private static bool HasZstdContentEncoding(HttpResponseMessage response)
+    {
+        foreach (var value in response.Content.Headers.ContentEncoding)
+        {
+            if (string.Equals(value, "zstd", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private HttpRequestMessage CreatePutRequest(string hashHex, byte[] bytes, string? contentType)

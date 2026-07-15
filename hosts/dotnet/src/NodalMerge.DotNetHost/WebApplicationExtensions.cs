@@ -44,6 +44,21 @@ public static class WebApplicationExtensions
         public long? Size { get; init; }
     }
 
+    /// <summary>
+    /// Query-string shape for the frozen <c>GET /blobs/{hash}/url</c> contract
+    /// (docs/BLOB_HTTP_SURFACE.md "Blob URL resolution"): <c>op</c>, and
+    /// <c>size</c>/<c>contentType</c> for <c>op=put</c>. No room/namespace —
+    /// this surface is the global CAS, not the legacy per-room
+    /// <c>/sync/blob-url</c> query shape.
+    /// </summary>
+    private sealed class BlobUrlOpQuery
+    {
+        public string? Op { get; init; }
+        [JsonPropertyName("contentType")]
+        public string? ContentType { get; init; }
+        public long? Size { get; init; }
+    }
+
     private const string DemoHtml = """
 <!doctype html>
 <html lang="en">
@@ -247,6 +262,13 @@ public static class WebApplicationExtensions
 
         EmitAuthReadinessChecks(app.Services, providerOptions, startupLogger);
 
+        // Blob origin surface (docs/BLOB_HTTP_SURFACE.md, slice S2.1a): bound once
+        // here and closed over by the handlers below, per that doc's guidance that
+        // this doesn't need to be a DI service. Declared before first use since
+        // the URL-resolution routes (slice S4.1) and the legacy /sync/blob-url
+        // alias both close over it too.
+        var blobHttpOptions = BlobHttpOptions.FromConfiguration(app.Configuration);
+
         app.MapGet("/", () => Results.Ok(new
         {
             service = "nodalmerge-dotnet-host",
@@ -288,13 +310,16 @@ public static class WebApplicationExtensions
         app.MapPost("/api/sync/token", HandleTokenMintAsync);
         app.MapPost("/sync/token/validate", HandleTokenValidateAsync);
         app.MapPost("/api/sync/token/validate", HandleTokenValidateAsync);
-        app.MapGet("/sync/blob-url", HandleBlobUrlAsync);
-        app.MapGet("/api/sync/blob-url", HandleBlobUrlAsync);
 
-        // Blob origin surface (docs/BLOB_HTTP_SURFACE.md, slice S2.1a): bound once
-        // here and closed over by the handlers below, per that doc's guidance that
-        // this doesn't need to be a DI service.
-        var blobHttpOptions = BlobHttpOptions.FromConfiguration(app.Configuration);
+        // Legacy blob-url resolver (pre-dates slice S4.1's frozen contract).
+        // Kept as an alias of GET /blobs/{hash}/url — same handler, same
+        // response shape ({"url":..., "expiresAtUtc":...}) and status codes;
+        // only the query-parameter surface (room/namespace) differs, per
+        // docs/BLOB_HTTP_SURFACE.md's "Blob URL resolution" section.
+        app.MapGet("/sync/blob-url", (HttpContext context, [AsParameters] BlobUrlQuery query, CancellationToken cancellationToken) =>
+            HandleBlobUrlAsync(context, query, blobHttpOptions, cancellationToken));
+        app.MapGet("/api/sync/blob-url", (HttpContext context, [AsParameters] BlobUrlQuery query, CancellationToken cancellationToken) =>
+            HandleBlobUrlAsync(context, query, blobHttpOptions, cancellationToken));
 
         app.MapGet("/blobs/{hash}", (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
             HandleBlobGetAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
@@ -310,6 +335,25 @@ public static class WebApplicationExtensions
             HandleBlobPutAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
         app.MapPut("/api/blobs/{hash}", (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
             HandleBlobPutAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+
+        // Blob URL resolution (docs/BLOB_HTTP_SURFACE.md "Blob URL
+        // resolution (optional capability)", slice S4.1). Frozen shape:
+        // GET /blobs/{hash}/url?op=get|put[&size=&contentType=] ->
+        // 200 {"url":..., "expiresAtUtc":...} | 501 (no backend) | 400
+        // (malformed hash).
+        app.MapGet("/blobs/{hash}/url", (HttpContext context, string hash, [AsParameters] BlobUrlOpQuery query, CancellationToken cancellationToken) =>
+            HandleBlobUrlResolveAsync(context, hash, query.Op, query.Size, query.ContentType, "default", "blobs", blobHttpOptions, cancellationToken));
+        app.MapGet("/api/blobs/{hash}/url", (HttpContext context, string hash, [AsParameters] BlobUrlOpQuery query, CancellationToken cancellationToken) =>
+            HandleBlobUrlResolveAsync(context, hash, query.Op, query.Size, query.ContentType, "default", "blobs", blobHttpOptions, cancellationToken));
+
+        // Upload confirmation (docs/BLOB_HTTP_SURFACE.md, same section).
+        // The .NET host has no bucket visibility today, so it takes the
+        // MAY-accept branch: 200 once a resolver is registered, 501
+        // otherwise, 400 on malformed hash.
+        app.MapPost("/blobs/{hash}/uploaded", (HttpContext context, string hash) =>
+            HandleBlobUploadedConfirmAsync(context, hash, blobHttpOptions));
+        app.MapPost("/api/blobs/{hash}/uploaded", (HttpContext context, string hash) =>
+            HandleBlobUploadedConfirmAsync(context, hash, blobHttpOptions));
 
         app.MapPost("/ffi/submit", async (HttpRequest request, IFfiHttpBridge ffi) =>
         {
@@ -506,55 +550,132 @@ public static class WebApplicationExtensions
         }
     }
 
-    private static async Task<IResult> HandleBlobUrlAsync(
-        [AsParameters] BlobUrlQuery query,
-        IBlobUrlResolverProvider resolver,
+    /// <summary>
+    /// Legacy alias of <c>GET /blobs/{hash}/url</c> (docs/BLOB_HTTP_SURFACE.md
+    /// "Blob URL resolution"). Pre-S4.1 callers passed <c>hash</c>/<c>room</c>/
+    /// <c>namespace</c> as query parameters instead of a route segment; this
+    /// shim maps that shape onto the frozen handler so both routes share one
+    /// implementation, one response shape, and one set of status codes.
+    /// </summary>
+    private static Task<IResult> HandleBlobUrlAsync(
+        HttpContext context,
+        BlobUrlQuery query,
+        BlobHttpOptions options,
         CancellationToken cancellationToken
     )
     {
-        if (string.IsNullOrWhiteSpace(query.Hash))
-            return Results.BadRequest(new { error = "hash is required" });
-
         var room = string.IsNullOrWhiteSpace(query.Room) ? "default" : query.Room;
         var scope = string.IsNullOrWhiteSpace(query.Namespace) ? "assets" : query.Namespace;
-        var op = (query.Op ?? string.Empty).Trim().ToLowerInvariant();
 
-        if (op == "put")
+        return HandleBlobUrlResolveAsync(
+            context,
+            query.Hash,
+            query.Op,
+            query.Size,
+            query.ContentType,
+            room,
+            scope,
+            options,
+            cancellationToken
+        );
+    }
+
+    /// <summary>
+    /// <c>GET /blobs/{hash}/url?op=get|put[&amp;size=&amp;contentType=]</c> —
+    /// the frozen URL-resolution contract (docs/BLOB_HTTP_SURFACE.md "Blob URL
+    /// resolution (optional capability)", slice S4.1). Shared by the new
+    /// route and the legacy <c>/sync/blob-url</c> alias.
+    /// </summary>
+    private static async Task<IResult> HandleBlobUrlResolveAsync(
+        HttpContext context,
+        string hash,
+        string? opRaw,
+        long? size,
+        string? contentType,
+        string room,
+        string ns,
+        BlobHttpOptions options,
+        CancellationToken cancellationToken)
+    {
+        var (validationStatus, validationError) = ValidateBlobRequest(context, hash, options);
+        if (validationStatus != StatusCodes.Status200OK)
         {
-            if (query.Size is null || query.Size <= 0)
-                return Results.BadRequest(new { error = "size must be a positive integer for op=put" });
-
-            var url = await resolver.ResolvePutUrlAsync(
-                new BlobPutUrlRequest(room, scope, query.Hash, query.Size.Value, query.ContentType),
-                cancellationToken
-            );
-
-            if (url is null) return Results.StatusCode(StatusCodes.Status404NotFound);
-
-            return Results.Ok(new
-            {
-                url = url.Url,
-                expiresAt = url.ExpiresAtUtc.ToUnixTimeSeconds()
-            });
+            return Results.Json(new { error = validationError }, statusCode: validationStatus);
         }
 
-        if (op == "get")
+        var op = (opRaw ?? string.Empty).Trim().ToLowerInvariant();
+        if (op != "get" && op != "put")
         {
-            var url = await resolver.ResolveGetUrlAsync(
-                new BlobGetUrlRequest(room, scope, query.Hash),
-                cancellationToken
-            );
-
-            if (url is null) return Results.StatusCode(StatusCodes.Status404NotFound);
-
-            return Results.Ok(new
-            {
-                url = url.Url,
-                expiresAt = url.ExpiresAtUtc.ToUnixTimeSeconds()
-            });
+            return Results.Json(new { error = "op must be 'get' or 'put'" }, statusCode: StatusCodes.Status400BadRequest);
         }
 
-        return Results.BadRequest(new { error = "op must be 'get' or 'put'" });
+        if (op == "put" && (size is null || size <= 0))
+        {
+            return Results.Json(
+                new { error = "size must be a positive integer for op=put" },
+                statusCode: StatusCodes.Status400BadRequest
+            );
+        }
+
+        // A missing resolver and a resolver that returns null (no
+        // presign-capable backend behind it — e.g. the WsOnly/File
+        // compositions' always-null stub) are both "no delegated backend
+        // configured" and both surface as 501; the frozen contract doesn't
+        // require distinguishing them (docs/BLOB_HTTP_SURFACE.md).
+        var resolver = context.RequestServices.GetService<IBlobUrlResolverProvider>();
+        if (resolver is null)
+        {
+            return Results.StatusCode(StatusCodes.Status501NotImplemented);
+        }
+
+        var url = op == "put"
+            ? await resolver.ResolvePutUrlAsync(
+                new BlobPutUrlRequest(room, ns, hash, size ?? 0, contentType),
+                cancellationToken)
+            : await resolver.ResolveGetUrlAsync(
+                new BlobGetUrlRequest(room, ns, hash),
+                cancellationToken);
+
+        if (url is null)
+        {
+            return Results.StatusCode(StatusCodes.Status501NotImplemented);
+        }
+
+        return Results.Ok(new
+        {
+            url = url.Url,
+            expiresAtUtc = url.ExpiresAtUtc.UtcDateTime.ToString("o")
+        });
+    }
+
+    /// <summary>
+    /// <c>POST /blobs/{hash}/uploaded</c> — upload confirmation
+    /// (docs/BLOB_HTTP_SURFACE.md "Blob URL resolution (optional
+    /// capability)", slice S4.1). The .NET host has no bucket visibility
+    /// today (<see cref="IBlobUrlResolverProvider"/> has no HEAD/verify
+    /// hook), so it takes the contract's MAY-accept branch: accept without
+    /// verification once a resolver is registered, mirroring the Rust
+    /// delegate auth mode's <c>verify_uploaded</c> default of <c>Ok(())</c>
+    /// (see docs/delegated-storage-gc.md's Uploading -&gt; Active lifecycle).
+    /// </summary>
+    private static IResult HandleBlobUploadedConfirmAsync(
+        HttpContext context,
+        string hash,
+        BlobHttpOptions options)
+    {
+        var (validationStatus, validationError) = ValidateBlobRequest(context, hash, options);
+        if (validationStatus != StatusCodes.Status200OK)
+        {
+            return Results.Json(new { error = validationError }, statusCode: validationStatus);
+        }
+
+        var resolver = context.RequestServices.GetService<IBlobUrlResolverProvider>();
+        if (resolver is null)
+        {
+            return Results.StatusCode(StatusCodes.Status501NotImplemented);
+        }
+
+        return Results.Ok(new { accepted = true });
     }
 
     // -- Blob origin surface (docs/BLOB_HTTP_SURFACE.md) ---------------------

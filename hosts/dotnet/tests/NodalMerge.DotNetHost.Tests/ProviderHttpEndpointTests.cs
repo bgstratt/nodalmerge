@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -12,6 +13,14 @@ namespace NodalMerge.DotNetHost.Tests;
 
 public sealed class ProviderHttpEndpointTests
 {
+    // Canonical 64-lowercase-hex test hash — matches the shared parity
+    // vectors' `canonical_hash` (engine/commands/blob-layout-vectors.v1.json)
+    // so it satisfies IsCanonicalBlobHash / the blob-surface hash-validation
+    // rule shared by GET/HEAD/PUT /blobs/{hash} and the new URL-resolution
+    // endpoints.
+    private const string CanonicalHash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     [Fact]
     public async Task Sync_token_returns_501_when_default_auth_provider_does_not_support_mint()
     {
@@ -107,6 +116,9 @@ public sealed class ProviderHttpEndpointTests
     [Fact]
     public async Task Sync_blob_url_put_uses_resolver_and_returns_url_payload()
     {
+        // Legacy /sync/blob-url is now an alias of GET /blobs/{hash}/url
+        // (slice S4.1): same response shape ({"url", "expiresAtUtc"}), not
+        // the old unix-seconds "expiresAt" field.
         var expiry = DateTimeOffset.UtcNow.AddMinutes(5);
         await using var app = BuildTestApp(services =>
         {
@@ -120,14 +132,17 @@ public sealed class ProviderHttpEndpointTests
 
         var client = app.GetTestClient();
         var response = await client.GetAsync(
-            "/sync/blob-url?op=put&room=room-a&namespace=assets&hash=sha256%3Aabc&size=1024&contentType=audio%2Faac"
+            $"/sync/blob-url?op=put&room=room-a&namespace=assets&hash={CanonicalHash}&size=1024&contentType=audio%2Faac"
         );
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var stream = await response.Content.ReadAsStreamAsync();
         using var doc = await JsonDocument.ParseAsync(stream);
         Assert.Equal("https://upload.example/put", doc.RootElement.GetProperty("url").GetString());
-        Assert.Equal(expiry.ToUnixTimeSeconds(), doc.RootElement.GetProperty("expiresAt").GetInt64());
+        Assert.Equal(
+            expiry.UtcDateTime.ToString("o"),
+            doc.RootElement.GetProperty("expiresAtUtc").GetString()
+        );
     }
 
     [Fact]
@@ -138,8 +153,182 @@ public sealed class ProviderHttpEndpointTests
 
         var client = app.GetTestClient();
         var response = await client.GetAsync(
-            "/api/sync/blob-url?op=put&hash=sha256%3Aabc"
+            $"/api/sync/blob-url?op=put&hash={CanonicalHash}"
         );
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Sync_blob_url_rejects_malformed_hash()
+    {
+        await using var app = BuildTestApp();
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.GetAsync("/api/sync/blob-url?op=get&hash=not-a-hash");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    // -- GET /blobs/{hash}/url (docs/BLOB_HTTP_SURFACE.md, slice S4.1) -------
+
+    [Fact]
+    public async Task BlobUrl_get_op_returns_frozen_shape()
+    {
+        var expiry = DateTimeOffset.UtcNow.AddHours(1);
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IBlobUrlResolverProvider>(
+                new FakeBlobUrlResolverProvider(
+                    getResult: new PresignedBlobUrl("https://bucket.example/get", expiry)
+                )
+            );
+        });
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.GetAsync($"/blobs/{CanonicalHash}/url?op=get");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        Assert.Equal("https://bucket.example/get", doc.RootElement.GetProperty("url").GetString());
+        Assert.Equal(
+            expiry.UtcDateTime.ToString("o"),
+            doc.RootElement.GetProperty("expiresAtUtc").GetString()
+        );
+    }
+
+    [Fact]
+    public async Task BlobUrl_put_op_with_size_and_contentType_returns_frozen_shape()
+    {
+        var expiry = DateTimeOffset.UtcNow.AddMinutes(15);
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IBlobUrlResolverProvider>(
+                new FakeBlobUrlResolverProvider(
+                    putResult: new PresignedBlobUrl("https://bucket.example/put", expiry)
+                )
+            );
+        });
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.GetAsync(
+            $"/api/blobs/{CanonicalHash}/url?op=put&size=2048&contentType=text%2Fplain"
+        );
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        Assert.Equal("https://bucket.example/put", doc.RootElement.GetProperty("url").GetString());
+        Assert.Equal(
+            expiry.UtcDateTime.ToString("o"),
+            doc.RootElement.GetProperty("expiresAtUtc").GetString()
+        );
+    }
+
+    [Fact]
+    public async Task BlobUrl_returns_501_when_backend_has_no_presign_capability()
+    {
+        // Default composition (BlobStorage=WsOnly) registers a resolver
+        // whose Resolve*UrlAsync always return null — the "no delegated
+        // backend" case the frozen contract requires answering 501 for.
+        await using var app = BuildTestApp();
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.GetAsync($"/blobs/{CanonicalHash}/url?op=get");
+
+        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BlobUrl_returns_501_when_no_resolver_registered_at_all()
+    {
+        await using var app = BuildTestApp(services =>
+        {
+            services.RemoveAll<IBlobUrlResolverProvider>();
+        });
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.GetAsync($"/blobs/{CanonicalHash}/url?op=get");
+
+        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BlobUrl_rejects_malformed_hash()
+    {
+        await using var app = BuildTestApp();
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.GetAsync("/blobs/not-a-hash/url?op=get");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        using var stream = await response.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        Assert.Equal("non-canonical hash", doc.RootElement.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task BlobUrl_rejects_invalid_op()
+    {
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IBlobUrlResolverProvider>(new FakeBlobUrlResolverProvider());
+        });
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.GetAsync($"/blobs/{CanonicalHash}/url?op=delete");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    // -- POST /blobs/{hash}/uploaded (docs/BLOB_HTTP_SURFACE.md, slice S4.1) -
+
+    [Fact]
+    public async Task BlobUploaded_accepts_when_resolver_registered()
+    {
+        // No bucket visibility in the .NET host today — MAY-accept without
+        // verification once a resolver exists (WsOnly default composition
+        // included).
+        await using var app = BuildTestApp();
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.PostAsync($"/blobs/{CanonicalHash}/uploaded", content: null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BlobUploaded_returns_501_when_no_resolver_registered()
+    {
+        await using var app = BuildTestApp(services =>
+        {
+            services.RemoveAll<IBlobUrlResolverProvider>();
+        });
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.PostAsync($"/api/blobs/{CanonicalHash}/uploaded", content: null);
+
+        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BlobUploaded_rejects_malformed_hash()
+    {
+        await using var app = BuildTestApp();
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.PostAsync("/blobs/not-a-hash/uploaded", content: null);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }

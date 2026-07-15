@@ -91,3 +91,109 @@ implementation is readable by the other (and by the WS blob flow, GC, and
   payload must never be written to a local store.
 - Treat 5xx/429/timeouts as retryable; 400/401/404/413/422 are not.
 - A PUT answered 200 or 201 is success; there is no need to distinguish them.
+
+## Blob URL resolution (optional capability)
+
+Status: **contract frozen 2026-07-15** (slice S4.1 of the CAS distribution plan,
+`nodalmerge-studio/plans/cas-distribution-and-storage.md` Phase 4). Driven by
+`engine/commands/blob-url-resolution-vectors.v1.json`.
+
+This section adds the presigned-URL seam (plan D5, `IBlobUrlResolverProvider` /
+`nodalmerge-s3-blobs`) to the blob HTTP surface. **Decision (recorded in the plan,
+2026-07-15): URL resolution is an explicit endpoint, not a 307 redirect on
+`GET/PUT /blobs/{hash}`.** Redirect-with-body semantics for PUT are fragile across HTTP
+clients (auth headers stripped cross-origin, bodies not reliably replayed on 307), and a
+chained provider's s3-direct link needs the URL as a plain value anyway. The relay
+endpoints above are **unchanged** by this section; a server with no delegated backend
+answers 501 here and clients fall back to the relay path, which keeps relay-only
+deployments (Phase 2) conformant with zero code change.
+
+### `GET /blobs/{hash}/url`
+
+```
+GET /blobs/{hash}/url?op=get|put[&size=<bytes>&contentType=<mime>]
+```
+
+- `{hash}` MUST be exactly 64 lowercase hex characters — same rule as the relay
+  endpoints, checked first. Malformed → **400** `{"error":"non-canonical hash"}`.
+- `op` is required and MUST be exactly `get` or `put`; anything else → **400**
+  `{"error":"op must be 'get' or 'put'"}`.
+- `size` and `contentType` are meaningful only for `op=put`: they flow through to the
+  presign delegate as metadata (the `size`/`content_type` fields of the delegate presign
+  protocol v1, `BLOB_STORAGE_LAYOUT.md` §7) so an app-side presign endpoint can, e.g.,
+  enforce a size cap or set the object's content type. `op=put` without a positive
+  integer `size` → **400**.
+- Success → **200** `{"url": "<presigned url>", "expiresAtUtc": "<ISO-8601 UTC
+  timestamp>"}`. There is no `expiresAt`-as-unix-seconds variant; every implementation
+  of this endpoint emits `expiresAtUtc` as an ISO-8601 string.
+- No presign-capable backend behind the server (relay-only deployment, or a backend that
+  declined to presign) → **501**. A server MAY collapse "no resolver/backend configured
+  at all" and "a configured backend declined to presign this request" into the same 501
+  — this section does not require distinguishing them, and the .NET host does not
+  distinguish them (see below).
+- This endpoint carries no room/namespace semantics, same as the relay endpoints — the
+  CAS is global and content-addressed. An implementation MAY require the same bearer
+  auth as the relay endpoints when a token is configured.
+
+### `POST /blobs/{hash}/uploaded`
+
+```
+POST /blobs/{hash}/uploaded
+```
+
+Upload confirmation: the client calls this once it has PUT bytes directly to a
+presigned URL obtained above, so the server can flip the asset's lifecycle state from
+`Uploading` to `Active` per `docs/delegated-storage-gc.md`.
+
+- `{hash}` validation is identical to every other endpoint on this surface: malformed →
+  **400** `{"error":"non-canonical hash"}`.
+- A server **with** bucket visibility SHOULD verify the upload (HEAD the object at the
+  canonical key, §"Bucket object layout" below) before flipping the asset to `Active`.
+  Verification failure (object missing, or a size mismatch against what was declared at
+  presign time) → **409**.
+- A server **without** bucket visibility MAY accept without verification — this mirrors
+  the Rust delegate auth mode's `BlobPersistence::verify_uploaded` default of `Ok(())`
+  (Delegate mode has no bucket credentials to HEAD with; the app's own presign endpoint
+  can verify independently by the time the room asks for the same hash on a read). The
+  .NET host takes this branch today: it has no HEAD/verify hook behind
+  `IBlobUrlResolverProvider`, so it accepts (**200**) once a resolver is registered.
+- No presign-capable backend / resolver registered at all → **501**.
+
+### Bucket object layout
+
+Per `docs/BLOB_STORAGE_LAYOUT.md` §3 and §8 (v3 at-rest encoding), the bucket object a
+resolved URL ultimately points at lives at:
+
+```
+{Prefix}blake3/<64-lowercase-hex>          identity encoding
+{Prefix}blake3/<64-lowercase-hex>.zst      zstd encoding — hash is always of the
+                                            UNCOMPRESSED bytes (the v3 invariant)
+```
+
+`{Prefix}` is deployment configuration (`path_prefix` in `nodalmerge-s3-blobs`, an
+app-chosen prefix for a delegated backend) — never part of the hash's identity. No room
+id or namespace is ever encoded into the key. Client-side compression before a presigned
+PUT (upload `.zst` bytes + a `contentEncoding` object-metadata entry) is a Phase 4
+seam — see `BLOB_STORAGE_LAYOUT.md` §8's S3 note; the .NET client-side link that produces
+`.zst` uploads is slice 4.3, not this one.
+
+### Status and what's deferred
+
+- **This doc section is the frozen contract.** The .NET host
+  (`WebApplicationExtensions.HandleBlobUrlResolveAsync` /
+  `HandleBlobUploadedConfirmAsync`, routed through `IBlobUrlResolverProvider`) conforms
+  to it as of slice S4.1.
+- **The Rust server's HTTP implementation of this section is slice 4.2** — today the
+  Rust server has no route for either endpoint; `nodalmerge-s3-blobs`'s
+  `resolve_get_url`/`resolve_put_url`/`verify_uploaded` hooks exist and are consumed by
+  the WS blob flow (`blob-redirect`/`blob-uploaded`) but not yet by an HTTP route. A
+  disk-backed Rust server will answer neither route until 4.2 lands (whatever the
+  framework's default for an unmapped route is — not necessarily 501 — since the route
+  doesn't exist yet).
+- **The .NET host's legacy `/sync/blob-url` route (and its `/api/sync/blob-url`
+  mirror) remain as an alias of `GET /blobs/{hash}/url`**: same handler, same response
+  shape (`{"url", "expiresAtUtc"}`), same status codes (400 malformed hash, 501 no
+  backend). The only difference is the query-parameter surface: the legacy route also
+  accepts `room`/`namespace` query parameters (defaulting to `"default"`/`"assets"` when
+  absent) for backward compatibility with pre-S4.1 callers; the new route carries no
+  room/namespace concept at all, consistent with this surface being room-agnostic.

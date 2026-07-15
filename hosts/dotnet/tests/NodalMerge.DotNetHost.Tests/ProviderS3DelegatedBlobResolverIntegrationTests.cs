@@ -14,6 +14,13 @@ namespace NodalMerge.DotNetHost.Tests;
 
 public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
 {
+    // Canonical 64-lowercase-hex test hash (see BlobLayoutParityTests /
+    // ProviderHttpEndpointTests for the same constant) — required since
+    // slice S4.1 aligned /sync/blob-url's hash validation to
+    // docs/BLOB_HTTP_SURFACE.md's canonical-hash rule.
+    private const string CanonicalHash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     [Fact]
     public async Task Sync_blob_url_returns_presigned_url_when_s3_delegated_resolver_returns_success()
     {
@@ -34,20 +41,27 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
         await app.StartAsync();
 
         var client = app.GetTestClient();
-        var response = await client.GetAsync("/sync/blob-url?op=put&room=room-a&namespace=assets&hash=sha256%3Aabc&size=1024");
+        var response = await client.GetAsync($"/sync/blob-url?op=put&room=room-a&namespace=assets&hash={CanonicalHash}&size=1024");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var stream = await response.Content.ReadAsStreamAsync();
         using var doc = await JsonDocument.ParseAsync(stream);
 
         Assert.Equal("https://upload.example/presigned", doc.RootElement.GetProperty("url").GetString());
-        // Protocol v1 responses carry no expiry field (see
+        // Slice S4.1 aligned /sync/blob-url's response shape to the frozen
+        // GET /blobs/{hash}/url contract (docs/BLOB_HTTP_SURFACE.md): an
+        // ISO-8601 "expiresAtUtc" string, not a unix-seconds "expiresAt".
+        // Protocol v1 itself still carries no expiry field (see
         // docs/BLOB_STORAGE_LAYOUT.md §7) — the resolver computes its own
         // from the configured TTL (default 900s), matching Rust's
         // PresignedUrl::with_ttl.
-        var expiresAt = doc.RootElement.GetProperty("expiresAt").GetInt64();
-        var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        Assert.InRange(expiresAt, nowUnix + 890, nowUnix + 910);
+        var expiresAtUtc = DateTime.Parse(
+            doc.RootElement.GetProperty("expiresAtUtc").GetString()!,
+            null,
+            System.Globalization.DateTimeStyles.RoundtripKind
+        );
+        var now = DateTime.UtcNow;
+        Assert.InRange((expiresAtUtc - now).TotalSeconds, 890, 910);
 
         // Pin the actual outbound request shape against protocol v1.
         Assert.NotNull(handler.LastRequestBody);
@@ -55,7 +69,7 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
         var root = reqDoc.RootElement;
         Assert.Equal("put", root.GetProperty("op").GetString());
         Assert.Equal("room-a", root.GetProperty("room").GetString());
-        Assert.Equal("sha256:abc", root.GetProperty("hash").GetString());
+        Assert.Equal(CanonicalHash, root.GetProperty("hash").GetString());
         Assert.Equal("blake3", root.GetProperty("algorithm").GetString());
         Assert.Equal(1024, root.GetProperty("size").GetInt64());
         Assert.Equal(900, root.GetProperty("ttl_seconds").GetInt64());
@@ -64,7 +78,7 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
     }
 
     [Fact]
-    public async Task Sync_blob_url_returns_404_when_s3_delegated_resolver_fails()
+    public async Task Sync_blob_url_returns_501_when_s3_delegated_resolver_fails()
     {
         await using var app = BuildTestApp(
             new DelegatedServerErrorHandler(),
@@ -82,13 +96,15 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
         await app.StartAsync();
 
         var client = app.GetTestClient();
-        var response = await client.GetAsync("/sync/blob-url?op=get&room=room-a&namespace=assets&hash=sha256%3Aabc");
+        var response = await client.GetAsync($"/sync/blob-url?op=get&room=room-a&namespace=assets&hash={CanonicalHash}");
 
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        // The frozen contract answers "no presign-capable backend" with 501,
+        // not 404 (docs/BLOB_HTTP_SURFACE.md "Blob URL resolution").
+        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
     }
 
     [Fact]
-    public async Task Sync_blob_url_retries_on_timeout_then_falls_back_to_404()
+    public async Task Sync_blob_url_retries_on_timeout_then_falls_back_to_501()
     {
         var handler = new DelegatedTimeoutHandler();
         await using var app = BuildTestApp(
@@ -110,9 +126,9 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
         await app.StartAsync();
 
         var client = app.GetTestClient();
-        var response = await client.GetAsync("/sync/blob-url?op=get&room=room-a&namespace=assets&hash=sha256%3Aabc");
+        var response = await client.GetAsync($"/sync/blob-url?op=get&room=room-a&namespace=assets&hash={CanonicalHash}");
 
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
         Assert.Equal(3, handler.CallCount);
     }
 
@@ -140,12 +156,12 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
 
         var client = app.GetTestClient();
 
-        var first = await client.GetAsync("/sync/blob-url?op=get&room=room-a&namespace=assets&hash=sha256%3Aabc");
-        Assert.Equal(HttpStatusCode.NotFound, first.StatusCode);
+        var first = await client.GetAsync($"/sync/blob-url?op=get&room=room-a&namespace=assets&hash={CanonicalHash}");
+        Assert.Equal(HttpStatusCode.NotImplemented, first.StatusCode);
         Assert.Equal(1, handler.CallCount);
 
-        var second = await client.GetAsync("/sync/blob-url?op=get&room=room-a&namespace=assets&hash=sha256%3Aabc");
-        Assert.Equal(HttpStatusCode.NotFound, second.StatusCode);
+        var second = await client.GetAsync($"/sync/blob-url?op=get&room=room-a&namespace=assets&hash={CanonicalHash}");
+        Assert.Equal(HttpStatusCode.NotImplemented, second.StatusCode);
         Assert.Equal(1, handler.CallCount);
     }
 

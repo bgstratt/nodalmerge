@@ -51,6 +51,14 @@
     <None Include="..\..\..\..\engine\commands\blob-http-surface-vectors.v1.json"
           Link="blob-http-surface-vectors.v1.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- Canonical blob URL-resolution parity vectors (slice S4.1);
+         BlobUrlResolutionVectorTests derives its cases from this so the
+         .NET GET /blobs/{hash}/url + POST /blobs/{hash}/uploaded surface is
+         asserted against the same source of truth the Rust server's slice
+         4.2 implementation will be checked against. -->
+    <None Include="..\..\..\..\engine\commands\blob-url-resolution-vectors.v1.json"
+          Link="blob-url-resolution-vectors.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
     <!-- Golden cross-runtime blob fixture; BlobLayoutInteropTests proves
          this host can read the same on-disk layout the Rust mirror
          (server/server/tests/blob_layout_interop.rs) reads. Glob is `**`,

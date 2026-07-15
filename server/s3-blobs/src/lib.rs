@@ -46,7 +46,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nodalmerge_core::Hash;
-use nodalmerge_server::store::{BlobPersistence, PresignedUrl};
+use nodalmerge_server::store::{parse_blob_entry_name, BlobPersistence, PresignedUrl};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use object_store::{
@@ -442,10 +442,18 @@ impl BlobPersistence for S3BlobStore {
     }
 
     fn blob_gc_sweep(&self, live: &std::collections::HashSet<Hash>, _grace: Duration) -> usize {
-        // S3 GC: list under the global blake3/ prefix, drop any object
-        // whose hash isn't live. We collapse the two phases into one — S3
-        // object versions (when enabled) act as their own grace period,
-        // and operators who want hard-delete can disable versioning.
+        // S3 GC: list under the global blake3/ prefix, drop any *canonical*
+        // object (bare hex or v3 `<hex>.zst`, per BLOB_STORAGE_LAYOUT.md §3/
+        // §8) whose bare hash isn't live. We collapse the two phases into
+        // one — S3 object versions (when enabled) act as their own grace
+        // period, and operators who want hard-delete can disable versioning.
+        //
+        // Entries that don't parse as a canonical blob/zstd name are
+        // foreign per §3 and must never be touched, exactly like the file
+        // store's `parse_blob_entry_name`-gated sweep — otherwise an
+        // unrelated object an operator placed under the same prefix (or a
+        // future encoding suffix a listener doesn't understand yet) would
+        // be silently deleted.
         let Some(s3) = self.s3.clone() else { return 0; };
         let prefix = ObjectPath::from(format!("{}blake3", self.cfg.path_prefix));
         let live_set: std::collections::HashSet<String> =
@@ -460,7 +468,11 @@ impl BlobPersistence for S3BlobStore {
                     let Ok(meta) = meta else { continue };
                     let key = meta.location.as_ref();
                     let Some(filename) = key.rsplit('/').next() else { continue };
-                    if !live_set.contains(filename) {
+                    let Some((hash, _encoding)) = parse_blob_entry_name(filename) else {
+                        // Foreign entry — never delete, never error (§3).
+                        continue;
+                    };
+                    if !live_set.contains(&hash.to_hex()) {
                         if let Err(e) = s3.delete(&meta.location).await {
                             tracing::warn!(?e, key = %meta.location, "blob_gc_sweep: delete failed");
                         } else {

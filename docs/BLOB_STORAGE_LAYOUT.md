@@ -1,4 +1,4 @@
-# Blob Storage Layout Contract (v2)
+# Blob Storage Layout Contract (v3)
 
 Canonical, cross-runtime specification for how NodalMerge stores
 content-addressed blobs. Both the Rust server (`DirPersistence`,
@@ -6,6 +6,10 @@ content-addressed blobs. Both the Rust server (`DirPersistence`,
 `S3DelegatedBlobUrlResolverProvider`) implement this contract; the vectors
 in `engine/commands/blob-layout-vectors.v1.json` pin it against drift.
 Rationale and history live in `docs/BLOB_LAYOUT_CONVERGENCE_PLAN.md`.
+
+v3 = v2 + §8 (optional zstd at-rest encoding). A v2 store is a valid v3
+store; a v3 store containing no `.zst` entries is byte-identical to a v2
+store. No migration or marker is required.
 
 ## 1. Content address
 
@@ -142,7 +146,59 @@ The app-side key derivation is `<its own prefix><algorithm>/<hash>` — the
 `room`/`namespace` fields are metadata the app may log or authorize
 against, never key inputs.
 
-## 8. Non-goals of this contract
+## 8. At-rest content encoding (v3)
+
+A blob with hash `<hex>` exists as **exactly one** of:
+
+```
+<blob_root>/blake3/<hex>          identity encoding: raw bytes; Blake3(these bytes) = <hex>
+<blob_root>/blake3/<hex>.zst      zstd encoding: a single zstd frame; Blake3(DECOMPRESSED bytes) = <hex>
+```
+
+- **Invariant (normative): the hash is always Blake3 of the uncompressed
+  bytes.** Compression is a storage/transport encoding, never an identity
+  change. This is the same rule that keeps any future chunk/delta encoding
+  honest (§1 still holds: the hash is the sole identity).
+- The `.zst` suffix is the only encoding signal. No sidecar metadata files
+  (they break single-file temp+rename atomicity), no `zstd/` subdirectory
+  (breaks one-place-to-look and GC enumeration), and **no content
+  sniffing** (a user's *content* can itself legitimately be a zstd file).
+- Naming rules (§3) amendment: `<64-lowercase-hex>.zst` is **canonical in
+  v3**. Everything else under `blake3/` remains foreign-skip. A v2 reader
+  treats `.zst` entries as foreign and skips them — degraded (the blob
+  appears missing to that reader) but never corrupt and never deleted.
+- If both files exist for one hash (writers never do this), readers prefer
+  the identity file; GC may delete the `.zst` duplicate.
+- Tombstones are keyed by **bare hex** exactly as in §4
+  (`.tombstones/blake3/<hex>`), covering whichever encoding exists. GC
+  strips a `.zst` suffix before parsing an entry name as a hash; the
+  live-set check uses the bare hash.
+- Readers that verify on read verify the **decompressed** bytes. A corrupt
+  frame or a decompressed-hash mismatch is treated as a missing blob
+  (plus a warning), never served.
+- Writers compress at their discretion; parity does **not** require two
+  stores to hold the same blob under the same encoding. Recommended
+  defaults: compression **on** for server-side durable stores (zstd level
+  3), **off** for peer-local caches (local disk is cheaper than
+  per-materialize CPU). Recommended skip heuristic (guidance, not
+  contract): skip declared compressed-media content types (`image/*`,
+  `video/*`, `audio/*`, `application/zip|gzip|zstd|x-7z*|wasm`); sample
+  the first min(64 KiB, len) and store raw if the sampled ratio > 0.98;
+  never compress blobs < 4096 bytes.
+- S3 stores: the client compresses before upload; key =
+  `<prefix>blake3/<hex>.zst` with a `contentEncoding` object metadata
+  entry. (Seam only until Phase 4 builds it.)
+- HTTP surface: see `docs/BLOB_HTTP_SURFACE.md` §content-encoding — a
+  server MAY serve stored `.zst` bytes with `Content-Encoding: zstd` when
+  the client advertises `Accept-Encoding: zstd`; the client decompresses
+  **before** hash verification and caching.
+
+Vectors: the `encoding_vectors_v3` and `name_conformance_vectors_v3`
+arrays in `engine/commands/blob-layout-vectors.v1.json` pin the encoded
+path derivation, v3 name-conformance, tombstone keying, and the
+both-files-exist preference. Pre-v3 harnesses ignore those arrays.
+
+## 9. Non-goals of this contract
 
 - It does not require every runtime to support every storage mode (file,
   S3-direct, S3-delegated) — see the convergence plan §2.4 for the current

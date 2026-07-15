@@ -103,5 +103,64 @@
         "url": "https://storage.example.com/blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef?X-Signature=..."
       }
     }
+  ],
+  "encoding_vectors_v3": [
+    {
+      "id": "zstd-encoded-relative-path",
+      "description": "v3 (BLOB_STORAGE_LAYOUT.md §8): the zstd-encoded file for a hash sits beside the identity path with a .zst suffix; the hash is Blake3 of the DECOMPRESSED bytes",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "encoded_relative_path": "blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.zst"
+    },
+    {
+      "id": "tombstone-for-encoded-blob-is-bare-hex",
+      "description": "tombstones are keyed by bare hex regardless of the stored encoding — one tombstone covers whichever encoding exists",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "tombstone_relative_path": ".tombstones/blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "id": "s3-key-zstd-encoded",
+      "description": "S3 key for a client-side-compressed upload (Phase 4 seam): prefix + blake3/<hex>.zst",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "prefix": "blobs/",
+      "s3_key": "blobs/blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.zst"
+    },
+    {
+      "id": "both-files-exist-prefers-identity",
+      "description": "if both blake3/<hex> and blake3/<hex>.zst exist (writers never do this), readers prefer the identity file; GC may delete the .zst duplicate",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "preferred_relative_path": "blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ],
+  "name_conformance_vectors_v3": [
+    {
+      "id": "v3-zst-suffix-is-canonical",
+      "description": "v3 readers/GC recognize <64-lowercase-hex>.zst as a canonical (zstd-encoded) entry; pre-v3 readers treat it as foreign and skip it — degraded but never corrupt or deleted",
+      "name": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.zst",
+      "canonical": true
+    },
+    {
+      "id": "v3-rejects-gz-suffix",
+      "description": "only .zst is a recognized encoding suffix; any other suffix stays foreign",
+      "name": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.gz",
+      "canonical": false
+    },
+    {
+      "id": "v3-rejects-uppercase-zst",
+      "description": "the hex part must still be 64 lowercase hex — the suffix does not relax the naming rule",
+      "name": "A123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.zst",
+      "canonical": false
+    },
+    {
+      "id": "v3-rejects-double-suffix",
+      "description": "exactly one .zst suffix; anything else is foreign",
+      "name": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.zst.zst",
+      "canonical": false
+    },
+    {
+      "id": "v3-bare-hex-still-canonical",
+      "description": "the v2 identity form remains canonical in v3",
+      "name": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "canonical": true
+    }
   ]
 }

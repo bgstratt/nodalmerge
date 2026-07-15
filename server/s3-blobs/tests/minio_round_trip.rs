@@ -132,6 +132,12 @@ fn s3_blob_round_trip_via_minio() {
         .verify_uploaded(room_id, &hash)
         .expect("HEAD should find the object");
 
+    // 2b. S4.2: `has_blob` is a real bucket HEAD in Direct mode (used by the
+    // blob HTTP origin's `HEAD /blobs/{hash}`), independent of `get_blob`
+    // (which always returns `None` for this backend).
+    assert!(store.has_blob(&hash), "has_blob should find the object after upload");
+    assert!(store.get_blob(&hash).is_none(), "S3BlobStore never hydrates bytes via get_blob");
+
     // 3. Mint presigned GET, fetch, confirm round-trip.
     let get = store
         .resolve_get_url(room_id, &hash, Some(payload.len() as u64))
@@ -153,6 +159,7 @@ fn s3_blob_round_trip_via_minio() {
     // 5. After GC, verify_uploaded reports missing.
     let post_gc = store.verify_uploaded(room_id, &hash);
     assert!(post_gc.is_err(), "object should be gone after GC: {post_gc:?}");
+    assert!(!store.has_blob(&hash), "has_blob should report false after GC deletes the object");
 
     drop(container);
 }

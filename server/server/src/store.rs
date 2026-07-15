@@ -203,6 +203,28 @@ pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
         true
     }
 
+    /// S4.2 — whether this backend is genuinely presign-capable, as opposed
+    /// to merely inheriting `resolve_get_url`/`resolve_put_url`/
+    /// `verify_uploaded`'s trait defaults (`None`/`None`/`Ok(())`).
+    ///
+    /// This exists because `verify_uploaded`'s default is `Ok(())` for two
+    /// very different reasons that the blob HTTP origin's `POST
+    /// /blobs/{hash}/uploaded` (`blob_http.rs`) must tell apart:
+    /// * a backend with **no** presign capability at all (`NoPersistence`,
+    ///   `DirPersistence`) — the endpoint must answer **501**.
+    /// * `nodalmerge-s3-blobs`'s `S3Auth::Delegate` mode, which *is* a real
+    ///   presign-capable backend but has no bucket credentials to verify an
+    ///   upload with, so it deliberately trusts the client (**200**) per
+    ///   `docs/BLOB_HTTP_SURFACE.md`'s "Blob URL resolution" section.
+    ///
+    /// `resolve_get_url`/`resolve_put_url` don't need an equivalent flag:
+    /// their own `None` already means "no URL, fall back" regardless of
+    /// backend, so `GET /blobs/{hash}/url` can key off that directly.
+    /// Default: `false`.
+    fn supports_presigned_urls(&self) -> bool {
+        false
+    }
+
     /// S3.1b — return this backend's own stored bytes for `hash` when it
     /// holds them under an *alternate* at-rest encoding (currently only
     /// zstd; see `docs/BLOB_STORAGE_LAYOUT.md` §8), alongside the
@@ -321,6 +343,9 @@ impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B>
     }
     fn blobs_durable(&self) -> bool {
         self.blobs.blobs_durable()
+    }
+    fn supports_presigned_urls(&self) -> bool {
+        self.blobs.supports_presigned_urls()
     }
     fn get_blob_encoded(&self, hash: &Hash) -> Option<(Vec<u8>, &'static str)> {
         self.blobs.get_blob_encoded(hash)

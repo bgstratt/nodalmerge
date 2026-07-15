@@ -417,6 +417,31 @@ impl BlobPersistence for S3BlobStore {
         None
     }
 
+    /// S4.2 — a real bucket existence check, used by the blob HTTP origin's
+    /// `HEAD /blobs/{hash}` (`blob_http.rs`) instead of the trait's default
+    /// (`get_blob(hash).is_some()`, which would always be `false` here since
+    /// `get_blob` above never hydrates bytes for this backend).
+    ///
+    /// Direct mode: a real S3 `HEAD` (reuses `direct_head`, already used by
+    /// `verify_uploaded`); any error is treated as "not found" rather than
+    /// panicking or propagating, matching the rest of this impl's
+    /// fall-back-to-WS-on-error posture. Delegate mode has no bucket
+    /// credentials to `HEAD` with, so it always reports `false` — a
+    /// consumer needing existence in that mode should use `GET
+    /// /blobs/{hash}/url` (S4.2) or its own app-side check instead.
+    fn has_blob(&self, hash: &Hash) -> bool {
+        match &self.cfg.auth {
+            S3Auth::Direct { .. } => match self.direct_head(hash) {
+                Ok(exists) => exists,
+                Err(e) => {
+                    tracing::warn!(?e, "has_blob: HEAD failed; treating as not-found");
+                    false
+                }
+            },
+            S3Auth::Delegate { .. } => false,
+        }
+    }
+
     /// Fallback path: when a small blob arrives over the WS, push it up
     /// to S3 so a later peer's `resolve_get_url` finds something.
     /// Direct mode only — Delegate mode has no creds and treats this as
@@ -576,6 +601,16 @@ impl BlobPersistence for S3BlobStore {
     }
 
     fn blobs_durable(&self) -> bool { true }
+
+    /// S4.2 — this backend is always presign-capable (in both auth modes),
+    /// distinguishing it from `NoPersistence`/`DirPersistence`'s default
+    /// `false`. See `BlobPersistence::supports_presigned_urls`'s doc for why
+    /// this can't just be inferred from `verify_uploaded`'s return value:
+    /// `Delegate` mode's `Ok(())` there means "trust the client" (a real
+    /// backend decision), not "no backend at all".
+    fn supports_presigned_urls(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -719,6 +754,37 @@ mod tests {
         cfg.auth = S3Auth::delegate("https://app.example.com/presign", None);
         let store = S3BlobStore::new(cfg).unwrap();
         assert!(store.s3.is_none(), "Delegate mode must not hold S3 creds");
+    }
+
+    #[test]
+    fn supports_presigned_urls_is_always_true() {
+        // Direct mode.
+        let mut cfg = S3BlobStoreConfig::default();
+        cfg.bucket = "b".into();
+        cfg.endpoint = Some("https://localhost:9000".into());
+        cfg.auth = S3Auth::direct_explicit("ak", "sk");
+        let store = S3BlobStore::new(cfg).unwrap();
+        assert!(store.supports_presigned_urls());
+
+        // Delegate mode.
+        let mut cfg = S3BlobStoreConfig::default();
+        cfg.bucket = "b".into();
+        cfg.auth = S3Auth::delegate("https://app.example.com/presign", None);
+        let store = S3BlobStore::new(cfg).unwrap();
+        assert!(store.supports_presigned_urls());
+    }
+
+    #[test]
+    fn delegate_mode_has_blob_always_false_no_network() {
+        // Delegate mode has no bucket credentials to HEAD with; has_blob
+        // must report false without attempting any network call (there's no
+        // client to make one with — `store.s3` is `None` in this mode, see
+        // `delegate_skips_s3_client`).
+        let mut cfg = S3BlobStoreConfig::default();
+        cfg.bucket = "b".into();
+        cfg.auth = S3Auth::delegate("https://app.example.com/presign", None);
+        let store = S3BlobStore::new(cfg).unwrap();
+        assert!(!store.has_blob(&Hash::of(b"anything")));
     }
 
     #[test]

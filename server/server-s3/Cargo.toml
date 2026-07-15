@@ -1,0 +1,19 @@
+[package]
+name = "nodalmerge-server-s3"
+version = "0.2.0"
+edition = "2021"
+autobins = false
+description = "NodalMerge reflector server binary with a selectable S3-compatible blob backend (S4.2)"
+
+[[bin]]
+name = "nodalmerge-server-s3"
+path = "src/main.rs"
+
+[dependencies]
+nodalmerge-server = { version = "0.2.0", path = "../server" }
+nodalmerge-s3-blobs = { version = "0.2.0", path = "../s3-blobs" }
+tokio = { workspace = true }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

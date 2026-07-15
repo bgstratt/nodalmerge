@@ -35,3 +35,14 @@ tokio-tungstenite = "0.24"
 base64 = "0.22"
 nodalmerge-command-registry = { version = "0.2.0", path = "../../engine/commands" }
 tower = { version = "0.5", features = ["util"] }
+# S4.2: MinIO-gated blob-URL-resolution integration test
+# (tests/blob_url_resolution_minio.rs). A dev-dependency on
+# nodalmerge-s3-blobs is not a cyclic *package* dependency (Cargo only
+# resolves dev-dependencies for this crate's own test/example/bench
+# targets, never for its library build) even though nodalmerge-s3-blobs
+# itself depends on nodalmerge-server normally.
+nodalmerge-s3-blobs = { version = "0.2.0", path = "../s3-blobs" }
+testcontainers = { version = "0.23", features = ["blocking"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls"] }
+aws-credential-types = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

@@ -3227,6 +3227,8 @@ dependencies = [
 name = "nodalmerge-server"
 version = "0.2.0"
 dependencies = [
+ "aws-credential-types",
+ "aws-sdk-s3",
  "axum",
  "base64 0.22.1",
  "ed25519-dalek",
@@ -3239,10 +3241,13 @@ dependencies = [
  "nodalmerge-core",
  "nodalmerge-gc",
  "nodalmerge-host-core",
+ "nodalmerge-s3-blobs",
  "rand_core 0.6.4",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "testcontainers",
  "tokio",
  "tokio-tungstenite",
  "tower",
@@ -3250,6 +3255,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zstd",
+]
+
+[[package]]
+name = "nodalmerge-server-s3"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "nodalmerge-s3-blobs",
+ "nodalmerge-server",
+ "tokio",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

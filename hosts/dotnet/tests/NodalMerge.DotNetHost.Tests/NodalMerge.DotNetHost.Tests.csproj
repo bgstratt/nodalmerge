@@ -43,6 +43,13 @@
     <None Include="..\..\..\..\engine\commands\blob-layout-vectors.v1.json"
           Link="blob-layout-vectors.v1.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- Canonical blob HTTP surface parity vectors; BlobHttpSurfaceTests derives
+         its cases from this so the .NET GET/HEAD/PUT /blobs/{hash} origin is
+         asserted against the same source of truth as the Rust
+         server/server/tests/blob_http_surface.rs mirror. -->
+    <None Include="..\..\..\..\engine\commands\blob-http-surface-vectors.v1.json"
+          Link="blob-http-surface-vectors.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
     <!-- Golden cross-runtime blob fixture; BlobLayoutInteropTests proves
          this host can read the same on-disk layout the Rust mirror
          (server/server/tests/blob_layout_interop.rs) reads. Glob is `**`,

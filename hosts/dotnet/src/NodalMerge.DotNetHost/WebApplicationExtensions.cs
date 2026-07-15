@@ -1,11 +1,15 @@
+using Blake3;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NodalMerge.DotNetHost.Ffi;
 using NodalMerge.DotNetHost.Runtime;
 using NodalMerge.Host.Abstractions.Providers;
 using NodalMerge.Host.Composition;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Serialization;
 
 namespace NodalMerge.DotNetHost;
@@ -287,6 +291,26 @@ public static class WebApplicationExtensions
         app.MapGet("/sync/blob-url", HandleBlobUrlAsync);
         app.MapGet("/api/sync/blob-url", HandleBlobUrlAsync);
 
+        // Blob origin surface (docs/BLOB_HTTP_SURFACE.md, slice S2.1a): bound once
+        // here and closed over by the handlers below, per that doc's guidance that
+        // this doesn't need to be a DI service.
+        var blobHttpOptions = BlobHttpOptions.FromConfiguration(app.Configuration);
+
+        app.MapGet("/blobs/{hash}", (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobGetAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+        app.MapGet("/api/blobs/{hash}", (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobGetAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+
+        app.MapMethods("/blobs/{hash}", ["HEAD"], (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobHeadAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+        app.MapMethods("/api/blobs/{hash}", ["HEAD"], (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobHeadAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+
+        app.MapPut("/blobs/{hash}", (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobPutAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+        app.MapPut("/api/blobs/{hash}", (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobPutAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+
         app.MapPost("/ffi/submit", async (HttpRequest request, IFfiHttpBridge ffi) =>
         {
             using var buffer = new MemoryStream();
@@ -531,6 +555,191 @@ public static class WebApplicationExtensions
         }
 
         return Results.BadRequest(new { error = "op must be 'get' or 'put'" });
+    }
+
+    // -- Blob origin surface (docs/BLOB_HTTP_SURFACE.md) ---------------------
+
+    private static async Task<IResult> HandleBlobGetAsync(
+        HttpContext context,
+        string hash,
+        IBlobStoreProvider blobStore,
+        BlobHttpOptions options,
+        CancellationToken cancellationToken)
+    {
+        var (status, bytes, error) = await ResolveBlobReadAsync(context, hash, blobStore, options, cancellationToken);
+        if (status != StatusCodes.Status200OK)
+        {
+            return Results.Json(new { error }, statusCode: status);
+        }
+
+        context.Response.Headers["ETag"] = $"\"{hash}\"";
+        return Results.File(bytes!, "application/octet-stream");
+    }
+
+    private static async Task<IResult> HandleBlobHeadAsync(
+        HttpContext context,
+        string hash,
+        IBlobStoreProvider blobStore,
+        BlobHttpOptions options,
+        CancellationToken cancellationToken)
+    {
+        var (status, bytes, _) = await ResolveBlobReadAsync(context, hash, blobStore, options, cancellationToken);
+        if (status != StatusCodes.Status200OK)
+        {
+            // HEAD never carries a body, so error responses are status-only.
+            return Results.StatusCode(status);
+        }
+
+        context.Response.Headers["ETag"] = $"\"{hash}\"";
+        context.Response.ContentType = "application/octet-stream";
+        context.Response.ContentLength = bytes!.Length;
+        return Results.Empty;
+    }
+
+    private static async Task<(int Status, byte[]? Bytes, string? Error)> ResolveBlobReadAsync(
+        HttpContext context,
+        string hash,
+        IBlobStoreProvider blobStore,
+        BlobHttpOptions options,
+        CancellationToken cancellationToken)
+    {
+        if (!IsCanonicalBlobHash(hash))
+        {
+            return (StatusCodes.Status400BadRequest, null, "non-canonical hash");
+        }
+
+        if (!IsAuthorizedBlobRequest(context, options))
+        {
+            return (StatusCodes.Status401Unauthorized, null, "unauthorized");
+        }
+
+        var result = await blobStore.TryGetBlobAsync(hash, cancellationToken);
+        if (!result.Found)
+        {
+            return (StatusCodes.Status404NotFound, null, "not found");
+        }
+
+        return (StatusCodes.Status200OK, result.Bytes, null);
+    }
+
+    private static async Task<IResult> HandleBlobPutAsync(
+        HttpContext context,
+        string hash,
+        IBlobStoreProvider blobStore,
+        BlobHttpOptions options,
+        CancellationToken cancellationToken)
+    {
+        if (!IsCanonicalBlobHash(hash))
+        {
+            return Results.Json(new { error = "non-canonical hash" }, statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (!IsAuthorizedBlobRequest(context, options))
+        {
+            return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var request = context.Request;
+        if (request.ContentLength is { } contentLength && contentLength > options.MaxBlobBytes)
+        {
+            return Results.Json(new { error = "payload too large" }, statusCode: StatusCodes.Status413PayloadTooLarge);
+        }
+
+        // Raise Kestrel's default per-request body size cap (~30 MB) so bodies up
+        // to MaxBlobBytes aren't rejected by the transport before our own cap
+        // (ReadBlobBodyWithCapAsync, below) gets a chance to apply.
+        var maxRequestBodySizeFeature = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
+        if (maxRequestBodySizeFeature is { IsReadOnly: false })
+        {
+            maxRequestBodySizeFeature.MaxRequestBodySize = options.MaxBlobBytes;
+        }
+
+        var (bytes, tooLarge) = await ReadBlobBodyWithCapAsync(request.Body, options.MaxBlobBytes, cancellationToken);
+        if (tooLarge)
+        {
+            return Results.Json(new { error = "payload too large" }, statusCode: StatusCodes.Status413PayloadTooLarge);
+        }
+
+        var actualHash = Hasher.Hash(bytes!).ToString();
+        if (!string.Equals(actualHash, hash, StringComparison.Ordinal))
+        {
+            return Results.Json(new { error = "hash mismatch" }, statusCode: StatusCodes.Status422UnprocessableEntity);
+        }
+
+        var existing = await blobStore.TryGetBlobAsync(hash, cancellationToken);
+        if (existing.Found)
+        {
+            // Content-addressed: identical bytes are already stored — idempotent no-op.
+            return Results.StatusCode(StatusCodes.Status200OK);
+        }
+
+        await blobStore.PutBlobAsync(hash, bytes!, request.ContentType, cancellationToken);
+        return Results.StatusCode(StatusCodes.Status201Created);
+    }
+
+    /// <summary>
+    /// Buffers a request body up to (and one byte past) <paramref name="maxBytes"/>.
+    /// Chunked bodies carry no <c>Content-Length</c>, so this is the only
+    /// enforcement point for them; bodies with a declared length are also caught
+    /// earlier by the immediate <c>Content-Length</c> check in the caller.
+    /// </summary>
+    private static async Task<(byte[]? Bytes, bool TooLarge)> ReadBlobBodyWithCapAsync(
+        Stream body,
+        long maxBytes,
+        CancellationToken cancellationToken)
+    {
+        using var buffer = new MemoryStream();
+        var readBuffer = new byte[81920];
+        long total = 0;
+        int read;
+        while ((read = await body.ReadAsync(readBuffer, cancellationToken)) > 0)
+        {
+            total += read;
+            if (total > maxBytes)
+            {
+                return (null, true);
+            }
+            buffer.Write(readBuffer, 0, read);
+        }
+
+        return (buffer.ToArray(), false);
+    }
+
+    private static bool IsCanonicalBlobHash(string hash)
+    {
+        if (hash.Length != 64)
+        {
+            return false;
+        }
+
+        foreach (var c in hash)
+        {
+            if (c is < '0' or > '9' && c is < 'a' or > 'f')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsAuthorizedBlobRequest(HttpContext context, BlobHttpOptions options)
+    {
+        if (string.IsNullOrEmpty(options.AuthToken))
+        {
+            return true;
+        }
+
+        const string bearerPrefix = "Bearer ";
+        var authHeader = context.Request.Headers.Authorization.ToString();
+        if (!authHeader.StartsWith(bearerPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var providedBytes = Encoding.UTF8.GetBytes(authHeader[bearerPrefix.Length..]);
+        var expectedBytes = Encoding.UTF8.GetBytes(options.AuthToken);
+        return CryptographicOperations.FixedTimeEquals(providedBytes, expectedBytes);
     }
 
     private static void EmitAuthReadinessChecks(

@@ -59,10 +59,89 @@ use object_store::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-// Avoid creating a tokio runtime on the current thread (which may already
-// be driving one). Instead we spawn a short-lived thread and run a runtime
-// there for the few sync-to-async bridges below.
 use url::Url;
+
+// ─── Sync→async bridge (slice 6.1, finding #11) ─────────────────────────────
+//
+// `BlobPersistence` is a sync trait, but every backend op here is async and
+// the caller may already be *on* a tokio worker — so we can neither
+// `block_on` in place (panics) nor start a runtime on the current thread.
+// Pre-6.1 each site spawned a fresh OS thread with a fresh multi-thread
+// `Runtime` and blocked on a timeout-less `mpsc::recv()`: nine
+// runtime-constructions per nine ops, and a hung bucket or delegate endpoint
+// pinned the calling worker forever.
+//
+// Now there is exactly one bridge: a process-wide runtime, lazily built on
+// first use and never dropped. Process-wide (`OnceLock`) rather than owned
+// by `S3BlobStore` deliberately — dropping a `Runtime` from inside an async
+// context panics, and `S3BlobStore` is built/dropped freely (server-s3
+// builds a second instance for `S3BlobObjectStore`; tests build dozens), so
+// an owned runtime would turn every drop site into a panic hazard. A static
+// never drops, which sidesteps the question entirely.
+
+static BRIDGE_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
+/// How many times [`BRIDGE_RUNTIME`] has ever been constructed. `OnceLock`
+/// already guarantees ≤ 1; this makes the guarantee *observable* so
+/// `bridge_reuses_one_shared_runtime_across_ops` can pin "N ops → 1 runtime"
+/// against regression back to per-op construction.
+static BRIDGE_RUNTIMES_BUILT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Margin the blocking receive waits *beyond* the op's own timeout, so the
+/// inner, better-labelled timeout (reqwest / `tokio::time::timeout`) always
+/// fires first and the recv timeout is purely a backstop against a lost
+/// bridge task.
+const BRIDGE_RECV_MARGIN: Duration = Duration::from_secs(15);
+
+fn bridge_handle() -> &'static tokio::runtime::Handle {
+    BRIDGE_RUNTIME
+        .get_or_init(|| {
+            BRIDGE_RUNTIMES_BUILT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::runtime::Builder::new_multi_thread()
+                // S3/HTTP I/O only — two workers is plenty, and keeps this
+                // pool from competing with the server's own runtime.
+                .worker_threads(2)
+                .thread_name("nm-s3-bridge")
+                .enable_all()
+                .build()
+                .expect("build shared s3 bridge runtime")
+        })
+        .handle()
+}
+
+/// The one sync→async bridge every op in this crate goes through (name per
+/// blob-cas-remediation.md 7.3, which absorbs this helper).
+///
+/// Spawns `fut` onto the shared runtime under a `tokio::time::timeout` of
+/// `inner_timeout`, then blocks on `recv_timeout(inner_timeout + margin)`.
+/// Both bounds classify as [`S3BlobError::Timeout`] — a *backend* error.
+/// Callers must never translate it into an absence/`Missing` answer: GC
+/// distinguishes "blob absent" from "backend failed" (slice 2.2), and a hung
+/// bucket misread as missing data is the exact failure this crate must not
+/// produce.
+fn block_on_shared_runtime<T: Send + 'static>(
+    op: &'static str,
+    inner_timeout: Duration,
+    fut: impl std::future::Future<Output = T> + Send + 'static,
+) -> Result<T, S3BlobError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    bridge_handle().spawn(async move {
+        let _ = tx.send(tokio::time::timeout(inner_timeout, fut).await);
+    });
+    match rx.recv_timeout(inner_timeout + BRIDGE_RECV_MARGIN) {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(_elapsed)) => Err(S3BlobError::Timeout { op, waited: inner_timeout }),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(S3BlobError::Timeout {
+            op,
+            waited: inner_timeout + BRIDGE_RECV_MARGIN,
+        }),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(S3BlobError::Bridge {
+            op,
+            detail: "bridge task dropped its result channel before completing".to_string(),
+        }),
+    }
+}
 
 // ─── GC tombstones ──────────────────────────────────────────────────────────
 
@@ -118,6 +197,23 @@ pub struct S3BlobStoreConfig {
     /// `true` ⇒ require HTTPS for the endpoint. Default `true`. Test
     /// helpers (MinIO over HTTP) can flip this off.
     pub require_https: bool,
+    /// Upper bound on a single backend operation: one delegate presign
+    /// roundtrip, one HEAD/GET/PUT/DELETE. Applied three deep — as the
+    /// per-request timeout on both HTTP clients *and* as the
+    /// `tokio::time::timeout` the bridge wraps each op future in — so no
+    /// retry loop inside `object_store` can stretch an op past it. A
+    /// timeout is always a **backend** error, never "missing" (slice 6.1).
+    /// Default 30 s.
+    pub op_timeout: Duration,
+    /// TCP connect timeout for both HTTP clients. Default 10 s.
+    pub connect_timeout: Duration,
+    /// Upper bound on one whole [`BlobPersistence::blob_gc_sweep`] pass —
+    /// a batch of LISTs/PUTs/DELETEs, so `op_timeout` would be far too
+    /// tight; each request inside it is still individually bounded by
+    /// `op_timeout`. Aborting mid-sweep is safe: identical to a crash
+    /// mid-sweep, which the two-phase tombstone protocol already tolerates
+    /// (slice 1.3). Default 15 min.
+    pub sweep_timeout: Duration,
     /// Auth strategy.
     pub auth: S3Auth,
 }
@@ -133,6 +229,9 @@ impl Default for S3BlobStoreConfig {
             presign_put_ttl: Duration::from_secs(15 * 60),
             direct_upload_threshold: 1 * 1024 * 1024,
             require_https: true,
+            op_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(10),
+            sweep_timeout: Duration::from_secs(15 * 60),
             auth: S3Auth::Direct {
                 access_key_id: None,
                 secret_access_key: None,
@@ -223,6 +322,15 @@ pub enum S3BlobError {
     Http(#[from] reqwest::Error),
     #[error("invalid url: {0}")]
     Url(#[from] url::ParseError),
+    /// The op's bounded wait expired — backend unresponsive. Explicitly
+    /// **not** evidence the object is absent; callers whose signature can't
+    /// carry an error must pick the conservative value, never "missing".
+    #[error("s3 op {op:?} timed out after {waited:?} — backend unresponsive, not evidence of a missing object")]
+    Timeout { op: &'static str, waited: Duration },
+    /// The bridge task vanished without delivering a result (panic inside
+    /// the spawned future). Backend-class, like [`Self::Timeout`].
+    #[error("s3 bridge failed for op {op:?}: {detail}")]
+    Bridge { op: &'static str, detail: String },
 }
 
 // ─── The store ──────────────────────────────────────────────────────────────
@@ -233,11 +341,13 @@ pub struct S3BlobStore {
     /// Direct mode only — used to mint presigned URLs and run uploads.
     /// `None` for Delegate mode.
     s3: Option<Arc<AmazonS3>>,
-    /// Delegate mode only — async HTTP client.
+    /// Delegate mode only — async HTTP client. Built once in [`Self::new`]
+    /// (connection pool reused across calls) with explicit request/connect
+    /// timeouts; `clone()` at call sites is a cheap `Arc` bump sharing the
+    /// same pool.
     http: reqwest::Client,
-    // No persistent runtime here — we spawn a short-lived runtime in a
-    // dedicated thread for each sync-to-async bridge to avoid starting a
-    // runtime on a thread that may already be running one.
+    // No runtime here — all ops go through the process-wide bridge
+    // (`block_on_shared_runtime`); see the rationale at its definition.
 }
 
 impl std::fmt::Debug for S3BlobStore {
@@ -276,9 +386,22 @@ impl S3BlobStore {
                 secret_access_key,
                 session_token,
             } => {
+                // Per-request bounds at the client layer, in addition to the
+                // bridge's per-op bound: inside `blob_gc_sweep` (many
+                // requests under one bridge call) this is the only thing
+                // keeping a single hung request from eating the whole
+                // sweep budget. Set BEFORE the endpoint block —
+                // `with_allow_http` also writes into the builder's client
+                // options, and a later `with_client_options` would clobber
+                // it.
                 let mut b = AmazonS3Builder::new()
                     .with_bucket_name(&cfg.bucket)
-                    .with_region(&cfg.region);
+                    .with_region(&cfg.region)
+                    .with_client_options(
+                        object_store::ClientOptions::new()
+                            .with_timeout(cfg.op_timeout)
+                            .with_connect_timeout(cfg.connect_timeout),
+                    );
                 if let Some(ep) = &cfg.endpoint {
                     b = b.with_endpoint(ep);
                     if !cfg.require_https {
@@ -299,7 +422,16 @@ impl S3BlobStore {
             S3Auth::Delegate { .. } => None,
         };
 
-        Ok(Self { cfg, s3, http: reqwest::Client::new() })
+        // One client for the store's lifetime, with explicit bounds — a
+        // hung delegate endpoint must fail the op, never pin the caller
+        // (finding #11). `reqwest::Client::new()` has NO request timeout.
+        let http = reqwest::Client::builder()
+            .timeout(cfg.op_timeout)
+            .connect_timeout(cfg.connect_timeout)
+            .build()
+            .map_err(S3BlobError::Http)?;
+
+        Ok(Self { cfg, s3, http })
     }
 
     /// Canonical relative layout: `<path_prefix>blake3/<hex>` — no room
@@ -314,19 +446,10 @@ impl S3BlobStore {
         let path = ObjectPath::from(self.key_for(hash));
         let ttl = self.cfg.presign_get_ttl;
         let s3 = s3.clone();
-        // Run the async call on a fresh runtime inside a spawned thread so
-        // we don't attempt to create or block on a runtime on the current
-        // thread (which may already be running Tokio).
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
-            let res = rt2.block_on(async move { s3.signed_url(reqwest::Method::GET, &path, ttl).await });
-            let _ = tx.send(res);
-        });
-        let url_res: Result<Url, object_store::Error> = rx
-            .recv()
-            .map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?;
-        let url = url_res.map_err(S3BlobError::ObjectStore)?;
+        let url: Url = block_on_shared_runtime("presign_get", self.cfg.op_timeout, async move {
+            s3.signed_url(reqwest::Method::GET, &path, ttl).await
+        })?
+        .map_err(S3BlobError::ObjectStore)?;
         Ok(url.to_string())
     }
 
@@ -336,16 +459,10 @@ impl S3BlobStore {
         let path = ObjectPath::from(self.key_for(hash));
         let ttl = self.cfg.presign_put_ttl;
         let s3 = s3.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
-            let res = rt2.block_on(async move { s3.signed_url(reqwest::Method::PUT, &path, ttl).await });
-            let _ = tx.send(res);
-        });
-        let url_res: Result<Url, object_store::Error> = rx
-            .recv()
-            .map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?;
-        let url = url_res.map_err(S3BlobError::ObjectStore)?;
+        let url: Url = block_on_shared_runtime("presign_put", self.cfg.op_timeout, async move {
+            s3.signed_url(reqwest::Method::PUT, &path, ttl).await
+        })?
+        .map_err(S3BlobError::ObjectStore)?;
         Ok(url.to_string())
     }
 
@@ -354,16 +471,12 @@ impl S3BlobStore {
         let s3 = self.s3.as_ref().expect("direct_head without s3 client");
         let path = ObjectPath::from(self.key_for(hash));
         let s3 = s3.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
-            let res = rt2.block_on(async move { s3.head(&path).await });
-            let _ = tx.send(res);
-        });
-        let res: Result<_, object_store::Error> = rx
-            .recv()
-            .map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?;
-        let res = res;
+        // A timeout propagates as `Err` (via `?`), never as `Ok(false)` —
+        // "the backend didn't answer" and "the object is absent" must stay
+        // distinguishable for every caller of this existence probe.
+        let res = block_on_shared_runtime("head", self.cfg.op_timeout, async move {
+            s3.head(&path).await
+        })?;
         match res {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
@@ -382,15 +495,12 @@ impl S3BlobStore {
             ));
         };
         let path = ObjectPath::from(key.to_string());
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
-            let res = rt2.block_on(async move { s3.head(&path).await });
-            let _ = tx.send(res);
-        });
-        let res: Result<_, object_store::Error> = rx
-            .recv()
-            .map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?;
+        // GC-liveness-relevant: a timeout here must reach the coordinator
+        // as `Err` (→ `GcError::Backend`), never as `Ok(false)` — "I don't
+        // know" must never become "not live".
+        let res = block_on_shared_runtime("head_key", self.cfg.op_timeout, async move {
+            s3.head(&path).await
+        })?;
         match res {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
@@ -410,15 +520,12 @@ impl S3BlobStore {
             ));
         };
         let path = ObjectPath::from(key.to_string());
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
-            let res = rt2.block_on(async move { s3.delete(&path).await });
-            let _ = tx.send(res);
-        });
-        let res: Result<_, object_store::Error> = rx
-            .recv()
-            .map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?;
+        // NotFound → success (already gone is the goal state), but a
+        // timeout stays an error: "I couldn't confirm the delete" and "it
+        // was already gone" are different facts to the GC run ledger.
+        let res = block_on_shared_runtime("delete_key", self.cfg.op_timeout, async move {
+            s3.delete(&path).await
+        })?;
         match res {
             Ok(()) => Ok(()),
             Err(object_store::Error::NotFound { .. }) => Ok(()),
@@ -471,26 +578,23 @@ impl S3BlobStore {
         };
         tracing::debug!(%op, room = %room_id, hash = %hash.to_hex(), size = ?size, %body.algorithm, endpoint = %endpoint, "delegate_request: sending presign request to app");
         let http = self.http.clone();
-        // Run delegate HTTP request on a fresh runtime in a spawned thread.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
-            let res = rt2.block_on(async move {
-                let mut req = http.post(&endpoint).json(&body);
-                if let Some(h) = auth_header {
-                    req = req.header("Authorization", h);
-                }
-                let resp: reqwest::Response = req.send().await?;
-                if !resp.status().is_success() {
-                    tracing::warn!(status = %resp.status(), %op, "delegate presign declined");
-                    return Ok(None);
-                }
-                let parsed: Resp = resp.json().await?;
-                Ok::<Option<String>, S3BlobError>(Some(parsed.url))
-            });
-            let _ = tx.send(res);
-        });
-        rx.recv().map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?
+        // The client's own request timeout (set in `new`) is the inner
+        // bound and carries the better error; the bridge bound backstops it.
+        // Both are `Err`, never a `None` "declined" — a wedged endpoint and
+        // an endpoint that said no are different operator problems.
+        block_on_shared_runtime("delegate_presign", self.cfg.op_timeout, async move {
+            let mut req = http.post(&endpoint).json(&body);
+            if let Some(h) = auth_header {
+                req = req.header("Authorization", h);
+            }
+            let resp: reqwest::Response = req.send().await?;
+            if !resp.status().is_success() {
+                tracing::warn!(status = %resp.status(), %op, "delegate presign declined");
+                return Ok(None);
+            }
+            let parsed: Resp = resp.json().await?;
+            Ok::<Option<String>, S3BlobError>(Some(parsed.url))
+        })?
     }
 }
 
@@ -549,25 +653,19 @@ impl BlobPersistence for S3BlobStore {
                     .to_string(),
             });
         };
-        // Same bridge as `direct_head`/`direct_presign_get`/`persist_blob`
-        // (fresh runtime on a spawned thread + mpsc): this trait method is
-        // sync and may be called from a Tokio worker, so blocking here
-        // directly would panic. Deliberately NOT a second bridge mechanism —
-        // finding #11 / slice 6.1 tracks replacing all of them at once, and
-        // inventing a new one here would make that job bigger.
         let path = ObjectPath::from(self.key_for(hash));
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
-            let res = rt2.block_on(async move {
+        let res: Result<Bytes, object_store::Error> =
+            match block_on_shared_runtime("hydrate_get", self.cfg.op_timeout, async move {
                 let got = s3.get(&path).await?;
                 got.bytes().await
-            });
-            let _ = tx.send(res);
-        });
-        let res: Result<Bytes, object_store::Error> = rx
-            .recv()
-            .map_err(|e| HydrateError::Backend(format!("thread error: {e}")))?;
+            }) {
+                Ok(r) => r,
+                // A bridge/op timeout is `Backend` — retryable, "says
+                // nothing about whether the object exists" — by the same
+                // rule as the 503 case below. `Missing` here would let a
+                // hung bucket read as lost data to the GC tree walk.
+                Err(e) => return Err(HydrateError::Backend(e.to_string())),
+            };
         match res {
             Ok(b) => Ok(b.to_vec()),
             Err(object_store::Error::NotFound { .. }) => Err(HydrateError::Missing),
@@ -585,18 +683,25 @@ impl BlobPersistence for S3BlobStore {
     /// `get_blob` above never hydrates bytes for this backend).
     ///
     /// Direct mode: a real S3 `HEAD` (reuses `direct_head`, already used by
-    /// `verify_uploaded`); any error is treated as "not found" rather than
-    /// panicking or propagating, matching the rest of this impl's
-    /// fall-back-to-WS-on-error posture. Delegate mode has no bucket
-    /// credentials to `HEAD` with, so it always reports `false` — a
-    /// consumer needing existence in that mode should use `GET
+    /// `verify_uploaded`); any error — including a 6.1 timeout — is treated
+    /// as "not found" rather than panicking or propagating, matching the
+    /// rest of this impl's fall-back-to-WS-on-error posture. This `bool`
+    /// signature cannot carry an error, and `false` is the conservative
+    /// value *for these callers*: the blob HTTP origin's `HEAD /blobs`
+    /// 404 and `PUT /blobs` dedupe short-circuit, where a spurious "absent"
+    /// costs a WS fallback or an idempotent re-PUT, while a spurious
+    /// "present" would 200 a HEAD for bytes that can't be served. GC
+    /// liveness never reads this method — it goes through `hydrate_blob` /
+    /// `head_key` / `blob_gc_sweep`, all of which carry errors. Delegate
+    /// mode has no bucket credentials to `HEAD` with, so it always reports
+    /// `false` — a consumer needing existence in that mode should use `GET
     /// /blobs/{hash}/url` (S4.2) or its own app-side check instead.
     fn has_blob(&self, hash: &Hash) -> bool {
         match &self.cfg.auth {
             S3Auth::Direct { .. } => match self.direct_head(hash) {
                 Ok(exists) => exists,
                 Err(e) => {
-                    tracing::warn!(?e, "has_blob: HEAD failed; treating as not-found");
+                    tracing::warn!(%e, "has_blob: HEAD failed (backend error, NOT confirmed absence); reporting not-found to the HTTP existence probe");
                     false
                 }
             },
@@ -617,14 +722,16 @@ impl BlobPersistence for S3BlobStore {
         };
         let path = ObjectPath::from(self.key_for(hash));
         let payload = Bytes::copy_from_slice(bytes);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
-            let res = rt2.block_on(async move { s3.put(&path, payload.into()).await });
-            let _ = tx.send(res);
+        // This trait method returns `()`, so a timeout can only be logged.
+        // Loudly: an unpersisted blob means a later peer's resolve_get_url
+        // finds nothing, and this log line is the only breadcrumb.
+        let res = block_on_shared_runtime("persist_put", self.cfg.op_timeout, async move {
+            s3.put(&path, payload.into()).await
         });
-        if let Err(e) = rx.recv().map_err(|e| S3BlobError::Config(format!("thread error: {e}"))).and_then(|r| r.map_err(S3BlobError::ObjectStore)) {
-            tracing::warn!(?e, "S3 persist_blob failed");
+        match res {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(?e, "S3 persist_blob failed"),
+            Err(e) => tracing::warn!(%e, "S3 persist_blob failed (bridge/timeout)"),
         }
     }
 
@@ -703,10 +810,12 @@ impl BlobPersistence for S3BlobStore {
         let tombs_prefix = format!("{}{}", self.cfg.path_prefix, TOMBSTONE_INFIX);
         let live_set: std::collections::HashSet<String> =
             live.iter().map(|h| h.to_hex()).collect();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
-            let res = rt2.block_on(async move {
+        // One bridge call for the whole pass, bounded by `sweep_timeout`
+        // (each request inside is separately bounded by `op_timeout` via
+        // the client options set in `new`). An aborted sweep = a crashed
+        // sweep, which the two-phase tombstone protocol tolerates: nothing
+        // is deleted without a previously persisted, aged tombstone.
+        let res = block_on_shared_runtime("gc_sweep", self.cfg.sweep_timeout, async move {
                 let now_ms = now_unix_millis();
                 let grace_ms = grace.as_millis();
 
@@ -802,10 +911,18 @@ impl BlobPersistence for S3BlobStore {
                     }
                 }
                 deleted
-            });
-            let _ = tx.send(res);
         });
-        rx.recv().map_err(|_| 0).unwrap_or(0)
+        match res {
+            Ok(deleted) => deleted,
+            // Timed out / bridge lost: report zero deletions — the
+            // conservative sweep outcome — and say loudly why, because a
+            // sweep that "reclaims nothing" every tick against a hung
+            // bucket would otherwise look like a healthy no-op.
+            Err(e) => {
+                tracing::error!(%e, "blob_gc_sweep aborted by timeout/bridge failure; no deletions reported");
+                0
+            }
+        }
     }
 
     fn resolve_get_url(
@@ -978,6 +1095,62 @@ mod tests {
         assert_eq!(c.presign_put_ttl, Duration::from_secs(900));
         assert_eq!(c.direct_upload_threshold, 1 * 1024 * 1024);
         assert!(c.require_https);
+        assert_eq!(c.op_timeout, Duration::from_secs(30));
+        assert_eq!(c.connect_timeout, Duration::from_secs(10));
+        assert_eq!(c.sweep_timeout, Duration::from_secs(900));
+    }
+
+    /// Slice 6.1 (finding #11): N ops → exactly 1 runtime, ever. Pre-6.1
+    /// each of the nine bridge sites ran `tokio::runtime::Runtime::new()`
+    /// inside a fresh `std::thread::spawn` per call — N ops meant N
+    /// runtimes (that half is demonstrated by the old code shape, not by a
+    /// test; the counter didn't exist to observe it). Post-6.1 the counter
+    /// sits inside `BRIDGE_RUNTIME`'s init closure, so it counts real
+    /// constructions: several ops of different shapes (HEAD, GET,
+    /// delegate HTTP) through the bridge must leave it at 1. This is the
+    /// only test in this binary that touches the bridge, so the assertion
+    /// is exact, not `<=`.
+    #[test]
+    fn bridge_reuses_one_shared_runtime_across_ops() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for conn in listener.incoming() {
+                match conn {
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut cfg = S3BlobStoreConfig::default();
+        cfg.bucket = "b".into();
+        cfg.endpoint = Some(format!("http://{addr}"));
+        cfg.require_https = false;
+        cfg.auth = S3Auth::direct_explicit("ak", "sk");
+        cfg.op_timeout = Duration::from_millis(200);
+        cfg.connect_timeout = Duration::from_millis(200);
+        let direct = S3BlobStore::new(cfg).unwrap();
+
+        let mut cfg = S3BlobStoreConfig::default();
+        cfg.bucket = "b".into();
+        cfg.auth = S3Auth::delegate(format!("http://{addr}/presign"), None);
+        cfg.op_timeout = Duration::from_millis(200);
+        cfg.connect_timeout = Duration::from_millis(200);
+        let delegate = S3BlobStore::new(cfg).unwrap();
+
+        let h = Hash::of(b"whatever");
+        let _ = direct.has_blob(&h);
+        let _ = direct.hydrate_blob(&h);
+        let _ = direct.verify_uploaded("room", &h);
+        let _ = delegate.resolve_get_url("room", &h, None);
+
+        assert_eq!(
+            BRIDGE_RUNTIMES_BUILT.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "four ops across two stores and two auth modes must share one runtime"
+        );
     }
 
     #[test]

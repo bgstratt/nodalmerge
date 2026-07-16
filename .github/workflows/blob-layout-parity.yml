@@ -64,6 +64,15 @@ name: blob-layout-parity
 #                                                 — the NonHydratingBackend port
 #                                                 this workflow's blob_gc step
 #                                                 uses is a copy, not the backend)
+#   server/s3-blobs/tests/bridge_timeouts.rs (slice 6.1, finding #11 — every
+#                                                 sync→async bridge op against
+#                                                 a stalled endpoint must fail
+#                                                 bounded and classify as a
+#                                                 backend error, never missing.
+#                                                 Docker-free: the stalled
+#                                                 endpoint is an in-test
+#                                                 TcpListener, so it lives here
+#                                                 rather than blob-s3-gc-minio.yml)
 #   server/server/tests/blob_relay_nonhydrating_backend.rs (S4.2 relay
 #                                                 contract; previously shipped
 #                                                 without a CI step — added
@@ -275,6 +284,10 @@ on:
       # slice 2.2 — Delegate-mode fail-loud gate. Docker-free (Delegate opens no
       # connection), so it lives in this workflow rather than blob-s3-gc-minio.yml.
       - "server/s3-blobs/tests/delegate_gc.rs"
+      # slice 6.1 (finding #11) — stalled-endpoint bridge/timeout gate. Docker-free
+      # (the stalled endpoint is an in-test TcpListener), so it lives in this
+      # workflow rather than blob-s3-gc-minio.yml.
+      - "server/s3-blobs/tests/bridge_timeouts.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -345,6 +358,10 @@ on:
       # slice 2.2 — Delegate-mode fail-loud gate. Docker-free (Delegate opens no
       # connection), so it lives in this workflow rather than blob-s3-gc-minio.yml.
       - "server/s3-blobs/tests/delegate_gc.rs"
+      # slice 6.1 (finding #11) — stalled-endpoint bridge/timeout gate. Docker-free
+      # (the stalled endpoint is an in-test TcpListener), so it lives in this
+      # workflow rather than blob-s3-gc-minio.yml.
+      - "server/s3-blobs/tests/bridge_timeouts.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -426,6 +443,9 @@ jobs:
 
       - name: Run Delegate-mode studio-GC fail-loud gate (slice 2.2, finding #10 — an S3-Delegate server must report "cannot resolve tree object" as a distinct, actionable config error, never a generic missing-blob; no Docker needed, Delegate mode opens no connection)
         run: cargo test -p nodalmerge-s3-blobs --test delegate_gc
+
+      - name: Run stalled-endpoint bridge/timeout gate (slice 6.1, finding #11 — every S3/delegate op against a hung endpoint must fail within the configured bound and classify as a backend error, never as missing/absent; no Docker needed, the stalled endpoint is an in-test TcpListener)
+        run: cargo test -p nodalmerge-s3-blobs --test bridge_timeouts
 
   dotnet-blob-layout:
     name: dotnet blob layout + delegate protocol + interop

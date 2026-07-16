@@ -349,6 +349,9 @@ async fn main() {
 /// | `NODALMERGE_S3_PRESIGN_PUT_TTL_SECS` | `900` | |
 /// | `NODALMERGE_S3_DIRECT_UPLOAD_THRESHOLD_BYTES` | `1048576` (1 MiB) | |
 /// | `NODALMERGE_S3_REQUIRE_HTTPS` | `true` | `false`/`0` for MinIO over HTTP |
+/// | `NODALMERGE_S3_OP_TIMEOUT_SECS` | `30` | Per-op bound; slice 6.1 |
+/// | `NODALMERGE_S3_CONNECT_TIMEOUT_SECS` | `10` | TCP connect bound; slice 6.1 |
+/// | `NODALMERGE_S3_SWEEP_TIMEOUT_SECS` | `900` | Whole-GC-sweep bound; slice 6.1 |
 /// | `NODALMERGE_S3_AUTH_MODE` | `direct` | `direct` \| `delegate` |
 /// | `NODALMERGE_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_SESSION_TOKEN` | *(none = AWS default chain)* | Direct mode only |
 /// | `NODALMERGE_S3_DELEGATE_ENDPOINT` | *(required for delegate mode)* | |
@@ -363,6 +366,9 @@ fn build_s3_config_from_env() -> Result<S3BlobStoreConfig, String> {
     let presign_put_ttl_secs = env_parse_u64("NODALMERGE_S3_PRESIGN_PUT_TTL_SECS", 900)?;
     let direct_upload_threshold = env_parse_u64("NODALMERGE_S3_DIRECT_UPLOAD_THRESHOLD_BYTES", 1024 * 1024)?;
     let require_https = env_parse_bool("NODALMERGE_S3_REQUIRE_HTTPS", true)?;
+    let op_timeout_secs = env_parse_u64("NODALMERGE_S3_OP_TIMEOUT_SECS", 30)?;
+    let connect_timeout_secs = env_parse_u64("NODALMERGE_S3_CONNECT_TIMEOUT_SECS", 10)?;
+    let sweep_timeout_secs = env_parse_u64("NODALMERGE_S3_SWEEP_TIMEOUT_SECS", 900)?;
 
     let auth_mode = env_nonempty("NODALMERGE_S3_AUTH_MODE").unwrap_or_else(|| "direct".to_string());
     let auth = match auth_mode.as_str() {
@@ -389,6 +395,9 @@ fn build_s3_config_from_env() -> Result<S3BlobStoreConfig, String> {
         presign_put_ttl: std::time::Duration::from_secs(presign_put_ttl_secs),
         direct_upload_threshold,
         require_https,
+        op_timeout: std::time::Duration::from_secs(op_timeout_secs),
+        connect_timeout: std::time::Duration::from_secs(connect_timeout_secs),
+        sweep_timeout: std::time::Duration::from_secs(sweep_timeout_secs),
         auth,
     })
 }

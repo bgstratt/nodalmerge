@@ -26,6 +26,21 @@ name: blob-layout-parity
 #                                                 is skip-gated until 3.1 and
 #                                                 intentionally has no step
 #                                                 below)
+#   server/server/tests/tree_walk_depth.rs       (slice 1.5 / finding #9 — a
+#                                                 deep single-entry tree-blob
+#                                                 chain must fail closed with
+#                                                 TreeWalkError::TooDeep rather
+#                                                 than overflowing the worker
+#                                                 stack and aborting the
+#                                                 process. NOTE: tree_walk.rs
+#                                                 itself was absent from the
+#                                                 paths: filters below until
+#                                                 1.5 — a step alone does not
+#                                                 make a suite run; the trigger
+#                                                 must list the source file the
+#                                                 suite guards, or the workflow
+#                                                 never fires on the PR that
+#                                                 breaks it)
 #   server/s3-blobs/src/lib.rs (blob_layout_vectors_match_s3_key_derivation)
 #   server/server/tests/blob_relay_nonhydrating_backend.rs (S4.2 relay
 #                                                 contract; previously shipped
@@ -69,6 +84,7 @@ on:
       - "engine/commands/fixtures/zstd-interop-v1/**"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
+      - "server/server/src/tree_walk.rs"
       - "server/server/src/blob_http.rs"
       - "server/server/src/main.rs"
       - "server/dev-server/src/main.rs"
@@ -76,6 +92,7 @@ on:
       - "server/server/tests/blob_layout_vectors.rs"
       - "server/server/tests/blob_layout_interop.rs"
       - "server/server/tests/blob_gc.rs"
+      - "server/server/tests/tree_walk_depth.rs"
       - "server/server/tests/blob_http_surface.rs"
       - "server/server/tests/zstd_interop.rs"
       - "server/server/tests/blob_relay_nonhydrating_backend.rs"
@@ -102,6 +119,7 @@ on:
       - "engine/commands/fixtures/zstd-interop-v1/**"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
+      - "server/server/src/tree_walk.rs"
       - "server/server/src/blob_http.rs"
       - "server/server/src/main.rs"
       - "server/dev-server/src/main.rs"
@@ -109,6 +127,7 @@ on:
       - "server/server/tests/blob_layout_vectors.rs"
       - "server/server/tests/blob_layout_interop.rs"
       - "server/server/tests/blob_gc.rs"
+      - "server/server/tests/tree_walk_depth.rs"
       - "server/server/tests/blob_http_surface.rs"
       - "server/server/tests/zstd_interop.rs"
       - "server/server/tests/blob_relay_nonhydrating_backend.rs"
@@ -162,6 +181,9 @@ jobs:
 
       - name: Run non-hydrating-backend conformance harness (slice 0.2; RED scenarios are #[ignore]d until their Phase 2 slice ships)
         run: cargo test -p nodalmerge-server --test blob_nonhydrating_conformance
+
+      - name: Run tree-walk depth-bound regression test (slice 1.5, finding #9 — deep chain must fail closed, not abort the process)
+        run: cargo test -p nodalmerge-server --test tree_walk_depth
 
       - name: Run cross-runtime zstd interop test (dotnet-produced frame)
         run: cargo test -p nodalmerge-server --test zstd_interop

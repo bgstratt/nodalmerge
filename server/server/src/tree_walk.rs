@@ -27,6 +27,17 @@ use serde::Deserialize;
 
 use crate::store::{hash_from_hex, BlobPersistence};
 
+/// Hard cap on directory-chain nesting a single walk will follow (v2 `"d"`
+/// entries only — v1 entries and v2 `"f"` entries are always terminal and
+/// never contribute to depth). This is **not** a plausible-repo limit — real
+/// trees are expected to be a handful of levels deep — it exists purely as a
+/// fail-closed backstop against a pathological/adversarial chain of
+/// single-entry tree blobs (see finding #9: such a chain is uploadable via
+/// anonymous blob PUT). 4096 is far beyond any legitimate directory nesting
+/// while still bounding the walk's work to something a single GC tick can
+/// afford.
+const MAX_TREE_DEPTH: usize = 4096;
+
 /// Everything that can go wrong walking a tree — always fatal to the whole
 /// walk (fail-closed; see module docs).
 #[derive(Debug)]
@@ -38,6 +49,11 @@ pub enum TreeWalkError {
     /// `TREE_OBJECT_FORMAT.md` (bad JSON, missing/unsupported `version`,
     /// non-canonical hash string, unknown entry `kind`, …).
     Malformed(String),
+    /// The directory-chain nesting exceeded [`MAX_TREE_DEPTH`]. Fail-closed
+    /// backstop for finding #9 (unbounded recursion → stack-overflow process
+    /// abort) — see the module docs and slice 1.5 of
+    /// `plans/blob-cas-remediation.md`.
+    TooDeep { hash: String, depth: usize },
 }
 
 impl std::fmt::Display for TreeWalkError {
@@ -45,6 +61,11 @@ impl std::fmt::Display for TreeWalkError {
         match self {
             TreeWalkError::MissingBlob(h) => write!(f, "missing tree/blob object {h}"),
             TreeWalkError::Malformed(m) => write!(f, "malformed tree object: {m}"),
+            TreeWalkError::TooDeep { hash, depth } => write!(
+                f,
+                "tree walk aborted at {hash}: directory nesting depth {depth} exceeds the \
+                 hard cap of {MAX_TREE_DEPTH} (see finding #9, plans/blob-cas-remediation.md 1.5)"
+            ),
         }
     }
 }
@@ -76,80 +97,91 @@ struct TreeV2 {
 
 /// Walk a tree object rooted at `root_hash`, returning every reachable
 /// **tree-object** hash (including the root itself) and **file blob** hash.
-/// Fails closed: any missing or malformed blob aborts with `Err`.
+/// Fails closed: any missing or malformed blob, or nesting beyond
+/// [`MAX_TREE_DEPTH`], aborts with `Err`.
+///
+/// Implemented as an explicit work-stack rather than recursion (finding #9):
+/// `walk_one`'s old per-directory-level recursion had no depth bound, so a
+/// chain of distinct single-entry `"d"` tree blobs — trivially uploadable via
+/// anonymous blob PUT — overflowed the worker's OS stack and aborted the
+/// whole server process. Driving the traversal from a heap-allocated `Vec`
+/// removes the OS call-stack entirely from the scaling story; the
+/// `MAX_TREE_DEPTH` cap on top is a fail-closed backstop against a
+/// pathological chain consuming unbounded work in a single GC tick, not a
+/// plausible-repo limit.
 pub fn walk_tree(
     persistence: &dyn BlobPersistence,
     root_hash: &Hash,
 ) -> Result<HashSet<Hash>, TreeWalkError> {
     let mut out = HashSet::new();
-    walk_one(persistence, root_hash, &mut out)?;
-    Ok(out)
-}
+    // (hash, depth-of-this-directory-in-the-chain). The root is depth 0.
+    let mut stack: Vec<(Hash, usize)> = vec![(*root_hash, 0)];
 
-fn walk_one(
-    persistence: &dyn BlobPersistence,
-    hash: &Hash,
-    out: &mut HashSet<Hash>,
-) -> Result<(), TreeWalkError> {
-    // v2 subtrees are shared across generations by construction (identical
-    // content ⇒ identical hash) — short-circuit on repeat visits so a large
-    // shared subtree is fetched/parsed at most once per walk.
-    if !out.insert(*hash) {
-        return Ok(());
-    }
-
-    let bytes = persistence
-        .get_blob(hash)
-        .ok_or_else(|| TreeWalkError::MissingBlob(hash.to_hex()))?;
-
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-        TreeWalkError::Malformed(format!("{} is not valid JSON: {e}", hash.to_hex()))
-    })?;
-
-    let version = value.get("version").and_then(|v| v.as_u64()).ok_or_else(|| {
-        TreeWalkError::Malformed(format!("{} is missing an integer 'version'", hash.to_hex()))
-    })?;
-
-    match version {
-        1 => {
-            let tree: TreeV1 = serde_json::from_value(value)
-                .map_err(|e| TreeWalkError::Malformed(format!("{}: {e}", hash.to_hex())))?;
-            for hex in tree.entries.values() {
-                let h = parse_entry_hash(hash, hex)?;
-                // v1 entries are always file blobs — never recurse.
-                out.insert(h);
-            }
+    while let Some((hash, depth)) = stack.pop() {
+        // v2 subtrees are shared across generations by construction (identical
+        // content ⇒ identical hash) — short-circuit on repeat visits so a large
+        // shared subtree is fetched/parsed at most once per walk.
+        if !out.insert(hash) {
+            continue;
         }
-        2 => {
-            let tree: TreeV2 = serde_json::from_value(value)
-                .map_err(|e| TreeWalkError::Malformed(format!("{}: {e}", hash.to_hex())))?;
-            for entry in tree.entries {
-                let h = parse_entry_hash(hash, &entry.h)?;
-                match entry.k.as_str() {
-                    "f" => {
-                        out.insert(h);
-                    }
-                    "d" => {
-                        walk_one(persistence, &h, out)?;
-                    }
-                    other => {
-                        return Err(TreeWalkError::Malformed(format!(
-                            "{}: unknown entry kind {other:?} (expected \"f\" or \"d\")",
-                            hash.to_hex()
-                        )))
+
+        if depth > MAX_TREE_DEPTH {
+            return Err(TreeWalkError::TooDeep { hash: hash.to_hex(), depth });
+        }
+
+        let bytes = persistence
+            .get_blob(&hash)
+            .ok_or_else(|| TreeWalkError::MissingBlob(hash.to_hex()))?;
+
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            TreeWalkError::Malformed(format!("{} is not valid JSON: {e}", hash.to_hex()))
+        })?;
+
+        let version = value.get("version").and_then(|v| v.as_u64()).ok_or_else(|| {
+            TreeWalkError::Malformed(format!("{} is missing an integer 'version'", hash.to_hex()))
+        })?;
+
+        match version {
+            1 => {
+                let tree: TreeV1 = serde_json::from_value(value)
+                    .map_err(|e| TreeWalkError::Malformed(format!("{}: {e}", hash.to_hex())))?;
+                for hex in tree.entries.values() {
+                    let h = parse_entry_hash(&hash, hex)?;
+                    // v1 entries are always file blobs — never recurse.
+                    out.insert(h);
+                }
+            }
+            2 => {
+                let tree: TreeV2 = serde_json::from_value(value)
+                    .map_err(|e| TreeWalkError::Malformed(format!("{}: {e}", hash.to_hex())))?;
+                for entry in tree.entries {
+                    let h = parse_entry_hash(&hash, &entry.h)?;
+                    match entry.k.as_str() {
+                        "f" => {
+                            out.insert(h);
+                        }
+                        "d" => {
+                            stack.push((h, depth + 1));
+                        }
+                        other => {
+                            return Err(TreeWalkError::Malformed(format!(
+                                "{}: unknown entry kind {other:?} (expected \"f\" or \"d\")",
+                                hash.to_hex()
+                            )))
+                        }
                     }
                 }
             }
-        }
-        other => {
-            return Err(TreeWalkError::Malformed(format!(
-                "{}: unsupported tree version {other} (this walk understands v1/v2 only)",
-                hash.to_hex()
-            )))
+            other => {
+                return Err(TreeWalkError::Malformed(format!(
+                    "{}: unsupported tree version {other} (this walk understands v1/v2 only)",
+                    hash.to_hex()
+                )))
+            }
         }
     }
 
-    Ok(())
+    Ok(out)
 }
 
 fn parse_entry_hash(tree_hash: &Hash, hex: &str) -> Result<Hash, TreeWalkError> {

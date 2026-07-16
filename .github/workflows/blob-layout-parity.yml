@@ -21,11 +21,17 @@ name: blob-layout-parity
 #   server/server/tests/blob_layout_vectors.rs
 #   server/server/tests/blob_layout_interop.rs
 #   server/server/tests/blob_http_surface.rs
-#   server/server/tests/zstd_interop.rs          (rust-as-consumer only; the
-#                                                 dotnet-as-consumer RED test
-#                                                 is skip-gated until 3.1 and
-#                                                 intentionally has no step
-#                                                 below)
+#   server/server/tests/zstd_interop.rs           (rust-as-consumer only: Rust
+#                                                 decoding a .NET-produced
+#                                                 frame was already green
+#                                                 pre-3.1, since Rust's
+#                                                 decode_all handles both
+#                                                 content-size-header shapes.
+#                                                 The other, previously-broken
+#                                                 direction — .NET decoding a
+#                                                 *Rust*-produced frame — is
+#                                                 pinned by ZstdInteropTests.cs
+#                                                 below, not here)
 #   server/server/tests/tree_walk_depth.rs       (slice 1.5 / finding #9 — a
 #                                                 deep single-entry tree-blob
 #                                                 chain must fail closed with
@@ -60,12 +66,71 @@ name: blob-layout-parity
 #                                                 `#[ignore]`d and skipped by
 #                                                 this step until their slice
 #                                                 ships)
+#   hosts/dotnet/…/BlobCompression.cs             (slice 3.1's fix — see the
+#                                                 ZstdInteropTests.cs entry
+#                                                 below. Was missing from the
+#                                                 paths: filters until the CI
+#                                                 follow-up for 3.1: the file
+#                                                 that was actually fixed
+#                                                 could not trigger this
+#                                                 workflow)
+#   hosts/dotnet/…/ServiceCollectionExtensions.cs (the DI composition root —
+#                                                 every .NET test below reaches
+#                                                 File/S3Delegated provider
+#                                                 wiring through
+#                                                 AddNodalMergeHostProviders.
+#                                                 Added by the 3.1 CI
+#                                                 follow-up audit: a wiring
+#                                                 regression here (e.g. which
+#                                                 provider "File" resolves to)
+#                                                 could break every test below
+#                                                 with no trigger)
+#   hosts/dotnet/…/NodalMergeHostProviderOptions.cs (parses which provider
+#                                                 each test's config selects;
+#                                                 same audit, same reasoning)
+#   hosts/dotnet/…/FileBlobStorageOptions.cs      (binds Compression/
+#                                                 CompressionLevel/
+#                                                 CompressionMinBytes — the
+#                                                 config surface that decides
+#                                                 whether BlobCompression is
+#                                                 even invoked; same audit)
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs
-#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs (see
-#                                                 note above — no dotnet CI
-#                                                 step yet)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs (slice
+#                                                 3.1, finding #4 — pins the
+#                                                 direction that was actually
+#                                                 broken: .NET decoding a
+#                                                 header-less zstd frame
+#                                                 produced by Rust's
+#                                                 zstd::stream::encode_all.
+#                                                 BlobCompression.TryDecompress
+#                                                 used to require
+#                                                 written == buffer.Length
+#                                                 after sizing the output
+#                                                 buffer from
+#                                                 Decompressor.GetDecompressedSize,
+#                                                 which returns only an upper
+#                                                 bound (the zstd default
+#                                                 window size) for frames
+#                                                 without a content-size
+#                                                 header — every frame Rust's
+#                                                 at-rest encoder produces — so
+#                                                 every cross-runtime
+#                                                 compressed fetch was
+#                                                 rejected as "corrupt zstd
+#                                                 frame." Fixed by accepting
+#                                                 written <= buffer.Length.
+#                                                 A Rust-only interop test
+#                                                 (zstd_interop.rs above)
+#                                                 cannot catch a regression
+#                                                 here: it only proves Rust
+#                                                 can still read a .NET frame,
+#                                                 never that .NET can read a
+#                                                 Rust one — hence this
+#                                                 dedicated dotnet CI step,
+#                                                 added alongside the CI
+#                                                 follow-up for slice 3.1)
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs
 #                                                 (slice 0.2's .NET half —
 #                                                 both tests are RED/Skip-gated
@@ -99,10 +164,14 @@ on:
       - "server/server/tests/blob_nonhydrating_conformance.rs"
       - "server/stores/blob-conformance/**"
       - "server/s3-blobs/src/lib.rs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/ServiceCollectionExtensions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/NodalMergeHostProviderOptions.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
@@ -134,10 +203,14 @@ on:
       - "server/server/tests/blob_nonhydrating_conformance.rs"
       - "server/stores/blob-conformance/**"
       - "server/s3-blobs/src/lib.rs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/ServiceCollectionExtensions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/NodalMergeHostProviderOptions.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
@@ -220,3 +293,6 @@ jobs:
 
       - name: Run file store migration tests
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobStoreProviderMigrationTests"
+
+      - name: "Run cross-runtime zstd interop test (dotnet-as-consumer: decodes a rust-produced header-less frame; slice 3.1, finding #4)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ZstdInteropTests"

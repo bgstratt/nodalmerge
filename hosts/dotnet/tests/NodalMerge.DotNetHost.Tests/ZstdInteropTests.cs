@@ -8,7 +8,7 @@ using NodalMerge.Host.Composition;
 namespace NodalMerge.DotNetHost.Tests;
 
 /// <summary>
-/// Cross-runtime zstd interop — Phase 0 slice 0.1 of
+/// Cross-runtime zstd interop — Phase 0 slice 0.1 / Phase 3 slice 3.1 of
 /// nodalmerge-studio/plans/blob-cas-remediation.md (finding #4). Reads the
 /// golden fixtures in <c>engine/commands/fixtures/zstd-interop-v1/</c>
 /// (manifest <c>engine/commands/zstd-interop-vectors.v1.json</c>, both
@@ -17,9 +17,13 @@ namespace NodalMerge.DotNetHost.Tests;
 /// same-runtime, which is exactly why finding #4 shipped: every frame from
 /// Rust <c>zstd::stream::encode_all</c> carries no content-size header, and
 /// <see cref="Decompressor.GetDecompressedSize"/> returns only an upper
-/// bound for those — so <see cref="BlobCompression.TryDecompress"/>'s
-/// <c>written == buffer.Length</c> check never holds and every
-/// cross-runtime compressed fetch is rejected as "corrupt zstd frame".
+/// bound for those (verified empirically against ZstdSharp.Port 0.8.1: it
+/// returns the zstd default window size, 131072, never zero/error) — so
+/// <see cref="BlobCompression.TryDecompress"/>'s old
+/// <c>written == buffer.Length</c> check never held and every cross-runtime
+/// compressed fetch was rejected as "corrupt zstd frame" until slice 3.1
+/// relaxed it to <c>written &lt;= buffer.Length</c> (with the existing
+/// Blake3 verify-after-decompress still catching real corruption).
 ///
 /// The Rust mirror (which decodes the <c>.NET</c>-produced fixture instead,
 /// and passes today without any production change) is
@@ -116,18 +120,19 @@ public sealed class ZstdInteropTests
     }
 
     /// <summary>
-    /// RED (finding #4): a Rust <c>zstd::stream::encode_all</c> frame
+    /// Was RED (finding #4): a Rust <c>zstd::stream::encode_all</c> frame
     /// carries no content-size header, so
-    /// <see cref="BlobCompression.TryDecompress"/> mis-sizes its output
-    /// buffer from <see cref="Decompressor.GetDecompressedSize"/>'s upper
-    /// bound and rejects the frame as corrupt. Confirmed failing today with
-    /// "Failed to decode zstd frame" / <c>Assert.True() Failure</c> on
-    /// <c>result.Found</c> before this Skip was added — see the slice 0.1
-    /// report for the captured output. Un-skip once slice 3.1 fixes
-    /// <c>TryDecompress</c> to accept <c>written &lt;= buffer.Length</c> (or
-    /// switches to a streaming decoder).
+    /// <see cref="BlobCompression.TryDecompress"/> used to mis-size its
+    /// output buffer from <see cref="Decompressor.GetDecompressedSize"/>'s
+    /// upper bound and reject the frame as corrupt (confirmed failing with
+    /// <c>Assert.True() Failure</c> on <c>result.Found</c> before slice 3.1 —
+    /// see the slice 0.1 report for the captured output). Fixed by slice 3.1:
+    /// <c>TryDecompress</c> now accepts <c>written &lt;= buffer.Length</c>
+    /// and slices to the actual decoded length, relying on the caller's
+    /// Blake3 verify-after-decompress to catch a genuinely wrong/corrupt
+    /// frame instead of the buffer-length equality check.
     /// </summary>
-    [Fact(Skip = "RED: fails until slice 3.1 — see nodalmerge-studio/plans/blob-cas-remediation.md")]
+    [Fact]
     public async Task DotNet_reads_rust_encoded_frame_without_content_size_header()
     {
         var vector = RequireFixture("rust-encode-all-no-size-header");

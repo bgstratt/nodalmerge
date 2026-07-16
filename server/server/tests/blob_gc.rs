@@ -544,7 +544,6 @@ async fn blob_gc_fails_closed_when_backend_cannot_enumerate_rooms() {
 }
 
 #[tokio::test]
-#[ignore = "RED: fails until slice 1.4 — see nodalmerge-studio/plans/blob-cas-remediation.md"]
 async fn blob_gc_survives_write_through_during_still_hydrating_room() {
     // 0.3(d) — gates slice 1.4 (finding #5). `Rooms::get_or_create`
     // (server/server/src/room.rs:427) inserts a new `Room` into the
@@ -600,6 +599,83 @@ async fn blob_gc_survives_write_through_during_still_hydrating_room() {
         blob_path.exists(),
         "blob referenced by a not-yet-hydrated room must survive"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn blob_gc_zero_grace_never_deletes_on_first_sighting() {
+    // Slice 1.4, bug 2 — regression pin for `MIN_PHYSICAL_GRACE`
+    // (room.rs). Before the fix, `Rooms::sweep_blobs(Duration::ZERO)`
+    // handed a literal zero straight to `DirPersistence::blob_gc_sweep`,
+    // whose "no tombstone yet" branch deletes same-call when
+    // `grace.is_zero()` — collapsing the two-phase protocol into a
+    // same-tick delete on an unreferenced blob's very first sighting. That
+    // reopens the write-through race slice 1.4 closes: a blob whose
+    // referencing node lands in the same window as its first GC sighting
+    // would be deleted before the write-through has a chance to catch up.
+    //
+    // The fix floors what `sweep_blobs` hands the backend to
+    // `MIN_PHYSICAL_GRACE` (1ms), so first sighting an unreferenced blob
+    // must ALWAYS only tombstone, regardless of the caller's requested
+    // grace — physical deletion always waits for a later, separate sweep
+    // call. That's the deterministic invariant under test here: no
+    // concurrency/racing needed to observe it, unlike the hydration-race
+    // gate above.
+    let dir = tmpdir("zero-grace-first-sighting");
+    let persistence: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap());
+    let room_id = "zero-grace-room".to_string();
+
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&[0x0Bu8; 32]),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    );
+    let _room = rooms.get_or_create(&room_id).await;
+
+    // An orphan blob: on disk, but never referenced by any node.
+    let orphan_bytes = b"never-referenced-zero-grace".to_vec();
+    let orphan_hash = Hash::of(&orphan_bytes);
+    persistence.persist_blob(&orphan_hash, &orphan_bytes);
+
+    let blake3_dir = dir.join("blobs").join("blake3");
+    let tombs_dir = dir.join("blobs").join(".tombstones").join("blake3");
+    let orphan_path = blake3_dir.join(orphan_hash.to_hex());
+    let orphan_tomb = tombs_dir.join(orphan_hash.to_hex());
+
+    // --- First sighting, grace == ZERO: must ONLY tombstone. ---------------
+    let deleted = rooms.sweep_blobs(Duration::ZERO).await;
+    assert_eq!(
+        deleted, 0,
+        "first sweep must never delete on the blob's first sighting, even with grace == 0"
+    );
+    assert!(
+        orphan_path.exists(),
+        "orphan must still be on disk after its first sighting"
+    );
+    assert!(
+        orphan_tomb.exists(),
+        "orphan must be tombstoned on its first sighting"
+    );
+
+    // Let the floored MIN_PHYSICAL_GRACE (1ms) elapse before the second,
+    // separate sweep call below — this ages a tombstone that already
+    // exists, it does not race a window.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // --- Second, separate sighting: tombstone is now old enough. -----------
+    let deleted = rooms.sweep_blobs(Duration::ZERO).await;
+    assert_eq!(
+        deleted, 1,
+        "second, separate sweep must delete the now-aged tombstone"
+    );
+    assert!(
+        !orphan_path.exists(),
+        "orphan must be gone after the second sweep"
+    );
+    assert!(!orphan_tomb.exists(), "tombstone cleaned up with delete");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

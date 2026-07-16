@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::AtomicUsize,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -99,6 +99,17 @@ pub struct Room {
     pub(crate) projection_build_semaphore: Mutex<Option<(usize, Arc<Semaphore>)>>,
     /// Waiters blocked on `projection_build_semaphore` (bounded by env max queue).
     pub(crate) projection_build_waiting: AtomicUsize,
+    /// blob-cas-remediation.md slice 1.4 (finding #5) — set once the
+    /// background persistence hydration spawned by [`Rooms::get_or_create`]
+    /// has finished loading nodes/blobs into this room's in-memory graph
+    /// (or immediately, on a non-durable backend, where there is nothing to
+    /// hydrate). `false` from construction until then. `Rooms::sweep_blobs`
+    /// consults this: a resident-but-still-hydrating room's in-memory graph
+    /// is empty (or partial), so treating residency alone as "this room's
+    /// live set is covered" would skip the persisted-node scan for a room
+    /// whose blobs aren't visible yet — losing them. Only a fully-hydrated
+    /// resident room may skip that fallback scan.
+    pub hydrated: AtomicBool,
 }
 
 impl Room {
@@ -139,6 +150,7 @@ impl Room {
             projections: RwLock::new(HashMap::new()),
             projection_build_semaphore: Mutex::new(None),
             projection_build_waiting: AtomicUsize::new(0),
+            hydrated: AtomicBool::new(false),
         })
     }
 
@@ -325,6 +337,18 @@ impl Room {
         Some(b64)
     }
 }
+
+/// blob-cas-remediation.md slice 1.4 (finding #5), bug 2 — the smallest
+/// grace [`Rooms::sweep_blobs`] will ever hand to
+/// `ServerPersistence::blob_gc_sweep`, regardless of the operator's
+/// configured `--blob-gc-grace`. A literal zero collapses the backend's
+/// two-phase tombstone into a same-call delete on first sight of an
+/// unreferenced blob, which reopens the write-through race this slice
+/// closes (see `sweep_blobs`'s doc comment). One millisecond is enough to
+/// push physical deletion to a later, separate sweep call without making
+/// `grace == 0` mean anything materially different in practice (a
+/// subsequent sweep tick is still ordinarily seconds away).
+const MIN_PHYSICAL_GRACE: Duration = Duration::from_millis(1);
 
 /// Global registry of rooms, lazily created on first connection.
 ///
@@ -536,6 +560,15 @@ impl Rooms {
                         "async persistence hydrate completed"
                     );
                 }
+                // blob-cas-remediation.md slice 1.4 (finding #5) — mark
+                // hydration complete unconditionally (durable or not: a
+                // non-durable backend has nothing to load, so it's
+                // trivially "hydrated"). Must be set only *after* every
+                // stage above has published its writes (graph/blobs/
+                // lineage), since `Rooms::sweep_blobs` treats this flag as
+                // its signal that the room's in-memory graph is a complete
+                // substitute for scanning persisted nodes directly.
+                room_clone.hydrated.store(true, Ordering::SeqCst);
             });
         }
         room
@@ -627,6 +660,31 @@ impl Rooms {
     /// `self.persistence.can_enumerate_rooms()` is `false`, the entire
     /// delete pass is skipped (logged, zero deletions) instead of trusting
     /// an empty `known_room_ids()` as proof no cold room needs protecting.
+    ///
+    /// blob-cas-remediation.md slice 1.4 (finding #5) — two more races in
+    /// the same shape, both fail-closed:
+    /// - **Hydration race.** `Rooms::get_or_create` inserts a room into
+    ///   `self.rooms` (making it "resident") *before* its background
+    ///   persistence hydration has populated its in-memory graph. Treating
+    ///   residency alone as "covered by the resident-graph scan above"
+    ///   would skip the persisted-node fallback for a room whose live set
+    ///   is (partially or wholly) empty only because hydration hasn't run
+    ///   yet — not because it has no blobs. Only a room whose
+    ///   [`Room::hydrated`] flag is set may be excluded from the fallback
+    ///   scan below.
+    /// - **Write-through window.** Even for a fully-hydrated room, this
+    ///   function's own live-set snapshot can go stale: several `.await`
+    ///   points separate collecting `live` from the physical
+    ///   `blob_gc_sweep` call, and a blob whose bytes + referencing node
+    ///   land during that window isn't in `live`. With a literal
+    ///   `grace == ZERO`, the backend's "no tombstone yet" branch deletes
+    ///   on the very same call that creates the tombstone — a genuine
+    ///   same-tick delete with no window at all. `MIN_PHYSICAL_GRACE`
+    ///   floors what we hand the backend so first-sighting an unreferenced
+    ///   blob only ever tombstones; physical deletion always waits for a
+    ///   later, separate sweep call, by which time the write-through has
+    ///   ordinarily caught up. This does not change two-phase *aging*
+    ///   semantics once a tombstone exists — see below.
     pub async fn sweep_blobs(&self, grace: Duration) -> usize {
         if !self.persistence.is_durable() {
             return 0;
@@ -639,8 +697,16 @@ impl Rooms {
                 .map(|(k, v)| (k.clone(), Arc::clone(v)))
                 .collect()
         };
-        let resident_ids: std::collections::HashSet<&str> =
-            resident.iter().map(|(id, _)| id.as_str()).collect();
+        // Only a *fully hydrated* resident room's in-memory graph is a
+        // trustworthy substitute for the persisted-node fallback scan
+        // below (slice 1.4, bug 1). A room still replaying its background
+        // hydration is resident but its graph may be empty/partial, so it
+        // must fall through to `load_room_nodes` like a cold room would.
+        let resident_ids: std::collections::HashSet<&str> = resident
+            .iter()
+            .filter(|(_, room)| room.hydrated.load(Ordering::SeqCst))
+            .map(|(id, _)| id.as_str())
+            .collect();
 
         let mut live = std::collections::HashSet::new();
         for (_, room) in &resident {
@@ -695,7 +761,17 @@ impl Rooms {
             }
         }
 
-        let deleted = self.persistence.blob_gc_sweep(&live, grace);
+        // blob-cas-remediation.md slice 1.4 (finding #5), bug 2 — never
+        // hand the backend a literal zero. `DirPersistence::blob_gc_sweep`
+        // (and the S3 conformance port) delete same-call when there's no
+        // existing tombstone and `grace.is_zero()`. Flooring here forces
+        // every first-sighting to only tombstone, regardless of the
+        // operator's configured `--blob-gc-grace`; a later, separate sweep
+        // call still deletes as soon as the tombstone is `grace` old
+        // (immediately, for a configured zero) — this closes only the
+        // same-tick write-through race, not the two-phase aging window.
+        let physical_grace = grace.max(MIN_PHYSICAL_GRACE);
+        let deleted = self.persistence.blob_gc_sweep(&live, physical_grace);
         if deleted > 0 {
             metrics::counter!("nodalmerge_blob_gc_deleted_total").increment(deleted as u64);
             tracing::info!(deleted, "blob GC reclaimed blobs");
@@ -781,8 +857,16 @@ pub fn spawn_idle_sweeper(
 ///
 /// Wakes every `interval` and calls [`Rooms::sweep_blobs`] with the
 /// configured `grace` window. `interval.is_zero()` disables GC (this
-/// function returns `None`); `grace == ZERO` collapses the two-phase
-/// tombstone protocol into a single-pass delete.
+/// function returns `None`).
+///
+/// **Updated by blob-cas-remediation.md slice 1.4 (finding #5):**
+/// `grace == ZERO` no longer collapses the two-phase tombstone protocol
+/// into a same-call delete — `sweep_blobs` floors what it hands the
+/// backend to [`MIN_PHYSICAL_GRACE`] so a blob's first sighting as
+/// unreferenced always just tombstones. With `grace == ZERO` a tombstone
+/// is still eligible for deletion on the *next* separate sweep call
+/// (effectively immediately, since `MIN_PHYSICAL_GRACE` is sub-millisecond
+/// relative to any real `interval`) — only the same-tick delete is gone.
 ///
 /// Callers can drop the returned `JoinHandle` — aborting the tokio
 /// runtime drops the task.

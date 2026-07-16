@@ -54,6 +54,14 @@ on:
     paths:
       - "engine/commands/work-unit-status-vectors.v1.json"
       - "server/server/src/studio_live_hashes.rs"
+      # slice 2.2 — studio_live_hashes.rs resolves cas-tree snapshots through
+      # tree_walk::walk_tree, which reads blobs through the BlobPersistence
+      # trait in store.rs. Both suites below transitively exercise them, so a
+      # change there must fire this workflow. (Same class of gap slice 1.5
+      # fixed in blob-layout-parity.yml: these filters enumerate implementation
+      # files by hand — root cause tracked as Phase 8.)
+      - "server/server/src/tree_walk.rs"
+      - "server/server/src/store.rs"
       - "server/server/tests/studio_gc.rs"
       - "server/server/src/gc_service.rs"
       - "server/server/src/gc_store.rs"
@@ -62,6 +70,14 @@ on:
     paths:
       - "engine/commands/work-unit-status-vectors.v1.json"
       - "server/server/src/studio_live_hashes.rs"
+      # slice 2.2 — studio_live_hashes.rs resolves cas-tree snapshots through
+      # tree_walk::walk_tree, which reads blobs through the BlobPersistence
+      # trait in store.rs. Both suites below transitively exercise them, so a
+      # change there must fire this workflow. (Same class of gap slice 1.5
+      # fixed in blob-layout-parity.yml: these filters enumerate implementation
+      # files by hand — root cause tracked as Phase 8.)
+      - "server/server/src/tree_walk.rs"
+      - "server/server/src/store.rs"
       - "server/server/tests/studio_gc.rs"
       - "server/server/src/gc_service.rs"
       - "server/server/src/gc_store.rs"

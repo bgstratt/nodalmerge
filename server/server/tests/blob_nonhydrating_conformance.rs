@@ -58,31 +58,96 @@ fn non_hydrating_persistence(tag: &str) -> SharedPersistence {
 
 // ─── tree-walk: documents today's mechanism (green, not gated) ────────────
 
+/// **Rewritten by slice 2.2.** This test used to assert the *bug*: that
+/// `walk_tree` over a non-hydrating backend always failed with `MissingBlob`
+/// even though `has_blob` said the tree was right there. That was finding
+/// #10's mechanism, and 2.2 removed it — the walk now resolves tree objects
+/// through `BlobPersistence::hydrate_blob` instead of `get_blob`.
+///
+/// It keeps its original job (pinning the mechanism the walk uses), so what
+/// it pins now is the pair of properties that make the fix legitimate rather
+/// than a hole in the offloading policy:
+///
+/// 1. the walk resolves tree objects on a backend whose `get_blob` never
+///    hydrates, and
+/// 2. `get_blob`'s non-hydrating contract is **untouched** — the walk must
+///    never call it. Asserted via `get_blob_calls()`, not via a return value:
+///    a value-only assertion would pass against a walk that called `get_blob`
+///    and ignored the answer, proving nothing about the policy.
 #[test]
-fn tree_walk_fails_closed_when_backend_never_hydrates_bytes() {
-    // Not gated: `walk_tree`'s own contract is fail-closed by design
-    // (tree_walk.rs module docs), and slice 2.2 may legitimately choose to
-    // resolve trees through a *different*, hydrating-capable path before
-    // ever reaching this function rather than changing `walk_tree` itself.
-    // This test only pins the mechanism finding #10 describes; the RED
-    // assertion that actually gates 2.2 is
-    // `studio_gc_live_set_over_cas_tree_snapshot_does_not_fail_closed_on_non_hydrating_backend`
-    // below, which exercises the real GC entry point and requires the
-    // *overall* collection to stop failing closed, without presuming how.
+fn tree_walk_resolves_via_hydrate_blob_without_touching_the_get_blob_policy() {
     let backend = NonHydratingBackend::default();
-    let (tree_hash, tree_bytes) = tree_v2_blob(serde_json::json!([]));
-    backend.persist_blob(&tree_hash, &tree_bytes); // marks present; bytes still unreadable
+    let file_hash = Hash::of(b"a file the tree names but the walk never fetches");
+    let (tree_hash, tree_bytes) =
+        tree_v2_blob(serde_json::json!([{"n": "a.txt", "k": "f", "h": file_hash.to_hex()}]));
+    backend.persist_blob(&tree_hash, &tree_bytes);
     assert!(backend.has_blob(&tree_hash), "sanity: the backend agrees the tree blob exists");
 
-    let err = walk_tree(&backend, &tree_hash)
-        .expect_err("today, get_blob=None always fails the walk even though has_blob is true");
-    assert!(matches!(err, TreeWalkError::MissingBlob(_)));
+    let live = walk_tree(&backend, &tree_hash).expect(
+        "finding #10: the walk must resolve tree objects through the hydrating path even \
+         though this backend's get_blob never returns bytes",
+    );
+    assert!(live.contains(&tree_hash), "the tree object itself is live");
+    assert!(live.contains(&file_hash), "the file the tree names is live");
+    assert_eq!(live.len(), 2, "root + file, nothing else: {live:?}");
+
+    assert_eq!(
+        backend.get_blob_calls(),
+        0,
+        "slice 2.2 must not have reached for get_blob: its non-hydrating contract is \
+         deliberately unchanged, and the tree walk resolves through hydrate_blob instead"
+    );
+}
+
+/// The `Missing` half of the same seam: a tree object that genuinely isn't
+/// there must still fail closed. Without this, "the walk stopped failing"
+/// could be satisfied by a walk that never fails at all — which would be a
+/// far worse bug than #10 (GC would compute a short live set and delete live
+/// blobs). Mirrors `minio_round_trip.rs`'s
+/// `s3_direct_tree_walk_reports_a_genuinely_absent_tree_as_missing` against
+/// the real backend.
+#[test]
+fn tree_walk_still_fails_closed_on_a_genuinely_absent_tree_object() {
+    let backend = NonHydratingBackend::default();
+    let phantom = Hash::of(b"never uploaded anywhere");
+    let err = walk_tree(&backend, &phantom).expect_err("an absent root must fail the walk");
+    assert!(
+        matches!(err, TreeWalkError::MissingBlob(_)),
+        "absent is Missing, not Unresolvable: {err:?}"
+    );
+}
+
+/// Slice 2.2 — the `Composite` forwarding pin.
+///
+/// `Composite<N, B>` is the production wiring (`Composite<Postgres, S3BlobStore>`),
+/// and `hydrate_blob`/`get_blob_hydrates` are **defaulted** trait methods. A
+/// missing forward therefore compiles silently and answers *plausibly*: the
+/// default would report `get_blob_hydrates() == true` for an S3-backed
+/// composite, call `get_blob` (correctly `None`), and hand back `Missing` —
+/// reinstating finding #10 with `S3BlobStore::hydrate_blob` sitting unused.
+/// This is the exact shape of the `RemoteBlobLinkAggregator` hole that would
+/// have voided slice 2.1, so it gets its own pin rather than relying on the
+/// GC test above to notice.
+#[test]
+fn composite_forwards_hydration_seam_to_the_blob_half() {
+    let persistence = non_hydrating_persistence("composite-forwarding");
+    assert!(
+        !persistence.get_blob_hydrates(),
+        "Composite must forward get_blob_hydrates to its blob half — inheriting the \
+         `true` default here would make the trait's own hydrate_blob default look correct"
+    );
+
+    let (tree_hash, tree_bytes) = tree_v2_blob(serde_json::json!([]));
+    persistence.persist_blob(&tree_hash, &tree_bytes);
+    let bytes = persistence
+        .hydrate_blob(&tree_hash)
+        .expect("Composite must forward hydrate_blob to the blob half's real override");
+    assert_eq!(bytes, tree_bytes, "and return that half's bytes, not a default's answer");
 }
 
 // ─── GC live-set (finding #10, gates slice 2.2) ────────────────────────────
 
 #[tokio::test]
-#[ignore = "RED: fails until slice 2.2 — see nodalmerge-studio/plans/blob-cas-remediation.md"]
 async fn studio_gc_live_set_over_cas_tree_snapshot_does_not_fail_closed_on_non_hydrating_backend() {
     let persistence = non_hydrating_persistence("gc-live-set");
     let sk = SigningKey::from_bytes(&[0xF1u8; 32]);
@@ -119,6 +184,24 @@ async fn studio_gc_live_set_over_cas_tree_snapshot_does_not_fail_closed_on_non_h
         "finding #10: GC must not fail closed forever just because the tree/file blobs \
          live on a backend that never hydrates bytes into the server process (S3's real \
          shape) — got {live:?}"
+    );
+
+    // Slice 2.2 strengthened the gate beyond `is_ok()`. On its own, `is_ok()`
+    // is satisfied by a "fix" that resolves nothing and returns an empty live
+    // set — which is not GC working, it is GC deleting every blob in the pool
+    // on the next sweep. The whole point of resolving the tree is *what comes
+    // back*, so assert the contents.
+    let live = live.unwrap();
+    assert!(
+        live.contains(&tree_hash.to_hex()),
+        "the tree object must be in the live set (it is itself a CAS blob, and a GC that \
+         doesn't protect it deletes the snapshot's index): {live:?}"
+    );
+    assert!(
+        live.contains(&file_hash.to_hex()),
+        "the file blob the tree names must be in the live set — this is the hash that only \
+         a successful tree *resolution* can produce, so it is what distinguishes a real fix \
+         from a walk that silently returned nothing: {live:?}"
     );
 }
 

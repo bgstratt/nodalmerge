@@ -443,3 +443,136 @@ fn s3_min_physical_grace_floor_is_effective_end_to_end() {
 
     drop(container);
 }
+
+// ─── blob-cas-remediation.md slice 2.2 (finding #10) ─────────────────────────
+
+/// Slice 2.2 — **the real gate for the hydrating tree read.**
+///
+/// `tree_walk::walk_tree` fetches tree objects through `BlobPersistence`.
+/// Before 2.2 it used `get_blob`, which this backend hardwires to `None` by
+/// policy — so every studio GC run over a cas-tree snapshot failed closed
+/// forever on any S3-backed server (finding #10).
+///
+/// The fix routes the walk through `BlobPersistence::hydrate_blob`, which
+/// `S3BlobStore` overrides with a real Direct-mode `GET`. **That policy is
+/// not being violated:** `walk_tree` only ever fetches *tree* objects (v1
+/// entries and v2 `"f"` entries are terminal — inserted into the live set,
+/// never fetched), which are small JSON metadata the server must parse to do
+/// its job. `get_blob`'s non-hydrating contract — about large *file* payloads
+/// — is untouched, and this test asserts that explicitly below.
+///
+/// This test cannot be delegated to `NonHydratingBackend`
+/// (server/stores/blob-conformance): that fake is a *port* of this backend,
+/// so a green test there gates a copy of the logic, never the real bucket
+/// `GET`. Same reasoning as the 1.3 GC gates above.
+#[test]
+fn s3_direct_tree_walk_resolves_tree_objects_from_the_real_bucket() {
+    let Some((container, endpoint, _rt)) = minio_fixture() else {
+        eprintln!("skipping: Docker / MinIO container unavailable");
+        return;
+    };
+    let store = S3BlobStore::new(test_cfg(&endpoint)).expect("build S3BlobStore");
+
+    // A file blob referenced by the tree. Never fetched by the walk — the
+    // walk only needs its hash — but uploaded anyway so the fixture is a
+    // faithful repo snapshot rather than a dangling reference.
+    let file_bytes = b"a real repo file, living only in the bucket".to_vec();
+    let file_hash = Hash::of(&file_bytes);
+    store.persist_blob(&file_hash, &file_bytes);
+
+    // The tree object is *also* an ordinary CAS blob (TREE_OBJECT_FORMAT.md).
+    let tree_bytes = serde_json::to_vec(&serde_json::json!({
+        "nodalmerge": "tree",
+        "version": 2,
+        "entries": [{"n": "a.txt", "k": "f", "h": file_hash.to_hex()}],
+    }))
+    .unwrap();
+    let tree_hash = Hash::of(&tree_bytes);
+    store.persist_blob(&tree_hash, &tree_bytes);
+
+    assert!(store.has_blob(&tree_hash), "sanity: the tree object really is in the bucket");
+    assert!(
+        store.get_blob(&tree_hash).is_none(),
+        "the non-hydrating policy on get_blob is deliberately UNCHANGED by slice 2.2 — \
+         if this ever starts returning bytes, 2.2 broke the contract it was told not to touch"
+    );
+
+    let live = nodalmerge_server::tree_walk::walk_tree(&store, &tree_hash)
+        .expect("finding #10: the tree walk must resolve tree objects on a real S3 bucket");
+
+    assert!(live.contains(&tree_hash), "the root tree object itself must be live");
+    assert!(live.contains(&file_hash), "the file the tree names must be live");
+    assert_eq!(live.len(), 2, "root + file, nothing else: {live:?}");
+
+    drop(container);
+}
+
+/// Slice 2.2, the nested half: a `"d"` entry is the *only* kind the walk
+/// recurses into, so a multi-level tree is what actually proves the S3
+/// hydrating read is reachable more than once per walk (a single-level tree
+/// would pass even if only the root were resolvable).
+#[test]
+fn s3_direct_tree_walk_recurses_into_nested_directories_from_the_real_bucket() {
+    let Some((container, endpoint, _rt)) = minio_fixture() else {
+        eprintln!("skipping: Docker / MinIO container unavailable");
+        return;
+    };
+    let store = S3BlobStore::new(test_cfg(&endpoint)).expect("build S3BlobStore");
+
+    let leaf_bytes = b"nested file".to_vec();
+    let leaf_hash = Hash::of(&leaf_bytes);
+    store.persist_blob(&leaf_hash, &leaf_bytes);
+
+    let subtree_bytes = serde_json::to_vec(&serde_json::json!({
+        "nodalmerge": "tree", "version": 2,
+        "entries": [{"n": "b.txt", "k": "f", "h": leaf_hash.to_hex()}],
+    }))
+    .unwrap();
+    let subtree_hash = Hash::of(&subtree_bytes);
+    store.persist_blob(&subtree_hash, &subtree_bytes);
+
+    let root_bytes = serde_json::to_vec(&serde_json::json!({
+        "nodalmerge": "tree", "version": 2,
+        "entries": [{"n": "dir", "k": "d", "h": subtree_hash.to_hex()}],
+    }))
+    .unwrap();
+    let root_hash = Hash::of(&root_bytes);
+    store.persist_blob(&root_hash, &root_bytes);
+
+    let live = nodalmerge_server::tree_walk::walk_tree(&store, &root_hash)
+        .expect("nested tree walk must resolve every directory level from the bucket");
+
+    assert!(live.contains(&root_hash), "root tree live");
+    assert!(live.contains(&subtree_hash), "subtree (fetched via a second bucket GET) live");
+    assert!(live.contains(&leaf_hash), "the nested file live");
+    assert_eq!(live.len(), 3, "root + subtree + file: {live:?}");
+
+    drop(container);
+}
+
+/// Slice 2.2 — a tree object that genuinely isn't in the bucket must still
+/// read as **Missing**, not as the backend-can't-hydrate error. Without this
+/// the fix could "pass" by reporting everything unresolvable, which would be
+/// just as fail-closed as the bug (and would make the Delegate-mode gate
+/// meaningless).
+#[test]
+fn s3_direct_tree_walk_reports_a_genuinely_absent_tree_as_missing() {
+    let Some((container, endpoint, _rt)) = minio_fixture() else {
+        eprintln!("skipping: Docker / MinIO container unavailable");
+        return;
+    };
+    let store = S3BlobStore::new(test_cfg(&endpoint)).expect("build S3BlobStore");
+
+    let phantom = Hash::of(b"a tree object that was never uploaded");
+    assert!(!store.has_blob(&phantom), "sanity: it really isn't there");
+
+    let err = nodalmerge_server::tree_walk::walk_tree(&store, &phantom)
+        .expect_err("an absent root must fail the walk");
+    assert!(
+        matches!(err, nodalmerge_server::tree_walk::TreeWalkError::MissingBlob(_)),
+        "an absent object is Missing, NOT Unresolvable — Unresolvable means \
+         'this backend can never hydrate', which Direct mode plainly can: {err:?}"
+    );
+
+    drop(container);
+}

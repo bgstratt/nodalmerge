@@ -258,8 +258,16 @@ on:
       - "server/server/tests/zstd_interop.rs"
       - "server/server/tests/blob_relay_nonhydrating_backend.rs"
       - "server/server/tests/blob_nonhydrating_conformance.rs"
+      # slice 2.2 — blob_nonhydrating_conformance.rs drives the studio GC entry
+      # point (collect_studio_live_hashes), the ONLY place walk_tree is reachable
+      # from GC. Without this line a change to the live-set walk could break that
+      # suite's whole reason for existing without ever firing it.
+      - "server/server/src/studio_live_hashes.rs"
       - "server/stores/blob-conformance/**"
       - "server/s3-blobs/src/lib.rs"
+      # slice 2.2 — Delegate-mode fail-loud gate. Docker-free (Delegate opens no
+      # connection), so it lives in this workflow rather than blob-s3-gc-minio.yml.
+      - "server/s3-blobs/tests/delegate_gc.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -313,8 +321,16 @@ on:
       - "server/server/tests/zstd_interop.rs"
       - "server/server/tests/blob_relay_nonhydrating_backend.rs"
       - "server/server/tests/blob_nonhydrating_conformance.rs"
+      # slice 2.2 — blob_nonhydrating_conformance.rs drives the studio GC entry
+      # point (collect_studio_live_hashes), the ONLY place walk_tree is reachable
+      # from GC. Without this line a change to the live-set walk could break that
+      # suite's whole reason for existing without ever firing it.
+      - "server/server/src/studio_live_hashes.rs"
       - "server/stores/blob-conformance/**"
       - "server/s3-blobs/src/lib.rs"
+      # slice 2.2 — Delegate-mode fail-loud gate. Docker-free (Delegate opens no
+      # connection), so it lives in this workflow rather than blob-s3-gc-minio.yml.
+      - "server/s3-blobs/tests/delegate_gc.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -379,7 +395,7 @@ jobs:
       - name: Run non-hydrating-backend relay contract (S4.2)
         run: cargo test -p nodalmerge-server --test blob_relay_nonhydrating_backend
 
-      - name: Run non-hydrating-backend conformance harness (slice 0.2; RED scenarios are #[ignore]d until their Phase 2 slice ships)
+      - name: Run non-hydrating-backend conformance harness (slice 0.2 harness; its GC-live-set/tree-walk gate went green in slice 2.2 — the archive-export gate remains #[ignore]d until 2.3)
         run: cargo test -p nodalmerge-server --test blob_nonhydrating_conformance
 
       - name: Run tree-walk depth-bound regression test (slice 1.5, finding #9 — deep chain must fail closed, not abort the process)
@@ -391,8 +407,11 @@ jobs:
       - name: Run blob HTTP surface vectors (GET/HEAD/PUT /blobs/{hash})
         run: cargo test -p nodalmerge-server --test blob_http_surface
 
-      - name: Run S3 key layout vectors
+      - name: Run S3 key layout vectors + Delegate-mode hydrate/tree-walk unit gates (slice 2.2, finding #10)
         run: cargo test -p nodalmerge-s3-blobs --lib
+
+      - name: Run Delegate-mode studio-GC fail-loud gate (slice 2.2, finding #10 — an S3-Delegate server must report "cannot resolve tree object" as a distinct, actionable config error, never a generic missing-blob; no Docker needed, Delegate mode opens no connection)
+        run: cargo test -p nodalmerge-s3-blobs --test delegate_gc
 
   dotnet-blob-layout:
     name: dotnet blob layout + delegate protocol + interop

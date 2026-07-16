@@ -127,6 +127,51 @@ pub trait NodePersistence: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// Why [`BlobPersistence::hydrate_blob`] could not produce a blob's bytes.
+///
+/// The distinction that matters — and the reason this is an enum rather than
+/// an `Option` (`blob-cas-remediation.md` slice 2.2, finding #10) — is
+/// [`Missing`](Self::Missing) vs [`Unhydratable`](Self::Unhydratable). Before
+/// 2.2 both collapsed into `get_blob` → `None`, so an S3-backed server's GC
+/// reported "missing tree object <hex>" on every tick: an operator reads that
+/// as data loss and goes hunting for an object that is sitting safely in the
+/// bucket, while the real cause — this deployment cannot read tree objects —
+/// is invisible. Keeping the two apart is the entire "fail loud" half of the
+/// slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HydrateError {
+    /// The backend has no such object — or holds it corrupt, which reads the
+    /// same way by design (existence is not integrity; see 3.2).
+    Missing,
+    /// The object may exist, but this backend can never deliver its bytes
+    /// into the server process. A **configuration** fact about the
+    /// deployment, not a fact about the data. Actionable by an operator.
+    Unhydratable {
+        /// Which backend refused, for the operator reading the log line.
+        backend: String,
+        /// Why it cannot hydrate, and — where there is one — what to do.
+        detail: String,
+    },
+    /// A transient read/network failure. Retryable; says nothing about
+    /// whether the object exists.
+    Backend(String),
+}
+
+impl std::fmt::Display for HydrateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HydrateError::Missing => write!(f, "blob not present in this store"),
+            HydrateError::Unhydratable { backend, detail } => write!(
+                f,
+                "backend cannot hydrate blob bytes into the server process ({backend}): {detail}"
+            ),
+            HydrateError::Backend(e) => write!(f, "backend read failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for HydrateError {}
+
 /// Blob-side persistence. See module docs for rationale.
 ///
 /// Blobs are a single global content-addressed pool — no room scoping, no
@@ -155,6 +200,83 @@ pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
     /// if not the cheapest.
     fn has_blob(&self, hash: &Hash) -> bool {
         self.get_blob(hash).is_some()
+    }
+
+    /// Does [`get_blob`](Self::get_blob) actually return bytes for blobs this
+    /// backend holds?
+    ///
+    /// **A declaration, not an inference** — and that distinction is the
+    /// whole reason this method exists. `get_blob` returning `None` for a
+    /// present hash has *two* completely different causes:
+    ///
+    /// * **Policy:** the backend never hydrates bytes into the server process
+    ///   at all (`S3BlobStore` — offloading them is the entire point).
+    /// * **Integrity:** the bytes are there but corrupt.
+    ///   [`DirPersistence::get_blob`] verifies BLAKE3 on read and returns
+    ///   `None` on a mismatch while [`has_blob`](Self::has_blob) — a plain
+    ///   `is_file()` — still says `true`.
+    ///
+    /// So "`get_blob` said `None` but `has_blob` said `true`" **cannot** be
+    /// used to detect a non-hydrating backend: on `DirPersistence` that exact
+    /// signature means "corrupt blob". [`hydrate_blob`](Self::hydrate_blob)'s
+    /// default therefore asks this question outright instead of guessing.
+    ///
+    /// Default `true`: every backend in this workspace except `S3BlobStore`
+    /// hydrates. **If you write a backend whose `get_blob` returns `None` as
+    /// policy, override this to `false`** — that is what makes the default
+    /// `hydrate_blob` fail *loudly* instead of silently reporting every blob
+    /// you hold as missing (see `blob-cas-remediation.md` finding #10, and
+    /// the `naive_default_only_backend_reports_everything_absent` pin in
+    /// `nodalmerge-blobstore-conformance`).
+    fn get_blob_hydrates(&self) -> bool {
+        true
+    }
+
+    /// Fetch a blob's bytes into the server process, distinguishing "not
+    /// there" from "this backend structurally cannot give you bytes".
+    ///
+    /// ## This is not a hole in the non-hydrating policy
+    ///
+    /// [`get_blob`](Self::get_blob)'s "S3 never hydrates" contract exists to
+    /// keep **large file payloads** out of the server process — that is the
+    /// entire point of offloading them to object storage, and slice 2.2 did
+    /// **not** change it. `hydrate_blob` is for the narrow class of objects
+    /// the server must *parse* to do its own job, which are small metadata by
+    /// construction. Its first caller, [`crate::tree_walk::walk_tree`], only
+    /// ever fetches **tree objects** (a few hundred bytes of JSON): v1 entries
+    /// and v2 `"f"` entries are terminal — their hashes go straight into the
+    /// live set and their bytes are never read — so only `"d"` entries are
+    /// ever fetched. Hydrating those is not "offloading, but worse"; it is the
+    /// server reading its own index. Callers that want *file* bytes on an S3
+    /// backend still have no business here: they should mint a URL via
+    /// [`resolve_get_url`](Self::resolve_get_url) and let the client pull.
+    ///
+    /// ## Contract
+    ///
+    /// * `Ok(bytes)` — verified bytes (backends that verify on read keep doing so).
+    /// * [`HydrateError::Missing`] — the backend genuinely has no such object,
+    ///   *or* holds it corrupt (same answer `get_blob` gives; existence is not
+    ///   integrity — see `blob-cas-remediation.md` 3.2).
+    /// * [`HydrateError::Unhydratable`] — the object may well exist, but this
+    ///   backend can never deliver its bytes here (S3 **Delegate** mode: no
+    ///   bucket credentials, and the delegate presign protocol v1 has no
+    ///   "give me the bytes" op). This is a **configuration** fact, and callers
+    ///   must surface it as such rather than as a lost object.
+    /// * [`HydrateError::Backend`] — a transient read/network failure. Retryable.
+    ///
+    /// The default is correct-by-construction for every hydrating backend and
+    /// **loud** for a backend that declares [`get_blob_hydrates`](Self::get_blob_hydrates)
+    /// `false` without overriding this — never silently `Missing`.
+    fn hydrate_blob(&self, hash: &Hash) -> Result<Vec<u8>, HydrateError> {
+        if !self.get_blob_hydrates() {
+            return Err(HydrateError::Unhydratable {
+                backend: format!("{self:?}"),
+                detail: "backend declares get_blob_hydrates() = false and does not override \
+                         hydrate_blob(), so it has no way to read bytes into this process"
+                    .to_string(),
+            });
+        }
+        self.get_blob(hash).ok_or(HydrateError::Missing)
     }
 
     /// G4 — two-phase blob GC sweep across the whole store.
@@ -350,6 +472,20 @@ impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B>
     }
     fn has_blob(&self, hash: &Hash) -> bool {
         self.blobs.has_blob(hash)
+    }
+    /// Must forward. Inheriting the trait default here would be the
+    /// `RemoteBlobLinkAggregator` hole (slice 2.1) all over again: for the
+    /// production `Composite<Postgres, S3BlobStore>` wiring the default would
+    /// answer `true`, then call `get_blob` (correctly `None` on S3) and report
+    /// every tree object **Missing** — silently reinstating finding #10 while
+    /// `S3BlobStore`'s own override sat right there, unused and untested.
+    /// Pinned by `composite_forwards_hydration_seam_to_the_blob_half`.
+    fn get_blob_hydrates(&self) -> bool {
+        self.blobs.get_blob_hydrates()
+    }
+    /// Must forward — see [`Self::get_blob_hydrates`].
+    fn hydrate_blob(&self, hash: &Hash) -> Result<Vec<u8>, HydrateError> {
+        self.blobs.hydrate_blob(hash)
     }
     fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
         self.blobs.persist_blob(hash, bytes)

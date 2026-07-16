@@ -566,8 +566,26 @@ fn resolve_snapshot_into(
         ))
     })?;
     let walked = tree_walk::walk_tree(persistence, &root_hash).map_err(|e| {
+        // Slice 2.2 (finding #10). `GcError` (core/gc) has only the three
+        // generic variants, and widening that shared enum is out of this
+        // slice's scope — so the distinctness lives in `TreeWalkError` (a
+        // dedicated `Unresolvable` variant, separate from `MissingBlob`) and
+        // is carried into the run-level error through its `Display`, which
+        // spells out that the deployment cannot read tree objects and what to
+        // do about it. The part an operator actually *alerts* on is the
+        // counter `walk_tree` bumps —
+        // `nodalmerge_tree_walk_resolve_failed_total{reason="unhydratable_backend"}`
+        // — precisely because a per-run `Failure` on its own is generic and
+        // would let "GC has never once run on this S3 server" hide as noise.
+        let kind = match &e {
+            tree_walk::TreeWalkError::Unresolvable { .. } => {
+                "tree walk could not resolve (DEPLOYMENT CONFIGURATION, not data loss)"
+            }
+            tree_walk::TreeWalkError::ResolveFailed { .. } => "tree walk failed transiently",
+            _ => "tree walk failed",
+        };
         GcError::Backend(format!(
-            "room {room_id} snapshot {}: tree walk from {} failed: {e}",
+            "room {room_id} snapshot {}: {kind} from {}: {e}",
             snap.snapshot_id, snap.tree_hash
         ))
     })?;

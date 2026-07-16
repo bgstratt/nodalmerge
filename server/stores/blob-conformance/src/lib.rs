@@ -7,21 +7,35 @@
 //!
 //! ## Why this shape
 //!
-//! `S3BlobStore::get_blob` (`server/s3-blobs/src/lib.rs:471`) always returns
-//! `None` — bytes are never hydrated into the server process, by design
-//! (`docs/BLOB_STORAGE_LAYOUT.md`). Any production code path that reaches
-//! for `BlobPersistence::get_blob` and doesn't treat `None` as "ask the
-//! resolve/hydrating path instead" silently breaks against a real S3
-//! deployment. [`NonHydratingBackend`] reproduces exactly that shape —
-//! in-memory, no network — so those code paths can be exercised without a
-//! real bucket. It mirrors `S3BlobStore`'s Direct auth mode specifically:
-//! `get_blob` always `None`, `has_blob` a real (here, in-memory) presence
-//! check via a real bucket-`HEAD`-equivalent, `verify_uploaded` re-checks
-//! that same presence set (mirrors `direct_head`-backed verification), and
-//! `supports_presigned_urls` is unconditionally `true` (matching
-//! `S3BlobStore`'s answer in *both* of its auth modes — see
-//! `BlobPersistence::supports_presigned_urls`'s doc for why that flag can't
-//! be inferred from `verify_uploaded`'s return value alone).
+//! `S3BlobStore::get_blob` always returns `None` — bytes are never hydrated
+//! into the server process, by design (`docs/BLOB_STORAGE_LAYOUT.md`). Any
+//! production code path that reaches for `BlobPersistence::get_blob` and
+//! doesn't treat `None` as "ask the resolve/hydrating path instead" silently
+//! breaks against a real S3 deployment. [`NonHydratingBackend`] reproduces
+//! exactly that shape — in-memory, no network — so those code paths can be
+//! exercised without a real bucket. It mirrors `S3BlobStore`'s Direct auth
+//! mode specifically: `get_blob` always `None`, `has_blob` a real (here,
+//! in-memory) presence check via a real bucket-`HEAD`-equivalent,
+//! `verify_uploaded` re-checks that same presence set (mirrors
+//! `direct_head`-backed verification), and `supports_presigned_urls` is
+//! unconditionally `true` (matching `S3BlobStore`'s answer in *both* of its
+//! auth modes — see `BlobPersistence::supports_presigned_urls`'s doc for why
+//! that flag can't be inferred from `verify_uploaded`'s return value alone).
+//!
+//! ## "Non-hydrating" is about `get_blob`, not about bytes (slice 2.2)
+//!
+//! Read this before concluding the `hydrate_blob` override below contradicts
+//! the name of this type. It does not, and neither does the real backend.
+//! `S3BlobStore` has a live S3 client — `get_blob`'s `None` is **policy**
+//! (keep large *file* payloads out of the server process), not incapacity.
+//! Slice 2.2 added `BlobPersistence::hydrate_blob` for the narrow class of
+//! objects the server must parse to do its own job — today only **tree
+//! objects**, a few hundred bytes of JSON, fetched by `tree_walk::walk_tree`,
+//! which never fetches a file blob at all (v1 entries and v2 `"f"` entries are
+//! terminal; only `"d"` entries are read). So Direct mode hydrates those with
+//! a real bucket `GET`, `get_blob` stays `None` forever, and this fake mirrors
+//! both. Delegate mode genuinely cannot, and is not modeled here — it needs no
+//! network to test, so it is gated in `s3-blobs`' own unit tests.
 //!
 //! ## The trap this deliberately avoids
 //!
@@ -43,13 +57,20 @@ use std::sync::Mutex;
 
 use ed25519_dalek::SigningKey;
 use nodalmerge_core::{Hash, MapOp, Op, StateGraph, SyncNode};
-use nodalmerge_server::store::BlobPersistence;
+use nodalmerge_server::store::{BlobPersistence, HydrateError};
 
 /// A `BlobPersistence` fake shaped exactly like `S3BlobStore`
 /// (`server/s3-blobs/src/lib.rs:467`, Direct auth mode). See module docs.
 #[derive(Debug, Default)]
 pub struct NonHydratingBackend {
     present: Mutex<HashSet<Hash>>,
+    /// Slice 2.2 — the bytes a real bucket would hold for a hash, so this
+    /// fake can port `S3BlobStore`'s Direct-mode [`BlobPersistence::hydrate_blob`]
+    /// (a real bucket `GET`). `present` stays the source of truth for
+    /// existence: a hash can be present *without* bytes here (see
+    /// [`Self::mark_present`]), which is a limitation of the fake, not a
+    /// state a real bucket can be in.
+    bytes: Mutex<std::collections::HashMap<Hash, Vec<u8>>>,
     /// Slice 1.3 — GC tombstones (hash → when it was first seen
     /// unreferenced), mirroring the tombstone objects the real
     /// `S3BlobStore::blob_gc_sweep` writes under
@@ -89,8 +110,63 @@ impl BlobPersistence for NonHydratingBackend {
         self.present.lock().unwrap().contains(hash)
     }
 
-    fn persist_blob(&self, hash: &Hash, _bytes: &[u8]) {
+    /// Ports `S3BlobStore::get_blob_hydrates` — the declaration that makes
+    /// the *reason* `get_blob` is `None` a fact the trait can act on
+    /// (policy, not corruption). Without this the trait's default
+    /// `hydrate_blob` would report every blob this fake holds as `Missing`.
+    fn get_blob_hydrates(&self) -> bool {
+        false
+    }
+
+    /// Slice 2.2 — ports `S3BlobStore`'s **Direct-mode** `hydrate_blob` (a
+    /// real bucket `GET`). Note the asymmetry with `get_blob` directly above,
+    /// and that it is the *real* backend's asymmetry, not an invention of
+    /// this fake: S3 refuses to hydrate *file payloads* into the server
+    /// process by policy, but it has a live client and can always fetch the
+    /// small tree objects the server must parse itself. See
+    /// `S3BlobStore::hydrate_blob`'s docs.
+    ///
+    /// **This is a port and only a port.** The real gate for the S3 hydrating
+    /// read is `server/s3-blobs/tests/minio_round_trip.rs`
+    /// (`s3_direct_tree_walk_resolves_tree_objects_from_the_real_bucket`,
+    /// `s3_direct_tree_walk_recurses_into_nested_directories_from_the_real_bucket`,
+    /// `s3_direct_tree_walk_reports_a_genuinely_absent_tree_as_missing`),
+    /// which runs against a real bucket in CI. Per this file's standing rule:
+    /// **if this port and `S3BlobStore` ever disagree, the MinIO tests are
+    /// right and this file is wrong.**
+    ///
+    /// Delegate mode is deliberately *not* modeled here — this fake mirrors
+    /// Direct mode only (see module docs). Delegate's `Unhydratable` is gated
+    /// in `s3-blobs`' own unit tests, where it needs no network.
+    fn hydrate_blob(&self, hash: &Hash) -> Result<Vec<u8>, HydrateError> {
+        if !self.present.lock().unwrap().contains(hash) {
+            return Err(HydrateError::Missing);
+        }
+        match self.bytes.lock().unwrap().get(hash) {
+            Some(b) => Ok(b.clone()),
+            // Present but byte-less: only reachable via `mark_present`, which
+            // models an object this process never saw the bytes of. A real
+            // bucket would simply return them; this fake cannot invent them.
+            // Reported as a loud Backend error rather than Missing so a test
+            // that lands here fails with the reason instead of quietly
+            // exercising the not-found path and proving the wrong thing.
+            None => Err(HydrateError::Backend(format!(
+                "NonHydratingBackend: {} was marked present via mark_present() without bytes, \
+                 so this fake cannot hydrate it. A real bucket WOULD return the object here — \
+                 this is a limitation of the fake. Use persist_blob() if the test needs the \
+                 bytes back.",
+                hash.to_hex()
+            ))),
+        }
+    }
+
+    /// Ports Direct-mode `persist_blob` (a real bucket `PUT`): the bytes are
+    /// now in the "bucket", so a later `hydrate_blob` returns them —
+    /// exactly as MinIO does. (Before slice 2.2 this fake discarded them,
+    /// which was fine only because nothing could read them back.)
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
         self.present.lock().unwrap().insert(*hash);
+        self.bytes.lock().unwrap().insert(*hash, bytes.to_vec());
     }
 
     /// Mirrors `S3BlobStore`'s Direct-mode `verify_uploaded`: a real
@@ -141,6 +217,10 @@ impl BlobPersistence for NonHydratingBackend {
         let now = std::time::Instant::now();
         let mut present = self.present.lock().unwrap();
         let mut tombs = self.tombstones.lock().unwrap();
+        // Slice 2.2 — a deleted object's bytes go with it, so a post-sweep
+        // `hydrate_blob` reports Missing exactly as a real bucket would
+        // (`minio_round_trip.rs` asserts the real backend's equivalent).
+        let mut bytes = self.bytes.lock().unwrap();
         let mut deleted = 0usize;
         for hash in present.iter().copied().collect::<Vec<_>>() {
             if live.contains(&hash) {
@@ -153,6 +233,7 @@ impl BlobPersistence for NonHydratingBackend {
                 Some(at) => {
                     if now.duration_since(*at) >= grace {
                         present.remove(&hash);
+                        bytes.remove(&hash);
                         tombs.remove(&hash);
                         deleted += 1;
                     }
@@ -161,6 +242,7 @@ impl BlobPersistence for NonHydratingBackend {
                     tombs.insert(hash, now);
                     if grace.is_zero() {
                         present.remove(&hash);
+                        bytes.remove(&hash);
                         tombs.remove(&hash);
                         deleted += 1;
                     }
@@ -353,5 +435,105 @@ mod tests {
              just persisted, because it falls through to get_blob()'s default None"
         );
         assert_eq!(backend.get_blob(&hash), None);
+    }
+
+    /// Slice 2.2 — pins the reason `hydrate_blob`'s **default** is safe to
+    /// have at all, which is the one question the slice's trait shape had to
+    /// answer (a default that is "correct for hydrating backends and silently
+    /// wrong for non-hydrating ones" is exactly the hole that nearly voided
+    /// slice 2.1).
+    ///
+    /// The defence is `get_blob_hydrates()`: a **declaration**, not an
+    /// inference. It could not have been inferred from `get_blob() == None &&
+    /// has_blob() == true` — on `DirPersistence` that same signature means a
+    /// **corrupt** blob (its `get_blob` verifies BLAKE3 on read and returns
+    /// `None` on mismatch, while `has_blob` is a plain `is_file()`), so
+    /// guessing would have relabelled every corrupt file blob as "this
+    /// backend cannot hydrate".
+    ///
+    /// So the residual trap is narrower than 2.1's, and this test pins both
+    /// halves of it:
+    #[test]
+    fn hydrate_blob_default_is_loud_for_a_backend_that_declares_non_hydration() {
+        /// Declares the policy, doesn't implement a read — the plausible
+        /// mistake for a future non-hydrating backend.
+        #[derive(Debug, Default)]
+        struct DeclaresButDoesntOverride;
+        impl BlobPersistence for DeclaresButDoesntOverride {
+            fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) {}
+            fn get_blob(&self, _hash: &Hash) -> Option<Vec<u8>> {
+                None
+            }
+            fn get_blob_hydrates(&self) -> bool {
+                false
+            }
+        }
+
+        let err = DeclaresButDoesntOverride
+            .hydrate_blob(&Hash::of(b"x"))
+            .expect_err("must not claim to have hydrated anything");
+        assert!(
+            matches!(err, HydrateError::Unhydratable { .. }),
+            "the default must fail LOUD for a declared non-hydrating backend — reporting \
+             Missing here is finding #10 reintroduced for the next backend: {err:?}"
+        );
+
+        // The other half: a backend that declares nothing keeps the plain,
+        // correct behavior. If this ever became Unhydratable, every hydrating
+        // backend's genuinely-absent blob would be misreported as a config
+        // problem — the mirror-image false alarm.
+        #[derive(Debug, Default)]
+        struct OrdinaryHydratingBackend;
+        impl BlobPersistence for OrdinaryHydratingBackend {
+            fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) {}
+        }
+        assert_eq!(
+            OrdinaryHydratingBackend.hydrate_blob(&Hash::of(b"x")),
+            Err(HydrateError::Missing),
+            "absent on a hydrating backend is Missing, not Unhydratable"
+        );
+    }
+
+    /// The residual trap, stated honestly rather than fixed: a backend that
+    /// overrides `get_blob` to `None` as policy and forgets **both**
+    /// `get_blob_hydrates` and `hydrate_blob` still reports `Missing`. The
+    /// type system cannot catch this (every method but `persist_blob` is
+    /// defaulted, and 2.2 deliberately did not change that — it would break
+    /// every external implementor). This test exists so the gap is a *known,
+    /// pinned* one rather than a surprise for whoever writes the next
+    /// non-hydrating backend; the mitigation is `get_blob`'s and
+    /// `get_blob_hydrates`' docs, which tell you to flip the flag.
+    #[test]
+    fn hydrate_blob_default_cannot_save_a_backend_that_declares_nothing() {
+        #[derive(Debug, Default)]
+        struct SilentlyNonHydrating {
+            present: Mutex<HashSet<Hash>>,
+        }
+        impl BlobPersistence for SilentlyNonHydrating {
+            fn persist_blob(&self, hash: &Hash, _bytes: &[u8]) {
+                self.present.lock().unwrap().insert(*hash);
+            }
+            fn get_blob(&self, _hash: &Hash) -> Option<Vec<u8>> {
+                None // policy — but never declared via get_blob_hydrates()
+            }
+            fn has_blob(&self, hash: &Hash) -> bool {
+                self.present.lock().unwrap().contains(hash)
+            }
+        }
+
+        let backend = SilentlyNonHydrating::default();
+        let hash = Hash::of(b"in the bucket, unreadable here");
+        backend.persist_blob(&hash, b"in the bucket, unreadable here");
+
+        assert!(backend.has_blob(&hash), "sanity: the backend knows it holds this");
+        assert_eq!(
+            backend.hydrate_blob(&hash),
+            Err(HydrateError::Missing),
+            "KNOWN GAP, pinned deliberately: without the get_blob_hydrates() declaration the \
+             default cannot tell this backend's policy-None apart from DirPersistence's \
+             corruption-None, so it answers Missing. Overriding get_blob to None without \
+             also overriding get_blob_hydrates is the one remaining way to reintroduce \
+             finding #10 in a new backend."
+        );
     }
 }

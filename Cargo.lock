@@ -3219,6 +3219,7 @@ dependencies = [
  "bytes",
  "ed25519-dalek",
  "futures-util",
+ "nodalmerge-blobstore-conformance",
  "nodalmerge-core",
  "nodalmerge-gc",
  "nodalmerge-server",

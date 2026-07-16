@@ -137,6 +137,15 @@ pub fn init(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + S
     describe_counter!("nodalmerge_rate_limit_drops_total", "Peers disconnected with close code 4008 after tripping the per-peer nodes/sec or bytes/sec rate limit.");
     // G4 — blob GC.
     describe_counter!("nodalmerge_blob_gc_deleted_total", "On-disk blobs deleted by the two-phase blob GC sweeper after falling out of the per-room live set.");
+    // blob-cas-remediation.md slice 2.2 (finding #10) — tree-object resolution.
+    // ALERT ON THIS. `reason="unhydratable_backend"` is not transient and will
+    // not clear on its own: it means the blob backend cannot read tree objects
+    // into this process (S3 Delegate mode), so `studio_live_hashes` can never
+    // compute a live set and blob GC reclaims **nothing**, forever, while the
+    // server otherwise looks healthy. That silence is the bug this counter
+    // exists to break. `reason="backend_error"` is transient (network/IO) and
+    // is expected to be non-zero but near-flat.
+    describe_counter!("nodalmerge_tree_walk_resolve_failed_total", "Tree objects the studio GC live-set walk could not resolve. Labels: `reason` = `unhydratable_backend` (the blob backend can never hydrate bytes into this process — a deployment config problem; GC is permanently inert) or `backend_error` (transient read/network failure).");
     // G5 — Lamport ceiling & wall-clock sanity.
     describe_counter!("nodalmerge_lamport_rejected_total", "Nodes rejected by the G5 sanity checks; label `reason` = `ceiling` (lamport > local + LAMPORT_SLACK) or `wall_skew` (wall_ms > now + 24h).");
     // G6 — capability token expiry.

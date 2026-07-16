@@ -46,7 +46,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nodalmerge_core::Hash;
-use nodalmerge_server::store::{parse_blob_entry_name, BlobPersistence, PresignedUrl};
+use nodalmerge_server::store::{
+    parse_blob_entry_name, BlobPersistence, HydrateError, PresignedUrl,
+};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use object_store::{
@@ -500,6 +502,81 @@ impl BlobPersistence for S3BlobStore {
     /// SDK pulls blobs lazily via `resolve_get_url`.
     fn get_blob(&self, _hash: &Hash) -> Option<Vec<u8>> {
         None
+    }
+
+    /// Declares the policy above as a fact the trait can act on rather than
+    /// only as prose — see [`BlobPersistence::get_blob_hydrates`]. This is
+    /// what stops the default [`BlobPersistence::hydrate_blob`] from reporting
+    /// every object this backend holds as `Missing`.
+    fn get_blob_hydrates(&self) -> bool {
+        false
+    }
+
+    /// blob-cas-remediation.md slice 2.2 (finding #10) — the resolution path
+    /// for objects the **server itself** must parse (today: tree objects, via
+    /// [`nodalmerge_server::tree_walk::walk_tree`]).
+    ///
+    /// **This does not contradict `get_blob` above.** That contract keeps
+    /// large *file* payloads out of the server process — the whole reason
+    /// this crate exists. `hydrate_blob`'s only caller fetches tree objects:
+    /// a few hundred bytes of JSON that the server cannot compute a GC live
+    /// set without reading (v1 entries and v2 `"f"` entries are terminal and
+    /// are never fetched; only `"d"` entries are). Reading those is the
+    /// server reading its own index. File bytes still belong on
+    /// `resolve_get_url`, and `get_blob` still returns `None` for everything,
+    /// forever — asserted directly in `minio_round_trip.rs`'s
+    /// `s3_direct_tree_walk_resolves_tree_objects_from_the_real_bucket`.
+    ///
+    /// * **Direct**: a real bucket `GET` on the same key `has_blob`/`verify_uploaded`
+    ///   HEAD (`key_for`) and `resolve_get_url` presign — one key derivation
+    ///   for every path, so hydration cannot drift from existence.
+    ///   `NotFound` → `Missing`; anything else → `Backend` (retryable), never
+    ///   silently `Missing`.
+    /// * **Delegate**: `Unhydratable`, always. There are no bucket credentials
+    ///   (`self.s3` is `None` — see `delegate_skips_s3_client`) and delegate
+    ///   presign protocol v1 has only `get`/`put` **URL-minting** ops, no
+    ///   bytes op — so this is a structural fact about the mode, not a
+    ///   failure to try. Gated by `delegate_mode_hydrate_blob_is_unhydratable_not_missing`.
+    fn hydrate_blob(&self, hash: &Hash) -> Result<Vec<u8>, HydrateError> {
+        let Some(s3) = self.s3.clone() else {
+            return Err(HydrateError::Unhydratable {
+                backend: "S3BlobStore (Delegate auth mode)".to_string(),
+                detail: "delegate mode holds no bucket credentials and the delegate presign \
+                         protocol v1 has no bytes-fetch op (only `get`/`put` URL minting), so \
+                         the server can never read tree objects itself. Studio GC cannot run \
+                         in this mode: configure S3 Direct-mode credentials, or have the app \
+                         run GC on its own side"
+                    .to_string(),
+            });
+        };
+        // Same bridge as `direct_head`/`direct_presign_get`/`persist_blob`
+        // (fresh runtime on a spawned thread + mpsc): this trait method is
+        // sync and may be called from a Tokio worker, so blocking here
+        // directly would panic. Deliberately NOT a second bridge mechanism —
+        // finding #11 / slice 6.1 tracks replacing all of them at once, and
+        // inventing a new one here would make that job bigger.
+        let path = ObjectPath::from(self.key_for(hash));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move {
+                let got = s3.get(&path).await?;
+                got.bytes().await
+            });
+            let _ = tx.send(res);
+        });
+        let res: Result<Bytes, object_store::Error> = rx
+            .recv()
+            .map_err(|e| HydrateError::Backend(format!("thread error: {e}")))?;
+        match res {
+            Ok(b) => Ok(b.to_vec()),
+            Err(object_store::Error::NotFound { .. }) => Err(HydrateError::Missing),
+            // A transient/permission failure must never masquerade as
+            // Missing: GC treats Missing as "walk this snapshot's tree is
+            // impossible", and quietly turning a 503 into that is how a
+            // recoverable blip becomes an apparent lost object.
+            Err(e) => Err(HydrateError::Backend(format!("{e}"))),
+        }
     }
 
     /// S4.2 — a real bucket existence check, used by the blob HTTP origin's
@@ -1074,5 +1151,63 @@ mod tests {
         // without ever hitting the (mock) endpoint.
         let url = store.resolve_put_url("room", &Hash::of(b"x"), 100, None);
         assert!(url.is_none(), "small uploads must fall through to WS");
+    }
+
+    // ─── blob-cas-remediation.md slice 2.2 (finding #10), Delegate half ──────
+    //
+    // Direct mode hydrates tree objects with a real bucket GET (gated for
+    // real against MinIO in `tests/minio_round_trip.rs`). Delegate mode
+    // genuinely *cannot*: it holds no bucket credentials (`store.s3` is
+    // `None` — see `delegate_skips_s3_client`), and the delegate presign
+    // protocol v1 has no "give me the bytes" op, only `get`/`put` URL
+    // minting. So 2.2's "or fails loud" half applies here, and these tests
+    // are what make "GC never runs on S3-delegate" impossible to miss.
+
+    /// The whole point: a Delegate-mode server must NOT report a tree object
+    /// it cannot hydrate as a generic "missing blob". `MissingBlob` sends an
+    /// operator hunting for a lost object; the truth is a *configuration*
+    /// fact about this deployment, and it must say so.
+    #[test]
+    fn delegate_mode_tree_walk_fails_loud_not_as_a_generic_missing_blob() {
+        let mut cfg = S3BlobStoreConfig::default();
+        cfg.bucket = "b".into();
+        cfg.auth = S3Auth::delegate("https://app.example.com/presign", None);
+        let store = S3BlobStore::new(cfg).unwrap();
+
+        let tree = Hash::of(b"a tree object living in the app's bucket");
+        let err = nodalmerge_server::tree_walk::walk_tree(&store, &tree)
+            .expect_err("Delegate mode cannot hydrate; the walk must fail");
+
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("missing tree/blob object"),
+            "finding #10: Delegate mode must not disguise 'this backend has no bucket              credentials to read tree objects with' as a generic missing-blob error —              that is exactly the indistinguishable-from-a-real-bug failure the slice              exists to remove. Got: {msg}"
+        );
+        // Actionable: name the backend, the mode, and what an operator can do.
+        for needle in ["delegate", "hydrate"] {
+            assert!(
+                msg.to_lowercase().contains(needle),
+                "the error must be actionable and name {needle:?}; got: {msg}"
+            );
+        }
+    }
+
+    /// `hydrate_blob` is the seam the walk goes through; assert the backend's
+    /// own answer directly, not only through `walk_tree`, so a future caller
+    /// (e.g. slice 2.3's archive export) inherits the same loud failure.
+    #[test]
+    fn delegate_mode_hydrate_blob_is_unhydratable_not_missing() {
+        let mut cfg = S3BlobStoreConfig::default();
+        cfg.bucket = "b".into();
+        cfg.auth = S3Auth::delegate("https://app.example.com/presign", None);
+        let store = S3BlobStore::new(cfg).unwrap();
+
+        let err = store
+            .hydrate_blob(&Hash::of(b"anything"))
+            .expect_err("Delegate mode can never hydrate bytes");
+        assert!(
+            matches!(err, nodalmerge_server::store::HydrateError::Unhydratable { .. }),
+            "must be Unhydratable (a config fact), never Missing (a data fact): {err:?}"
+        );
     }
 }

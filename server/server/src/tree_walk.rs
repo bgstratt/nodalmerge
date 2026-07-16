@@ -12,12 +12,30 @@
 //!
 //! This walk is intentionally narrow: given a root hash, return every
 //! reachable tree-object hash *and* file blob hash, fetching bytes via
-//! [`BlobPersistence::get_blob`] (already zstd-transparent — see
+//! [`BlobPersistence::hydrate_blob`] (already zstd-transparent — see
 //! `store::DirPersistence::get_blob`). It never writes, never verifies
 //! anything beyond "does this parse as a tree object", and fails closed:
 //! a missing or malformed blob at any point aborts the whole walk with
 //! `Err`, never a partial set — the GC liveness computation built on top of
 //! this (`studio_live_hashes.rs`) depends on that.
+//!
+//! ## Why `hydrate_blob` and not `get_blob` (slice 2.2, finding #10)
+//!
+//! This walk used `get_blob`, which `S3BlobStore` hardwires to `None` as
+//! deliberate policy — so on every S3-backed server the walk aborted on its
+//! first fetch and studio GC failed closed *forever*, reporting a generic
+//! "missing tree object" that reads like data loss.
+//!
+//! Routing through [`BlobPersistence::hydrate_blob`] does **not** weaken that
+//! policy. The policy keeps large **file** payloads out of the server
+//! process; this walk never fetches a file blob. v1 entries are terminal by
+//! format, and of v2's two kinds only `"d"` is ever fetched — `"f"` entries
+//! contribute their hash to the live set and nothing else. Every byte this
+//! module reads is a small JSON tree object, i.e. the server's own index,
+//! which it cannot do its job without parsing. A backend that genuinely
+//! cannot supply even those (S3 **Delegate** mode) gets
+//! [`TreeWalkError::Unresolvable`] — distinct, actionable, and counted —
+//! rather than being mistaken for a lost blob.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -25,7 +43,7 @@ use std::collections::HashSet;
 use nodalmerge_core::Hash;
 use serde::Deserialize;
 
-use crate::store::{hash_from_hex, BlobPersistence};
+use crate::store::{hash_from_hex, BlobPersistence, HydrateError};
 
 /// Hard cap on directory-chain nesting a single walk will follow (v2 `"d"`
 /// entries only — v1 entries and v2 `"f"` entries are always terminal and
@@ -54,6 +72,24 @@ pub enum TreeWalkError {
     /// abort) — see the module docs and slice 1.5 of
     /// `plans/blob-cas-remediation.md`.
     TooDeep { hash: String, depth: usize },
+    /// Slice 2.2 (finding #10) — the blob backend **cannot** read tree-object
+    /// bytes into this process at all (S3 Delegate mode: no bucket
+    /// credentials, and delegate presign protocol v1 has no bytes op). The
+    /// tree is probably sitting safely in the bucket; this deployment simply
+    /// cannot walk it.
+    ///
+    /// Deliberately **not** [`MissingBlob`](Self::MissingBlob): that would
+    /// read as data loss and send an operator hunting for an object that
+    /// isn't lost, which is precisely the "GC never runs on S3, and nobody
+    /// notices" failure this slice exists to remove. Counted separately in
+    /// `nodalmerge_tree_walk_resolve_failed_total{reason="unhydratable_backend"}`.
+    Unresolvable { hash: String, detail: String },
+    /// Slice 2.2 — the backend tried to read the tree object and failed
+    /// transiently (network/IO). Says nothing about whether it exists, so it
+    /// is neither `MissingBlob` nor `Unresolvable`: the next tick may well
+    /// succeed. Counted as
+    /// `nodalmerge_tree_walk_resolve_failed_total{reason="backend_error"}`.
+    ResolveFailed { hash: String, detail: String },
 }
 
 impl std::fmt::Display for TreeWalkError {
@@ -65,6 +101,20 @@ impl std::fmt::Display for TreeWalkError {
                 f,
                 "tree walk aborted at {hash}: directory nesting depth {depth} exceeds the \
                  hard cap of {MAX_TREE_DEPTH} (see finding #9, plans/blob-cas-remediation.md 1.5)"
+            ),
+            TreeWalkError::Unresolvable { hash, detail } => write!(
+                f,
+                "cannot resolve tree object {hash}: {detail} — this is a DEPLOYMENT \
+                 CONFIGURATION problem, not a lost blob: the object is probably intact in \
+                 object storage, but this server cannot read tree objects, so studio GC \
+                 cannot compute a live set and will not reclaim anything. Run the server \
+                 with S3 Direct-mode credentials (or a blob backend that hydrates) if GC \
+                 is required. See finding #10, plans/blob-cas-remediation.md 2.2"
+            ),
+            TreeWalkError::ResolveFailed { hash, detail } => write!(
+                f,
+                "failed to read tree object {hash}: {detail} (transient backend error — \
+                 the object's existence is unknown; a later tick may succeed)"
             ),
         }
     }
@@ -129,9 +179,57 @@ pub fn walk_tree(
             return Err(TreeWalkError::TooDeep { hash: hash.to_hex(), depth });
         }
 
-        let bytes = persistence
-            .get_blob(&hash)
-            .ok_or_else(|| TreeWalkError::MissingBlob(hash.to_hex()))?;
+        // Slice 2.2 (finding #10). This *must not* be `get_blob`: that is
+        // hardwired `None` on `S3BlobStore` as deliberate policy, so every
+        // studio GC run over a cas-tree snapshot failed closed forever on any
+        // S3-backed server. `hydrate_blob` is the resolution path — a real
+        // bucket GET in Direct mode, a distinct/actionable error in Delegate
+        // mode (see `store::HydrateError`).
+        //
+        // **This does not contradict `get_blob`'s non-hydrating contract.**
+        // That contract is about keeping large *file* payloads out of the
+        // server process. Every fetch in this loop is a **tree object** — a
+        // few hundred bytes of JSON — and never a file blob: `"f"` entries
+        // (and all v1 entries) are terminal, going straight into `out` above
+        // without their bytes ever being read; only `"d"` entries reach this
+        // line. The server is reading its own index, not hauling payloads.
+        let bytes = persistence.hydrate_blob(&hash).map_err(|e| match e {
+            HydrateError::Missing => TreeWalkError::MissingBlob(hash.to_hex()),
+            HydrateError::Unhydratable { backend, detail } => {
+                metrics::counter!(
+                    "nodalmerge_tree_walk_resolve_failed_total",
+                    "reason" => "unhydratable_backend"
+                )
+                .increment(1);
+                tracing::error!(
+                    hash = %hash.to_hex(),
+                    %backend,
+                    %detail,
+                    "tree walk cannot resolve a tree object: this blob backend never \
+                     hydrates bytes into the server process, so studio GC cannot compute \
+                     a live set and will reclaim nothing. This is a deployment \
+                     configuration problem, not a missing blob (finding #10, \
+                     blob-cas-remediation.md 2.2)"
+                );
+                TreeWalkError::Unresolvable {
+                    hash: hash.to_hex(),
+                    detail: format!("{backend}: {detail}"),
+                }
+            }
+            HydrateError::Backend(detail) => {
+                metrics::counter!(
+                    "nodalmerge_tree_walk_resolve_failed_total",
+                    "reason" => "backend_error"
+                )
+                .increment(1);
+                tracing::warn!(
+                    hash = %hash.to_hex(),
+                    %detail,
+                    "tree walk: transient backend failure reading a tree object"
+                );
+                TreeWalkError::ResolveFailed { hash: hash.to_hex(), detail }
+            }
+        })?;
 
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
             TreeWalkError::Malformed(format!("{} is not valid JSON: {e}", hash.to_hex()))

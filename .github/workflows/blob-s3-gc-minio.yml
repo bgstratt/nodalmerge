@@ -90,6 +90,10 @@ on:
       - "server/server/src/room.rs"
       - "server/server/src/gc_store.rs"
       - "server/server/src/blob_http.rs"
+      # slice 2.2 — minio_round_trip.rs now drives walk_tree against a real
+      # bucket (s3_direct_tree_walk_*), the only real gate for the S3 hydrating
+      # tree read. The fake in blob-conformance is a port and cannot gate it.
+      - "server/server/src/tree_walk.rs"
       - "server/server/src/gc_adapter.rs"
       - "server/stores/blob-conformance/**"
       - "core/crdt/src/**"
@@ -101,6 +105,10 @@ on:
       - "server/server/src/room.rs"
       - "server/server/src/gc_store.rs"
       - "server/server/src/blob_http.rs"
+      # slice 2.2 — minio_round_trip.rs now drives walk_tree against a real
+      # bucket (s3_direct_tree_walk_*), the only real gate for the S3 hydrating
+      # tree read. The fake in blob-conformance is a port and cannot gate it.
+      - "server/server/src/tree_walk.rs"
       - "server/server/src/gc_adapter.rs"
       - "server/stores/blob-conformance/**"
       - "core/crdt/src/**"

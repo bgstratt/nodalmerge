@@ -87,8 +87,43 @@ pub trait NodePersistence: Send + Sync + std::fmt::Debug {
     /// Default: empty, meaning a caller relying on this alone would only
     /// see resident rooms — backends without a room index should override
     /// if they want cold rooms protected from GC.
+    ///
+    /// ⚠ **An empty result here is ambiguous by itself** — it means both
+    /// "this backend genuinely has no other rooms" and "this backend never
+    /// implemented enumeration." Callers that need to tell those apart
+    /// (i.e. anything that might delete based on the result) MUST also
+    /// consult [`Self::can_enumerate_rooms`] rather than trusting an empty
+    /// `Vec` as proof of completeness.
     fn known_room_ids(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// blob-cas-remediation.md slice 1.1 (finding #1) — the capability
+    /// signal that makes [`Self::known_room_ids`]'s empty default *safe by
+    /// construction* instead of silently authoritative.
+    ///
+    /// Before this existed, `Composite<N, B>` didn't forward
+    /// `known_room_ids` at all, and `PostgresNodeStore`/`MongoNodeStore`
+    /// never implemented it — so every one of those (durable, production)
+    /// wirings reported zero cold rooms regardless of how many actually had
+    /// persisted blobs, and the global blob GC sweep
+    /// (`Rooms::sweep_blobs`) read that as "no cold rooms have blobs" and
+    /// deleted them.
+    ///
+    /// `true` means `known_room_ids()` is a genuine, complete enumeration
+    /// of every room with persisted nodes — the sweep may trust an empty
+    /// result as proof there are no cold rooms to protect. `false` (the
+    /// default) means the backend hasn't confirmed that, and the sweep
+    /// must fail closed: refuse to run its delete pass rather than risk
+    /// treating "I don't know" as "there is nothing to protect."
+    ///
+    /// Backends that implement real enumeration (`DirPersistence`,
+    /// `PostgresNodeStore`, `MongoNodeStore`) override this to `true`
+    /// alongside `known_room_ids`. `NoPersistence` doesn't need to — it's
+    /// never durable, so [`ServerPersistence::is_durable`] already short-
+    /// circuits the sweep before this is consulted.
+    fn can_enumerate_rooms(&self) -> bool {
+        false
     }
 }
 
@@ -300,6 +335,12 @@ impl<N: NodePersistence, B: BlobPersistence> NodePersistence for Composite<N, B>
     }
     fn nodes_durable(&self) -> bool {
         self.nodes.nodes_durable()
+    }
+    fn known_room_ids(&self) -> Vec<String> {
+        self.nodes.known_room_ids()
+    }
+    fn can_enumerate_rooms(&self) -> bool {
+        self.nodes.can_enumerate_rooms()
     }
 }
 
@@ -631,6 +672,10 @@ impl NodePersistence for DirPersistence {
                 Vec::new()
             }
         }
+    }
+
+    fn can_enumerate_rooms(&self) -> bool {
+        true
     }
 }
 

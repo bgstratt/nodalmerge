@@ -198,6 +198,32 @@ impl NodePersistence for PostgresNodeStore {
     fn nodes_durable(&self) -> bool {
         true
     }
+
+    /// blob-cas-remediation.md slice 1.1 (finding #1) — real enumeration
+    /// backed by a `DISTINCT room_id` scan, so the global blob GC sweep
+    /// (`Rooms::sweep_blobs`) can protect blobs owned by cold/non-resident
+    /// rooms instead of the trait's unsafe empty default.
+    fn known_room_ids(&self) -> Vec<String> {
+        let pool = self.pool.clone();
+        let rows: Result<Vec<String>, sqlx::Error> = self.rt.block_on(async move {
+            let rows = sqlx::query("SELECT DISTINCT room_id FROM nodalmerge_nodes")
+                .fetch_all(&pool)
+                .await?;
+            Ok(rows.into_iter().map(|r| r.get::<String, _>("room_id")).collect())
+        });
+        match rows {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(?e, "postgres known_room_ids failed");
+                Vec::new()
+            }
+        }
+    }
+
+    /// See [`Self::known_room_ids`] — this backend genuinely enumerates.
+    fn can_enumerate_rooms(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

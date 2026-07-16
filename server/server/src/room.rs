@@ -621,6 +621,12 @@ impl Rooms {
     /// actively dangerous under the flat layout. So this collects live
     /// hashes from resident rooms via their in-memory graphs, then unions
     /// in every other known room id via a fresh `load_room_nodes` scan.
+    ///
+    /// blob-cas-remediation.md slice 1.1 — **fails closed** when the
+    /// backing store can't prove that union is complete. If
+    /// `self.persistence.can_enumerate_rooms()` is `false`, the entire
+    /// delete pass is skipped (logged, zero deletions) instead of trusting
+    /// an empty `known_room_ids()` as proof no cold room needs protecting.
     pub async fn sweep_blobs(&self, grace: Duration) -> usize {
         if !self.persistence.is_durable() {
             return 0;
@@ -639,6 +645,29 @@ impl Rooms {
         let mut live = std::collections::HashSet::new();
         for (_, room) in &resident {
             live.extend(collect_live_blob_hashes(room).await);
+        }
+
+        // blob-cas-remediation.md slice 1.1 (finding #1) — the altitude
+        // fix. `known_room_ids()` returning empty is ambiguous: it means
+        // both "there are genuinely no cold rooms" and "this backend never
+        // implemented enumeration" (the trait default — true of every
+        // `Composite`/Postgres/Mongo wiring before this slice). Treating
+        // the latter as the former is exactly how a cold room's blobs got
+        // permanently deleted. Fail closed: refuse to run the delete pass
+        // at all unless the backend can prove its enumeration is complete.
+        if !self.persistence.can_enumerate_rooms() {
+            tracing::warn!(
+                "blob GC sweep: persistence backend cannot enumerate known_room_ids() \
+                 (NodePersistence::can_enumerate_rooms() == false); refusing to run the \
+                 delete pass so blobs owned only by a cold/non-resident room are not \
+                 destroyed"
+            );
+            metrics::counter!(
+                "nodalmerge_blob_gc_skipped_total",
+                "reason" => "cannot_enumerate_rooms"
+            )
+            .increment(1);
+            return 0;
         }
         for id in self.persistence.known_room_ids() {
             if resident_ids.contains(id.as_str()) {

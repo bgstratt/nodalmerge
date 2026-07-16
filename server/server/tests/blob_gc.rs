@@ -367,7 +367,6 @@ async fn blob_gc_is_noop_on_in_memory_persistence() {
 // gates.
 
 #[tokio::test]
-#[ignore = "RED: fails until slice 1.1 — see nodalmerge-studio/plans/blob-cas-remediation.md"]
 async fn blob_gc_composite_must_forward_known_room_ids_for_cold_rooms() {
     // 0.3(a) — gates slice 1.1 (finding #1). `Composite<N, B>`'s
     // `impl NodePersistence` (server/server/src/store.rs:291) never
@@ -443,6 +442,102 @@ async fn blob_gc_composite_must_forward_known_room_ids_for_cold_rooms() {
     assert!(
         blob_path.exists(),
         "cold room's blob (owned via Composite) must survive a sweep driven by a different resident room"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `NodePersistence` stub that deliberately does **not** override
+/// `known_room_ids`/`can_enumerate_rooms` — modeling a durable backend that
+/// hasn't (yet) implemented room enumeration (the shape every
+/// `Composite`/Postgres/Mongo wiring had before slice 1.1). Before the
+/// altitude fix, this was indistinguishable from "there are no cold rooms"
+/// and the sweep would delete anything not referenced by a resident room.
+struct NotEnumerableNodeStore {
+    nodes: std::sync::Mutex<std::collections::HashMap<String, Vec<nodalmerge_core::SyncNode>>>,
+}
+
+impl std::fmt::Debug for NotEnumerableNodeStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NotEnumerableNodeStore").finish_non_exhaustive()
+    }
+}
+
+impl Default for NotEnumerableNodeStore {
+    fn default() -> Self {
+        Self {
+            nodes: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl NodePersistence for NotEnumerableNodeStore {
+    fn load_room_nodes(&self, room_id: &str) -> Vec<nodalmerge_core::SyncNode> {
+        self.nodes
+            .lock()
+            .unwrap()
+            .get(room_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+    fn persist_node(&self, room_id: &str, node: &nodalmerge_core::SyncNode) {
+        self.nodes
+            .lock()
+            .unwrap()
+            .entry(room_id.to_string())
+            .or_default()
+            .push(node.clone());
+    }
+    fn nodes_durable(&self) -> bool {
+        true
+    }
+    // known_room_ids / can_enumerate_rooms: intentionally left at the
+    // trait's defaults (empty Vec / false) — that's the point of this test.
+}
+
+#[tokio::test]
+async fn blob_gc_fails_closed_when_backend_cannot_enumerate_rooms() {
+    // 1.1 altitude fix (finding #1): an empty `known_room_ids()` must not
+    // be trusted as "there are no cold rooms" unless the backend also says
+    // `can_enumerate_rooms() == true`. This is deliberately a *different*
+    // shape from `blob_gc_composite_must_forward_known_room_ids_for_cold_rooms`
+    // above (which proves `Composite` forwards a *real* enumerator): here
+    // the wrapped `NodePersistence` never implements enumeration at all, so
+    // the only way to avoid deleting a cold room's blob is refusing to run
+    // the delete pass in the first place.
+    let dir = tmpdir("not-enumerable");
+    let nodes = NotEnumerableNodeStore::default();
+    let blobs = DirPersistence::open(&dir).unwrap();
+
+    let persistence: SharedPersistence = Arc::new(Composite::new(nodes, blobs));
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&[0x0Au8; 32]),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    );
+
+    // A wholly orphaned blob: not referenced by any node, not even in a
+    // resident room. Under the pre-1.1 behavior this would be deleted on
+    // the very first `grace = ZERO` sweep, since the empty `known_room_ids()`
+    // default looked identical to "no other rooms exist."
+    let orphan_bytes = b"orphan-under-a-non-enumerable-node-store".to_vec();
+    let orphan_hash = Hash::of(&orphan_bytes);
+    persistence.persist_blob(&orphan_hash, &orphan_bytes);
+
+    let _room = rooms.get_or_create("only-resident-room").await;
+
+    let deleted = rooms.sweep_blobs(Duration::ZERO).await;
+    assert_eq!(
+        deleted, 0,
+        "sweep must refuse to delete anything when the backend can't prove its room \
+         enumeration is complete"
+    );
+    let blob_path = dir.join("blobs").join("blake3").join(orphan_hash.to_hex());
+    assert!(
+        blob_path.exists(),
+        "orphan blob must survive when the node store can't enumerate rooms"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -442,6 +442,57 @@ impl NodePersistence for MongoNodeStore {
     fn nodes_durable(&self) -> bool {
         true
     }
+
+    /// blob-cas-remediation.md slice 1.1 (finding #1) — real enumeration
+    /// via a `distinct("room_id")`, so the global blob GC sweep
+    /// (`Rooms::sweep_blobs`) can protect blobs owned by cold/non-resident
+    /// rooms instead of the trait's unsafe empty default.
+    fn known_room_ids(&self) -> Vec<String> {
+        tracing::debug!(client_id = self.client_id, "mongo known_room_ids using client");
+        let nodes_coll = self.client.database(&self.db_name).collection::<Document>(&self.collection_name);
+        let rt = self.rt.clone();
+        let handle = std::thread::spawn(move || {
+            rt.block_on(async move {
+                let mut attempt = 0u8;
+                loop {
+                    match nodes_coll.distinct("room_id", doc! {}).await {
+                        Ok(values) => {
+                            break Ok(values
+                                .into_iter()
+                                .filter_map(|b| b.as_str().map(|s| s.to_string()))
+                                .collect::<Vec<String>>());
+                        }
+                        Err(e) if matches!(*e.kind, ErrorKind::ServerSelection { .. }) && attempt < 2 => {
+                            attempt += 1;
+                            tracing::warn!(error = ?e, attempt = attempt, "distinct retry after ServerSelection");
+                            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
+                            continue;
+                        }
+                        Err(e) => break Err(e),
+                    }
+                }
+            })
+        });
+        let res: Result<Vec<String>, mongodb::error::Error> = match handle.join() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(?e, "mongo thread join failed");
+                return Vec::new();
+            }
+        };
+        match res {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(?e, "mongo known_room_ids failed");
+                Vec::new()
+            }
+        }
+    }
+
+    /// See [`Self::known_room_ids`] — this backend genuinely enumerates.
+    fn can_enumerate_rooms(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

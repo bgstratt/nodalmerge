@@ -131,11 +131,13 @@ async fn blob_http_surface_vectors_conform() {
     let no_auth_router: Router = blob_http::blob_routes(BlobHttpConfig {
         auth_token: None,
         max_blob_bytes: file.max_blob_bytes_for_tests,
+        gc_inventory: None,
     })
     .with_state(rooms.clone());
     let auth_router: Router = blob_http::blob_routes(BlobHttpConfig {
         auth_token: Some(file.auth_token_for_tests.clone()),
         max_blob_bytes: file.max_blob_bytes_for_tests,
+        gc_inventory: None,
     })
     .with_state(rooms.clone());
 

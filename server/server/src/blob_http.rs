@@ -43,6 +43,8 @@
 //! rejection when the (possibly chunked, possibly `Content-Length`-less)
 //! body stream exceeds that limit while buffering.
 
+use std::sync::Arc;
+
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -52,6 +54,7 @@ use axum::{
     Json, Router,
 };
 use nodalmerge_core::Hash;
+use nodalmerge_gc::contracts::AssetInventoryStore;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -70,7 +73,7 @@ use crate::store::{hash_from_hex, is_canonical_blob_name};
 const GLOBAL_ROOM_PLACEHOLDER: &str = "_global";
 
 /// Runtime configuration for the blob HTTP origin routes.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BlobHttpConfig {
     /// Static bearer token. `None` = anonymous (matches the rest of the
     /// current HTTP surface). `Some(token)` requires every blob request to
@@ -80,6 +83,17 @@ pub struct BlobHttpConfig {
     /// `DefaultBodyLimit` on the whole body stream (not just
     /// `Content-Length`), so chunked bodies are capped while buffering too.
     pub max_blob_bytes: usize,
+    /// S5.3 — the GC coordinator's asset inventory, if the server has one
+    /// configured (`--store` + `--blob-gc-interval`). When present, a
+    /// successful local `PUT` (identity write) or a successful
+    /// `POST /blobs/{hash}/uploaded` confirmation (S4.2 presign path) both
+    /// upsert the hash as `Active` in the inventory immediately — the
+    /// `Uploading -> Active` transition `docs/delegated-storage-gc.md`
+    /// calls normative, rather than waiting for the next scheduled mark
+    /// pass to notice the reference. `None` (the default) is a no-op —
+    /// every existing deployment without the new coordinator enabled is
+    /// unaffected.
+    pub gc_inventory: Option<Arc<dyn AssetInventoryStore>>,
 }
 
 impl Default for BlobHttpConfig {
@@ -87,9 +101,27 @@ impl Default for BlobHttpConfig {
         Self {
             auth_token: None,
             max_blob_bytes: 64 * 1024 * 1024, // 64 MiB
+            gc_inventory: None,
         }
     }
 }
+
+impl std::fmt::Debug for BlobHttpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlobHttpConfig")
+            .field("auth_token", &self.auth_token.as_ref().map(|_| "<redacted>"))
+            .field("max_blob_bytes", &self.max_blob_bytes)
+            .field("gc_inventory", &self.gc_inventory.is_some())
+            .finish()
+    }
+}
+
+/// S5.3 — sentinel `run_id` used when upserting an inventory row outside a
+/// real `GcCoordinator::run_once` call (i.e. from the upload-confirm path
+/// below, not a mark pass). Never matched against a real run id; it exists
+/// purely so the row has *some* `last_marked_run_id` and reads clearly in
+/// the ledger.
+const UPLOAD_MARK_SENTINEL: &str = "upload";
 
 /// Build the `/blobs/:hash` routes (`GET`, `HEAD`, `PUT`) plus the S4.2
 /// blob-URL-resolution routes (`GET /blobs/:hash/url`, `POST
@@ -366,7 +398,17 @@ async fn confirm_blob_uploaded(
     }
 
     match rooms.persistence.verify_uploaded(GLOBAL_ROOM_PLACEHOLDER, &hash) {
-        Ok(()) => StatusCode::OK.into_response(),
+        Ok(()) => {
+            // S5.3: Uploading -> Active per docs/delegated-storage-gc.md's
+            // normative lifecycle guidance, immediately rather than waiting
+            // for the next scheduled mark pass.
+            if let Some(inv) = &cfg.gc_inventory {
+                if let Err(e) = inv.upsert_active_seen(UPLOAD_MARK_SENTINEL, &hash_hex, std::time::SystemTime::now()) {
+                    tracing::warn!(?e, hash = %hash_hex, "gc inventory upsert after verify_uploaded failed");
+                }
+            }
+            StatusCode::OK.into_response()
+        }
         Err(msg) => (StatusCode::CONFLICT, Json(json!({"error": msg}))).into_response(),
     }
 }
@@ -460,6 +502,14 @@ async fn put_blob(
             Json(json!({"error": "hash mismatch"})),
         )
             .into_response();
+    }
+
+    // S5.3: either branch below means the bytes now genuinely exist under
+    // `hash_hex` — mark it Active immediately (see `gc_inventory`'s doc).
+    if let Some(inv) = &cfg.gc_inventory {
+        if let Err(e) = inv.upsert_active_seen(UPLOAD_MARK_SENTINEL, &hash_hex, std::time::SystemTime::now()) {
+            tracing::warn!(?e, hash = %hash_hex, "gc inventory upsert after PUT failed");
+        }
     }
 
     if rooms.persistence.has_blob(&path_hash) {

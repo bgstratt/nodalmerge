@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 nodalmerge-server = { version = "0.2.0", path = "../server" }
 nodalmerge-s3-blobs = { version = "0.2.0", path = "../s3-blobs" }
+nodalmerge-gc = { version = "0.2.0", path = "../../core/gc" }
 tokio = { workspace = true }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }

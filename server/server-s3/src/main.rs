@@ -47,8 +47,11 @@
 use std::sync::Arc;
 
 use axum::{routing::get, Router};
-use nodalmerge_s3_blobs::{S3Auth, S3BlobStore, S3BlobStoreConfig};
-use nodalmerge_server::{blob_http, keypair, metrics, room, store, ws_handler};
+use nodalmerge_s3_blobs::{S3Auth, S3BlobObjectStore, S3BlobStore, S3BlobStoreConfig};
+use nodalmerge_server::{
+    blob_http, gc_blob_objects, gc_pin_store, gc_service, gc_store, keypair, metrics, room, store,
+    ws_handler,
+};
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -96,15 +99,22 @@ async fn main() {
 
     let store_path = parse_store_arg(&args);
 
+    // S5.3: hoisted out of the match below so the GC coordinator wiring can
+    // reuse the same config later (bucket/path-prefix for its key scheme,
+    // and a second `S3BlobStore` instance for `S3BlobObjectStore`) without
+    // re-reading env vars a second time or duplicating the "s3" branch.
+    let s3_cfg_for_gc: Option<S3BlobStoreConfig> =
+        if backend == "s3" { Some(match build_s3_config_from_env() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("error: S3 blob backend config invalid: {e}");
+                std::process::exit(1);
+            }
+        }) } else { None };
+
     let persistence: store::SharedPersistence = match backend.as_str() {
         "s3" => {
-            let s3_cfg = match build_s3_config_from_env() {
-                Ok(cfg) => cfg,
-                Err(e) => {
-                    eprintln!("error: S3 blob backend config invalid: {e}");
-                    std::process::exit(1);
-                }
-            };
+            let s3_cfg = s3_cfg_for_gc.clone().expect("s3_cfg_for_gc is Some when backend == \"s3\"");
             let blobs = match S3BlobStore::new(s3_cfg) {
                 Ok(b) => b,
                 Err(e) => {
@@ -200,16 +210,76 @@ async fn main() {
         tracing::info!("idle-room eviction disabled (idle-timeout = 0)");
     }
 
+    // S5.3: the GC inventory/run ledger is a sibling `gc.db` beside
+    // `--store` (same as `main.rs`) — independent of `--blob-backend`,
+    // since it needs a filesystem location regardless of where blob bytes
+    // themselves live.
+    let gc_inventory: Option<Arc<gc_store::SqliteGcStore>> = match &store_path {
+        Some(path) => {
+            let key_scheme = match &s3_cfg_for_gc {
+                Some(s3_cfg) => nodalmerge_s3_blobs::s3_key_scheme(s3_cfg.bucket.clone(), s3_cfg.path_prefix.clone()),
+                None => gc_store::local_key_scheme(),
+            };
+            match gc_store::SqliteGcStore::open(path, key_scheme) {
+                Ok(s) => Some(Arc::new(s)),
+                Err(e) => {
+                    eprintln!("error: gc inventory store open failed at {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => None,
+    };
+
     let blob_gc_interval = parse_u64_flag(&args, "--blob-gc-interval", 0).unwrap_or(0);
     if blob_gc_interval > 0 {
         if rooms.persistence.is_durable() {
             let grace = parse_u64_flag(&args, "--blob-gc-grace", 86400).unwrap_or(86400);
-            tracing::info!(interval_secs = blob_gc_interval, grace_secs = grace, "blob GC enabled");
-            let _handle = room::spawn_blob_gc_sweeper(
-                rooms.clone(),
-                std::time::Duration::from_secs(blob_gc_interval),
-                std::time::Duration::from_secs(grace),
-            );
+            let gc_mode = parse_gc_mode_arg(&args).unwrap_or_default();
+            let gc_cfg = gc_service::GcServiceConfig {
+                mode: gc_mode,
+                grace: std::time::Duration::from_secs(grace),
+                max_deletes_per_run: parse_u64_flag(&args, "--gc-max-deletes-per-run", 100).unwrap_or(100),
+                require_head_before_delete: parse_bool_flag(&args, "--gc-require-head-before-delete", true),
+                retain_intermediate_days: parse_i64_flag(&args, "--gc-retain-intermediate-days", 30).unwrap_or(30),
+            };
+            tracing::info!(interval_secs = blob_gc_interval, grace_secs = grace, mode = ?gc_mode, backend = backend.as_str(), "gc sweeper enabled");
+            match (&store_path, &gc_inventory) {
+                (Some(path), Some(inventory)) => {
+                    let pins = Arc::new(gc_pin_store::StaticPinStore::from_env_and_args(&args));
+                    match &s3_cfg_for_gc {
+                        Some(s3_cfg) => {
+                            let objects = match S3BlobObjectStore::new(s3_cfg.clone()) {
+                                Ok(o) => Arc::new(o),
+                                Err(e) => {
+                                    eprintln!("error: S3BlobObjectStore::new failed: {e}");
+                                    std::process::exit(1);
+                                }
+                            };
+                            let _handle = gc_service::spawn_gc_sweeper(
+                                rooms.clone(),
+                                std::time::Duration::from_secs(blob_gc_interval),
+                                gc_cfg,
+                                Arc::clone(inventory),
+                                pins,
+                                objects,
+                            );
+                        }
+                        None => {
+                            let objects = Arc::new(gc_blob_objects::LocalBlobObjectStore::new(path));
+                            let _handle = gc_service::spawn_gc_sweeper(
+                                rooms.clone(),
+                                std::time::Duration::from_secs(blob_gc_interval),
+                                gc_cfg,
+                                Arc::clone(inventory),
+                                pins,
+                                objects,
+                            );
+                        }
+                    }
+                }
+                _ => tracing::warn!("gc sweeper armed but no --store root; disabled"),
+            }
         } else {
             tracing::warn!(
                 "--blob-gc-interval set but persistence is in-memory; GC disabled \
@@ -225,6 +295,7 @@ async fn main() {
     let blob_cfg = blob_http::BlobHttpConfig {
         auth_token: blob_token,
         max_blob_bytes: blob_max_bytes,
+        gc_inventory: gc_inventory.map(|inv| inv as Arc<dyn nodalmerge_gc::contracts::AssetInventoryStore>),
     };
 
     let cors = CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any);
@@ -541,6 +612,92 @@ fn parse_usize_flag(args: &[String], flag: &str, default_for_msg: usize) -> Opti
                 Ok(n) => Some(n),
                 Err(_) => {
                     eprintln!("warning: {flag} expects a non-negative integer; got {s:?}, using default {default_for_msg}");
+                    None
+                }
+            };
+        }
+        i += 1;
+    }
+    None
+}
+
+/// S5.3: Parse `--gc-mode <off|legacy|dryrun|markonly|sweepsoft|sweephard>`
+/// (or `--gc-mode=<...>`). Mirrors `nodalmerge-server`'s `main.rs`.
+fn parse_gc_mode_arg(args: &[String]) -> Option<gc_service::GcMode> {
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == "--gc-mode" {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix("--gc-mode=") {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match gc_service::GcMode::parse(s) {
+                Some(m) => Some(m),
+                None => {
+                    eprintln!(
+                        "warning: --gc-mode expects off|legacy|dryrun|markonly|sweepsoft|sweephard; got {s:?}, using default legacy"
+                    );
+                    None
+                }
+            };
+        }
+        i += 1;
+    }
+    None
+}
+
+/// S5.3: Parse a `bool` CLI flag. Mirrors `nodalmerge-server`'s `main.rs`.
+fn parse_bool_flag(args: &[String], flag: &str, default_for_msg: bool) -> bool {
+    let eq_prefix = format!("{flag}=");
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == flag {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match s.to_ascii_lowercase().as_str() {
+                "true" | "1" => true,
+                "false" | "0" => false,
+                _ => {
+                    eprintln!(
+                        "warning: {flag} expects true/false/1/0; got {s:?}, using default {default_for_msg}"
+                    );
+                    default_for_msg
+                }
+            };
+        }
+        i += 1;
+    }
+    default_for_msg
+}
+
+/// S5.3: Parse an `i64` CLI flag. Mirrors `nodalmerge-server`'s `main.rs`.
+fn parse_i64_flag(args: &[String], flag: &str, default_for_msg: i64) -> Option<i64> {
+    let eq_prefix = format!("{flag}=");
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == flag {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match s.parse::<i64>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!("warning: {flag} expects an integer; got {s:?}, using default {default_for_msg}");
                     None
                 }
             };

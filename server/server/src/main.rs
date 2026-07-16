@@ -1,4 +1,7 @@
-use nodalmerge_server::{blob_http, keypair, metrics, room, store, ws_handler};
+use nodalmerge_server::{
+    blob_http, gc_blob_objects, gc_pin_store, gc_service, gc_store, keypair, metrics, room, store,
+    ws_handler,
+};
 
 use std::sync::Arc;
 use axum::{Router, routing::get};
@@ -60,14 +63,15 @@ async fn main() {
 
     // F4: optional on-disk persistence. `--store <path>` enables a SQLite+files
     // backend rooted at `<path>`; absent it, the server is in-memory only.
-    let persistence: store::SharedPersistence = match parse_store_arg(&args) {
+    let store_path = parse_store_arg(&args);
+    let persistence: store::SharedPersistence = match &store_path {
         Some(path) => {
             let compression = store::BlobCompressionConfig {
                 enabled: blob_compression_enabled,
                 level: blob_compression_level,
                 ..store::BlobCompressionConfig::default()
             };
-            match store::DirPersistence::open_with_compression(&path, compression) {
+            match store::DirPersistence::open_with_compression(path, compression) {
                 Ok(p) => {
                     tracing::info!(
                         store = %path.display(),
@@ -130,25 +134,66 @@ async fn main() {
         tracing::info!("idle-room eviction disabled (idle-timeout = 0)");
     }
 
-    // G4: optional blob GC sweeper. `--blob-gc-interval <secs>` (default 0 =
-    // disabled) arms the task; `--blob-gc-grace <secs>` (default 86400 = 24 h)
-    // is the tombstone-to-delete grace window. Like idle eviction, this is
-    // durable-only: on in-memory builds blobs never hit disk so there is
-    // nothing to collect.
+    // S5.3: the GC inventory/run ledger lives beside `--store` (a sibling
+    // `gc.db`, same pattern as `nodalmerge.db`) whenever on-disk persistence
+    // is configured — independent of whether the periodic sweeper below is
+    // armed, so `PUT`/`uploaded`-confirm events (wired in `blob_http.rs`)
+    // can start tracking assets immediately, ready for whenever an operator
+    // turns on `--blob-gc-interval`/`--gc-mode`.
+    let gc_inventory: Option<std::sync::Arc<gc_store::SqliteGcStore>> = match &store_path {
+        Some(path) => match gc_store::SqliteGcStore::open(path, gc_store::local_key_scheme()) {
+            Ok(s) => Some(std::sync::Arc::new(s)),
+            Err(e) => {
+                eprintln!("error: gc inventory store open failed at {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+
+    // G4/S5.3: optional GC sweeper on the existing `--blob-gc-interval`
+    // schedule. `--gc-mode off|legacy|dryrun|markonly|sweepsoft|sweephard`
+    // (default `legacy`) picks which deletion path runs on each tick — see
+    // `gc_service`'s module docs for how the two coexist. `legacy` is
+    // today's exact behavior (the no-op MarkOnly preflight +
+    // `blob_gc_sweep`'s tombstone/grace/delete dance) so landing this slice
+    // changes nothing until an operator opts in to the new coordinator.
     let blob_gc_interval = parse_u64_flag(&args, "--blob-gc-interval", 0).unwrap_or(0);
     if blob_gc_interval > 0 {
         if rooms.persistence.is_durable() {
             let grace = parse_u64_flag(&args, "--blob-gc-grace", 86400).unwrap_or(86400);
+            let gc_mode = parse_gc_mode_arg(&args).unwrap_or_default();
+            let gc_cfg = gc_service::GcServiceConfig {
+                mode: gc_mode,
+                grace: std::time::Duration::from_secs(grace),
+                max_deletes_per_run: parse_u64_flag(&args, "--gc-max-deletes-per-run", 100).unwrap_or(100),
+                require_head_before_delete: parse_bool_flag(&args, "--gc-require-head-before-delete", true),
+                retain_intermediate_days: parse_i64_flag(&args, "--gc-retain-intermediate-days", 30).unwrap_or(30),
+            };
             tracing::info!(
                 interval_secs = blob_gc_interval,
                 grace_secs = grace,
-                "blob GC enabled"
+                mode = ?gc_mode,
+                "gc sweeper enabled"
             );
-            let _handle = room::spawn_blob_gc_sweeper(
-                rooms.clone(),
-                std::time::Duration::from_secs(blob_gc_interval),
-                std::time::Duration::from_secs(grace),
-            );
+            // `rooms.persistence.is_durable()` already guarantees
+            // `store_path`/`gc_inventory` are `Some` (in-memory persistence
+            // is never durable), but guard explicitly rather than assume.
+            match (&store_path, &gc_inventory) {
+                (Some(path), Some(inventory)) => {
+                    let pins = std::sync::Arc::new(gc_pin_store::StaticPinStore::from_env_and_args(&args));
+                    let objects = std::sync::Arc::new(gc_blob_objects::LocalBlobObjectStore::new(path));
+                    let _handle = gc_service::spawn_gc_sweeper(
+                        rooms.clone(),
+                        std::time::Duration::from_secs(blob_gc_interval),
+                        gc_cfg,
+                        std::sync::Arc::clone(inventory),
+                        pins,
+                        objects,
+                    );
+                }
+                _ => tracing::warn!("gc sweeper armed but no --store root; disabled"),
+            }
         } else {
             tracing::warn!(
                 "--blob-gc-interval set but persistence is in-memory; GC disabled \
@@ -188,6 +233,7 @@ async fn main() {
     let blob_cfg = blob_http::BlobHttpConfig {
         auth_token: blob_token,
         max_blob_bytes: blob_max_bytes,
+        gc_inventory: gc_inventory.map(|inv| inv as std::sync::Arc<dyn nodalmerge_gc::contracts::AssetInventoryStore>),
     };
 
     let cors = CorsLayer::new()
@@ -424,6 +470,98 @@ fn parse_usize_flag(args: &[String], flag: &str, default_for_msg: usize) -> Opti
                 Ok(n) => Some(n),
                 Err(_) => {
                     eprintln!("warning: {flag} expects a non-negative integer; got {s:?}, using default {default_for_msg}");
+                    None
+                }
+            };
+        }
+        i += 1;
+    }
+    None
+}
+
+/// S5.3: Parse `--gc-mode <off|legacy|dryrun|markonly|sweepsoft|sweephard>`
+/// (or `--gc-mode=<...>`). `None` when absent or unrecognized — callers fall
+/// back to `GcMode::default()` (`Legacy`, preserving pre-S5.3 behavior).
+fn parse_gc_mode_arg(args: &[String]) -> Option<gc_service::GcMode> {
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == "--gc-mode" {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix("--gc-mode=") {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match gc_service::GcMode::parse(s) {
+                Some(m) => Some(m),
+                None => {
+                    eprintln!(
+                        "warning: --gc-mode expects off|legacy|dryrun|markonly|sweepsoft|sweephard; got {s:?}, using default legacy"
+                    );
+                    None
+                }
+            };
+        }
+        i += 1;
+    }
+    None
+}
+
+/// S5.3: Parse a `bool` CLI flag (e.g. `--gc-require-head-before-delete
+/// false`). Accepts `true`/`false`/`1`/`0` (case-insensitive). Returns
+/// `default_for_msg` (not `Option`, since every caller of this flag wants a
+/// concrete value, not a further fallback decision) when absent or invalid.
+fn parse_bool_flag(args: &[String], flag: &str, default_for_msg: bool) -> bool {
+    let eq_prefix = format!("{flag}=");
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == flag {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match s.to_ascii_lowercase().as_str() {
+                "true" | "1" => true,
+                "false" | "0" => false,
+                _ => {
+                    eprintln!(
+                        "warning: {flag} expects true/false/1/0; got {s:?}, using default {default_for_msg}"
+                    );
+                    default_for_msg
+                }
+            };
+        }
+        i += 1;
+    }
+    default_for_msg
+}
+
+/// S5.3: Parse an `i64` CLI flag (e.g. `--gc-retain-intermediate-days 30`).
+/// Mirrors `parse_i32_flag`; signed since it's compared against an `i128`
+/// nanosecond timestamp domain, not used as a byte-count/index.
+fn parse_i64_flag(args: &[String], flag: &str, default_for_msg: i64) -> Option<i64> {
+    let eq_prefix = format!("{flag}=");
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let raw = if a == flag {
+            args.get(i + 1).map(|s| s.as_str())
+        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
+            Some(v)
+        } else {
+            None
+        };
+        if let Some(s) = raw {
+            return match s.parse::<i64>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!("warning: {flag} expects an integer; got {s:?}, using default {default_for_msg}");
                     None
                 }
             };

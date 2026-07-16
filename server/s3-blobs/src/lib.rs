@@ -339,6 +339,61 @@ impl S3BlobStore {
         }
     }
 
+    /// S5.3 — HEAD an arbitrary bucket key (not derived from a `Hash`),
+    /// Direct mode only. Generalizes `direct_head` for
+    /// [`S3BlobObjectStore`], which the GC coordinator's hard-sweep drives
+    /// off inventory rows keyed by object key, not by hash.
+    pub fn head_key(&self, key: &str) -> Result<bool, S3BlobError> {
+        let Some(s3) = self.s3.clone() else {
+            return Err(S3BlobError::Config(
+                "head_key requires Direct-mode credentials (Delegate mode has no bucket access)".to_string(),
+            ));
+        };
+        let path = ObjectPath::from(key.to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move { s3.head(&path).await });
+            let _ = tx.send(res);
+        });
+        let res: Result<_, object_store::Error> = rx
+            .recv()
+            .map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?;
+        match res {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(e) => Err(S3BlobError::ObjectStore(e)),
+        }
+    }
+
+    /// S5.3 — DELETE an arbitrary bucket key. See [`Self::head_key`]. A
+    /// missing object is treated as success (already gone is the goal
+    /// state, not an error) — mirrors `object_store::ObjectStore::delete`'s
+    /// own idempotent-on-missing behavior for most backends, made explicit
+    /// here rather than relying on it.
+    pub fn delete_key(&self, key: &str) -> Result<(), S3BlobError> {
+        let Some(s3) = self.s3.clone() else {
+            return Err(S3BlobError::Config(
+                "delete_key requires Direct-mode credentials (Delegate mode has no bucket access)".to_string(),
+            ));
+        };
+        let path = ObjectPath::from(key.to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
+            let res = rt2.block_on(async move { s3.delete(&path).await });
+            let _ = tx.send(res);
+        });
+        let res: Result<_, object_store::Error> = rx
+            .recv()
+            .map_err(|e| S3BlobError::Config(format!("thread error: {e}")))?;
+        match res {
+            Ok(()) => Ok(()),
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(S3BlobError::ObjectStore(e)),
+        }
+    }
+
     /// Delegate-mode HTTP roundtrip.
     fn delegate_request(
         &self,
@@ -611,6 +666,62 @@ impl BlobPersistence for S3BlobStore {
     fn supports_presigned_urls(&self) -> bool {
         true
     }
+}
+
+// ─── S5.3: nodalmerge_gc::contracts::BlobObjectStore ────────────────────────
+
+/// S5.3 — the GC coordinator's hard-sweep HEAD/DELETE surface, backed by an
+/// S3-compatible bucket. Direct-mode only (Delegate mode never holds bucket
+/// credentials to HEAD/DELETE with — a hard sweep against a Delegate-mode
+/// deployment must use a different `BlobObjectStore`, out of this slice's
+/// scope). Owns its own [`S3BlobStore`] instance (a second, independent
+/// client built from the same [`S3BlobStoreConfig`] the persistence layer
+/// uses) rather than sharing the one `nodalmerge_server::store::Composite`
+/// owns by value — `S3BlobStore::new` is cheap (just builds an HTTP/S3
+/// client, no heavyweight state), and this keeps the GC adapter decoupled
+/// from whatever owns the persistence-facing instance.
+pub struct S3BlobObjectStore {
+    inner: S3BlobStore,
+}
+
+impl S3BlobObjectStore {
+    pub fn new(cfg: S3BlobStoreConfig) -> Result<Self, S3BlobError> {
+        Ok(Self { inner: S3BlobStore::new(cfg)? })
+    }
+}
+
+impl nodalmerge_gc::contracts::BlobObjectStore for S3BlobObjectStore {
+    fn head(&self, bucket: &str, key: &str) -> nodalmerge_gc::GcResult<bool> {
+        if bucket != self.inner.cfg.bucket {
+            return Err(nodalmerge_gc::GcError::Backend(format!(
+                "S3BlobObjectStore is bound to bucket {:?}, got {bucket:?}",
+                self.inner.cfg.bucket
+            )));
+        }
+        self.inner
+            .head_key(key)
+            .map_err(|e| nodalmerge_gc::GcError::Backend(e.to_string()))
+    }
+
+    fn delete(&self, bucket: &str, key: &str) -> nodalmerge_gc::GcResult<()> {
+        if bucket != self.inner.cfg.bucket {
+            return Err(nodalmerge_gc::GcError::Backend(format!(
+                "S3BlobObjectStore is bound to bucket {:?}, got {bucket:?}",
+                self.inner.cfg.bucket
+            )));
+        }
+        self.inner
+            .delete_key(key)
+            .map_err(|e| nodalmerge_gc::GcError::Backend(e.to_string()))
+    }
+}
+
+/// S5.3 — a `gc_store::KeyScheme` that derives `(bucket, object_key)` the
+/// same way [`S3BlobStore::key_for`] does (`{path_prefix}blake3/{hex}`), so
+/// `AssetRecord` rows the GC ledger writes line up with what
+/// [`S3BlobObjectStore`] actually HEADs/DELETEs.
+pub fn s3_key_scheme(bucket: String, path_prefix: String) -> nodalmerge_server::gc_store::KeyScheme {
+    std::sync::Arc::new(move |hash: &str| (bucket.clone(), format!("{path_prefix}blake3/{hash}")))
 }
 
 #[cfg(test)]

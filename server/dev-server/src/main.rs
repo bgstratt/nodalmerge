@@ -92,6 +92,10 @@ async fn main() {
     let blob_cfg = blob_http::BlobHttpConfig {
         auth_token: blob_token,
         max_blob_bytes: blob_max_bytes,
+        // S5.3: this dev-server composes MongoNodeStore (nodes) with
+        // NoPersistence (blobs) above — no on-disk blob root to back a GC
+        // inventory ledger with, so this stays unwired here.
+        gc_inventory: None,
     };
 
     let cors = CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any);

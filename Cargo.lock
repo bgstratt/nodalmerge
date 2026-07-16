@@ -3209,6 +3209,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "nodalmerge-core",
+ "nodalmerge-gc",
  "nodalmerge-server",
  "object_store",
  "reqwest",
@@ -3262,6 +3263,7 @@ name = "nodalmerge-server-s3"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "nodalmerge-gc",
  "nodalmerge-s3-blobs",
  "nodalmerge-server",
  "tokio",

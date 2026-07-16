@@ -6,6 +6,7 @@ description = "S3-compatible BlobPersistence backend for nodalmerge-server (AWS,
 
 [dependencies]
 nodalmerge-core = { version = "0.2.0", path = "../../core/crdt" }
+nodalmerge-gc = { version = "0.2.0", path = "../../core/gc" }
 nodalmerge-server = { version = "0.2.0", path = "../server" }
 object_store = { version = "0.11", features = ["aws"] }
 tokio = { workspace = true }

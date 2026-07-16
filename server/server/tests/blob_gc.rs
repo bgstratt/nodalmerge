@@ -22,6 +22,9 @@ use std::time::Duration;
 use ed25519_dalek::SigningKey;
 use nodalmerge_blobstore_conformance::NonHydratingBackend;
 use nodalmerge_core::{BlobStore, Hash, MapOp, Op, StateGraph};
+use nodalmerge_gc::contracts::AssetInventoryStore;
+use nodalmerge_gc::types::AssetState;
+use nodalmerge_server::gc_store::{local_key_scheme, SqliteGcStore};
 use nodalmerge_server::room::{import_nodes, Rooms};
 use nodalmerge_server::store::{Composite, DirPersistence, NodePersistence, SharedPersistence};
 
@@ -681,7 +684,6 @@ async fn blob_gc_zero_grace_never_deletes_on_first_sighting() {
 }
 
 #[tokio::test]
-#[ignore = "RED: fails until slice 1.3 — see nodalmerge-studio/plans/blob-cas-remediation.md"]
 async fn blob_gc_s3_path_honors_nonzero_grace() {
     // 0.3(c) — gates slice 1.3 (finding #3). `S3BlobStore::blob_gc_sweep`
     // (server/s3-blobs/src/lib.rs:524) binds `_grace` and never reads it —
@@ -719,4 +721,168 @@ async fn blob_gc_s3_path_honors_nonzero_grace() {
         deleted, 0,
         "the S3 path must honor a non-zero grace, not delete on the first pass"
     );
+}
+
+// ─── 1.3 — the gc-inventory union (finding #3, second half) ──────────────────
+
+/// Build a `Rooms` over `dir` with a real SQLite GC inventory attached, the
+/// way `main.rs`/`server-s3/main.rs` wire it (`BlobHttpConfig::gc_inventory`
+/// and `Rooms::with_gc_inventory` share one handle).
+fn rooms_with_inventory(
+    dir: &std::path::Path,
+    key: [u8; 32],
+    upload_grace: Duration,
+) -> (Rooms, SharedPersistence, Arc<SqliteGcStore>) {
+    let persistence: SharedPersistence = Arc::new(DirPersistence::open(dir).unwrap());
+    let inventory = Arc::new(SqliteGcStore::open(dir, local_key_scheme()).unwrap());
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&key),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    )
+    .with_gc_inventory(Arc::clone(&inventory) as Arc<dyn AssetInventoryStore>)
+    .with_blob_upload_grace(upload_grace);
+    (rooms, persistence, inventory)
+}
+
+#[tokio::test]
+async fn blob_gc_protects_recently_confirmed_upload_not_yet_referenced() {
+    // 1.3 (finding #3), second half. A client uploads bytes
+    // (`PUT /blobs/{hash}` or presign + `POST /blobs/{hash}/uploaded`);
+    // `blob_http.rs` immediately upserts the hash `Active` in the GC
+    // inventory. The `SetBlob` op that references it has not landed yet — it
+    // is a separate round-trip on a separate connection. The legacy sweep's
+    // live set is built purely from room DAGs, so for that whole interval
+    // the blob is indistinguishable from an orphan and gets tombstoned, then
+    // deleted — reclaiming bytes the server told the client it had accepted.
+    //
+    // `grace == ZERO` (via MIN_PHYSICAL_GRACE) makes that deletion land on
+    // the second, separate sweep, so the assertion below is deterministic:
+    // no interleaving to race, just "does the live set know about the
+    // upload".
+    let dir = tmpdir("inventory-protects-upload");
+    let (rooms, persistence, inventory) =
+        rooms_with_inventory(&dir, [0x0Cu8; 32], Duration::from_secs(3600));
+    let _room = rooms.get_or_create("upload-room").await;
+
+    let bytes = b"confirmed-upload-awaiting-its-setblob-op".to_vec();
+    let hash = Hash::of(&bytes);
+    persistence.persist_blob(&hash, &bytes);
+    // Exactly what blob_http.rs's PUT / upload-confirm paths do, sentinel
+    // run id and all (blob_http.rs's UPLOAD_MARK_SENTINEL).
+    inventory
+        .upsert_active_seen("upload", &hash.to_hex(), std::time::SystemTime::now())
+        .unwrap();
+    assert_eq!(
+        inventory.asset_state(&hash.to_hex()),
+        Some(AssetState::Active),
+        "sanity: the upload path marked this row Active"
+    );
+
+    let blob_path = dir.join("blobs").join("blake3").join(hash.to_hex());
+    let tomb_path = dir
+        .join("blobs")
+        .join(".tombstones")
+        .join("blake3")
+        .join(hash.to_hex());
+
+    // First sighting: must not even tombstone — the upload is live.
+    let deleted = rooms.sweep_blobs(Duration::ZERO).await;
+    assert_eq!(deleted, 0, "first sweep must not delete a just-confirmed upload");
+    assert!(
+        !tomb_path.exists(),
+        "a recently-confirmed upload is LIVE, so it must not be tombstoned at all"
+    );
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Second, separate sweep — this is the one that deleted the blob before
+    // 1.3 (the first having tombstoned it under MIN_PHYSICAL_GRACE).
+    let deleted = rooms.sweep_blobs(Duration::ZERO).await;
+    assert_eq!(deleted, 0, "a still-recent confirmed upload must survive later sweeps too");
+    assert!(
+        blob_path.exists(),
+        "bytes the server confirmed to a client must not be reclaimed before the \
+         client's SetBlob op has had a chance to land"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn blob_gc_reclaims_unreferenced_upload_once_upload_window_elapses() {
+    // 1.3's anti-hole gate — as important as the protection test above, and
+    // deliberately its mirror image. `state = 'Active'` is inventory
+    // bookkeeping, not protection: the upload paths stamp
+    // `last_marked_run_id = "upload"` (`UPLOAD_MARK_SENTINEL`), a value no
+    // real run id ever equals, so `iter_unmarked_candidates` returns every
+    // upload row on every subsequent run — by design, so uploads nobody
+    // references are reclaimed.
+    //
+    // Unioning all `Active` rows into the live set would silently convert
+    // that sentinel into PERMANENT protection: every anonymous PUT would be
+    // live forever, i.e. unbounded disk growth driven by an unauthenticated
+    // endpoint. That regression passes the protection test above with
+    // flying colors — this is the test that catches it. The upload window is
+    // shrunk to 50ms here so it can elapse in-test; production defaults to
+    // `DEFAULT_BLOB_UPLOAD_GRACE` (1 h).
+    let dir = tmpdir("inventory-reclaims-after-window");
+    let (rooms, persistence, inventory) =
+        rooms_with_inventory(&dir, [0x0Du8; 32], Duration::from_millis(50));
+    let _room = rooms.get_or_create("upload-room").await;
+
+    let bytes = b"uploaded-and-then-nobody-ever-referenced-it".to_vec();
+    let hash = Hash::of(&bytes);
+    persistence.persist_blob(&hash, &bytes);
+    inventory
+        .upsert_active_seen("upload", &hash.to_hex(), std::time::SystemTime::now())
+        .unwrap();
+
+    let blob_path = dir.join("blobs").join("blake3").join(hash.to_hex());
+    let tomb_path = dir
+        .join("blobs")
+        .join(".tombstones")
+        .join("blake3")
+        .join(hash.to_hex());
+
+    // Inside the upload window: protected (this half mirrors the test above,
+    // and keeps this test honest — it must start from genuine protection,
+    // otherwise "gets reclaimed" proves nothing).
+    let deleted = rooms.sweep_blobs(Duration::ZERO).await;
+    assert_eq!(deleted, 0, "inside the upload window the row is live");
+    assert!(!tomb_path.exists(), "inside the upload window it must not be tombstoned");
+
+    // Let the upload window elapse. The row is still `Active` in the
+    // inventory — nothing transitions it, which is exactly why `state`
+    // cannot be the protection.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(
+        inventory.asset_state(&hash.to_hex()),
+        Some(AssetState::Active),
+        "the row is STILL Active — protection must come from last_seen_at, not state"
+    );
+
+    // First sighting after the window: unprotected again ⇒ tombstoned
+    // (MIN_PHYSICAL_GRACE, slice 1.4), not yet deleted.
+    let deleted = rooms.sweep_blobs(Duration::ZERO).await;
+    assert_eq!(deleted, 0, "first post-window sighting only tombstones");
+    assert!(
+        tomb_path.exists(),
+        "once the upload window elapses the blob must be tombstoned like any orphan"
+    );
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Second, separate sighting: reclaimed.
+    let deleted = rooms.sweep_blobs(Duration::ZERO).await;
+    assert_eq!(
+        deleted, 1,
+        "an Active-but-never-referenced upload MUST be reclaimed once its upload \
+         window elapses — otherwise every anonymous PUT is live forever"
+    );
+    assert!(!blob_path.exists(), "the never-referenced upload's bytes must be gone");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

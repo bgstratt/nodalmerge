@@ -62,6 +62,36 @@ use thiserror::Error;
 // there for the few sync-to-async bridges below.
 use url::Url;
 
+// ─── GC tombstones ──────────────────────────────────────────────────────────
+
+/// Key infix for the GC tombstone objects
+/// [`S3BlobStore::blob_gc_sweep`] writes: full key is
+/// `<path_prefix>.tombstones/blake3/<hex>.<unix_millis>`. Mirrors
+/// `DirPersistence`'s `blobs/.tombstones/blake3/` directory. A sibling of
+/// `<path_prefix>blake3/`, so the blob listing never sees tombstones.
+const TOMBSTONE_INFIX: &str = ".tombstones/blake3";
+
+fn now_unix_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Parse a tombstone object's filename (`<64-hex>.<unix_millis>`) into its
+/// bare hash hex and the millisecond stamp recorded in the key. `None` for
+/// anything else — a foreign object under the tombstone prefix is left
+/// alone, same rule as `parse_blob_entry_name`'s (BLOB_STORAGE_LAYOUT.md
+/// §3).
+fn parse_tombstone_name(filename: &str) -> Option<(String, u128)> {
+    let (hex, stamp) = filename.split_once('.')?;
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+        return None;
+    }
+    let ms: u128 = stamp.parse().ok()?;
+    Some((hex.to_string(), ms))
+}
+
 // ─── Public types ───────────────────────────────────────────────────────────
 
 /// All knobs for an `S3BlobStore`.
@@ -521,27 +551,109 @@ impl BlobPersistence for S3BlobStore {
         }
     }
 
-    fn blob_gc_sweep(&self, live: &std::collections::HashSet<Hash>, _grace: Duration) -> usize {
-        // S3 GC: list under the global blake3/ prefix, drop any *canonical*
-        // object (bare hex or v3 `<hex>.zst`, per BLOB_STORAGE_LAYOUT.md §3/
-        // §8) whose bare hash isn't live. We collapse the two phases into
-        // one — S3 object versions (when enabled) act as their own grace
-        // period, and operators who want hard-delete can disable versioning.
-        //
-        // Entries that don't parse as a canonical blob/zstd name are
-        // foreign per §3 and must never be touched, exactly like the file
-        // store's `parse_blob_entry_name`-gated sweep — otherwise an
-        // unrelated object an operator placed under the same prefix (or a
-        // future encoding suffix a listener doesn't understand yet) would
-        // be silently deleted.
+    /// Two-phase GC sweep against the bucket — the S3 mirror of
+    /// [`nodalmerge_server::store::DirPersistence::blob_gc_sweep`]'s
+    /// semantics, and of the contract on
+    /// [`BlobPersistence::blob_gc_sweep`]: an object not in `live` is
+    /// **tombstoned** on the first sweep that sees it and **deleted** only
+    /// on a later sweep, once its tombstone is at least `grace` old. An
+    /// object that reappears in `live` has its tombstone cleared.
+    ///
+    /// ## Why this is explicit rather than leaning on bucket versioning
+    ///
+    /// This sweep used to be single-pass — bind `grace`, never read it,
+    /// delete immediately — on the documented premise that "S3 object
+    /// versions act as their own grace period, and operators who want
+    /// hard-delete can disable versioning." That premise is exactly what
+    /// made the behavior unsafe, and blob-cas-remediation.md slice 1.3
+    /// replaces it rather than preserving it:
+    ///
+    /// * It holds only while versioning is enabled — an optional, per-bucket
+    ///   feature that is **off** by default, that this crate never checks,
+    ///   never sets, and cannot enforce. Every default bucket had no grace
+    ///   period whatsoever.
+    /// * The same comment actively invited operators to disable versioning
+    ///   for hard-delete, i.e. to silently opt out of the only thing standing
+    ///   in for grace, with no indication that it was load-bearing.
+    /// * A noncurrent version is not a grace window in the sense the caller
+    ///   means: nothing re-links it when the blob becomes live again, and
+    ///   restoring it is an out-of-band operator action, not something the
+    ///   server does on the next sweep.
+    /// * It silently no-op'd [`Rooms::sweep_blobs`]'s `MIN_PHYSICAL_GRACE`
+    ///   floor (slice 1.4, bug 2), so `--blob-gc-grace 0` meant "delete on
+    ///   first sighting" on this backend no matter what the caller passed.
+    ///
+    /// Versioning remains a perfectly good *backstop* against operator
+    /// error; it is simply not this method's grace window.
+    ///
+    /// ## Tombstone layout
+    ///
+    /// `<path_prefix>.tombstones/blake3/<hex>.<unix_millis>` — an empty
+    /// object. Mirrors `DirPersistence`'s `blobs/.tombstones/blake3/<hex>`
+    /// (keyed by bare hex regardless of encoding, so one tombstone covers
+    /// both `<hex>` and `<hex>.zst`) with one deliberate difference: the
+    /// tombstone *time* lives in the key rather than in the object's
+    /// mtime/body.
+    ///
+    /// * **Not the object's `last_modified`:** that is the *bucket's* clock,
+    ///   while `grace` is measured against this process's clock. Skew in the
+    ///   unsafe direction (bucket clock behind) would delete early — the one
+    ///   failure mode this whole slice exists to prevent. The timestamp in
+    ///   the key is written by, and compared against, the same clock.
+    /// * **Not the object's body:** that would cost a `GET` per candidate
+    ///   per sweep. In the key, a single `LIST` of the tombstone prefix
+    ///   yields every hash *and* its tombstone time.
+    ///
+    /// Since the tombstone prefix is a sibling of `<path_prefix>blake3/`,
+    /// tombstones are never enumerated by (nor mistaken for) the blob
+    /// listing below.
+    ///
+    /// Entries that don't parse as a canonical blob/zstd name are foreign
+    /// per BLOB_STORAGE_LAYOUT.md §3 and must never be touched, exactly like
+    /// the file store's `parse_blob_entry_name`-gated sweep — otherwise an
+    /// unrelated object an operator placed under the same prefix (or a
+    /// future encoding suffix a listener doesn't understand yet) would be
+    /// silently deleted.
+    ///
+    /// Gated end-to-end against a real MinIO bucket by
+    /// `server/s3-blobs/tests/minio_round_trip.rs`
+    /// (`s3_blob_gc_two_phase_honors_grace_and_tombstones_first`,
+    /// `s3_blob_gc_clears_tombstone_when_object_becomes_live_again`,
+    /// `s3_min_physical_grace_floor_is_effective_end_to_end`).
+    fn blob_gc_sweep(&self, live: &std::collections::HashSet<Hash>, grace: Duration) -> usize {
         let Some(s3) = self.s3.clone() else { return 0; };
         let prefix = ObjectPath::from(format!("{}blake3", self.cfg.path_prefix));
+        let tombs_prefix = format!("{}{}", self.cfg.path_prefix, TOMBSTONE_INFIX);
         let live_set: std::collections::HashSet<String> =
             live.iter().map(|h| h.to_hex()).collect();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let rt2 = tokio::runtime::Runtime::new().expect("create runtime");
             let res = rt2.block_on(async move {
+                let now_ms = now_unix_millis();
+                let grace_ms = grace.as_millis();
+
+                // One LIST of the tombstone prefix up front: bare hex →
+                // every tombstone key for it, with its recorded time.
+                // Normally one entry per hash; two concurrent sweeps could
+                // briefly leave more, so this keeps them all and ages by the
+                // *newest* (smallest age ⇒ fail closed, never delete early).
+                let mut tombs: std::collections::HashMap<String, Vec<(ObjectPath, u128)>> =
+                    std::collections::HashMap::new();
+                let tomb_root = ObjectPath::from(tombs_prefix.clone());
+                let mut tomb_stream = s3.list(Some(&tomb_root));
+                while let Some(meta) = tomb_stream.next().await {
+                    let Ok(meta) = meta else { continue };
+                    let key = meta.location.as_ref().to_string();
+                    let Some(filename) = key.rsplit('/').next() else { continue };
+                    let Some((hex, stamped_ms)) = parse_tombstone_name(filename) else {
+                        // Foreign object under the tombstone prefix — same
+                        // rule as §3: never touched, never fatal.
+                        continue;
+                    };
+                    tombs.entry(hex).or_default().push((meta.location.clone(), stamped_ms));
+                }
+
                 let mut deleted = 0usize;
                 let mut stream = s3.list(Some(&prefix));
                 while let Some(meta) = stream.next().await {
@@ -552,11 +664,63 @@ impl BlobPersistence for S3BlobStore {
                         // Foreign entry — never delete, never error (§3).
                         continue;
                     };
-                    if !live_set.contains(&hash.to_hex()) {
-                        if let Err(e) = s3.delete(&meta.location).await {
-                            tracing::warn!(?e, key = %meta.location, "blob_gc_sweep: delete failed");
-                        } else {
-                            deleted += 1;
+                    let hex = hash.to_hex();
+
+                    if live_set.contains(&hex) {
+                        // Referenced: clear any leftover tombstone so a brief
+                        // unreference-then-rereference (e.g. a concurrent
+                        // SetBlob arriving between sweeps) doesn't doom the
+                        // object next round.
+                        if let Some(existing) = tombs.get(&hex) {
+                            for (path, _) in existing {
+                                if let Err(e) = s3.delete(path).await {
+                                    tracing::warn!(?e, key = %path, "blob_gc_sweep: clear tombstone failed");
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Not live — consult the tombstone.
+                    match tombs.get(&hex).and_then(|v| v.iter().map(|(_, ms)| *ms).max()) {
+                        Some(newest_ms) => {
+                            // `saturating_sub`: a tombstone stamped in the
+                            // future (clock stepped back between sweeps)
+                            // reads as age 0 — not aged, so we wait rather
+                            // than delete. Fail closed.
+                            let age_ms = now_ms.saturating_sub(newest_ms);
+                            if age_ms >= grace_ms {
+                                if let Err(e) = s3.delete(&meta.location).await {
+                                    tracing::warn!(?e, key = %meta.location, "blob_gc_sweep: delete failed");
+                                    continue;
+                                }
+                                for (path, _) in tombs.get(&hex).into_iter().flatten() {
+                                    let _ = s3.delete(path).await;
+                                }
+                                deleted += 1;
+                            }
+                        }
+                        None => {
+                            // No tombstone yet — create one. This is the
+                            // first sighting; deletion waits for a later,
+                            // separate sweep call unless the caller
+                            // explicitly asked for a zero grace (matching
+                            // `DirPersistence`'s branch exactly).
+                            // `Rooms::sweep_blobs` never passes a literal
+                            // zero — see `MIN_PHYSICAL_GRACE` (slice 1.4).
+                            let tomb_key = ObjectPath::from(format!("{tombs_prefix}/{hex}.{now_ms}"));
+                            if let Err(e) = s3.put(&tomb_key, Bytes::new().into()).await {
+                                tracing::warn!(?e, key = %tomb_key, "blob_gc_sweep: create tombstone failed");
+                                continue;
+                            }
+                            if grace.is_zero() {
+                                if let Err(e) = s3.delete(&meta.location).await {
+                                    tracing::warn!(?e, key = %meta.location, "blob_gc_sweep: immediate delete failed");
+                                    continue;
+                                }
+                                let _ = s3.delete(&tomb_key).await;
+                                deleted += 1;
+                            }
                         }
                     }
                 }

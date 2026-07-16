@@ -3217,6 +3217,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-s3",
  "bytes",
+ "ed25519-dalek",
  "futures-util",
  "nodalmerge-core",
  "nodalmerge-gc",

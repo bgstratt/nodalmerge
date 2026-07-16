@@ -47,7 +47,23 @@ name: blob-layout-parity
 #                                                 suite guards, or the workflow
 #                                                 never fires on the PR that
 #                                                 breaks it)
-#   server/s3-blobs/src/lib.rs (blob_layout_vectors_match_s3_key_derivation)
+#   server/server/src/gc_store.rs                (the GC asset inventory whose
+#                                                 `Active` rows blob_gc.rs's
+#                                                 slice-1.3 union tests drive
+#                                                 through `Rooms::sweep_blobs`
+#                                                 via a real `SqliteGcStore`;
+#                                                 `iter_unmarked_candidates`'s
+#                                                 semantics ARE that union's
+#                                                 contract. Added by slice 1.3 —
+#                                                 blob_gc.rs had a step here but
+#                                                 this file could not trigger it)
+#   server/s3-blobs/src/lib.rs (blob_layout_vectors_match_s3_key_derivation;
+#                                                 its blob_gc_sweep two-phase
+#                                                 grace is gated for real by
+#                                                 .github/workflows/blob-s3-gc-minio.yml
+#                                                 — the NonHydratingBackend port
+#                                                 this workflow's blob_gc step
+#                                                 uses is a copy, not the backend)
 #   server/server/tests/blob_relay_nonhydrating_backend.rs (S4.2 relay
 #                                                 contract; previously shipped
 #                                                 without a CI step — added
@@ -230,6 +246,7 @@ on:
       - "server/server/src/room.rs"
       - "server/server/src/tree_walk.rs"
       - "server/server/src/blob_http.rs"
+      - "server/server/src/gc_store.rs"
       - "server/server/src/main.rs"
       - "server/dev-server/src/main.rs"
       - "server/axum-embed/src/lib.rs"
@@ -284,6 +301,7 @@ on:
       - "server/server/src/room.rs"
       - "server/server/src/tree_walk.rs"
       - "server/server/src/blob_http.rs"
+      - "server/server/src/gc_store.rs"
       - "server/server/src/main.rs"
       - "server/dev-server/src/main.rs"
       - "server/axum-embed/src/lib.rs"

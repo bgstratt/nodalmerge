@@ -231,6 +231,21 @@ async fn main() {
         None => None,
     };
 
+    // blob-cas-remediation.md slice 1.3 (finding #3): same handle, two
+    // readers — `BlobHttpConfig` writes upload rows through it, and
+    // `Rooms::sweep_blobs` unions the recent ones into its live set so a
+    // confirmed-but-not-yet-referenced upload survives. This binary is the
+    // one that matters most for the S3 path: its uploads land via presign +
+    // `POST /blobs/{hash}/uploaded`, so the server holds no bytes of its own
+    // and the room DAG is the *only* other thing that knows the blob exists.
+    // Window: `room::DEFAULT_BLOB_UPLOAD_GRACE` (1 h); no CLI flag yet (7.1).
+    let rooms = match &gc_inventory {
+        Some(inv) => rooms.with_gc_inventory(
+            Arc::clone(inv) as Arc<dyn nodalmerge_gc::contracts::AssetInventoryStore>
+        ),
+        None => rooms,
+    };
+
     let blob_gc_interval = parse_u64_flag(&args, "--blob-gc-interval", 0).unwrap_or(0);
     if blob_gc_interval > 0 {
         if rooms.persistence.is_durable() {

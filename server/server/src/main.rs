@@ -151,6 +151,20 @@ async fn main() {
         None => None,
     };
 
+    // blob-cas-remediation.md slice 1.3 (finding #3): the same inventory
+    // handle `BlobHttpConfig` writes upload rows through also feeds
+    // `Rooms::sweep_blobs`'s live set, so a confirmed-but-not-yet-referenced
+    // upload isn't swept out from under the client that just uploaded it.
+    // Both must point at the same store or the union protects nothing. The
+    // window is `room::DEFAULT_BLOB_UPLOAD_GRACE` (1 h) — no CLI flag yet;
+    // that config surface lands with slice 7.1's shared bootstrap module.
+    let rooms = match &gc_inventory {
+        Some(inv) => rooms.with_gc_inventory(
+            std::sync::Arc::clone(inv) as std::sync::Arc<dyn nodalmerge_gc::contracts::AssetInventoryStore>
+        ),
+        None => rooms,
+    };
+
     // G4/S5.3: optional GC sweeper on the existing `--blob-gc-interval`
     // schedule. `--gc-mode off|legacy|dryrun|markonly|sweepsoft|sweephard`
     // (default `legacy`) picks which deletion path runs on each tick — see

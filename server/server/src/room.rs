@@ -15,7 +15,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, RwLock, Semaphore};
 
@@ -350,6 +350,54 @@ impl Room {
 /// subsequent sweep tick is still ordinarily seconds away).
 const MIN_PHYSICAL_GRACE: Duration = Duration::from_millis(1);
 
+/// blob-cas-remediation.md slice 1.3 (finding #3) — how long a
+/// **confirmed-but-not-yet-referenced** upload is protected from the blob
+/// GC sweep. Default 1 hour.
+///
+/// ## What this window actually covers (the obvious guess is wrong)
+///
+/// This is **not** the presign TTL. It bounds
+/// *bytes-exist → referenced-by-a-CRDT-op*, which is **client-side
+/// latency**: the interval between the moment a client's bytes are provably
+/// in the store and the moment its `SetBlob` op lands in a room DAG, where
+/// the ordinary live set takes over. Both upload paths stamp the inventory
+/// row's `last_seen_at = now` at the moment the bytes exist
+/// (`blob_http.rs`'s `put_blob`, after the hash check; and
+/// `confirm_blob_uploaded`, after `verify_uploaded`), so
+/// `S3BlobStoreConfig::presign_put_ttl` (15 min) bounds the interval that
+/// *ends before this one starts*. Tying this default to the PUT TTL would
+/// conflate two different intervals and reclaim legitimate slow uploads.
+///
+/// One hour coincidentally equals `S3BlobStoreConfig::presign_get_ttl`,
+/// which gives a coherent operator story — "the longest URL we'd hand out"
+/// — but the number is chosen on its own merits.
+///
+/// ## Why it must be bounded at all
+///
+/// Liveness is decided per-run by *marking*, not by the inventory's `state`
+/// column: `gc_store.rs`'s `iter_unmarked_candidates` selects
+/// `state != 'Deleted' AND (last_marked_run_id IS NULL OR
+/// last_marked_run_id != ?1)`. The upload paths stamp
+/// `last_marked_run_id = "upload"` (`blob_http.rs`'s `UPLOAD_MARK_SENTINEL`),
+/// a value no real run id ever equals, so an unreferenced upload is unmarked
+/// on the next run and correctly reclaimed. **`state = 'Active'` is
+/// inventory bookkeeping, not protection.** Unioning *every* `Active` row
+/// into the live set would convert that sentinel into permanent protection:
+/// every anonymous `PUT /blobs/{hash}` would become live forever —
+/// unbounded disk growth from an endpoint that is anonymous by default
+/// (blob-PUT auth is deliberately optional; see slice 1.5's note, which is
+/// valid *only while this union stays time-bounded*). So only rows whose
+/// `last_seen_at` falls inside this window are protected, and an upload
+/// nobody references within it becomes reclaimable again — pinned by
+/// `blob_gc_reclaims_unreferenced_upload_once_upload_window_elapses`
+/// (`server/server/tests/blob_gc.rs`).
+///
+/// ⚠ **Config-struct-only today.** There is no `--blob-upload-grace` CLI
+/// flag: a config surface across the three server binaries belongs to slice
+/// 7.1's shared bootstrap module, which owns that plumbing. Override
+/// programmatically via [`Rooms::with_blob_upload_grace`].
+pub const DEFAULT_BLOB_UPLOAD_GRACE: Duration = Duration::from_secs(60 * 60);
+
 /// Global registry of rooms, lazily created on first connection.
 ///
 /// Also carries the server's persistent Ed25519 keypair (E1) so every
@@ -386,6 +434,23 @@ pub struct Rooms {
     /// G3: per-peer rate limit on accepted bytes per second (raw decoded
     /// pack bytes, not wire JSON). `0` disables byte-rate limiting.
     pub peer_rate_bytes: u32,
+    /// blob-cas-remediation.md slice 1.3 (finding #3) — the GC asset
+    /// inventory, when the deployment has one (`--store`; see
+    /// `main.rs`/`server-s3/main.rs`). [`Rooms::sweep_blobs`] unions
+    /// recently-`Active` rows into its live set so a confirmed upload that
+    /// has not yet been referenced by a `SetBlob` op is not swept out from
+    /// under the client that just uploaded it. `None` (the default) is the
+    /// pre-1.3 behavior exactly — the union contributes nothing.
+    ///
+    /// Same handle `blob_http::BlobHttpConfig::gc_inventory` writes those
+    /// rows through; the two must be wired to the same store or the union
+    /// protects nothing. Set via [`Rooms::with_gc_inventory`].
+    pub(crate) gc_inventory: Option<Arc<dyn nodalmerge_gc::contracts::AssetInventoryStore>>,
+    /// blob-cas-remediation.md slice 1.3 — how recently an inventory row
+    /// must have been seen for the union above to protect it. See
+    /// [`DEFAULT_BLOB_UPLOAD_GRACE`], which documents why this is bounded
+    /// and why it is not the presign TTL.
+    pub(crate) blob_upload_grace: Duration,
 }
 
 impl Rooms {
@@ -445,7 +510,30 @@ impl Rooms {
             broadcast_capacity,
             peer_rate_nodes,
             peer_rate_bytes,
+            gc_inventory: None,
+            blob_upload_grace: DEFAULT_BLOB_UPLOAD_GRACE,
         }
+    }
+
+    /// blob-cas-remediation.md slice 1.3 — wire the GC asset inventory into
+    /// the legacy sweep's live set. Pass the *same* handle given to
+    /// `blob_http::BlobHttpConfig::gc_inventory`. See [`Rooms::gc_inventory`].
+    pub fn with_gc_inventory(
+        mut self,
+        inventory: Arc<dyn nodalmerge_gc::contracts::AssetInventoryStore>,
+    ) -> Self {
+        self.gc_inventory = Some(inventory);
+        self
+    }
+
+    /// blob-cas-remediation.md slice 1.3 — override
+    /// [`DEFAULT_BLOB_UPLOAD_GRACE`]. Read that constant's doc before
+    /// changing it: shortening it below real client latency reclaims
+    /// legitimate slow uploads; lengthening it grows the window in which an
+    /// anonymous PUT holds bytes nobody references.
+    pub fn with_blob_upload_grace(mut self, grace: Duration) -> Self {
+        self.blob_upload_grace = grace;
+        self
     }
 
     pub async fn get_or_create(&self, id: &str) -> Arc<Room> {
@@ -743,6 +831,11 @@ impl Rooms {
             live.extend(blob_hashes_referenced_by(nodes.iter()));
         }
 
+        // blob-cas-remediation.md slice 1.3 (finding #3) — union in uploads
+        // the gc inventory has seen recently. See
+        // `collect_recent_upload_hashes`.
+        live.extend(self.collect_recent_upload_hashes(SystemTime::now()));
+
         // PR-05 compatibility bridge: run the shared GC coordinator in
         // MarkOnly mode once, globally, to exercise host-neutral contracts
         // without changing delete behavior. Legacy blob_gc_sweep remains
@@ -771,12 +864,100 @@ impl Rooms {
         // (immediately, for a configured zero) — this closes only the
         // same-tick write-through race, not the two-phase aging window.
         let physical_grace = grace.max(MIN_PHYSICAL_GRACE);
+        // Slice 1.3: this is now honored by **every** durable backend. It
+        // used to be a no-op on the S3 path, which bound `grace` and never
+        // read it (see `S3BlobStore::blob_gc_sweep`'s doc for the
+        // bucket-versioning premise that made it so, and why that premise
+        // was wrong).
         let deleted = self.persistence.blob_gc_sweep(&live, physical_grace);
         if deleted > 0 {
             metrics::counter!("nodalmerge_blob_gc_deleted_total").increment(deleted as u64);
             tracing::info!(deleted, "blob GC reclaimed blobs");
         }
         deleted
+    }
+
+    /// blob-cas-remediation.md slice 1.3 (finding #3) — hashes the GC asset
+    /// inventory says were uploaded **recently enough** to still be waiting
+    /// for the `SetBlob` op that will reference them.
+    ///
+    /// A client's bytes and the CRDT op that references them arrive on two
+    /// different round-trips: `PUT /blobs/{hash}` (or presign + `POST
+    /// /blobs/{hash}/uploaded`) lands first and upserts an `Active`
+    /// inventory row (`blob_http.rs`); the `SetBlob` op reaches a room DAG
+    /// afterwards. Until it does, [`Rooms::sweep_blobs`]'s room-DAG-derived
+    /// live set cannot tell that upload apart from an orphan — so without
+    /// this union, a sweep landing in that gap tombstones and then reclaims
+    /// bytes the server has already told the client it accepted.
+    ///
+    /// **Only `Active` rows inside [`Rooms::blob_upload_grace`] are
+    /// protected, and that bound is the whole design** — see
+    /// [`DEFAULT_BLOB_UPLOAD_GRACE`] for why an unbounded union of `Active`
+    /// rows would make every anonymous PUT live forever, and which test
+    /// pins it.
+    ///
+    /// Returns empty when no inventory is wired (the pre-1.3 behavior,
+    /// exactly) and — deliberately — when the inventory query *fails*:
+    /// `sweep_blobs`'s protections are additive unions, so a failure here
+    /// can only ever un-protect. That is the wrong direction for a P0
+    /// data-loss path, and it is invisible in the return type. The `warn!`
+    /// is the only signal; a sweep that cannot read the inventory should
+    /// arguably refuse to delete at all, the way slice 1.1 made a
+    /// non-enumerable node store refuse. Filed as a follow-up rather than
+    /// widened here: the same "a failed query is indistinguishable from an
+    /// empty result" shape is already tracked against
+    /// `known_room_ids()`'s `warn!`-and-return-empty on both the Postgres
+    /// and Mongo stores, and it wants one fix, not three.
+    fn collect_recent_upload_hashes(
+        &self,
+        now: SystemTime,
+    ) -> std::collections::HashSet<nodalmerge_core::Hash> {
+        let mut out = std::collections::HashSet::new();
+        let Some(inventory) = &self.gc_inventory else {
+            return out;
+        };
+        // `iter_unmarked_candidates(run_id)` returns every non-`Deleted` row
+        // whose `last_marked_run_id != run_id`. There is no "iterate all
+        // rows" method on the trait, and this is the query the coordinator
+        // itself uses; a sentinel that no real run id and no upload mark can
+        // equal (real ids are `gc-<millis>-<n>`; the upload mark is
+        // `"upload"` — `blob_http.rs`'s `UPLOAD_MARK_SENTINEL`) makes it
+        // exactly that. This reads the ledger and writes nothing.
+        const UPLOAD_WINDOW_SCAN_SENTINEL: &str = "_blob-upload-window-scan";
+        let rows = match inventory.iter_unmarked_candidates(UPLOAD_WINDOW_SCAN_SENTINEL) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    "blob GC sweep: could not read the gc inventory; a very recent upload \
+                     that has no SetBlob op yet is unprotected this tick"
+                );
+                return out;
+            }
+        };
+        let cutoff = now.checked_sub(self.blob_upload_grace).unwrap_or(UNIX_EPOCH);
+        let mut protected = 0usize;
+        for row in rows {
+            // `Active` alone is NOT protection — see the constant's doc.
+            if row.state != nodalmerge_gc::types::AssetState::Active {
+                continue;
+            }
+            if row.last_seen_at < cutoff {
+                continue; // upload window elapsed — reclaimable again
+            }
+            if let Some(hash) = crate::store::hash_from_hex(&row.hash) {
+                out.insert(hash);
+                protected += 1;
+            }
+        }
+        if protected > 0 {
+            tracing::debug!(
+                protected,
+                grace_secs = self.blob_upload_grace.as_secs(),
+                "blob GC sweep: protecting recently-confirmed uploads awaiting their SetBlob op"
+            );
+        }
+        out
     }
 }
 

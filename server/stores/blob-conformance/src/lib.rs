@@ -50,6 +50,11 @@ use nodalmerge_server::store::BlobPersistence;
 #[derive(Debug, Default)]
 pub struct NonHydratingBackend {
     present: Mutex<HashSet<Hash>>,
+    /// Slice 1.3 — GC tombstones (hash → when it was first seen
+    /// unreferenced), mirroring the tombstone objects the real
+    /// `S3BlobStore::blob_gc_sweep` writes under
+    /// `<prefix>.tombstones/blake3/`. See [`Self::blob_gc_sweep`].
+    tombstones: Mutex<std::collections::HashMap<Hash, std::time::Instant>>,
     get_blob_calls: AtomicUsize,
 }
 
@@ -107,28 +112,62 @@ impl BlobPersistence for NonHydratingBackend {
         true
     }
 
-    /// Slice 0.3(c) (`blob-cas-remediation.md`, finding #3 / slice 1.3) — a
-    /// deliberate, byte-for-byte-faithful port of today's real
-    /// `S3BlobStore::blob_gc_sweep` (`server/s3-blobs/src/lib.rs:524`):
-    /// `grace` is bound and never read, so this is a **single-pass,
-    /// immediate delete** of anything present-but-not-live, no tombstone,
-    /// no grace window. This is not a stand-in for the eventual fix — it is
-    /// the current bug, ported so its consumers (the GC sweep path) can be
-    /// exercised without a live S3/MinIO endpoint
-    /// (`server/s3-blobs/tests/minio_round_trip.rs` covers the real backend
-    /// end-to-end but requires Docker). When slice 1.3 lands a real
-    /// two-phase grace on the S3 backend, this override must be updated to
-    /// match, or the RED test it backs
-    /// (`server/server/tests/blob_gc.rs`'s
-    /// `blob_gc_s3_path_honors_nonzero_grace`) will pass for the wrong
-    /// reason.
-    fn blob_gc_sweep(&self, live: &HashSet<Hash>, _grace: std::time::Duration) -> usize {
+    /// A port of `S3BlobStore::blob_gc_sweep`'s **two-phase grace**
+    /// (`server/s3-blobs/src/lib.rs`), in-memory: an unreferenced hash is
+    /// tombstoned on the first sweep that sees it and deleted only once its
+    /// tombstone is at least `grace` old; a hash that becomes live again has
+    /// its tombstone cleared; `grace == 0` collapses the two phases in the
+    /// same call. The real backend keeps its tombstones as bucket objects
+    /// (`<prefix>.tombstones/blake3/<hex>.<unix_millis>`); this fake keeps
+    /// them in a map. Both age against this process's clock.
+    ///
+    /// ## Read this before "fixing" a test against this method
+    ///
+    /// Until slice 1.3 (`blob-cas-remediation.md`, finding #3) this was a
+    /// byte-for-byte port of the real backend's **bug**: `grace` bound and
+    /// never read, a single-pass immediate delete. It exists so the GC sweep
+    /// path can be exercised without a live S3/MinIO endpoint — which means
+    /// it can only ever gate a **copy** of the backend's behavior, never the
+    /// backend. A green test here is evidence about this file and nothing
+    /// else. The real gates for the S3 two-phase grace are the
+    /// bucket-touching ones in `server/s3-blobs/tests/minio_round_trip.rs`
+    /// (`s3_blob_gc_two_phase_honors_grace_and_tombstones_first`,
+    /// `s3_blob_gc_clears_tombstone_when_object_becomes_live_again`,
+    /// `s3_min_physical_grace_floor_is_effective_end_to_end`); they run in
+    /// CI via `.github/workflows/blob-s3-gc-minio.yml`. **If this port and
+    /// `S3BlobStore` ever disagree, the MinIO tests are right and this file
+    /// is wrong.**
+    fn blob_gc_sweep(&self, live: &HashSet<Hash>, grace: std::time::Duration) -> usize {
+        let now = std::time::Instant::now();
         let mut present = self.present.lock().unwrap();
-        let dead: Vec<Hash> = present.iter().filter(|h| !live.contains(*h)).copied().collect();
-        for h in &dead {
-            present.remove(h);
+        let mut tombs = self.tombstones.lock().unwrap();
+        let mut deleted = 0usize;
+        for hash in present.iter().copied().collect::<Vec<_>>() {
+            if live.contains(&hash) {
+                // Live: clear any leftover tombstone so a brief
+                // unreference-then-rereference doesn't doom it next round.
+                tombs.remove(&hash);
+                continue;
+            }
+            match tombs.get(&hash) {
+                Some(at) => {
+                    if now.duration_since(*at) >= grace {
+                        present.remove(&hash);
+                        tombs.remove(&hash);
+                        deleted += 1;
+                    }
+                }
+                None => {
+                    tombs.insert(hash, now);
+                    if grace.is_zero() {
+                        present.remove(&hash);
+                        tombs.remove(&hash);
+                        deleted += 1;
+                    }
+                }
+            }
         }
-        dead.len()
+        deleted
     }
 }
 

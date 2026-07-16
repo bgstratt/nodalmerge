@@ -16,8 +16,8 @@
     { "name": "DeadLettered", "ordinal": 11 },
     { "name": "Retrying", "ordinal": 12 }
   ],
-  "terminal_status_names_comment": "Per studio_live_hashes.rs's STATUS_COMPLETED/STATUS_FAILED/STATUS_MERGED consts and its doc comment: Cancelled/DeadLettered have live revival edges (WorkUnitTransitions.CanTransition) and are deliberately NOT terminal here, unlike a narrower cache-eviction terminal set elsewhere in studio. This list is the GC-relevant terminal set only.",
-  "terminal_status_names": ["Completed", "Failed", "Merged"],
+  "terminal_status_names_comment": "Per studio_live_hashes.rs's STATUS_COMPLETED/STATUS_MERGED consts and its doc comment: Cancelled/DeadLettered have live revival edges (WorkUnitTransitions.CanTransition) and are deliberately NOT terminal here, unlike a narrower cache-eviction terminal set elsewhere in studio. `Failed` was removed from this list by slice 1.6 (finding #30, blob-cas-remediation.md): it also has a live revival edge (`Failed -> Cancelled -> Queued`/`Executing` via WorkUnit.cs's `(_, Cancelled) when from is not Completed and not Merged` rule), so a Failed work unit's seed must not be retention-aged either. This list is the GC-relevant terminal set only.",
+  "terminal_status_names": ["Completed", "Merged"],
   "work_unit_envelope_vectors": [
     {
       "id": "created-minimal",
@@ -89,6 +89,30 @@
         "is_terminal": true,
         "repository_id": "repo-b",
         "metadata": { "reviewedBy": "alice" }
+      }
+    },
+    {
+      "id": "failed-is-not-terminal",
+      "description": "regression pin for slice 1.6 (finding #30, blob-cas-remediation.md): Failed has a live revival edge (Failed -> Cancelled -> Queued/Executing via WorkUnit.cs's `(_, Cancelled) when from is not Completed and not Merged` rule), so the GC classifier must NOT treat it as terminal — a Failed work unit's seed snapshot must not be retention-aged out, since a human may return to steer or hand-fix it",
+      "envelope": {
+        "v": 1,
+        "kind": "studio/work-unit/v1",
+        "payload": {
+          "WorkUnitId": "WU-5",
+          "Status": 4,
+          "CreatedAt": "2026-05-01T00:00:00.0000000+00:00",
+          "UpdatedAt": "2026-05-01T01:00:00.0000000+00:00",
+          "RepositoryId": null,
+          "Metadata": null
+        }
+      },
+      "expected": {
+        "work_unit_id": "WU-5",
+        "status_name": "Failed",
+        "status_ordinal": 4,
+        "is_terminal": false,
+        "repository_id": null,
+        "metadata": null
       }
     },
     {

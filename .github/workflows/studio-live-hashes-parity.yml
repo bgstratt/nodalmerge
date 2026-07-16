@@ -15,6 +15,22 @@ name: studio-live-hashes-parity
 #                                                      inline vector tests,
 #                                                      previously uncovered
 #                                                      by any workflow)
+#   server/server/tests/studio_gc.rs                  (studio-domain GC
+#                                                      retention integration
+#                                                      suite. Shipped with NO
+#                                                      CI step at all — the
+#                                                      file never ran here or
+#                                                      in any other workflow,
+#                                                      so its Phase 0 RED gates
+#                                                      for slices 1.2/1.6 were
+#                                                      invisible rather than
+#                                                      merely skipped. Step
+#                                                      added alongside slice
+#                                                      1.6 of nodalmerge-studio's
+#                                                      plans/blob-cas-remediation.md;
+#                                                      RED scenarios are
+#                                                      `#[ignore]`d and skipped
+#                                                      until their slice ships)
 #
 # The vector assertions live inline in studio_live_hashes.rs's own
 # #[cfg(test)] mod tests (mirroring the established
@@ -38,11 +54,17 @@ on:
     paths:
       - "engine/commands/work-unit-status-vectors.v1.json"
       - "server/server/src/studio_live_hashes.rs"
+      - "server/server/tests/studio_gc.rs"
+      - "server/server/src/gc_service.rs"
+      - "server/server/src/gc_store.rs"
       - ".github/workflows/studio-live-hashes-parity.yml"
   pull_request:
     paths:
       - "engine/commands/work-unit-status-vectors.v1.json"
       - "server/server/src/studio_live_hashes.rs"
+      - "server/server/tests/studio_gc.rs"
+      - "server/server/src/gc_service.rs"
+      - "server/server/src/gc_store.rs"
       - ".github/workflows/studio-live-hashes-parity.yml"
   workflow_dispatch:
 
@@ -62,3 +84,6 @@ jobs:
 
       - name: Run studio_live_hashes unit suite (classification, timestamp parsing, PascalCase payload shapes, WorkUnitStatus vectors)
         run: "cargo test -p nodalmerge-server --lib studio_live_hashes::"
+
+      - name: Run studio-domain GC retention integration suite (RED scenarios gating slices 1.2/1.6 are #[ignore]d until their slice ships)
+        run: cargo test -p nodalmerge-server --test studio_gc

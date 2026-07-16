@@ -89,24 +89,34 @@ const KIND_REPOSITORY_OP: &str = "studio/repository-op/v1";
 /// Cancelled(5), Queued(6), Executing(7), Proposed(8), Reviewing(9),
 /// Merged(10), DeadLettered(11), Retrying(12)`.
 ///
-/// Terminal set per 5.1's findings note: `Cancelled`/`DeadLettered` have
-/// live revival edges and are deliberately *not* terminal here, unlike the
-/// narrower cache-eviction terminal set elsewhere in Studio.
+/// Terminal set: a status is terminal here only if `WorkUnitTransitions.
+/// CanTransition` has **zero outgoing edges** from it — i.e. the GC can
+/// prove the work unit's seed snapshot will never be resumed, and so is
+/// safe to let age out under `RetainIntermediateDays` instead of being
+/// retained forever like a Pinned/Active seed.
 ///
-/// Correction (blob-cas-remediation.md finding #30 / slice 1.6): this is
-/// **not** because `WorkUnitTransitions.CanTransition` has zero outgoing
-/// edges from `Completed`/`Failed`/`Merged` — it does not. `WorkUnit.cs`'s
-/// `(_, Cancelled) when from is not Completed and not Merged` rule permits
-/// `Failed -> Cancelled`, and `Cancelled -> Queued`/`Executing` are legal, a
-/// real revival path out of a retention-aged status. That is tracked as a
-/// separate finding (#30 / slice 1.6) and is out of scope for this module;
-/// the terminal set below remains an intentional, currently-accepted
-/// simplification for GC purposes, not a claim about the full transition
-/// graph.
+/// `Cancelled`/`DeadLettered` are deliberately *not* terminal here (unlike
+/// the narrower cache-eviction terminal set elsewhere in Studio): both have
+/// live revival edges (`Cancelled -> Queued`/`Executing`;
+/// `DeadLettered -> Retrying`/`Proposed`/`Merged`/`Queued`/`Executing`).
+///
+/// `Failed` was terminal here until slice 1.6 (blob-cas-remediation.md
+/// finding #30), on the documented-but-false claim that `CanTransition` had
+/// zero outgoing edges from `Completed`/`Failed`/`Merged`. It does not:
+/// `WorkUnit.cs`'s `(_, Cancelled) when from is not Completed and not
+/// Merged` rule permits `Failed -> Cancelled`, and `Cancelled ->
+/// Queued`/`Executing` are legal — so `Failed -> Cancelled -> Queued`
+/// revives a work unit out of a status this GC was retention-aging, which
+/// could delete a seed snapshot a human later returns to resume. Slice 1.6
+/// dropped `Failed` from `TERMINAL_STATUSES` so it is protected the same
+/// way as `Cancelled`/`DeadLettered` (product decision, recorded in the
+/// plan: a failed work unit is resumable). Accepted consequence: `Failed`
+/// seeds now retain indefinitely, same as `Cancelled`/`DeadLettered` — see
+/// the plan's "Follow-ups filed" section for the (out-of-scope) revival-
+/// window policy that would bound this for all three.
 const STATUS_COMPLETED: i64 = 3;
-const STATUS_FAILED: i64 = 4;
 const STATUS_MERGED: i64 = 10;
-const TERMINAL_STATUSES: [i64; 3] = [STATUS_COMPLETED, STATUS_FAILED, STATUS_MERGED];
+const TERMINAL_STATUSES: [i64; 2] = [STATUS_COMPLETED, STATUS_MERGED];
 
 fn is_terminal_status(status: i64) -> bool {
     TERMINAL_STATUSES.contains(&status)

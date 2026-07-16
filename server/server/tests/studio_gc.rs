@@ -274,11 +274,30 @@ async fn expired_intermediate_generation_without_shared_blobs_is_excluded() {
 
 #[tokio::test]
 async fn active_work_unit_seed_stays_live_past_the_retention_window() {
+    // NOTE (fixed alongside slice 1.6, blob-cas-remediation.md): this test
+    // used to be vacuous — its Bootstrap generation (gen-0) shared
+    // `tree_seed` with the seed generation (gen-seed), so gen-seed's tree
+    // was Pinned via Bootstrap regardless of whether the "non-terminal
+    // work unit protects its seed" mechanism under test actually worked.
+    // The Bootstrap generation now gets its OWN unique tree
+    // (`tree_bootstrap`), isolating the seed-protection loop the same way
+    // 0.3(e)'s `failed_work_unit_seed_stays_live_past_the_retention_window`
+    // does. Proof this now isolates the mechanism: reverting the fix this
+    // test guards (making `WU-inflight`'s status terminal, or otherwise
+    // disabling the seed-loop) makes this test fail — see slice 1.6's
+    // report for the exact local-revert command.
     let dir = tmpdir("active-seed");
     let persistence: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap());
     let sk = SigningKey::from_bytes(&[0xA3u8; 32]);
     let rooms = Rooms::new(SigningKey::from_bytes(&[0x12u8; 32]), Arc::clone(&persistence), 512, 0, 0);
     let room = rooms.get_or_create("repo/repo-d").await;
+
+    // Bootstrap generation with its OWN unique tree — not shared with
+    // gen-seed below (see the isolation note above).
+    let (file_bootstrap, fb_bytes) = (Hash::of(b"repo-d-bootstrap-file"), b"repo-d-bootstrap-file".to_vec());
+    persistence.persist_blob(&file_bootstrap, &fb_bytes);
+    let (tree_bootstrap, tb_bytes) = tree_v2_blob(serde_json::json!([{"n":"b.txt","k":"f","h":file_bootstrap.to_hex()}]));
+    persistence.persist_blob(&tree_bootstrap, &tb_bytes);
 
     let (file_seed, fs_bytes) = (Hash::of(b"seed-file"), b"seed-file".to_vec());
     persistence.persist_blob(&file_seed, &fs_bytes);
@@ -292,11 +311,12 @@ async fn active_work_unit_seed_stays_live_past_the_retention_window() {
 
     install_studio_entry(
         &room, &sk, "studio/repository-snapshot/v1/gen-0",
-        snapshot_envelope("gen-0", "repo-d", 0, "2000-01-01T00:00:00Z", &tree_seed.to_hex(), None, Some("Bootstrap"), None),
+        snapshot_envelope("gen-0", "repo-d", 0, "2000-01-01T00:00:00Z", &tree_bootstrap.to_hex(), None, Some("Bootstrap"), None),
     ).await;
-    // gen-seed predates the work unit and is >30 days old — would expire
-    // as Intermediate on its own, except a non-terminal work unit seeds
-    // from it.
+    // gen-seed predates the work unit and is >30 days old, and its tree is
+    // NOT shared with any Pinned/head generation — would expire as
+    // Intermediate on its own, except a non-terminal work unit seeds from
+    // it. This is the only thing that can keep tree_seed/file_seed live.
     install_studio_entry(
         &room, &sk, "studio/repository-snapshot/v1/gen-seed",
         snapshot_envelope("gen-seed", "repo-d", 1, "2020-01-01T00:00:00Z", &tree_seed.to_hex(), None, None, None),
@@ -709,7 +729,6 @@ async fn ordinary_setblob_blob_must_survive_sweepsoft_then_sweephard() {
 }
 
 #[tokio::test]
-#[ignore = "RED: fails until slice 1.6 — see nodalmerge-studio/plans/blob-cas-remediation.md"]
 async fn failed_work_unit_seed_stays_live_past_the_retention_window() {
     // 0.3(e) — gates slice 1.6 (finding #30, added during 0.4).
     // `TERMINAL_STATUSES` (studio_live_hashes.rs) treats `Failed` (4) as

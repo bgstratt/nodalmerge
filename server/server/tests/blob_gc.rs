@@ -20,9 +20,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
+use nodalmerge_blobstore_conformance::NonHydratingBackend;
 use nodalmerge_core::{BlobStore, Hash, MapOp, Op, StateGraph};
 use nodalmerge_server::room::{import_nodes, Rooms};
-use nodalmerge_server::store::{DirPersistence, SharedPersistence};
+use nodalmerge_server::store::{Composite, DirPersistence, NodePersistence, SharedPersistence};
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -356,4 +357,195 @@ async fn blob_gc_is_noop_on_in_memory_persistence() {
     let _ = rooms.get_or_create("x").await;
     let deleted = rooms.sweep_blobs(Duration::ZERO).await;
     assert_eq!(deleted, 0, "NoPersistence must never report deletions");
+}
+
+// ─── 0.3 — GC data-loss regression suite (blob-cas-remediation.md Phase 0/1) ──
+//
+// Scenarios (a), (c), (d) live here (Rooms::sweep_blobs / legacy two-phase
+// world); (b) and (e) live in tests/studio_gc.rs (the new coordinator's
+// world). See the plan's Phase 0 §0.3 and Phase 1 for the finding each
+// gates.
+
+#[tokio::test]
+#[ignore = "RED: fails until slice 1.1 — see nodalmerge-studio/plans/blob-cas-remediation.md"]
+async fn blob_gc_composite_must_forward_known_room_ids_for_cold_rooms() {
+    // 0.3(a) — gates slice 1.1 (finding #1). `Composite<N, B>`'s
+    // `impl NodePersistence` (server/server/src/store.rs:291) never
+    // overrides `known_room_ids`, so it always falls through to the
+    // trait's empty-`Vec` default (store.rs:90) — even when the wrapped
+    // node store can genuinely enumerate every room with persisted nodes.
+    // `Composite` is exactly how the production `server-s3` binary wires a
+    // real node store to a blob backend (see nodalmerge-s3-blobs's module
+    // doc), so this is the production wiring shape, not a synthetic one —
+    // this test is `blob_gc_protects_blobs_in_cold_non_resident_rooms`
+    // above, with the persistence swapped from a bare `DirPersistence` to
+    // `Composite<DirPersistence, DirPersistence>`.
+    let dir = tmpdir("composite-cold-room");
+    let node_side = DirPersistence::open(&dir).unwrap();
+    let blob_side = DirPersistence::open(&dir).unwrap();
+    let sk = SigningKey::from_bytes(&[0xC1u8; 32]);
+
+    let persistence: SharedPersistence = Arc::new(Composite::new(node_side, blob_side));
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&[0x07u8; 32]),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    );
+
+    let bytes = b"owned-by-a-cold-room-via-composite".to_vec();
+    let hash = Hash::of(&bytes);
+    {
+        let room_a = rooms.get_or_create("room-a").await;
+        persistence.persist_blob(&hash, &bytes);
+        room_a.blobs.write().await.put(bytes.clone());
+        let node = make_setblob_node(&sk, "k", hash);
+        let (accepted, _, _) = import_nodes(&room_a, vec![node]).await;
+        assert_eq!(accepted, 1);
+    }
+    // Evict room-a exactly like the plain-DirPersistence cold-room test
+    // above.
+    let mut evicted = Vec::new();
+    for _ in 0..20 {
+        evicted = rooms
+            .sweep_idle(Duration::ZERO, std::time::Instant::now())
+            .await;
+        if evicted.contains(&"room-a".to_string()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        evicted.contains(&"room-a".to_string()),
+        "room-a must be evicted (non-resident) before the sweep below"
+    );
+
+    // Sanity: the underlying node store genuinely CAN enumerate this room —
+    // proves the gap is Composite's forwarding, not DirPersistence's
+    // ability. A fresh handle on the same directory, called directly
+    // (bypassing Composite).
+    let probe = DirPersistence::open(&dir).unwrap();
+    assert!(
+        probe.known_room_ids().iter().any(|id| id == "room-a"),
+        "sanity: the real node store can enumerate room-a directly"
+    );
+
+    // Only room-b is resident when the sweep runs.
+    let _room_b = rooms.get_or_create("room-b").await;
+
+    let deleted = rooms.sweep_blobs(Duration::ZERO).await;
+    assert_eq!(
+        deleted, 0,
+        "Composite must forward known_room_ids so cold room-a's blob survives"
+    );
+    let blob_path = dir.join("blobs").join("blake3").join(hash.to_hex());
+    assert!(
+        blob_path.exists(),
+        "cold room's blob (owned via Composite) must survive a sweep driven by a different resident room"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+#[ignore = "RED: fails until slice 1.4 — see nodalmerge-studio/plans/blob-cas-remediation.md"]
+async fn blob_gc_survives_write_through_during_still_hydrating_room() {
+    // 0.3(d) — gates slice 1.4 (finding #5). `Rooms::get_or_create`
+    // (server/server/src/room.rs:427) inserts a new `Room` into the
+    // resident map and spawns its persistence hydration in the background
+    // *before* that hydration has loaded anything into the room's
+    // in-memory graph. `sweep_blobs` (room.rs:644) treats residency alone
+    // as "covered" and skips the cold-room persisted-node scan for that
+    // room id — so a blob referenced only by nodes this room persisted
+    // *before this process started* (i.e. nothing racy about the write
+    // itself — the race is purely "hydration hasn't run yet") is invisible
+    // to the live set and gets swept. `--blob-gc-grace 0` (the plan's
+    // stated repro condition) makes the deletion immediate, observable in
+    // a single sweep call.
+    //
+    // Determinism note: `#[tokio::test]` defaults to the current-thread
+    // flavor, and nothing between `get_or_create` and `sweep_blobs` below
+    // is a genuine suspend point (uncontended `tokio::sync::RwLock`
+    // acquisitions resolve without yielding), so the background hydration
+    // task spawned by `get_or_create` cannot run before `sweep_blobs`
+    // executes.
+    let dir = tmpdir("hydration-race");
+    let persistence: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap());
+    let sk = SigningKey::from_bytes(&[0xC2u8; 32]);
+    let room_id = "hydrate-race-room".to_string();
+
+    // A node + its referenced blob, durably persisted as though by a prior
+    // server process — nothing yet loaded into any in-memory `Room`.
+    let bytes = b"referenced-by-a-not-yet-hydrated-room".to_vec();
+    let hash = Hash::of(&bytes);
+    persistence.persist_blob(&hash, &bytes);
+    let node = make_setblob_node(&sk, "avatar", hash);
+    persistence.persist_node(&room_id, &node);
+
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&[0x08u8; 32]),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    );
+
+    // Creates the room and spawns its background hydration task, which has
+    // not yet had a chance to run — see the determinism note above.
+    let _room = rooms.get_or_create(&room_id).await;
+
+    let deleted = rooms.sweep_blobs(Duration::ZERO).await;
+    assert_eq!(
+        deleted, 0,
+        "a still-hydrating resident room's persisted blob must survive the sweep"
+    );
+    let blob_path = dir.join("blobs").join("blake3").join(hash.to_hex());
+    assert!(
+        blob_path.exists(),
+        "blob referenced by a not-yet-hydrated room must survive"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+#[ignore = "RED: fails until slice 1.3 — see nodalmerge-studio/plans/blob-cas-remediation.md"]
+async fn blob_gc_s3_path_honors_nonzero_grace() {
+    // 0.3(c) — gates slice 1.3 (finding #3). `S3BlobStore::blob_gc_sweep`
+    // (server/s3-blobs/src/lib.rs:524) binds `_grace` and never reads it —
+    // a single-pass immediate delete regardless of the caller's grace
+    // window. `NonHydratingBackend::blob_gc_sweep`
+    // (server/stores/blob-conformance/src/lib.rs) is a byte-for-byte port
+    // of that exact (buggy) logic, so this test exercises the real bug
+    // shape through `Rooms::sweep_blobs`/`Composite` without needing a live
+    // S3/MinIO endpoint (server/s3-blobs/tests/minio_round_trip.rs covers
+    // the real backend end-to-end but requires Docker).
+    let dir = tmpdir("s3-path-grace");
+    let nodes = DirPersistence::open(&dir).unwrap();
+    let blobs = NonHydratingBackend::default();
+
+    let orphan_bytes = b"orphan-on-the-s3-path".to_vec();
+    let orphan_hash = Hash::of(&orphan_bytes);
+    // Simulates a completed presigned upload the backend never saw bytes
+    // for — exactly how a real upload-confirm marks an S3 object live.
+    blobs.mark_present(orphan_hash);
+
+    let persistence: SharedPersistence = Arc::new(Composite::new(nodes, blobs));
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&[0x09u8; 32]),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    );
+    let _room = rooms.get_or_create("gc-s3-room").await;
+
+    // Long grace: a correct two-phase S3 sweep must NOT delete on the very
+    // first pass.
+    let deleted = rooms.sweep_blobs(Duration::from_secs(3600)).await;
+    assert_eq!(
+        deleted, 0,
+        "the S3 path must honor a non-zero grace, not delete on the first pass"
+    );
 }

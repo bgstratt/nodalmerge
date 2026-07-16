@@ -16,6 +16,7 @@ members = [
     "server/dev-server",
     "server/stores/postgres",
     "server/stores/conformance",
+    "server/stores/blob-conformance",
     "peer/runtime-local",
     "peer/runtime-local-ffi",
     "peer/headless",

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
+use nodalmerge_blobstore_conformance::make_setblob_node;
 use nodalmerge_core::{BlobStore, Hash, MapOp, Op, StateGraph};
 use nodalmerge_gc::contracts::{AssetInventoryStore, GcRunStore};
 use nodalmerge_gc::types::{AssetState, GcRunMode, GcRunStart};
@@ -642,5 +643,138 @@ async fn run_store_records_running_then_succeeded() {
         .start_run(GcRunStart { mode: GcRunMode::DryRun, started_at: std::time::SystemTime::now() })
         .unwrap();
     assert_eq!(store.run_status(&run_id), None, "no status until finish_run");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ─── 0.3 — GC data-loss regression suite (blob-cas-remediation.md Phase 0/1) ──
+//
+// (a), (c), (d) live in tests/blob_gc.rs (Rooms::sweep_blobs / legacy
+// two-phase world); (b) and (e) live here, since both need the new
+// coordinator's studio-domain live-hash source. See the plan's Phase 0 §0.3
+// and Phase 1 for the finding each gates.
+
+#[tokio::test]
+#[ignore = "RED: fails until slice 1.2 — see nodalmerge-studio/plans/blob-cas-remediation.md"]
+async fn ordinary_setblob_blob_must_survive_sweepsoft_then_sweephard() {
+    // 0.3(b) — gates slice 1.2 (finding #2). `collect_studio_live_hashes`
+    // (studio_live_hashes.rs:666) only ever looks at `studio/`-prefixed
+    // engine-map keys (`resolve_room_studio_map`'s filter at line 648), so
+    // an ordinary
+    // `SetBlob`-referenced blob — nothing studio-specific about it, e.g. a
+    // plain avatar upload — is never added to the live set the new
+    // coordinator computes from, and gets reclaimed under `--gc-mode
+    // sweepsoft`/`sweephard` even though it's genuinely referenced by the
+    // room's DAG. The legacy `Rooms::sweep_blobs` path protects this fine
+    // (via `blob_hashes_referenced_by`); this coordinator does not.
+    let dir = tmpdir("ordinary-setblob");
+    let persistence: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap());
+    let sk = SigningKey::from_bytes(&[0xB6u8; 32]);
+    let rooms = Rooms::new(SigningKey::from_bytes(&[0x26u8; 32]), Arc::clone(&persistence), 512, 0, 0);
+    let room = rooms.get_or_create("peer-room").await;
+
+    let (avatar, avatar_bytes) = (Hash::of(b"an-ordinary-avatar-upload"), b"an-ordinary-avatar-upload".to_vec());
+    persistence.persist_blob(&avatar, &avatar_bytes);
+    let node = make_setblob_node(&sk, "avatar", avatar);
+    let (accepted, _, errs) = import_nodes(&room, vec![node]).await;
+    assert_eq!(accepted, 1, "expected the ordinary SetBlob node to be accepted: {errs:?}");
+
+    let inventory = Arc::new(SqliteGcStore::open(&dir, local_key_scheme()).unwrap());
+    // A prior mark pass (or the upload-time Uploading->Active hook wired
+    // into blob_http.rs) already saw this hash live — see
+    // `seed_prior_active`'s doc for why that's required for it to be a
+    // sweep candidate at all in this design.
+    seed_prior_active(&inventory, &avatar);
+    let pins = Arc::new(StaticPinStore::new(std::iter::empty()));
+    let objects = Arc::new(LocalBlobObjectStore::new(&dir));
+
+    let grace = Duration::from_millis(50);
+    let cfg_soft = gc_cfg(GcMode::New(GcRunMode::SweepSoft), grace);
+    gc_service::run_new_coordinator_once(&rooms, GcRunMode::SweepSoft, &cfg_soft, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+        .await
+        .expect("sweepsoft must succeed");
+
+    tokio::time::sleep(Duration::from_millis(80)).await; // elapse grace
+
+    let cfg_hard = gc_cfg(GcMode::New(GcRunMode::SweepHard), grace);
+    gc_service::run_new_coordinator_once(&rooms, GcRunMode::SweepHard, &cfg_hard, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+        .await
+        .expect("sweephard must succeed");
+
+    assert!(
+        dir.join("blobs").join("blake3").join(avatar.to_hex()).is_file(),
+        "an ordinary SetBlob-referenced blob must survive sweepsoft/sweephard, not just the legacy sweep"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+#[ignore = "RED: fails until slice 1.6 — see nodalmerge-studio/plans/blob-cas-remediation.md"]
+async fn failed_work_unit_seed_stays_live_past_the_retention_window() {
+    // 0.3(e) — gates slice 1.6 (finding #30, added during 0.4).
+    // `TERMINAL_STATUSES` (studio_live_hashes.rs) treats `Failed` (4) as
+    // terminal, so a `Failed` work unit is skipped entirely by the "Active"
+    // seed-protection loop in `classify_repo_room`, and its seed generation
+    // — deliberately NOT shared with any Pinned/head generation here, unlike
+    // this file's `active_work_unit_seed_stays_live_past_the_retention_window`
+    // sibling fixture, which happens to also pin its seed's tree via a
+    // Bootstrap generation and so doesn't actually isolate the seed-loop
+    // mechanism — ages out under `retain_intermediate_days` like any
+    // ordinary Intermediate snapshot. But studio's `WorkUnit.cs:208` rule
+    // `(_, Cancelled) when from is not Completed and not Merged => true`
+    // permits `Failed -> Cancelled`, and `Cancelled -> Queued`/`Executing`
+    // are both legal — a real revival path out of a status the GC
+    // retention-ages. The GC cannot prove this work unit's blobs are dead,
+    // so it must not reclaim them.
+    let dir = tmpdir("failed-seed");
+    let persistence: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap());
+    let sk = SigningKey::from_bytes(&[0xA5u8; 32]);
+    let rooms = Rooms::new(SigningKey::from_bytes(&[0x14u8; 32]), Arc::clone(&persistence), 512, 0, 0);
+    let room = rooms.get_or_create("repo/repo-e").await;
+
+    // Bootstrap generation with its OWN unique tree — not shared with
+    // gen-seed below.
+    let (file_bootstrap, fb_bytes) = (Hash::of(b"repo-e-bootstrap-file"), b"repo-e-bootstrap-file".to_vec());
+    persistence.persist_blob(&file_bootstrap, &fb_bytes);
+    let (tree_bootstrap, tb_bytes) = tree_v2_blob(serde_json::json!([{"n":"b.txt","k":"f","h":file_bootstrap.to_hex()}]));
+    persistence.persist_blob(&tree_bootstrap, &tb_bytes);
+
+    let (file_seed, fs_bytes) = (Hash::of(b"repo-e-seed-file"), b"repo-e-seed-file".to_vec());
+    persistence.persist_blob(&file_seed, &fs_bytes);
+    let (tree_seed, ts_bytes) = tree_v2_blob(serde_json::json!([{"n":"s.txt","k":"f","h":file_seed.to_hex()}]));
+    persistence.persist_blob(&tree_seed, &ts_bytes);
+
+    let (file_head, fh_bytes) = (Hash::of(b"repo-e-head-file"), b"repo-e-head-file".to_vec());
+    persistence.persist_blob(&file_head, &fh_bytes);
+    let (tree_head, th_bytes) = tree_v2_blob(serde_json::json!([{"n":"h.txt","k":"f","h":file_head.to_hex()}]));
+    persistence.persist_blob(&tree_head, &th_bytes);
+
+    install_studio_entry(
+        &room, &sk, "studio/repository-snapshot/v1/gen-0",
+        snapshot_envelope("gen-0", "repo-e", 0, "2000-01-01T00:00:00Z", &tree_bootstrap.to_hex(), None, Some("Bootstrap"), None),
+    ).await;
+    // >30 days old, no shared Pinned/head tree, no WorkUnitId on the
+    // snapshot itself — its only possible protection is a non-terminal
+    // work unit's seed-selection.
+    install_studio_entry(
+        &room, &sk, "studio/repository-snapshot/v1/gen-seed",
+        snapshot_envelope("gen-seed", "repo-e", 1, "2020-01-01T00:00:00Z", &tree_seed.to_hex(), None, None, None),
+    ).await;
+    install_studio_entry(
+        &room, &sk, "studio/repository-snapshot/v1/gen-head",
+        snapshot_envelope("gen-head", "repo-e", 2, "2026-01-01T00:00:00Z", &tree_head.to_hex(), None, None, None),
+    ).await;
+    install_studio_entry(
+        &room, &sk, "studio/work-unit/v1/WU-failed",
+        work_unit_envelope("WU-failed", 4 /* Failed */, "2020-01-02T00:00:00Z", "2020-01-02T00:00:00Z", Some("repo-e"), None),
+    ).await;
+
+    let live = collect_studio_live_hashes(&rooms, 30).await.expect("collect must succeed");
+    assert!(
+        live.contains(&tree_seed.to_hex()),
+        "a Failed work unit's seed generation must stay live -- Failed has a legal revival path (Failed -> Cancelled -> Queued/Executing)"
+    );
+    assert!(live.contains(&file_seed.to_hex()));
+
     let _ = std::fs::remove_dir_all(&dir);
 }

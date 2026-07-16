@@ -1,0 +1,12 @@
+[package]
+name = "nodalmerge-blobstore-conformance"
+version = "0.2.0"
+edition = "2021"
+publish = false
+description = "Shared non-hydrating BlobPersistence conformance harness (blob-cas-remediation.md slice 0.2)"
+
+[dependencies]
+nodalmerge-core = { path = "../../../core/crdt" }
+nodalmerge-server = { path = "../../server" }
+ed25519-dalek = { workspace = true }
+serde_json = { workspace = true }

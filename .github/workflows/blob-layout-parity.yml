@@ -13,13 +13,50 @@ name: blob-layout-parity
 #                                                 source of truth)
 #   engine/commands/fixtures/blob-layout-v1/     (golden cross-runtime
 #                                                 fixture tree)
+#   engine/commands/zstd-interop-vectors.v1.json (cross-runtime zstd fixture
+#                                                 manifest, slice 0.1 of
+#                                                 blob-cas-remediation.md)
+#   engine/commands/fixtures/zstd-interop-v1/    (golden cross-runtime zstd
+#                                                 frame fixtures)
 #   server/server/tests/blob_layout_vectors.rs
 #   server/server/tests/blob_layout_interop.rs
 #   server/server/tests/blob_http_surface.rs
+#   server/server/tests/zstd_interop.rs          (rust-as-consumer only; the
+#                                                 dotnet-as-consumer RED test
+#                                                 is skip-gated until 3.1 and
+#                                                 intentionally has no step
+#                                                 below)
 #   server/s3-blobs/src/lib.rs (blob_layout_vectors_match_s3_key_derivation)
+#   server/server/tests/blob_relay_nonhydrating_backend.rs (S4.2 relay
+#                                                 contract; previously shipped
+#                                                 without a CI step — added
+#                                                 alongside slice 0.2 of
+#                                                 blob-cas-remediation.md
+#                                                 while its fake was promoted
+#                                                 to nodalmerge-blobstore-conformance)
+#   server/server/tests/blob_nonhydrating_conformance.rs (slice 0.2's
+#                                                 non-hydrating-backend
+#                                                 conformance harness — GC
+#                                                 live-set / tree-walk /
+#                                                 archive-export scenarios
+#                                                 against S3BlobStore's real
+#                                                 shape; the RED scenarios
+#                                                 that gate Phase 2 are
+#                                                 `#[ignore]`d and skipped by
+#                                                 this step until their slice
+#                                                 ships)
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs (see
+#                                                 note above — no dotnet CI
+#                                                 step yet)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs
+#                                                 (slice 0.2's .NET half —
+#                                                 both tests are RED/Skip-gated
+#                                                 until slice 2.1, so this file
+#                                                 intentionally has no dotnet
+#                                                 CI step yet either)
 
 on:
   push:
@@ -28,6 +65,8 @@ on:
       - "engine/commands/blob-layout-vectors.v1.json"
       - "engine/commands/blob-http-surface-vectors.v1.json"
       - "engine/commands/fixtures/blob-layout-v1/**"
+      - "engine/commands/zstd-interop-vectors.v1.json"
+      - "engine/commands/fixtures/zstd-interop-v1/**"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
       - "server/server/src/blob_http.rs"
@@ -38,6 +77,10 @@ on:
       - "server/server/tests/blob_layout_interop.rs"
       - "server/server/tests/blob_gc.rs"
       - "server/server/tests/blob_http_surface.rs"
+      - "server/server/tests/zstd_interop.rs"
+      - "server/server/tests/blob_relay_nonhydrating_backend.rs"
+      - "server/server/tests/blob_nonhydrating_conformance.rs"
+      - "server/stores/blob-conformance/**"
       - "server/s3-blobs/src/lib.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
@@ -48,12 +91,15 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   pull_request:
     paths:
       - "engine/commands/blob-layout-vectors.v1.json"
       - "engine/commands/blob-http-surface-vectors.v1.json"
       - "engine/commands/fixtures/blob-layout-v1/**"
+      - "engine/commands/zstd-interop-vectors.v1.json"
+      - "engine/commands/fixtures/zstd-interop-v1/**"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
       - "server/server/src/blob_http.rs"
@@ -64,6 +110,10 @@ on:
       - "server/server/tests/blob_layout_interop.rs"
       - "server/server/tests/blob_gc.rs"
       - "server/server/tests/blob_http_surface.rs"
+      - "server/server/tests/zstd_interop.rs"
+      - "server/server/tests/blob_relay_nonhydrating_backend.rs"
+      - "server/server/tests/blob_nonhydrating_conformance.rs"
+      - "server/stores/blob-conformance/**"
       - "server/s3-blobs/src/lib.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
@@ -74,6 +124,7 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   workflow_dispatch:
 
@@ -105,6 +156,15 @@ jobs:
 
       - name: Run cross-runtime golden fixture interop test
         run: cargo test -p nodalmerge-server --test blob_layout_interop
+
+      - name: Run non-hydrating-backend relay contract (S4.2)
+        run: cargo test -p nodalmerge-server --test blob_relay_nonhydrating_backend
+
+      - name: Run non-hydrating-backend conformance harness (slice 0.2; RED scenarios are #[ignore]d until their Phase 2 slice ships)
+        run: cargo test -p nodalmerge-server --test blob_nonhydrating_conformance
+
+      - name: Run cross-runtime zstd interop test (dotnet-produced frame)
+        run: cargo test -p nodalmerge-server --test zstd_interop
 
       - name: Run blob HTTP surface vectors (GET/HEAD/PUT /blobs/{hash})
         run: cargo test -p nodalmerge-server --test blob_http_surface

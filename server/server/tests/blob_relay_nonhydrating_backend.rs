@@ -15,38 +15,25 @@
 //! coverage is `server/s3-blobs/tests/minio_round_trip.rs` plus the
 //! MinIO-gated `blob_url_resolution_minio.rs`) so this specific relay
 //! contract is covered by a fast, always-on test.
+//!
+//! Slice 0.2 (`nodalmerge-studio/plans/blob-cas-remediation.md`): the fake
+//! used to be defined locally here; it's now promoted to
+//! `nodalmerge-blobstore-conformance` so this file and
+//! `blob_nonhydrating_conformance.rs` share one definition instead of two
+//! near-identical copies.
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use ed25519_dalek::SigningKey;
+use nodalmerge_blobstore_conformance::NonHydratingBackend;
 use nodalmerge_core::Hash;
 use nodalmerge_server::blob_http::{self, BlobHttpConfig};
 use nodalmerge_server::room::Rooms;
-use nodalmerge_server::store::{BlobPersistence, Composite, NoPersistence, SharedPersistence};
+use nodalmerge_server::store::{Composite, NoPersistence, SharedPersistence};
 use tower::ServiceExt;
-
-/// Minimal stand-in for `S3BlobStore`'s shape: `get_blob` never hydrates
-/// bytes; `has_blob` is a real (in this fake, in-memory) existence check.
-#[derive(Debug, Default)]
-struct NonHydratingBackend {
-    present: Mutex<HashSet<Hash>>,
-}
-
-impl BlobPersistence for NonHydratingBackend {
-    fn get_blob(&self, _hash: &Hash) -> Option<Vec<u8>> {
-        None
-    }
-    fn has_blob(&self, hash: &Hash) -> bool {
-        self.present.lock().unwrap().contains(hash)
-    }
-    fn persist_blob(&self, hash: &Hash, _bytes: &[u8]) {
-        self.present.lock().unwrap().insert(*hash);
-    }
-}
 
 fn router(persistence: SharedPersistence) -> Router {
     let rooms = Rooms::new(SigningKey::from_bytes(&[0x81; 32]), persistence, 512, 0, 0);
@@ -57,7 +44,7 @@ fn router(persistence: SharedPersistence) -> Router {
 async fn head_reports_present_via_has_blob_even_though_get_blob_never_hydrates() {
     let backend = NonHydratingBackend::default();
     let hash = Hash::of(b"never actually hydrated");
-    backend.present.lock().unwrap().insert(hash);
+    backend.mark_present(hash);
     let hash_hex = hash.to_hex();
 
     // `SharedPersistence = Arc<dyn ServerPersistence>` needs both halves;

@@ -89,10 +89,20 @@ const KIND_REPOSITORY_OP: &str = "studio/repository-op/v1";
 /// Cancelled(5), Queued(6), Executing(7), Proposed(8), Reviewing(9),
 /// Merged(10), DeadLettered(11), Retrying(12)`.
 ///
-/// Terminal set per 5.1's findings note (`WorkUnitTransitions.CanTransition`
-/// has zero outgoing edges from these three — `Cancelled`/`DeadLettered`
-/// have live revival edges and are deliberately *not* terminal here, unlike
-/// the narrower cache-eviction terminal set elsewhere in Studio).
+/// Terminal set per 5.1's findings note: `Cancelled`/`DeadLettered` have
+/// live revival edges and are deliberately *not* terminal here, unlike the
+/// narrower cache-eviction terminal set elsewhere in Studio.
+///
+/// Correction (blob-cas-remediation.md finding #30 / slice 1.6): this is
+/// **not** because `WorkUnitTransitions.CanTransition` has zero outgoing
+/// edges from `Completed`/`Failed`/`Merged` — it does not. `WorkUnit.cs`'s
+/// `(_, Cancelled) when from is not Completed and not Merged` rule permits
+/// `Failed -> Cancelled`, and `Cancelled -> Queued`/`Executing` are legal, a
+/// real revival path out of a retention-aged status. That is tracked as a
+/// separate finding (#30 / slice 1.6) and is out of scope for this module;
+/// the terminal set below remains an intentional, currently-accepted
+/// simplification for GC purposes, not a claim about the full transition
+/// graph.
 const STATUS_COMPLETED: i64 = 3;
 const STATUS_FAILED: i64 = 4;
 const STATUS_MERGED: i64 = 10;
@@ -967,5 +977,194 @@ mod tests {
         resolved.insert("studio/repository-op/v1/OP-1".to_string(), (bytes, false));
         let data = parse_room_studio_data("repo/repo-a", &resolved).unwrap();
         assert_eq!(data.op_referenced_hashes.len(), 2);
+    }
+
+    // ─── Cross-repo contract vectors (finding #14 / slice 0.4) ─────────────
+    //
+    // Inline vector tests, not an external `tests/` crate — mirrors the
+    // established precedent of `blob_layout_vectors_match_s3_key_derivation`
+    // in `server/s3-blobs/src/lib.rs`, which reaches this module's private
+    // items from inside `#[cfg(test)] mod tests` instead of exporting a
+    // test-only `pub` surface. An earlier draft of this slice added
+    // `pub fn parse_work_unit_status_for_vectors` / `pub struct
+    // ParsedWorkUnitStatusVector` purely so an external `tests/` crate could
+    // reach the parser; that widened the crate's public API for a test's
+    // convenience and has been removed in favor of this inline suite.
+
+    /// Test-only helper exercising the *real* production parse path for a
+    /// `studio/work-unit/v1` envelope: the real `WorkUnitPayloadRaw`
+    /// deserializer (so its `#[serde(rename = ...)]` PascalCase mapping is
+    /// genuinely exercised) and the real `is_terminal_status`. Not `pub` —
+    /// it lives entirely inside this test module.
+    fn parse_work_unit_envelope_for_test(
+        envelope_json: &[u8],
+    ) -> Result<(String, i64, bool, Option<String>, Option<HashMap<String, String>>), String> {
+        let envelope: Value = serde_json::from_slice(envelope_json).map_err(|e| e.to_string())?;
+        let kind = envelope
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "envelope missing string `kind`".to_string())?;
+        if kind != KIND_WORK_UNIT {
+            return Err(format!("expected kind `{KIND_WORK_UNIT}`, got `{kind}`"));
+        }
+        let payload = envelope
+            .get("payload")
+            .cloned()
+            .ok_or_else(|| "envelope missing `payload`".to_string())?;
+        let raw: WorkUnitPayloadRaw = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+        Ok((
+            raw.work_unit_id,
+            raw.status,
+            is_terminal_status(raw.status),
+            raw.repository_id,
+            raw.metadata,
+        ))
+    }
+
+    /// Asserts the Rust GC live-hash classifier's `WorkUnitStatus` parsing
+    /// against the canonical vectors
+    /// (`engine/commands/work-unit-status-vectors.v1.json`). Freezes finding
+    /// #14 (`nodalmerge-studio/plans/blob-cas-remediation.md`, Phase 0 slice
+    /// 0.4): the studio C# `WorkUnitStatus` enum's ordinals and PascalCase
+    /// JSON casing were hand-mirrored here with no vector pinning either
+    /// side. The .NET mirror is
+    /// `nodalmerge-studio/tests/NodalMerge.Studio.Contracts.Tests/WorkUnitStatusVectorTests.cs`.
+    /// To change a `WorkUnitStatus` ordinal/name, update the vectors and
+    /// BOTH harnesses together — a drift here means the GC coordinator
+    /// misclassifies live work-unit-seeded snapshots as garbage in
+    /// production, instead of failing a test.
+    #[test]
+    fn terminal_status_ordinals_match_frozen_constants() {
+        const VECTORS_JSON: &str =
+            include_str!("../../../engine/commands/work-unit-status-vectors.v1.json");
+
+        #[derive(Debug, serde::Deserialize)]
+        struct VectorsFile {
+            status_ordinals: Vec<StatusOrdinal>,
+            terminal_status_names: Vec<String>,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        struct StatusOrdinal {
+            name: String,
+            ordinal: i64,
+        }
+
+        let file: VectorsFile = serde_json::from_str(VECTORS_JSON)
+            .expect("engine/commands/work-unit-status-vectors.v1.json must parse");
+        let by_name: HashMap<&str, i64> = file
+            .status_ordinals
+            .iter()
+            .map(|s| (s.name.as_str(), s.ordinal))
+            .collect();
+
+        let mut failures = Vec::new();
+        for name in &file.terminal_status_names {
+            let Some(&ordinal) = by_name.get(name.as_str()) else {
+                failures.push(format!("terminal status `{name}` has no entry in status_ordinals"));
+                continue;
+            };
+            let bytes = envelope(
+                KIND_WORK_UNIT,
+                work_unit_payload(
+                    "synthetic",
+                    ordinal,
+                    "2026-01-01T00:00:00.0000000+00:00",
+                    "2026-01-01T00:00:00.0000000+00:00",
+                    None,
+                    None,
+                ),
+            );
+            match parse_work_unit_envelope_for_test(&bytes) {
+                Ok((_, _, is_terminal, _, _)) if is_terminal => {}
+                Ok((_, _, is_terminal, _, _)) => failures.push(format!(
+                    "status `{name}` (ordinal {ordinal}) round-tripped through the real parser as is_terminal={is_terminal}, expected true"
+                )),
+                Err(e) => failures.push(format!("status `{name}` (ordinal {ordinal}) failed to parse: {e}")),
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "work-unit-status vectors drifted from studio_live_hashes.rs's terminal-status constants:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Exercises the real envelope -> `WorkUnitPayloadRaw` -> classification
+    /// path (the exact thing GC calls in production) against each frozen
+    /// envelope vector, covering ordinal, PascalCase field casing, optional
+    /// fields, and the deliberately-non-terminal `DeadLettered` case.
+    #[test]
+    fn work_unit_envelope_vectors_match_the_real_parse_path() {
+        const VECTORS_JSON: &str =
+            include_str!("../../../engine/commands/work-unit-status-vectors.v1.json");
+
+        #[derive(Debug, serde::Deserialize)]
+        struct VectorsFile {
+            work_unit_envelope_vectors: Vec<EnvelopeVector>,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        struct EnvelopeVector {
+            id: String,
+            envelope: Value,
+            expected: ExpectedWorkUnit,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        struct ExpectedWorkUnit {
+            work_unit_id: String,
+            status_ordinal: i64,
+            is_terminal: bool,
+            repository_id: Option<String>,
+            metadata: Option<HashMap<String, String>>,
+        }
+
+        let file: VectorsFile = serde_json::from_str(VECTORS_JSON)
+            .expect("engine/commands/work-unit-status-vectors.v1.json must parse");
+        let mut failures = Vec::new();
+
+        for vector in &file.work_unit_envelope_vectors {
+            let bytes = serde_json::to_vec(&vector.envelope).unwrap();
+            match parse_work_unit_envelope_for_test(&bytes) {
+                Ok((work_unit_id, status_ordinal, is_terminal, repository_id, metadata)) => {
+                    if work_unit_id != vector.expected.work_unit_id {
+                        failures.push(format!(
+                            "vector `{}`: expected work_unit_id {:?}, got {:?}",
+                            vector.id, vector.expected.work_unit_id, work_unit_id
+                        ));
+                    }
+                    if status_ordinal != vector.expected.status_ordinal {
+                        failures.push(format!(
+                            "vector `{}`: expected status_ordinal {}, got {}",
+                            vector.id, vector.expected.status_ordinal, status_ordinal
+                        ));
+                    }
+                    if is_terminal != vector.expected.is_terminal {
+                        failures.push(format!(
+                            "vector `{}`: expected is_terminal={}, got {}",
+                            vector.id, vector.expected.is_terminal, is_terminal
+                        ));
+                    }
+                    if repository_id != vector.expected.repository_id {
+                        failures.push(format!(
+                            "vector `{}`: expected repository_id {:?}, got {:?}",
+                            vector.id, vector.expected.repository_id, repository_id
+                        ));
+                    }
+                    if metadata != vector.expected.metadata {
+                        failures.push(format!(
+                            "vector `{}`: expected metadata {:?}, got {:?}",
+                            vector.id, vector.expected.metadata, metadata
+                        ));
+                    }
+                }
+                Err(e) => failures.push(format!("vector `{}` failed to parse: {e}", vector.id)),
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "work-unit-status envelope vectors drifted from the real Rust parse path:\n{}",
+            failures.join("\n")
+        );
     }
 }

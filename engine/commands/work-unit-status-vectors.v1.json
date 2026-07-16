@@ -1,0 +1,125 @@
+{
+  "$comment": "Freezes finding #14 (nodalmerge-studio/plans/blob-cas-remediation.md, Phase 0 slice 0.4): the studio C# WorkUnitStatus enum's ordinals and PascalCase JSON casing, previously hand-mirrored (unpinned by any vector) by nodalmerge's Rust GC live-hash classifier. Consumed by: server/server/src/studio_live_hashes.rs's own #[cfg(test)] mod tests (Rust — inline vector tests reusing the real WorkUnitPayloadRaw deserializer and is_terminal_status/TERMINAL_STATUSES logic directly, no external tests/ crate or pub test-only surface; mirrors the blob_layout_vectors_match_s3_key_derivation precedent in server/s3-blobs/src/lib.rs) and nodalmerge-studio/tests/NodalMerge.Studio.Contracts.Tests/WorkUnitStatusVectorTests.cs (.NET, against nodalmerge-studio/src/NodalMerge.Studio.Contracts/Domain/WorkUnit.cs's WorkUnitStatus enum and WorkUnit record, serialized with bare JsonSerializer.Serialize(entity) as IStudioNodeStore's real write path does — no naming policy, no JsonStringEnumConverter). If you reorder/rename/insert a WorkUnitStatus value, this file and BOTH harnesses must move together: a silent drift here means nodalmerge's GC coordinator (server/server/src/studio_live_hashes.rs) misclassifies live work-unit-seeded snapshots as garbage and deletes them in production, instead of failing a test.",
+  "schema_version": 1,
+  "status_ordinals": [
+    { "name": "Created", "ordinal": 0 },
+    { "name": "Active", "ordinal": 1 },
+    { "name": "Waiting", "ordinal": 2 },
+    { "name": "Completed", "ordinal": 3 },
+    { "name": "Failed", "ordinal": 4 },
+    { "name": "Cancelled", "ordinal": 5 },
+    { "name": "Queued", "ordinal": 6 },
+    { "name": "Executing", "ordinal": 7 },
+    { "name": "Proposed", "ordinal": 8 },
+    { "name": "Reviewing", "ordinal": 9 },
+    { "name": "Merged", "ordinal": 10 },
+    { "name": "DeadLettered", "ordinal": 11 },
+    { "name": "Retrying", "ordinal": 12 }
+  ],
+  "terminal_status_names_comment": "Per studio_live_hashes.rs's STATUS_COMPLETED/STATUS_FAILED/STATUS_MERGED consts and its doc comment: Cancelled/DeadLettered have live revival edges (WorkUnitTransitions.CanTransition) and are deliberately NOT terminal here, unlike a narrower cache-eviction terminal set elsewhere in studio. This list is the GC-relevant terminal set only.",
+  "terminal_status_names": ["Completed", "Failed", "Merged"],
+  "work_unit_envelope_vectors": [
+    {
+      "id": "created-minimal",
+      "description": "the smallest real envelope the Rust classifier receives for a fresh work unit: optional fields absent (null), non-terminal status",
+      "envelope": {
+        "v": 1,
+        "kind": "studio/work-unit/v1",
+        "payload": {
+          "WorkUnitId": "WU-1",
+          "Status": 0,
+          "CreatedAt": "2026-01-01T00:00:00.0000000+00:00",
+          "UpdatedAt": "2026-01-01T00:00:00.0000000+00:00",
+          "RepositoryId": null,
+          "Metadata": null
+        }
+      },
+      "expected": {
+        "work_unit_id": "WU-1",
+        "status_name": "Created",
+        "status_ordinal": 0,
+        "is_terminal": false,
+        "repository_id": null,
+        "metadata": null
+      }
+    },
+    {
+      "id": "queued-with-repository",
+      "description": "queue-driven pipeline status (Phase 4 slice 11a) with RepositoryId populated, no Metadata",
+      "envelope": {
+        "v": 1,
+        "kind": "studio/work-unit/v1",
+        "payload": {
+          "WorkUnitId": "WU-2",
+          "Status": 6,
+          "CreatedAt": "2026-02-01T00:00:00.0000000+00:00",
+          "UpdatedAt": "2026-02-02T00:00:00.0000000+00:00",
+          "RepositoryId": "repo-a",
+          "Metadata": null
+        }
+      },
+      "expected": {
+        "work_unit_id": "WU-2",
+        "status_name": "Queued",
+        "status_ordinal": 6,
+        "is_terminal": false,
+        "repository_id": "repo-a",
+        "metadata": null
+      }
+    },
+    {
+      "id": "completed-terminal-with-metadata",
+      "description": "a terminal status (protects the retention classifier's Pinned/Active/Intermediate rules) with a populated Metadata map",
+      "envelope": {
+        "v": 1,
+        "kind": "studio/work-unit/v1",
+        "payload": {
+          "WorkUnitId": "WU-3",
+          "Status": 3,
+          "CreatedAt": "2026-03-01T00:00:00.0000000+00:00",
+          "UpdatedAt": "2026-03-05T00:00:00.0000000+00:00",
+          "RepositoryId": "repo-b",
+          "Metadata": { "reviewedBy": "alice" }
+        }
+      },
+      "expected": {
+        "work_unit_id": "WU-3",
+        "status_name": "Completed",
+        "status_ordinal": 3,
+        "is_terminal": true,
+        "repository_id": "repo-b",
+        "metadata": { "reviewedBy": "alice" }
+      }
+    },
+    {
+      "id": "dead-lettered-is-not-terminal",
+      "description": "regression pin for the deliberately-non-terminal DeadLettered case (studio_live_hashes.rs doc comment): despite sounding like an end state, DeadLettered has a live revival edge back to Retrying/Proposed/Merged/Queued/Executing, so the GC classifier must NOT treat it as terminal",
+      "envelope": {
+        "v": 1,
+        "kind": "studio/work-unit/v1",
+        "payload": {
+          "WorkUnitId": "WU-4",
+          "Status": 11,
+          "CreatedAt": "2026-04-01T00:00:00.0000000+00:00",
+          "UpdatedAt": "2026-04-01T01:00:00.0000000+00:00",
+          "RepositoryId": null,
+          "Metadata": null
+        }
+      },
+      "expected": {
+        "work_unit_id": "WU-4",
+        "status_name": "DeadLettered",
+        "status_ordinal": 11,
+        "is_terminal": false,
+        "repository_id": null,
+        "metadata": null
+      }
+    }
+  ],
+  "delegate_room_id_placeholder": {
+    "$comment": "Slot only, per slice 0.4's Note — the VALUE is deliberately undecided pending slice 7.4 (server/server/src/blob_http.rs:73 sends room=\"_global\" into the shared delegate presign protocol v1; the .NET host sends room=\"default\", ns=\"blobs\" for the same room-agnostic routes). This slice adds the slot so 7.4 has a frozen, pre-existing place in this shared file to assert its chosen winner into without a schema_version bump. Neither the Rust nor the .NET test for THIS slice reads or asserts against `room`/`namespace` below; they are null on purpose and must stay null until 7.4 lands.",
+    "room": null,
+    "namespace": null,
+    "decided_in_slice": "7.4"
+  }
+}

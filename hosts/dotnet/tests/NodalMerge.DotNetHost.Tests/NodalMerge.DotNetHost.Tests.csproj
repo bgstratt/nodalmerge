@@ -68,6 +68,22 @@
       <Link>blob-layout-fixture-v1\%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- Cross-runtime zstd interop fixtures (slice 0.1 of
+         nodalmerge-studio/plans/blob-cas-remediation.md, finding #4);
+         ZstdInteropTests derives its cases from this manifest so this host
+         is asserted against real Rust zstd::stream::encode_all and .NET
+         ZstdSharp.Compressor.Wrap output, not just its own encoder. Binary
+         fixtures have no conventional extension-glob issue here (all
+         `.zst`), but need an explicit entry same as the blob-layout-v1
+         fixtures above — the `*.json` glob pattern used elsewhere in this
+         file would not pick up a `.zst` file. -->
+    <None Include="..\..\..\..\engine\commands\zstd-interop-vectors.v1.json"
+          Link="zstd-interop-vectors.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\..\engine\commands\fixtures\zstd-interop-v1\**">
+      <Link>zstd-interop-fixture-v1\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

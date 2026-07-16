@@ -1,0 +1,64 @@
+name: studio-live-hashes-parity
+
+# Asserts the Rust studio-domain GC live-hash classifier
+# (server/server/src/studio_live_hashes.rs) against its canonical contract:
+#   engine/commands/work-unit-status-vectors.v1.json  (source of truth for
+#                                                      WorkUnitStatus ordinals
+#                                                      + PascalCase casing,
+#                                                      finding #14 /
+#                                                      Phase 0 slice 0.4 of
+#                                                      nodalmerge-studio's
+#                                                      plans/blob-cas-remediation.md)
+#   server/server/src/studio_live_hashes.rs           (parser + its own
+#                                                      #[cfg(test)] unit
+#                                                      suite — including the
+#                                                      inline vector tests,
+#                                                      previously uncovered
+#                                                      by any workflow)
+#
+# The vector assertions live inline in studio_live_hashes.rs's own
+# #[cfg(test)] mod tests (mirroring the established
+# blob_layout_vectors_match_s3_key_derivation precedent in
+# server/s3-blobs/src/lib.rs), not in a separate external tests/ crate — so
+# running the module's lib-test suite is sufficient; there is no separate
+# `--test` binary to invoke.
+#
+# The .NET mirror
+# (nodalmerge-studio/tests/NodalMerge.Studio.Contracts.Tests/WorkUnitStatusVectorTests.cs)
+# lives in the sibling nodalmerge-studio repo and is wired into ITS OWN CI
+# (nodalmerge-studio/.github/workflows/ci.yml), not this workflow — this repo
+# cannot see a change to nodalmerge-studio's WorkUnitStatus enum, so a studio-side
+# reorder can only be caught by studio's CI checking out this repo's vector
+# file (see that workflow's added checkout step). This asymmetry is a known,
+# reported limitation of the cross-repo contract (see slice 0.4's report).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "engine/commands/work-unit-status-vectors.v1.json"
+      - "server/server/src/studio_live_hashes.rs"
+      - ".github/workflows/studio-live-hashes-parity.yml"
+  pull_request:
+    paths:
+      - "engine/commands/work-unit-status-vectors.v1.json"
+      - "server/server/src/studio_live_hashes.rs"
+      - ".github/workflows/studio-live-hashes-parity.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-studio-live-hashes:
+    name: rust studio live-hash classifier + WorkUnitStatus vectors
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run studio_live_hashes unit suite (classification, timestamp parsing, PascalCase payload shapes, WorkUnitStatus vectors)
+        run: "cargo test -p nodalmerge-server --lib studio_live_hashes::"

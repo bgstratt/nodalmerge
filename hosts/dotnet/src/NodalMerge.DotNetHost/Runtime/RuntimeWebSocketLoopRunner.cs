@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using NodalMerge.Host.Abstractions.Providers;
 
 namespace NodalMerge.DotNetHost.Runtime;
 
@@ -24,6 +25,7 @@ public sealed class RuntimeWebSocketLoopRunner
     );
 
     private readonly ILogger<RuntimeWebSocketLoopRunner> _logger;
+    private readonly IReadOnlyList<IInboundPackObserver> _inboundPackObservers;
 
     public RuntimeWebSocketLoopRunner()
         : this(NullLogger<RuntimeWebSocketLoopRunner>.Instance)
@@ -31,8 +33,23 @@ public sealed class RuntimeWebSocketLoopRunner
     }
 
     public RuntimeWebSocketLoopRunner(ILogger<RuntimeWebSocketLoopRunner> logger)
+        : this(logger, Array.Empty<IInboundPackObserver>())
+    {
+    }
+
+    // S7.1: additive-only constructor overload. Resolved automatically by the DI container
+    // (services.AddSingleton<RuntimeWebSocketLoopRunner>() in ServiceCollectionExtensions picks
+    // the constructor with the most resolvable parameters) — IEnumerable<T> always resolves, to an
+    // empty sequence when no IInboundPackObserver is registered, so unregistered hosts and every
+    // existing direct `new RuntimeWebSocketLoopRunner(...)` call site (both existing ctors are
+    // untouched) get byte-identical behavior to before this slice.
+    public RuntimeWebSocketLoopRunner(
+        ILogger<RuntimeWebSocketLoopRunner> logger,
+        IEnumerable<IInboundPackObserver> inboundPackObservers)
     {
         _logger = logger;
+        _inboundPackObservers = inboundPackObservers as IReadOnlyList<IInboundPackObserver>
+            ?? inboundPackObservers.ToArray();
     }
 
     public const int MaxInboundMessageBytes = 64 * 1024;
@@ -245,6 +262,15 @@ public sealed class RuntimeWebSocketLoopRunner
                                     cancellationToken
                                 );
                             }
+
+                            // S7.1: this is the genuinely peer-authored inbound-apply point on the
+                            // server-side WS path (the frame just received from state's socket, of
+                            // type "pack", after engine import + persistence above) — not the
+                            // broadcast fan-out further down (TryBuildPackRelay/roomBroker.BroadcastAsync),
+                            // which is this host's own echo to OTHER peers. Fire-and-forget-safe: each
+                            // observer is isolated by its own try/catch so a throwing observer can
+                            // never break the loop or undo the persistence that already succeeded.
+                            await NotifyInboundPackObserversAsync(state.RoomId!, nodesB64, cancellationToken);
 
                             // Also persist the room's current server-pack snapshot.
                             // In practice most client writes arrive as `pack` messages,
@@ -600,6 +626,35 @@ public sealed class RuntimeWebSocketLoopRunner
         }
 
         return null;
+    }
+
+    private async ValueTask NotifyInboundPackObserversAsync(
+        string roomId,
+        string nodesB64,
+        CancellationToken cancellationToken
+    )
+    {
+        if (_inboundPackObservers.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var observer in _inboundPackObservers)
+        {
+            try
+            {
+                await observer.OnInboundPackAppliedAsync(roomId, nodesB64, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "runtime ws inbound pack observer failed room={Room} observer={Observer}",
+                    roomId,
+                    observer.GetType().Name
+                );
+            }
+        }
     }
 
     private static bool ShouldPersistSnapshotForMutation(string? inboundType)

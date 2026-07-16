@@ -1,9 +1,11 @@
 using NodalMerge.DotNetHost.Ffi;
 using NodalMerge.DotNetHost.Runtime;
+using NodalMerge.Host.Abstractions.Providers;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Diagnostics.Metrics;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 
 namespace NodalMerge.DotNetHost.Tests;
 
@@ -464,6 +466,141 @@ public class RuntimeWebSocketLoopRunnerTests
         Assert.True(metrics.GetTotalByTrace("runtime_ws_inbound_messages_total", "trace-abc") >= beforeInboundTrace + 2);
     }
 
+    // S7.1: IInboundPackObserver hook — fires after engine import + persistence for a genuinely
+    // peer-authored inbound "pack" message on the server-side WS path.
+    [Fact]
+    public async Task Inbound_peer_pack_notifies_registered_observer_after_persistence()
+    {
+        var observer = new RecordingInboundPackObserver();
+        var runner = new RuntimeWebSocketLoopRunner(
+            NullLogger<RuntimeWebSocketLoopRunner>.Instance,
+            new IInboundPackObserver[] { observer }
+        );
+        var frameProcessor = CreateFrameProcessor(FfiJsonBridgeResult.Success("[]"));
+        var state = InitializedState();
+        var nodeStore = new InMemoryNodeStoreProvider();
+        var dagPersistence = new RuntimeDagPersistenceService(
+            nodeStore,
+            new FakeRuntimeCommandBridge(),
+            NullLogger<RuntimeDagPersistenceService>.Instance
+        );
+        var socket = new FakeWebSocket([
+            FakeReceiveFrame.Text("{\"type\":\"pack\",\"room\":\"room-a\",\"nodes\":\"bm9kZXM=\",\"trace_id\":\"trace-observer\"}"),
+            FakeReceiveFrame.Close()
+        ]);
+
+        await runner.RunAsync(
+            socket,
+            frameProcessor,
+            state,
+            roomBroker: null,
+            tokenValidationService: null,
+            dagPersistenceService: dagPersistence,
+            peerLocalPersistenceService: null,
+            CancellationToken.None
+        );
+
+        var call = Assert.Single(observer.Calls);
+        Assert.Equal("room-a", call.RoomId);
+        Assert.Equal("bm9kZXM=", call.NodesB64);
+
+        // Persistence already happened by the time the observer ran — this is the "AFTER
+        // import + persistence succeed" ordering the hook contracts to.
+        var snapshot = await nodeStore.LoadRoomSnapshotAsync("room-a", CancellationToken.None);
+        Assert.NotNull(snapshot);
+        Assert.NotEmpty(snapshot!.Nodes);
+    }
+
+    [Fact]
+    public async Task Catchup_pack_sent_to_newly_joined_peer_does_not_notify_observer()
+    {
+        var observer = new RecordingInboundPackObserver();
+        var runner = new RuntimeWebSocketLoopRunner(
+            NullLogger<RuntimeWebSocketLoopRunner>.Instance,
+            new IInboundPackObserver[] { observer }
+        );
+        var frameProcessor = CreateFrameProcessor(FfiJsonBridgeResult.Success("[]"));
+        var state = InitializedState();
+        var nodeStore = new InMemoryNodeStoreProvider();
+        var dagPersistence = new RuntimeDagPersistenceService(
+            nodeStore,
+            new ServerPackAnsweringBridge([9, 9, 9]),
+            NullLogger<RuntimeDagPersistenceService>.Instance
+        );
+
+        // A non-"pack" frame is enough to trigger this connection's room registration (and thus
+        // the catch-up pack construction) — the observer must only ever be driven by genuinely
+        // received "pack" frames, never by this host's own outbound construction.
+        var socket = new FakeWebSocket([
+            FakeReceiveFrame.Text("{\"type\":\"noop\"}"),
+            FakeReceiveFrame.Close()
+        ]);
+
+        await runner.RunAsync(
+            socket,
+            frameProcessor,
+            state,
+            roomBroker: null,
+            tokenValidationService: null,
+            dagPersistenceService: dagPersistence,
+            peerLocalPersistenceService: null,
+            CancellationToken.None
+        );
+
+        Assert.Contains(socket.SentTextMessages, m => m.Contains("\"type\":\"pack\""));
+        Assert.Empty(observer.Calls);
+    }
+
+    [Fact]
+    public async Task Throwing_observer_does_not_break_loop_or_persistence()
+    {
+        var throwingObserver = new ThrowingInboundPackObserver();
+        var recordingObserver = new RecordingInboundPackObserver();
+        var runner = new RuntimeWebSocketLoopRunner(
+            NullLogger<RuntimeWebSocketLoopRunner>.Instance,
+            new IInboundPackObserver[] { throwingObserver, recordingObserver }
+        );
+        var frameProcessor = CreateFrameProcessor(
+            FfiJsonBridgeResult.Success("[]"),
+            FfiJsonBridgeResult.Success("[\"NoopAck\"]")
+        );
+        var state = InitializedState();
+        var nodeStore = new InMemoryNodeStoreProvider();
+        var dagPersistence = new RuntimeDagPersistenceService(
+            nodeStore,
+            new FakeRuntimeCommandBridge(),
+            NullLogger<RuntimeDagPersistenceService>.Instance
+        );
+        var socket = new FakeWebSocket([
+            FakeReceiveFrame.Text("{\"type\":\"pack\",\"room\":\"room-a\",\"nodes\":\"bm9kZXM=\"}"),
+            FakeReceiveFrame.Text("{\"type\":\"noop\"}"),
+            FakeReceiveFrame.Close()
+        ]);
+
+        await runner.RunAsync(
+            socket,
+            frameProcessor,
+            state,
+            roomBroker: null,
+            tokenValidationService: null,
+            dagPersistenceService: dagPersistence,
+            peerLocalPersistenceService: null,
+            CancellationToken.None
+        );
+
+        Assert.Equal(1, throwingObserver.InvocationCount);
+        Assert.Single(recordingObserver.Calls);
+        // The loop kept processing frames after the throwing observer, and closed normally.
+        Assert.Contains(socket.SentTextMessages, m => m.Contains("\"type\":\"noop-ack\""));
+        Assert.Equal("client requested close", socket.CloseDescription);
+
+        // The pack itself was already persisted before observers ran, so the throw never
+        // undid it.
+        var snapshot = await nodeStore.LoadRoomSnapshotAsync("room-a", CancellationToken.None);
+        Assert.NotNull(snapshot);
+        Assert.NotEmpty(snapshot!.Nodes);
+    }
+
     [Fact]
     public async Task Simulated_reconnect_storm_emits_actionable_room_metrics()
     {
@@ -680,6 +817,105 @@ internal enum ReceiveFailureMode
     None,
     WebSocketException,
     ObjectDisposedException
+}
+
+// S7.1 test doubles for IInboundPackObserver.
+
+internal sealed class RecordingInboundPackObserver : IInboundPackObserver
+{
+    public List<(string RoomId, string NodesB64)> Calls { get; } = [];
+
+    public ValueTask OnInboundPackAppliedAsync(string roomId, string nodesB64, CancellationToken cancellationToken = default)
+    {
+        Calls.Add((roomId, nodesB64));
+        return ValueTask.CompletedTask;
+    }
+}
+
+internal sealed class ThrowingInboundPackObserver : IInboundPackObserver
+{
+    public int InvocationCount { get; private set; }
+
+    public ValueTask OnInboundPackAppliedAsync(string roomId, string nodesB64, CancellationToken cancellationToken = default)
+    {
+        InvocationCount += 1;
+        throw new InvalidOperationException("simulated observer failure");
+    }
+}
+
+internal sealed class InMemoryNodeStoreProvider : INodeStoreProvider
+{
+    private readonly List<AcceptedNodeRecord> _nodes = [];
+
+    public ValueTask<NodeSnapshot?> LoadRoomSnapshotAsync(string roomId, CancellationToken cancellationToken = default)
+    {
+        return ValueTask.FromResult<NodeSnapshot?>(new NodeSnapshot(roomId, _nodes.ToArray()));
+    }
+
+    public ValueTask<CompactionSnapshot?> LoadCompactionSnapshotAsync(string roomId, CancellationToken cancellationToken = default)
+    {
+        return ValueTask.FromResult<CompactionSnapshot?>(null);
+    }
+
+    public ValueTask PersistAcceptedNodesAsync(string roomId, IReadOnlyList<AcceptedNodeRecord> nodes, CancellationToken cancellationToken = default)
+    {
+        _nodes.AddRange(nodes);
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask DeleteAcceptedNodesAsync(string roomId, IReadOnlyList<string> nodeIdHexes, CancellationToken cancellationToken = default)
+    {
+        _nodes.RemoveAll(node => nodeIdHexes.Contains(node.NodeIdHex, StringComparer.Ordinal));
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask PersistCompactionSnapshotAsync(string roomId, CompactionSnapshot snapshot, CancellationToken cancellationToken = default)
+    {
+        return ValueTask.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Answers EnsureRoom + RequestServerPack so <c>RuntimeDagPersistenceService.TryExportRoomPackB64Async</c>
+/// (the server-side catch-up-pack path) returns a real payload; everything else (InspectPack,
+/// ImportPack) is answered with an empty success so callers that don't care about it don't fail.
+/// </summary>
+internal sealed class ServerPackAnsweringBridge : IRuntimeCommandBridge
+{
+    private readonly byte[] _payload;
+
+    public ServerPackAnsweringBridge(byte[] payload)
+    {
+        _payload = payload;
+    }
+
+    public FfiJsonBridgeResult ProcessJsonCommand(string commandJson)
+    {
+        using var doc = JsonDocument.Parse(commandJson);
+        var root = doc.RootElement;
+
+        if (root.TryGetProperty("command", out var command))
+        {
+            if (command.ValueKind == JsonValueKind.String
+                && string.Equals(command.GetString(), "EnsureRoom", StringComparison.Ordinal))
+            {
+                return FfiJsonBridgeResult.Success("[]");
+            }
+
+            if (command.ValueKind == JsonValueKind.Object
+                && command.TryGetProperty("RequestServerPack", out _))
+            {
+                var nodesB64 = Convert.ToBase64String(_payload);
+                var eventsJson =
+                    "[{\"ServerPackPrepared\":{\"room_id\":\"room-a\",\"nodes_b64\":\""
+                    + nodesB64
+                    + "\",\"root_hex\":\"ab\"}}]";
+                return FfiJsonBridgeResult.Success(eventsJson);
+            }
+        }
+
+        return FfiJsonBridgeResult.Success("[]");
+    }
 }
 
 internal sealed class WsMeterCapture : IDisposable

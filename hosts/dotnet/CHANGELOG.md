@@ -4,6 +4,24 @@ All notable changes to the NodalMerge .NET host packages (`NodalMerge.Host.Abstr
 `NodalMerge.Host.Composition`, `NodalMerge.DotNetHost`, `NodalMerge.DotNetHost.Native.win-x64`,
 `NodalMerge.DotNetHost.Native.linux-x64`) are documented here.
 
+## 0.2.2 — 2026-07-16
+
+- **Additive: `IInboundPackObserver` hook** (`NodalMerge.Host.Abstractions.Providers`). Invoked
+  after engine import + persistence succeed for a genuinely peer-authored inbound `"pack"`
+  message on the server-side WebSocket path (`RuntimeWebSocketLoopRunner`, a peer connected to
+  this host's `/ws/{room}` endpoint) — never for this host's own outbound/rebroadcast pack
+  traffic. Resolved via DI as `IEnumerable<IInboundPackObserver>` through a new
+  `RuntimeWebSocketLoopRunner` constructor overload; zero registered observers (today's default)
+  reproduces prior behavior exactly. A throwing observer is caught and logged per-observer and
+  never breaks the WS loop or the pack's already-completed persistence. No breaking changes: all
+  existing public constructors and `RunAsync` overload signatures are unchanged.
+
+## 0.2.1
+
+- Local package bump carried the new host surface plus real win-x64/linux-x64 native runtimes
+  (see 0.2.0 below for the blob-storage-layout convergence it built on). No `NodalMerge.DotNetHost`
+  public API changes recorded against 0.2.0 at this revision.
+
 ## 0.2.0 — 2026-07-06
 
 - **Breaking: blob storage layout convergence.** File and S3 blob stores on

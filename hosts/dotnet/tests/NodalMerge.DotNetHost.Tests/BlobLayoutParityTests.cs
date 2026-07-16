@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using Blake3;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using NodalMerge.Host.Abstractions.Providers;
@@ -249,17 +250,28 @@ public sealed class BlobLayoutParityTests
     [Fact]
     public async Task FileStore_prefers_identity_when_both_encodings_exist()
     {
-        var vector = EncodingVectorsV3.Single(v => v.Id == "both-files-exist-prefers-identity");
+        // The "both-files-exist-prefers-identity" vector's `hash` field is a
+        // fixed placeholder used elsewhere in this file purely to assert the
+        // pure path-derivation formula (see the Rust reference's own note in
+        // blob_layout_vectors_v3.rs: that vector is "a derivation vector, not
+        // a behavior test"). This test exercises actual runtime behavior
+        // (TryGetBlobAsync), which — since slice 3.2 added verify-on-read to
+        // the identity path — needs bytes that really hash to the path
+        // they're stored at. Mirrors the Rust runtime counterpart
+        // `both_exist_prefers_identity_at_runtime`, which uses `Hash::of(&payload)`
+        // for the same reason.
+        var identityBytes = new byte[] { 9, 9, 9 };
+        var hash = Hasher.Hash(identityBytes).ToString();
+
         var root = Path.Combine(Path.GetTempPath(), "nodalmerge-blob-layout-parity", Guid.NewGuid().ToString("N"));
         var blake3Dir = Path.Combine(root, "blake3");
         Directory.CreateDirectory(blake3Dir);
 
-        var identityBytes = new byte[] { 9, 9, 9 };
-        var identityPath = Path.Combine(root, vector.PreferredRelativePath!.Replace('/', Path.DirectorySeparatorChar));
+        var identityPath = Path.Combine(blake3Dir, hash);
         await File.WriteAllBytesAsync(identityPath, identityBytes);
         // The .zst sibling doesn't need to be a valid frame — identity must
         // win before this file is ever touched.
-        await File.WriteAllBytesAsync(Path.Combine(blake3Dir, vector.Hash + ".zst"), [0xDE, 0xAD, 0xBE, 0xEF]);
+        await File.WriteAllBytesAsync(Path.Combine(blake3Dir, hash + ".zst"), [0xDE, 0xAD, 0xBE, 0xEF]);
 
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -275,7 +287,7 @@ public sealed class BlobLayoutParityTests
         await using var provider = services.BuildServiceProvider();
         var blobStore = provider.GetRequiredService<IBlobStoreProvider>();
 
-        var result = await blobStore.TryGetBlobAsync(vector.Hash, CancellationToken.None);
+        var result = await blobStore.TryGetBlobAsync(hash, CancellationToken.None);
 
         Assert.True(result.Found);
         Assert.Equal(identityBytes, result.Bytes);

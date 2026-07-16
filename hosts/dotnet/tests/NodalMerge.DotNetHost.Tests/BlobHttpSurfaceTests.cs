@@ -151,6 +151,40 @@ public sealed class BlobHttpSurfaceTests : IAsyncLifetime
         await RunVectorAsync(Vectors.Single(v => v.Id == "put-new"), "/api/blobs");
     }
 
+    /// <summary>
+    /// Slice 3.2 (nodalmerge-studio/plans/blob-cas-remediation.md, finding
+    /// #13): the identity-stored on-disk file is tampered AFTER being
+    /// seeded, so it no longer matches its own filename hash. Before the
+    /// fix, <c>FileBlobStoreProvider.TryGetBlobAsync</c>'s identity branch
+    /// read the file and returned it unverified, so the origin served the
+    /// tampered bytes as a 200. This asserts the origin-level defect
+    /// docs/BLOB_HTTP_SURFACE.md guards against directly: "corrupt → 404,
+    /// never wrong bytes" — matching what the zstd path and the Rust origin
+    /// already do.
+    /// </summary>
+    [Fact]
+    public async Task Get_tampered_identity_blob_returns_404_not_corrupt_200()
+    {
+        SeedBlob(_anonRoot!, SeedHash, Encoding.ASCII.GetBytes(SeedContent));
+
+        // Tamper the identity file in place, at the path keyed by the
+        // ORIGINAL (seed) hash.
+        var identityPath = Path.Combine(_anonRoot!, "blake3", SeedHash);
+        await File.WriteAllBytesAsync(identityPath, Encoding.ASCII.GetBytes("substituted-attacker-bytes-of-a-different-length"));
+
+        using var response = await _anonClient!.GetAsync($"/blobs/{SeedHash}");
+
+        Assert.True(
+            response.StatusCode == HttpStatusCode.NotFound,
+            $"expected 404 for a tampered identity blob, got {(int)response.StatusCode}"
+        );
+
+        // Belt-and-suspenders: whatever the 404 body is, it must not be the
+        // tampered bytes verbatim (the pre-fix bug served them as a 200).
+        var bodyText = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("substituted-attacker-bytes", bodyText, StringComparison.Ordinal);
+    }
+
     private async Task RunVectorAsync(BlobVector vector, string basePath)
     {
         var (client, root) = vector.ServerTokenConfigured

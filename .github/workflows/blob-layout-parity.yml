@@ -198,6 +198,24 @@ name: blob-layout-parity
 #                                                 follow-up, now tracked as
 #                                                 Phase 8 (deferred) in
 #                                                 blob-cas-remediation.md)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobIdentityVerifyTests.cs
+#                                                 (slice 3.2, finding #13 — new
+#                                                 file, pins FileBlobStoreProvider's
+#                                                 identity-path BLAKE3 verify-on-read:
+#                                                 a tampered identity blob file must
+#                                                 read as Missing, matching the zstd
+#                                                 path and Rust's DirPersistence::get_blob,
+#                                                 never served as a hit)
+#   NOTE: slice 3.2's fix exposed that several pre-existing tests keyed blob
+#   fixtures by fabricated placeholder hashes (e.g. "sha256:abc") rather than
+#   the real BLAKE3 hash of the bytes they stored — silently relying on the
+#   identity path's prior lack of verification. Fixed alongside 3.2 in
+#   ProviderDurabilityTests.cs, Row19AutomatedScenarioHarnessTests.cs, and
+#   ProviderHostRestartDurabilityIntegrationTests.cs (now keyed by
+#   Hasher.Hash(bytes)). None of those three files run in any CI workflow
+#   today — a pre-existing gap this slice did not introduce, already tracked
+#   under the Phase 8 CI follow-up above; not added here since the fixes are
+#   fixture-shape corrections, not new coverage for this workflow's contract.
 
 on:
   push:
@@ -248,6 +266,7 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobStoreProviderExistsAsyncDefaultTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderExistsAsyncTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobIdentityVerifyTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpEncodingNegotiationTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/HttpRemoteBlobStoreProviderTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobStoreProviderTests.cs"
@@ -301,6 +320,7 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobStoreProviderExistsAsyncDefaultTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderExistsAsyncTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobIdentityVerifyTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpEncodingNegotiationTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/HttpRemoteBlobStoreProviderTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobStoreProviderTests.cs"
@@ -394,6 +414,9 @@ jobs:
 
       - name: "Run FileBlobStoreProvider.ExistsAsync cheap-probe tests (slice 2.1)"
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobStoreProviderExistsAsyncTests"
+
+      - name: "Run FileBlobStoreProvider identity-path BLAKE3 verify-on-read tests (slice 3.2, finding #13 — a tampered identity blob must read as Missing, never wrong bytes)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobIdentityVerifyTests"
 
       - name: "Run blob HTTP encoding negotiation tests (HEAD no longer sets Content-Length — slice 2.1 parity fix)"
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobHttpEncodingNegotiationTests"

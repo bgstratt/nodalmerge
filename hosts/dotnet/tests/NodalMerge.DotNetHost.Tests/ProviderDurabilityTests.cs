@@ -1,3 +1,4 @@
+using Blake3;
 using NodalMerge.Host.Abstractions.Providers;
 using NodalMerge.Host.Composition;
 using Microsoft.Extensions.Configuration;
@@ -26,10 +27,14 @@ public sealed class ProviderDurabilityTests
             )
             .Build();
 
-        const string hashA = "sha256:multi-device-a";
-        const string hashB = "sha256:multi-device-b";
+        // Slice 3.2 added BLAKE3 verify-on-read to the identity path, so
+        // fixture blobs must be keyed by their REAL content hash (a
+        // fabricated key like the old "sha256:multi-device-a" placeholder
+        // now reads back as Missing, not a hit).
         var bytesA = new byte[] { 101, 102, 103 };
         var bytesB = new byte[] { 201, 202, 203, 204 };
+        var hashA = Hasher.Hash(bytesA).ToString();
+        var hashB = Hasher.Hash(bytesB).ToString();
 
         // Device A uploads the first blob.
         await using (var deviceA = BuildProvider(configuration))
@@ -84,8 +89,10 @@ public sealed class ProviderDurabilityTests
             )
             .Build();
 
-        const string hash = "sha256:blob-reconnect";
+        // See the note in the multi-device test above: slice 3.2's
+        // verify-on-read means the key must be the real content hash.
         var expectedBytes = new byte[] { 21, 22, 23, 24, 25 };
+        var hash = Hasher.Hash(expectedBytes).ToString();
 
         await using (var firstProvider = BuildProvider(configuration))
         {
@@ -165,6 +172,11 @@ public sealed class ProviderDurabilityTests
             )
             .Build();
 
+        // See the note in the multi-device test above: slice 3.2's
+        // verify-on-read means the key must be the real content hash.
+        var blobBytes = new byte[] { 8, 6, 7, 5, 3, 0, 9 };
+        var blobHash = Hasher.Hash(blobBytes).ToString();
+
         await using (var firstProvider = BuildProvider(configuration))
         {
             var nodeStore = firstProvider.GetRequiredService<INodeStoreProvider>();
@@ -176,7 +188,7 @@ public sealed class ProviderDurabilityTests
                 CancellationToken.None
             );
 
-            await blobStore.PutBlobAsync("sha256:abc", [8, 6, 7, 5, 3, 0, 9], "application/octet-stream", CancellationToken.None);
+            await blobStore.PutBlobAsync(blobHash, blobBytes, "application/octet-stream", CancellationToken.None);
         }
 
         await using (var secondProvider = BuildProvider(configuration))
@@ -190,9 +202,9 @@ public sealed class ProviderDurabilityTests
             Assert.Equal("node-1", snapshot.Nodes[0].NodeIdHex);
             Assert.Equal([1, 2, 3, 4], snapshot.Nodes[0].Payload);
 
-            var blob = await blobStore.TryGetBlobAsync("sha256:abc", CancellationToken.None);
+            var blob = await blobStore.TryGetBlobAsync(blobHash, CancellationToken.None);
             Assert.True(blob.Found);
-            Assert.Equal([8, 6, 7, 5, 3, 0, 9], blob.Bytes);
+            Assert.Equal(blobBytes, blob.Bytes);
         }
     }
 

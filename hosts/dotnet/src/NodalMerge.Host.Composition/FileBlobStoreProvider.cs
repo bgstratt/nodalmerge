@@ -35,6 +35,26 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
         if (File.Exists(path))
         {
             var identityBytes = await File.ReadAllBytesAsync(path, cancellationToken);
+
+            // Slice 3.2 (finding #13): verify-on-read, matching the zstd
+            // branch below and Rust's DirPersistence::get_blob (store.rs:683)
+            // — on a hash mismatch, log and treat as missing. Never delete
+            // the file, never throw: a corrupt blob is Missing, the same
+            // outcome an absent file would produce, so the HTTP origin's
+            // "corrupt → 404, never wrong bytes" contract holds without any
+            // extra plumbing at the call site.
+            var actualHash = Hasher.Hash(identityBytes).ToString();
+            if (!string.Equals(actualHash, hashHex, StringComparison.Ordinal))
+            {
+                _logger?.LogWarning(
+                    "Corrupt identity blob file for {Hash} at {Path} hashes to {ActualHash} instead; treating as missing",
+                    hashHex,
+                    path,
+                    actualHash
+                );
+                return BlobReadResult.Missing;
+            }
+
             return BlobReadResult.Hit(identityBytes, contentType: null);
         }
 

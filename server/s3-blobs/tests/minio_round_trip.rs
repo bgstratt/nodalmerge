@@ -576,3 +576,133 @@ fn s3_direct_tree_walk_reports_a_genuinely_absent_tree_as_missing() {
 
     drop(container);
 }
+
+// ─── blob-cas-remediation.md slice 2.3 (finding #7) ──────────────────────────
+
+/// Slice 2.3 — **the real gate for archive-export digest parity.**
+///
+/// Before 2.3, `archive_adapter`/`archive_export` reached for `get_blob`, which
+/// this backend hardwires to `None` by policy — so an S3-backed server computed
+/// `blobs_digest` over the **empty set** and produced an archive containing no
+/// bytes, silently, whose digest could never match a Dir-backed peer's for the
+/// same room (finding #7).
+///
+/// `blob_nonhydrating_conformance.rs` asserts this same property against
+/// `NonHydratingBackend`, but that fake is a *port* of this backend — a green
+/// test there gates a copy of the logic, never a real bucket `GET`. Same
+/// reasoning as the 1.3 GC gates and 2.2's tree-walk gates above. This is
+/// where the claim "Dir- and S3-backed exports of the same room agree" is
+/// actually proven.
+///
+/// ## Why the assertion is against an independently computed digest
+///
+/// `dir_digest == s3_digest` is satisfied by **both being the empty-set
+/// digest** — i.e. by finding #7 spreading to Dir rather than being fixed. So
+/// the digest is pinned against `expected` (computed here from the bytes) and
+/// explicitly asserted *not* to be the empty-set digest.
+///
+/// ## What this test costs, and why that is the point (finding #11 / slice 6.1)
+///
+/// Unlike the tree walk, which reads only small JSON index objects, this pulls
+/// the **full file payload** out of the bucket and into the server process —
+/// through `S3BlobStore::hydrate_blob`, which spawns a fresh OS thread and a
+/// fresh multi-threaded tokio `Runtime` **per blob** and blocks on a
+/// **timeout-less** `mpsc::recv()`. One blob here; a real room has thousands.
+/// See slice 2.3's report.
+#[test]
+fn s3_direct_archive_export_digest_matches_a_dir_backed_export_of_the_same_room() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use ed25519_dalek::SigningKey;
+    use nodalmerge_blobstore_conformance::{make_setblob_node, tmp_dir};
+    use nodalmerge_core::canonical_hash;
+    use nodalmerge_server::archive_export::build_external_manifest_document;
+    use nodalmerge_server::room::{import_nodes, Room};
+    use nodalmerge_server::store::{Composite, DirPersistence, SharedPersistence};
+
+    let Some((container, endpoint, rt)) = minio_fixture() else {
+        eprintln!("skipping: Docker / MinIO container unavailable");
+        return;
+    };
+
+    let signer = SigningKey::from_bytes(&[0xA3u8; 32]);
+    let room_id = "archive-digest-parity-minio";
+    let blob_bytes = b"a real file that must reach the exported manifest's blobs digest".to_vec();
+    let blob_hash = Hash::of(&blob_bytes);
+
+    // The digest a correct export must produce, computed from the bytes here
+    // rather than by asking the code under test (mirrors archive_export.rs's
+    // formula: canonical_hash over BTreeMap<hex, bytes>, "sha256:"-prefixed).
+    let expected = {
+        let map: BTreeMap<String, Vec<u8>> =
+            [(blob_hash.to_hex(), blob_bytes.clone())].into_iter().collect();
+        format!("sha256:{}", canonical_hash(&map).to_hex())
+    };
+    let empty_digest = format!(
+        "sha256:{}",
+        canonical_hash(&BTreeMap::<String, Vec<u8>>::new()).to_hex()
+    );
+    assert_ne!(
+        expected, empty_digest,
+        "sanity: this room references a blob, so its correct digest is not the empty-set \
+         digest — if this fires, every assertion below is vacuous"
+    );
+
+    // Hydrating baseline: DirPersistence really holds the bytes.
+    let dir_persistence: SharedPersistence =
+        Arc::new(DirPersistence::open(tmp_dir("minio-archive-dir")).expect("open dir"));
+    dir_persistence.persist_blob(&blob_hash, &blob_bytes);
+
+    // The production S3 shape: real nodes on disk, blobs in the real bucket.
+    let s3 = S3BlobStore::new(test_cfg(&endpoint)).expect("build S3BlobStore");
+    s3.persist_blob(&blob_hash, &blob_bytes);
+    assert!(s3.has_blob(&blob_hash), "sanity: the blob really is in the bucket");
+    assert!(
+        s3.get_blob(&blob_hash).is_none(),
+        "the non-hydrating policy on get_blob is deliberately UNCHANGED by slice 2.3 — if \
+         this ever returns bytes, 2.3 broke the contract it was told not to touch"
+    );
+    let s3_persistence: SharedPersistence = Arc::new(Composite::new(
+        DirPersistence::open(tmp_dir("minio-archive-s3")).expect("open dir"),
+        s3,
+    ));
+
+    let mut digests = Vec::new();
+    for (tag, persistence) in [("dir", dir_persistence), ("s3", s3_persistence)] {
+        let room: Arc<Room> = Room::new(room_id.to_string(), Arc::clone(&persistence), 64);
+        let (accepted, _, errs) = rt.block_on(import_nodes(
+            &room,
+            vec![make_setblob_node(&signer, "asset", blob_hash)],
+        ));
+        assert_eq!(accepted, 1, "setup ({tag}): the SetBlob node must be accepted: {errs:?}");
+
+        let manifest = build_external_manifest_document(
+            &*persistence,
+            room_id,
+            &signer,
+            &"0".repeat(64),
+            0,
+            &[],
+        )
+        .unwrap_or_else(|e| panic!("({tag}) manifest build must succeed: {e}"));
+        digests.push((tag, manifest.payload_digest_set.blobs));
+    }
+
+    for (tag, digest) in &digests {
+        assert_eq!(
+            digest, &expected,
+            "({tag}) finding #7: the exported manifest's blobs digest must be computed \
+             over the REAL BYTES. Asserted against an independently computed digest, not \
+             merely dir-vs-s3: that comparison alone is satisfied by both being empty"
+        );
+        assert_ne!(
+            digest, &empty_digest,
+            "({tag}) the empty-set digest is finding #7's signature and must not be the \
+             fix's output"
+        );
+    }
+    assert_eq!(digests[0].1, digests[1].1, "and, restated: Dir and S3 agree");
+
+    drop(container);
+}

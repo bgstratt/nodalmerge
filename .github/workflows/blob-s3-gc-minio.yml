@@ -70,6 +70,12 @@ name: blob-s3-gc-minio
 #                                          those rows, incl. UPLOAD_MARK_SENTINEL
 #   server/server/src/gc_adapter.rs        `sweep_blobs`'s MarkOnly preflight runs
 #                                          on every legacy tick this suite drives
+#   server/server/src/archive_adapter.rs   slice 2.3 — the archive describe/export
+#   server/server/src/archive_export.rs    paths, whose blobs digest is computed
+#                                          over blob bytes hydrated out of the
+#                                          real bucket. Dir-vs-S3 digest parity
+#                                          (finding #7) is only genuinely proven
+#                                          here; the fake can only gate a copy
 #   server/stores/blob-conformance/**      the in-memory port of blob_gc_sweep;
 #                                          if it and S3BlobStore drift, these
 #                                          tests are the ones that say so
@@ -94,6 +100,13 @@ on:
       # bucket (s3_direct_tree_walk_*), the only real gate for the S3 hydrating
       # tree read. The fake in blob-conformance is a port and cannot gate it.
       - "server/server/src/tree_walk.rs"
+      # slice 2.3 (finding #7) — minio_round_trip.rs now drives archive export
+      # against a real bucket (s3_direct_archive_export_digest_matches_a_dir_backed_export_of_the_same_room),
+      # the only real gate for the claim "Dir- and S3-backed exports of the same
+      # room agree". Both files below compute a blobs digest over hydrated blob
+      # bytes; the fake in blob-conformance is a port and cannot gate either.
+      - "server/server/src/archive_adapter.rs"
+      - "server/server/src/archive_export.rs"
       - "server/server/src/gc_adapter.rs"
       - "server/stores/blob-conformance/**"
       - "core/crdt/src/**"
@@ -109,6 +122,13 @@ on:
       # bucket (s3_direct_tree_walk_*), the only real gate for the S3 hydrating
       # tree read. The fake in blob-conformance is a port and cannot gate it.
       - "server/server/src/tree_walk.rs"
+      # slice 2.3 (finding #7) — minio_round_trip.rs now drives archive export
+      # against a real bucket (s3_direct_archive_export_digest_matches_a_dir_backed_export_of_the_same_room),
+      # the only real gate for the claim "Dir- and S3-backed exports of the same
+      # room agree". Both files below compute a blobs digest over hydrated blob
+      # bytes; the fake in blob-conformance is a port and cannot gate either.
+      - "server/server/src/archive_adapter.rs"
+      - "server/server/src/archive_export.rs"
       - "server/server/src/gc_adapter.rs"
       - "server/stores/blob-conformance/**"
       - "core/crdt/src/**"

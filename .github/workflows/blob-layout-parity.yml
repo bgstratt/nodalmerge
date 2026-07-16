@@ -263,6 +263,13 @@ on:
       # from GC. Without this line a change to the live-set walk could break that
       # suite's whole reason for existing without ever firing it.
       - "server/server/src/studio_live_hashes.rs"
+      # slice 2.3 (finding #7) — blob_nonhydrating_conformance.rs drives archive
+      # describe AND the manifest-document export path (two SEPARATE functions,
+      # each with its own blob-resolution site). Without these lines a change to
+      # either could silently reintroduce the empty-set blobs digest without the
+      # suite that guards it ever firing.
+      - "server/server/src/archive_adapter.rs"
+      - "server/server/src/archive_export.rs"
       - "server/stores/blob-conformance/**"
       - "server/s3-blobs/src/lib.rs"
       # slice 2.2 — Delegate-mode fail-loud gate. Docker-free (Delegate opens no
@@ -326,6 +333,13 @@ on:
       # from GC. Without this line a change to the live-set walk could break that
       # suite's whole reason for existing without ever firing it.
       - "server/server/src/studio_live_hashes.rs"
+      # slice 2.3 (finding #7) — blob_nonhydrating_conformance.rs drives archive
+      # describe AND the manifest-document export path (two SEPARATE functions,
+      # each with its own blob-resolution site). Without these lines a change to
+      # either could silently reintroduce the empty-set blobs digest without the
+      # suite that guards it ever firing.
+      - "server/server/src/archive_adapter.rs"
+      - "server/server/src/archive_export.rs"
       - "server/stores/blob-conformance/**"
       - "server/s3-blobs/src/lib.rs"
       # slice 2.2 — Delegate-mode fail-loud gate. Docker-free (Delegate opens no
@@ -395,7 +409,7 @@ jobs:
       - name: Run non-hydrating-backend relay contract (S4.2)
         run: cargo test -p nodalmerge-server --test blob_relay_nonhydrating_backend
 
-      - name: Run non-hydrating-backend conformance harness (slice 0.2 harness; its GC-live-set/tree-walk gate went green in slice 2.2 — the archive-export gate remains #[ignore]d until 2.3)
+      - name: Run non-hydrating-backend conformance harness (slice 0.2 harness, fully ungated as of slice 2.3 — GC-live-set/tree-walk went green in 2.2, archive describe/export digest parity + fail-loud in 2.3)
         run: cargo test -p nodalmerge-server --test blob_nonhydrating_conformance
 
       - name: Run tree-walk depth-bound regression test (slice 1.5, finding #9 — deep chain must fail closed, not abort the process)

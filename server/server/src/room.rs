@@ -605,15 +605,63 @@ impl Rooms {
                     // Load this room's referenced blobs (point lookups
                     // against the global pool) and insert into the
                     // in-memory blob store.
+                    //
+                    // blob-cas-remediation.md slice 2.3 (finding #7) — this
+                    // is the **third** `filter_map(get_blob)` site the finding
+                    // names, and it is the one that must NOT be "fixed" like
+                    // the other two. Room open is not an export: hydrating
+                    // here would pull every file payload the room references
+                    // into server memory on **every room open**, which is
+                    // exactly the cost offloading to object storage exists to
+                    // avoid, and which `BlobPersistence::hydrate_blob`'s own
+                    // contract tells file-byte callers not to do. The correct
+                    // behavior on a non-hydrating backend is to load nothing
+                    // and let clients pull via presigned/origin URLs — which
+                    // is what already happened, silently and by accident, via
+                    // `get_blob` returning `None` for every hash.
+                    //
+                    // So 2.3 changes no behavior here; it removes the
+                    // *silence* (an operator reading `loaded_blobs = 0` had no
+                    // way to tell "correct offloading" from "the blobs are
+                    // gone") and makes the skip a decision the code states
+                    // rather than an accident of a `None` return. Asking
+                    // `get_blob_hydrates()` — a declaration, not an inference
+                    // — is the only sound way to tell those apart: on
+                    // `DirPersistence` a `None` from `get_blob` with `has_blob
+                    // == true` means a *corrupt* blob, not a non-hydrating
+                    // backend. Pinned by
+                    // `blob_nonhydrating_conformance.rs`'s
+                    // `room_hydrate_does_not_pull_file_payloads_through_a_non_hydrating_backend`.
+                    //
+                    // See slice 2.4 for serving these blobs to a peer that has
+                    // no direct blob IO; that gap is unchanged by this slice.
                     let load_blobs_start = Instant::now();
-                    let blobs: Vec<Vec<u8>> = referenced_hashes
-                        .iter()
-                        .filter_map(|h| persistence.get_blob(h))
-                        .collect();
+                    let hydrates = persistence.get_blob_hydrates();
+                    let blobs: Vec<Vec<u8>> = if hydrates {
+                        referenced_hashes
+                            .iter()
+                            .filter_map(|h| persistence.get_blob(h))
+                            .collect()
+                    } else {
+                        tracing::info!(
+                            room = %room_clone.room_id,
+                            referenced_blobs = referenced_hashes.len(),
+                            "async persistence hydrate stage: load_room_blobs skipped — \
+                             this blob backend does not hydrate bytes into the server \
+                             process (S3's offloading policy). The room's in-memory blob \
+                             store stays empty by design and clients fetch blobs via \
+                             presigned/origin URLs. This is NOT data loss, and it is NOT \
+                             finding #7: unlike archive export, room open has no need of \
+                             the bytes"
+                        );
+                        Vec::new()
+                    };
                     let load_blobs_elapsed = load_blobs_start.elapsed();
                     tracing::info!(
                         room = %room_clone.room_id,
+                        referenced_blobs = referenced_hashes.len(),
                         loaded_blobs = blobs.len(),
+                        backend_hydrates = hydrates,
                         elapsed_ms = load_blobs_elapsed.as_millis(),
                         "async persistence hydrate stage: load_room_blobs"
                     );

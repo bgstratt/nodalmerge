@@ -8,7 +8,7 @@ use nodalmerge_core::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::store::ServerPersistence;
+use crate::store::{HydrateError, ServerPersistence};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportManifestDigestSet {
@@ -68,7 +68,8 @@ pub fn build_external_manifest_document(
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     let checkpoint_hash = checkpoint_hash_for_nodes(&nodes)?;
     let nodes_digest = nodes_digest_for_nodes(&nodes);
-    let blobs_digest = blobs_digest_for_referenced(persistence, &nodes);
+    // slice 2.3 (finding #7): propagate rather than silently digest a subset.
+    let blobs_digest = blobs_digest_for_referenced(persistence, &nodes)?;
 
     let compatibility_window = ExportManifestCompatibilityWindow {
         min_supported: EXPORT_COMPAT_MIN_SUPPORTED.to_string(),
@@ -198,14 +199,158 @@ fn nodes_digest_for_nodes(nodes: &[SyncNode]) -> String {
     format!("sha256:{}", Hash::of(&packed).to_hex())
 }
 
-fn blobs_digest_for_referenced(persistence: &dyn ServerPersistence, nodes: &[SyncNode]) -> String {
-    let mut map = BTreeMap::new();
+/// blob-cas-remediation.md slice 2.3 (finding #7) — resolve every blob a
+/// room's nodes reference, through the **hydrating** path, failing loudly
+/// rather than silently exporting fewer blobs than the room actually has.
+///
+/// ## Why this is not a hole in the offloading policy (and where it differs
+/// ## from `tree_walk`, slice 2.2's caller)
+///
+/// [`BlobPersistence::hydrate_blob`](crate::store::BlobPersistence::hydrate_blob)'s
+/// doc says callers wanting *file* bytes on an S3 backend "have no business
+/// here" and should mint a URL instead. **Archive export is the documented
+/// exception, and it is an exception by arithmetic, not by preference:**
+/// `blobs_digest` is `canonical_hash` over the blobs' *bytes*. There is no
+/// formulation of this function that produces a correct digest without
+/// reading them. Unlike the tree walk — which reads only small JSON index
+/// objects — this really does pull full file payloads into the process. That
+/// is inherent to what an export *is* (a self-contained copy), it is bounded
+/// by an operator-initiated, non-periodic request rather than a GC tick, and
+/// it is the cost of the alternative to a digest that is silently wrong. See
+/// this slice's report for the runtime-bridge consequence (finding #11 /
+/// slice 6.1), which this call site makes materially more expensive.
+///
+/// ## Which failures are fatal, and why they are not all the same
+///
+/// Slice 2.2's [`HydrateError`] split is load-bearing here — the three
+/// variants are three different facts and get three different answers:
+///
+/// * [`HydrateError::Unhydratable`] → **fatal.** A fact about the
+///   *deployment* (S3 Delegate mode holds no bucket credentials and the
+///   delegate presign protocol has no bytes-fetch op). The plan permits
+///   "explicit warning + manifest marker" as an alternative to failing, but
+///   not here: a manifest whose blobs digest is the empty-set digest is one
+///   that mismatches **every** Dir-backed peer's digest for the same room. A
+///   marker admitting that does not make the artifact usable; it annotates
+///   finding #7's damage instead of preventing it. An operator can act on
+///   this (configure Direct-mode credentials, or export from a node that
+///   has them), so the honest answer is a loud, actionable refusal at export
+///   time.
+/// * [`HydrateError::Backend`] → **fatal.** Transient and retryable, and it
+///   says nothing about whether the object exists. Dropping it would mint a
+///   *signed* manifest whose digest permanently disagrees with every peer
+///   because of one 503, with no error anywhere. Retrying is cheap; a wrong
+///   signed digest is forever.
+/// * [`HydrateError::Missing`] → **tolerated**, counted and warned. This is
+///   a fact about the **data**, not the backend: a Dir-backed peer and an
+///   S3-backed peer both see it and both exclude the hash, so the digests
+///   still agree — which is precisely the property finding #7 is about.
+///   Failing here would instead brick export forever for any room carrying a
+///   dangling `SetBlob` (a node committed for an upload that never
+///   completed), with no operator remedy, and would regress today's
+///   `DirPersistence` behavior, which finding #7 does not allege is wrong.
+///   Note a **corrupt** blob arrives here too (`DirPersistence::get_blob`
+///   verifies BLAKE3 on read; see slice 3.2) — so a Dir peer holding a
+///   corrupt blob and an S3 peer holding a good one *will* disagree on the
+///   digest. That disagreement is correct: they genuinely hold different
+///   bytes, and a digest that hid it would be worse than one that surfaces
+///   it.
+///
+/// The dividing line: **fail on faults an operator can act on; count, warn
+/// and continue on facts about the data that every peer shares.**
+pub(crate) fn resolve_referenced_blobs(
+    persistence: &dyn ServerPersistence,
+    nodes: &[SyncNode],
+) -> Result<Vec<(Hash, Vec<u8>)>, String> {
+    let mut blobs: Vec<(Hash, Vec<u8>)> = Vec::new();
+    let mut missing = 0usize;
+
     for hash in crate::room::blob_hashes_referenced_by(nodes.iter()) {
-        if let Some(bytes) = persistence.get_blob(&hash) {
-            map.insert(hash.to_hex(), bytes);
+        match persistence.hydrate_blob(&hash) {
+            Ok(bytes) => blobs.push((hash, bytes)),
+            Err(HydrateError::Missing) => {
+                missing += 1;
+                metrics::counter!(
+                    "nodalmerge_archive_blob_unresolved_total",
+                    "reason" => "missing"
+                )
+                .increment(1);
+                tracing::warn!(
+                    hash = %hash.to_hex(),
+                    "archive export: a referenced blob's bytes are not present (dangling \
+                     SetBlob, or a corrupt blob failing verify-on-read). It is excluded \
+                     from the blobs digest — which is what a peer that also lacks it \
+                     computes, so digests still agree — but the exported archive is \
+                     incomplete for this hash"
+                );
+            }
+            Err(HydrateError::Unhydratable { backend, detail }) => {
+                metrics::counter!(
+                    "nodalmerge_archive_blob_unresolved_total",
+                    "reason" => "unhydratable_backend"
+                )
+                .increment(1);
+                tracing::error!(
+                    hash = %hash.to_hex(),
+                    %backend,
+                    %detail,
+                    "archive export refused: this blob backend can never read blob bytes \
+                     into the server process, so any archive it produced would carry a \
+                     blobs digest computed over an incomplete set"
+                );
+                return Err(format!(
+                    "DEPLOYMENT CONFIGURATION: archive export cannot hydrate referenced \
+                     blob {hash}: this server's blob backend ({backend}) can never read \
+                     blob bytes into the server process, so the export's blobs digest \
+                     would be computed over an incomplete set and would not match a \
+                     Dir-backed peer's digest for the same room. This is a configuration \
+                     fact, not data loss — the object is very likely intact in the \
+                     bucket. Backend detail: {detail}",
+                    hash = hash.to_hex(),
+                ));
+            }
+            Err(HydrateError::Backend(detail)) => {
+                metrics::counter!(
+                    "nodalmerge_archive_blob_unresolved_total",
+                    "reason" => "backend_error"
+                )
+                .increment(1);
+                tracing::error!(
+                    hash = %hash.to_hex(),
+                    %detail,
+                    "archive export aborted: a referenced blob could not be read this \
+                     attempt. Retryable — deliberately not treated as an absent blob"
+                );
+                return Err(format!(
+                    "referenced blob {hash} could not be read from the blob backend: \
+                     {detail}. The export was aborted rather than sign a digest over an \
+                     incomplete blob set; this is retryable",
+                    hash = hash.to_hex(),
+                ));
+            }
         }
     }
-    format!("sha256:{}", canonical_hash(&map).to_hex())
+
+    if missing > 0 {
+        tracing::warn!(
+            resolved = blobs.len(),
+            missing,
+            "archive export: {missing} referenced blob(s) had no bytes and are excluded \
+             from the archive and its blobs digest"
+        );
+    }
+    Ok(blobs)
+}
+
+fn blobs_digest_for_referenced(
+    persistence: &dyn ServerPersistence,
+    nodes: &[SyncNode],
+) -> Result<String, String> {
+    let map: BTreeMap<String, Vec<u8>> = resolve_referenced_blobs(persistence, nodes)?
+        .into_iter()
+        .map(|(hash, bytes)| (hash.to_hex(), bytes))
+        .collect();
+    Ok(format!("sha256:{}", canonical_hash(&map).to_hex()))
 }
 
 fn signature_payload(

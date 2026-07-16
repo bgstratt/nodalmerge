@@ -48,7 +48,14 @@ pub async fn process_archive_describe(
     };
 
     let load_start = Instant::now();
-    let loaded = load_archive_from_ref(room, current_room_id, &archive_ref, true)?;
+    let loaded = load_archive_from_ref(
+        room,
+        current_room_id,
+        &archive_ref,
+        true,
+        // The blobs digest is computed over the bytes (slice 2.3).
+        BlobBytesNeed::Required,
+    )?;
     observe_archive_stage("describe", "manifest_load", load_start);
 
     let checkpoint_hash = loaded
@@ -124,7 +131,16 @@ pub async fn process_archive_validate(
     }
 
     let load_start = Instant::now();
-    let loaded = match load_archive_from_ref(room, current_room_id, &archive_ref, false) {
+    let loaded = match load_archive_from_ref(
+        room,
+        current_room_id,
+        &archive_ref,
+        false,
+        // slice 2.3: validate reads only nodes — it never touches
+        // `loaded.blobs`, so it must not pay to hydrate them (and must keep
+        // working on a backend that cannot).
+        BlobBytesNeed::NotNeeded,
+    ) {
         Ok(loaded) => loaded,
         Err(rejected) => return ArchiveWsResponse::ValidateRejected(rejected),
     };
@@ -233,7 +249,21 @@ pub async fn process_archive_import(
     }
 
     let load_start = Instant::now();
-    let loaded = match load_archive_from_ref(room, current_room_id, &archive_ref, false) {
+    let loaded = match load_archive_from_ref(
+        room,
+        current_room_id,
+        &archive_ref,
+        false,
+        // slice 2.3: `metadata_only` discards the blobs, so resolving them
+        // would download every file payload only to drop it — and would fail
+        // outright on a backend that cannot hydrate. `full_apply` re-persists
+        // them into the target room and genuinely needs them.
+        if import_mode == "full_apply" {
+            BlobBytesNeed::Required
+        } else {
+            BlobBytesNeed::NotNeeded
+        },
+    ) {
         Ok(loaded) => loaded,
         Err(rejected) => return ArchiveWsResponse::ImportRejected(rejected),
     };
@@ -641,11 +671,40 @@ fn parse_archive_ref(archive_ref: &str) -> Result<ArchiveSourceRef, ArchiveReaso
     Err(ArchiveReasonClass::UnsupportedFormat)
 }
 
+/// blob-cas-remediation.md slice 2.3 — does this caller actually need the
+/// referenced blobs' **bytes**?
+///
+/// `load_archive_from_ref` is shared by four entry points and only some of
+/// them do. Before 2.3 the distinction was free: `get_blob` was a local read
+/// on `DirPersistence` and a no-op `None` on S3, so resolving blobs nobody
+/// wanted cost nothing visible. 2.3 makes resolution *hydrating*, which turns
+/// the same unconditional work into a full download of every file payload the
+/// room references — and, on S3 **Delegate** mode, into a hard failure of an
+/// operation that never wanted the bytes in the first place.
+///
+/// So the need is now an explicit argument rather than an accident. See
+/// `blob_nonhydrating_conformance.rs`'s
+/// `archive_validate_does_not_hydrate_blobs_and_works_on_a_delegate_backend`
+/// and `archive_metadata_only_import_does_not_hydrate_blobs_on_a_delegate_backend`,
+/// which fail if this collapses back to "always resolve".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlobBytesNeed {
+    /// `archive.describe` / `archive.export`: the blobs digest is computed
+    /// over the bytes, so there is no way to answer without reading them.
+    /// `archive.import` with `full_apply`: the bytes are re-persisted into
+    /// the target room.
+    Required,
+    /// `archive.validate`: never reads `LoadedArchive::blobs`.
+    /// `archive.import` with `metadata_only`: discards them.
+    NotNeeded,
+}
+
 fn load_archive_from_ref(
     room: &Arc<Room>,
     current_room_id: &str,
     archive_ref: &str,
     include_summary_digests: bool,
+    blob_bytes_need: BlobBytesNeed,
 ) -> Result<LoadedArchive, ArchiveRejected> {
     let source_ref = match parse_archive_ref(archive_ref) {
         Ok(source_ref) => source_ref,
@@ -699,10 +758,43 @@ fn load_archive_from_ref(
     // Blobs are a global CAS pool (docs/BLOB_STORAGE_LAYOUT.md); recover
     // the source room's blob set via point lookups against the hashes its
     // own nodes reference.
-    let blobs: Vec<(Hash, Vec<u8>)> = crate::room::blob_hashes_referenced_by(nodes.iter())
-        .into_iter()
-        .filter_map(|hash| room.persistence.get_blob(&hash).map(|bytes| (hash, bytes)))
-        .collect();
+    //
+    // blob-cas-remediation.md slice 2.3 (finding #7): this used to
+    // `filter_map` away `get_blob`'s `None`, which on an S3 backend is
+    // *every* blob — so an S3-backed server described/exported an archive
+    // whose `blobs_digest` was computed over the empty set, with no warning
+    // and no way for a Dir-backed peer's digest to ever match it. The shared
+    // resolver reads through the hydrating path and fails loudly on faults
+    // an operator can act on; see its docs for the per-variant policy.
+    //
+    // Only resolved when the caller actually wants the bytes — see
+    // [`BlobBytesNeed`]. `include_summary_digests` implies the need (the
+    // digest is over the bytes); `archive.validate` and a `metadata_only`
+    // import imply the opposite.
+    let want_blob_bytes = include_summary_digests || blob_bytes_need == BlobBytesNeed::Required;
+    let blobs: Vec<(Hash, Vec<u8>)> = if want_blob_bytes {
+        crate::archive_export::resolve_referenced_blobs(&*room.persistence, &nodes).map_err(
+            |message| {
+                rejected(
+                    current_room_id,
+                    archive_ref,
+                    // Reusing CheckpointNotFound: it is the class the export
+                    // path already maps every `build_external_manifest_document`
+                    // failure to, and `ArchiveReasonClass` is a frozen
+                    // cross-runtime contract (core/crdt/src/archive_contracts.rs,
+                    // engine/host-core/src/protocol.rs, and
+                    // tests/archive_portability_vectors.rs). Adding a variant is
+                    // a protocol change with a .NET parity obligation, which is
+                    // out of 2.3's scope — the actionable detail rides in
+                    // `reason_message`. Reported as a wart, not resolved here.
+                    ArchiveReasonClass::CheckpointNotFound,
+                    &message,
+                )
+            },
+        )?
+    } else {
+        Vec::new()
+    };
 
     let (checkpoint_hash, nodes_digest, blobs_digest) = if include_summary_digests {
         let replayed = replay(&nodes, None).map_err(|_| {
@@ -1609,6 +1701,7 @@ mod tests {
                 "archive-profile-control",
                 &archive_ref,
                 false,
+                BlobBytesNeed::NotNeeded,
             )
             .expect("archive load stage should succeed");
             stage_samples
@@ -1828,6 +1921,7 @@ mod tests {
                 "archive-profile-parity-control",
                 &file_archive_ref,
                 false,
+                BlobBytesNeed::NotNeeded,
             )
             .expect("file archive load stage should succeed");
             file_stage_samples
@@ -1960,6 +2054,7 @@ mod tests {
                 "archive-profile-parity-control",
                 &object_archive_ref,
                 false,
+                BlobBytesNeed::NotNeeded,
             )
             .expect("object archive load stage should succeed");
             object_stage_samples

@@ -45,6 +45,7 @@ pub fn run_all(store: &dyn NodePersistence, room_id: &str) {
     batch_persist_round_trips(store, &format!("{room_id}-batch"));
     rooms_are_isolated(store, &format!("{room_id}-iso"));
     hydration_order_matches_insertion(store, &format!("{room_id}-order"));
+    known_room_ids_is_superset_of_written_rooms(store, &format!("{room_id}-enum"));
 }
 
 fn nodes_durable_reports_true(store: &dyn NodePersistence) {
@@ -116,6 +117,56 @@ fn rooms_are_isolated(store: &dyn NodePersistence, room: &str) {
     assert_eq!(la[0].id, na.id);
     assert_eq!(lb[0].id, nb.id);
     assert_ne!(la[0].id, lb[0].id, "rooms leaked into each other");
+}
+
+/// blob-cas-remediation.md CI follow-up (raised by slice 1.1, finding #1) —
+/// `known_room_ids()` is now safety-critical: the global blob GC sweep
+/// trusts it completely whenever `can_enumerate_rooms() == true`, which
+/// `PostgresNodeStore` and `MongoNodeStore` both assert. Every prior F7
+/// scenario in this file writes into one namespaced room and never looks at
+/// `known_room_ids()`/`can_enumerate_rooms()` at all, so a regression to
+/// either query (e.g. a `DISTINCT room_id` scan silently returning an empty
+/// or partial set) would ship with a fully green conformance suite and
+/// resurrect finding #1's permanent blob deletion — now with the fail-closed
+/// guard vouching for it.
+///
+/// `known_room_ids()` is store-global, not scoped to a single `room_id` — a
+/// persistent DB or a run sharing the store with other scenarios will have
+/// other rooms present. So this asserts a **superset**, never an exact set:
+/// write into two distinct namespaced rooms and confirm both come back.
+fn known_room_ids_is_superset_of_written_rooms(store: &dyn NodePersistence, room: &str) {
+    assert!(
+        store.can_enumerate_rooms(),
+        "F7 adapters must report can_enumerate_rooms() == true"
+    );
+
+    let sk = SigningKey::from_bytes(&[0x66u8; 32]);
+    let room_x = format!("{room}-x");
+    let room_y = format!("{room}-y");
+    let nx = make_node(&sk, "kx", b"vx");
+    let ny = make_node(&sk, "ky", b"vy");
+    store.persist_node(&room_x, &nx);
+    store.persist_node(&room_y, &ny);
+
+    // Round-trip both rooms first so a failure here (rather than the
+    // enumeration assertions below) points straight at ordinary
+    // persist/load, not at known_room_ids().
+    assert_eq!(store.load_room_nodes(&room_x).len(), 1, "room {room_x} round-trip failed");
+    assert_eq!(store.load_room_nodes(&room_y).len(), 1, "room {room_y} round-trip failed");
+
+    let known: std::collections::HashSet<String> = store.known_room_ids().into_iter().collect();
+    assert!(
+        known.contains(&room_x),
+        "known_room_ids() is missing room {room_x}, which was just persisted to — \
+         enumeration is incomplete and the global blob GC sweep would treat this \
+         room's blobs as unreferenced"
+    );
+    assert!(
+        known.contains(&room_y),
+        "known_room_ids() is missing room {room_y}, which was just persisted to — \
+         enumeration is incomplete and the global blob GC sweep would treat this \
+         room's blobs as unreferenced"
+    );
 }
 
 fn hydration_order_matches_insertion(store: &dyn NodePersistence, room: &str) {

@@ -36,6 +36,25 @@ fn start_postgres() -> Option<testcontainers::Container<GenericImage>> {
 fn postgres_passes_full_conformance() {
     let _ = tracing_subscriber::fmt::try_init();
     let Some(container) = start_postgres() else {
+        // Graceful skip is correct for a dev laptop that may not have Docker
+        // running — but the exact same `eprintln!` + `return` reports as a
+        // PASS to the test harness. In CI that is catastrophic: if the
+        // Docker/testcontainers setup ever breaks, this job goes green while
+        // testing nothing, silently losing all coverage of
+        // `PostgresNodeStore` — including the safety-critical
+        // `known_room_ids`/`can_enumerate_rooms` enumeration the blob GC
+        // sweep trusts completely (blob-cas-remediation.md slice 1.1,
+        // finding #1; see the CI follow-up notes and the new
+        // `known_room_ids_is_superset_of_written_rooms` conformance
+        // scenario). CI sets `NODALMERGE_REQUIRE_DOCKER=1` to convert this
+        // skip into a hard failure; local/dev runs without the var keep
+        // skipping gracefully.
+        if std::env::var("NODALMERGE_REQUIRE_DOCKER").as_deref() == Ok("1") {
+            panic!(
+                "NODALMERGE_REQUIRE_DOCKER=1 but Docker / Postgres container is \
+                 unavailable — this suite must not silently pass in CI"
+            );
+        }
         eprintln!("skipping: Docker / Postgres container unavailable");
         return;
     };

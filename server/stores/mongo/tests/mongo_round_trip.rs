@@ -32,6 +32,25 @@ fn mongo_passes_full_conformance() {
     // which panics inside a #[tokio::test] runtime.
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let Some(container) = start_mongo() else {
+        // Graceful skip is correct for a dev laptop that may not have Docker
+        // running — but the exact same `eprintln!` + `return` reports as a
+        // PASS to the test harness. In CI that is catastrophic: if the
+        // Docker/testcontainers setup ever breaks, this job goes green while
+        // testing nothing, silently losing all coverage of `MongoNodeStore`
+        // — including the safety-critical
+        // `known_room_ids`/`can_enumerate_rooms` enumeration the blob GC
+        // sweep trusts completely (blob-cas-remediation.md slice 1.1,
+        // finding #1; see the CI follow-up notes and the new
+        // `known_room_ids_is_superset_of_written_rooms` conformance
+        // scenario). CI sets `NODALMERGE_REQUIRE_DOCKER=1` to convert this
+        // skip into a hard failure; local/dev runs without the var keep
+        // skipping gracefully.
+        if std::env::var("NODALMERGE_REQUIRE_DOCKER").as_deref() == Ok("1") {
+            panic!(
+                "NODALMERGE_REQUIRE_DOCKER=1 but Docker / Mongo container is \
+                 unavailable — this suite must not silently pass in CI"
+            );
+        }
         eprintln!("skipping: Docker / Mongo container unavailable");
         return;
     };

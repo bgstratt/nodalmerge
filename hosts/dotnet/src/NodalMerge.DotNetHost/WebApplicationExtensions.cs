@@ -748,6 +748,25 @@ public static class WebApplicationExtensions
         return false;
     }
 
+    /// <summary>
+    /// HEAD /blobs/{hash} (docs/BLOB_HTTP_SURFACE.md: "Exists for cheap
+    /// existence checks"). Slice 2.1 — deliberately NOT a thin wrapper around
+    /// <see cref="ResolveBlobReadAsync"/>/<c>TryGetBlobAsync</c> anymore: that
+    /// forced a full remote download + BLAKE3 verify + local write-back under
+    /// ChainedRemote/S3Direct just to answer "does this exist?". Answers via
+    /// <see cref="IBlobStoreProvider.ExistsAsync"/> instead, mirroring the
+    /// Rust reference's <c>head_blob</c> (<c>blob_http.rs:256</c>), which
+    /// answers via <c>has_blob</c> rather than <c>get_blob</c> for the same
+    /// reason.
+    ///
+    /// Also matches Rust in NOT setting <c>Content-Length</c>: <c>head_blob</c>
+    /// only ever sets <c>Content-Type</c> + <c>ETag</c> on 200 (never
+    /// Content-Length), and the frozen golden vector <c>head-found</c>
+    /// (engine/commands/blob-http-surface-vectors.v1.json) doesn't require
+    /// one either. Reporting an accurate Content-Length would require reading
+    /// (and, for a zstd-encoded blob, decompressing) the bytes — exactly the
+    /// cost this method exists to avoid.
+    /// </summary>
     private static async Task<IResult> HandleBlobHeadAsync(
         HttpContext context,
         string hash,
@@ -755,16 +774,21 @@ public static class WebApplicationExtensions
         BlobHttpOptions options,
         CancellationToken cancellationToken)
     {
-        var (status, bytes, _) = await ResolveBlobReadAsync(context, hash, blobStore, options, cancellationToken);
-        if (status != StatusCodes.Status200OK)
+        var (validationStatus, _) = ValidateBlobRequest(context, hash, options);
+        if (validationStatus != StatusCodes.Status200OK)
         {
             // HEAD never carries a body, so error responses are status-only.
-            return Results.StatusCode(status);
+            return Results.StatusCode(validationStatus);
+        }
+
+        var exists = await blobStore.ExistsAsync(hash, cancellationToken);
+        if (!exists)
+        {
+            return Results.StatusCode(StatusCodes.Status404NotFound);
         }
 
         context.Response.Headers["ETag"] = $"\"{hash}\"";
         context.Response.ContentType = "application/octet-stream";
-        context.Response.ContentLength = bytes!.Length;
         return Results.Empty;
     }
 
@@ -849,8 +873,11 @@ public static class WebApplicationExtensions
             return Results.Json(new { error = "hash mismatch" }, statusCode: StatusCodes.Status422UnprocessableEntity);
         }
 
-        var existing = await blobStore.TryGetBlobAsync(hash, cancellationToken);
-        if (existing.Found)
+        // Slice 2.1: idempotency's already-present check goes through the
+        // cheap ExistsAsync probe, not a full TryGetBlobAsync read — matches
+        // the Rust reference (blob_http.rs:515 uses has_blob, not get_blob).
+        var alreadyExists = await blobStore.ExistsAsync(hash, cancellationToken);
+        if (alreadyExists)
         {
             // Content-addressed: identical bytes are already stored — idempotent no-op.
             return Results.StatusCode(StatusCodes.Status200OK);

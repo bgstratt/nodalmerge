@@ -81,6 +81,49 @@ public sealed class RemoteBlobLinkAggregator : IBlobStoreProvider
         return BlobReadResult.Missing;
     }
 
+    /// <summary>
+    /// Slice 2.1 — existence probe, ordered-fallback like
+    /// <see cref="TryGetBlobAsync"/> but never hydrating bytes. Overriding this is not
+    /// optional: this aggregator IS the single "remote" argument
+    /// <see cref="ChainedBlobStoreProvider"/> sees whenever more than one remote link is
+    /// configured, so without an override it would inherit
+    /// <see cref="IBlobStoreProvider"/>'s compat default — which answers existence by
+    /// calling <see cref="TryGetBlobAsync"/>, putting a full remote download (+ verify +
+    /// local write-back) back on the HEAD/PUT-idempotency path for precisely the
+    /// three-link <c>local -&gt; server-relay -&gt; s3-direct</c> deployment that most
+    /// needs the cheap probe.
+    ///
+    /// A throwing link is treated as "ask the next one", exactly as in
+    /// <see cref="TryGetBlobAsync"/>: a degraded link is an availability event, not
+    /// evidence about the blob. Consequently a <c>false</c> here means "no reachable link
+    /// has it", which is the same guarantee <see cref="TryGetBlobAsync"/>'s
+    /// <see cref="BlobReadResult.Missing"/> already carries.
+    /// </summary>
+    public async ValueTask<bool> ExistsAsync(string hashHex, CancellationToken cancellationToken = default)
+    {
+        foreach (var link in _links)
+        {
+            try
+            {
+                if (await link.ExistsAsync(hashHex, cancellationToken))
+                {
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Remote blob link {Link} existence probe failed for {Hash}; falling through to the next configured link",
+                    link.GetType().Name,
+                    hashHex
+                );
+            }
+        }
+
+        return false;
+    }
+
     public async ValueTask PutBlobAsync(
         string hashHex,
         byte[] bytes,

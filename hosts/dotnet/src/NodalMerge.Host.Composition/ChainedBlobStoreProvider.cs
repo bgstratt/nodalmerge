@@ -86,6 +86,44 @@ public sealed class ChainedBlobStoreProvider : IBlobStoreProvider
         return BlobReadResult.Hit(remoteResult.Bytes!, remoteResult.ContentType);
     }
 
+    /// <summary>
+    /// Cheap existence probe (slice 2.1): local first (typically
+    /// <see cref="FileBlobStoreProvider"/>'s <see cref="File.Exists"/>
+    /// check), falling through to the remote link's own cheap probe
+    /// (<see cref="HttpRemoteBlobStoreProvider"/>'s HEAD,
+    /// <see cref="S3DirectBlobStoreProvider"/>'s bucket HEAD, or — if the
+    /// remote is a <c>RemoteBlobLinkAggregator</c> composing more than one
+    /// link — whatever that aggregator's own <see cref="IBlobStoreProvider.ExistsAsync"/>
+    /// resolves to, currently its default (<see cref="IBlobStoreProvider.TryGetBlobAsync"/>)
+    /// since the aggregator does not itself override this member yet).
+    /// A degraded/unreachable remote is treated as "not found" here, exactly
+    /// like <see cref="TryGetBlobAsync"/>'s local-first-availability stance —
+    /// never propagated as a fault, and — critically — never falls back to
+    /// a full <see cref="TryGetBlobAsync"/> read, which would defeat the
+    /// entire point of this method.
+    /// </summary>
+    public async ValueTask<bool> ExistsAsync(string hashHex, CancellationToken cancellationToken = default)
+    {
+        if (await _local.ExistsAsync(hashHex, cancellationToken))
+        {
+            return true;
+        }
+
+        try
+        {
+            return await _remote.ExistsAsync(hashHex, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Remote blob origin existence probe failed for {Hash}; treating as absent (local-first availability)",
+                hashHex
+            );
+            return false;
+        }
+    }
+
     public async ValueTask PutBlobAsync(
         string hashHex,
         byte[] bytes,

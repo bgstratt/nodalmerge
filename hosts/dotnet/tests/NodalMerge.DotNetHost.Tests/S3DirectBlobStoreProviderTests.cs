@@ -106,6 +106,63 @@ public sealed class S3DirectBlobStoreProviderTests
         Assert.False(result.Found);
     }
 
+    /// <summary>
+    /// Slice 2.1 (nodalmerge-studio/plans/blob-cas-remediation.md):
+    /// <see cref="S3DirectBlobStoreProvider.ExistsAsync"/> resolves the same
+    /// presigned <c>op=get</c> URL as <see cref="S3DirectBlobStoreProvider.TryGetBlobAsync"/>
+    /// but issues a bucket <c>HEAD</c> instead of a <c>GET</c> — no body is
+    /// ever fetched.
+    /// </summary>
+    [Fact]
+    public async Task ExistsAsync_bucket_200_is_true_and_never_fetches_a_body()
+    {
+        var origin = new QueueHandler([UrlResolveOk(BucketUrl)]);
+        HttpRequestMessage? capturedBucketRequest = null;
+        var bucket = new CapturingRequestHandler(req =>
+        {
+            capturedBucketRequest = req;
+            return MakeResponse(HttpStatusCode.OK);
+        });
+        var provider = BuildProvider(origin, bucket);
+
+        var exists = await provider.ExistsAsync(Hash);
+
+        Assert.True(exists);
+        Assert.NotNull(capturedBucketRequest);
+        Assert.Equal(HttpMethod.Head, capturedBucketRequest!.Method);
+    }
+
+    [Fact]
+    public async Task ExistsAsync_bucket_404_is_false()
+    {
+        var origin = new QueueHandler([UrlResolveOk(BucketUrl)]);
+        var bucket = new QueueHandler([MakeResponse(HttpStatusCode.NotFound)]);
+        var provider = BuildProvider(origin, bucket);
+
+        Assert.False(await provider.ExistsAsync(Hash));
+    }
+
+    [Fact]
+    public async Task ExistsAsync_url_resolution_501_is_false_and_does_not_touch_the_bucket()
+    {
+        var origin = new QueueHandler([MakeResponse(HttpStatusCode.NotImplemented)]);
+        var bucket = new QueueHandler([]);
+        var provider = BuildProvider(origin, bucket);
+
+        Assert.False(await provider.ExistsAsync(Hash));
+        Assert.Equal(0, bucket.CallCount);
+    }
+
+    [Fact]
+    public async Task ExistsAsync_unexpected_bucket_status_throws()
+    {
+        var origin = new QueueHandler([UrlResolveOk(BucketUrl)]);
+        var bucket = new QueueHandler([MakeResponse(HttpStatusCode.InternalServerError)]);
+        var provider = BuildProvider(origin, bucket);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => provider.ExistsAsync(Hash).AsTask());
+    }
+
     [Fact]
     public async Task Put_compresses_and_uploads_with_zstd_content_encoding_then_confirms()
     {

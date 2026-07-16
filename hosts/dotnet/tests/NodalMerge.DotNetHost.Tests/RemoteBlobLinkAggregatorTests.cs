@@ -99,14 +99,86 @@ public sealed class RemoteBlobLinkAggregatorTests
         Assert.Equal(1, second.PutCallCount);
     }
 
+    /// <summary>
+    /// Slice 2.1's benefit is lost for the three-link config unless this class overrides
+    /// <c>ExistsAsync</c> itself: <see cref="RemoteBlobLinkAggregator"/> IS the "remote"
+    /// argument <see cref="ChainedBlobStoreProvider"/> sees whenever more than one remote
+    /// link is configured, so falling through to the interface's compat default would put
+    /// a full remote download + write-back back on the HEAD/PUT-idempotency path for
+    /// exactly the <c>local -&gt; server-relay -&gt; s3-direct</c> deployment that most
+    /// needs the cheap probe. Asserting on <c>GetCallCount == 0</c> (not on the boolean
+    /// alone) is what pins that — the default answers the boolean correctly too.
+    /// </summary>
+    [Fact]
+    public async Task Exists_answers_via_cheap_probe_without_hydrating_any_link()
+    {
+        var first = new FakeLink { Exists = true, GetResult = BlobReadResult.Hit([1, 2, 3], null) };
+        var second = new FakeLink { Exists = true, GetResult = BlobReadResult.Hit([9], null) };
+        IBlobStoreProvider aggregator = new RemoteBlobLinkAggregator([first, second], NullLogger<RemoteBlobLinkAggregator>.Instance);
+
+        Assert.True(await aggregator.ExistsAsync(Hash));
+
+        Assert.Equal(0, first.GetCallCount);
+        Assert.Equal(0, second.GetCallCount);
+        // First link already answered "present" — no reason to probe the second.
+        Assert.Equal(1, first.ExistsCallCount);
+        Assert.Equal(0, second.ExistsCallCount);
+    }
+
+    [Fact]
+    public async Task Exists_falls_through_to_second_link_when_first_does_not_have_it()
+    {
+        var first = new FakeLink { Exists = false };
+        var second = new FakeLink { Exists = true };
+        IBlobStoreProvider aggregator = new RemoteBlobLinkAggregator([first, second], NullLogger<RemoteBlobLinkAggregator>.Instance);
+
+        Assert.True(await aggregator.ExistsAsync(Hash));
+
+        Assert.Equal(1, first.ExistsCallCount);
+        Assert.Equal(1, second.ExistsCallCount);
+        Assert.Equal(0, first.GetCallCount);
+        Assert.Equal(0, second.GetCallCount);
+    }
+
+    /// <summary>
+    /// Mirrors <c>Get_falls_through_to_second_link_when_first_throws</c>: a degraded link
+    /// is an availability event, not a verdict on the blob. Same posture as
+    /// <see cref="RemoteBlobLinkAggregator.TryGetBlobAsync"/>, deliberately.
+    /// </summary>
+    [Fact]
+    public async Task Exists_falls_through_to_second_link_when_first_throws()
+    {
+        var first = new FakeLink { ExistsException = new InvalidOperationException("degraded") };
+        var second = new FakeLink { Exists = true };
+        IBlobStoreProvider aggregator = new RemoteBlobLinkAggregator([first, second], NullLogger<RemoteBlobLinkAggregator>.Instance);
+
+        Assert.True(await aggregator.ExistsAsync(Hash));
+        Assert.Equal(1, second.ExistsCallCount);
+    }
+
+    [Fact]
+    public async Task Exists_returns_false_when_every_link_misses_or_throws()
+    {
+        var first = new FakeLink { Exists = false };
+        var second = new FakeLink { ExistsException = new InvalidOperationException("also degraded") };
+        IBlobStoreProvider aggregator = new RemoteBlobLinkAggregator([first, second], NullLogger<RemoteBlobLinkAggregator>.Instance);
+
+        Assert.False(await aggregator.ExistsAsync(Hash));
+        Assert.Equal(0, first.GetCallCount);
+        Assert.Equal(0, second.GetCallCount);
+    }
+
     private sealed class FakeLink : IBlobStoreProvider
     {
         public BlobReadResult GetResult { get; set; } = BlobReadResult.Missing;
         public Exception? GetException { get; set; }
         public Exception? PutException { get; set; }
+        public bool Exists { get; set; }
+        public Exception? ExistsException { get; set; }
 
         public int GetCallCount { get; private set; }
         public int PutCallCount { get; private set; }
+        public int ExistsCallCount { get; private set; }
 
         public ValueTask<BlobReadResult> TryGetBlobAsync(string hashHex, CancellationToken cancellationToken = default)
         {
@@ -116,6 +188,25 @@ public sealed class RemoteBlobLinkAggregatorTests
                 throw GetException;
             }
             return ValueTask.FromResult(GetResult);
+        }
+
+        /// <summary>
+        /// Models a link that CAN answer existence cheaply — the real
+        /// <see cref="HttpRemoteBlobStoreProvider"/>/<see cref="S3DirectBlobStoreProvider"/>
+        /// shape after slice 2.1 (a bucket/relay <c>HEAD</c>). Tracked separately from
+        /// <see cref="GetCallCount"/> precisely so a probe can be told apart from a
+        /// hydrating read: if the aggregator ever falls back to the interface's default
+        /// <c>ExistsAsync</c>, that default routes through <see cref="TryGetBlobAsync"/>
+        /// and <see cref="GetCallCount"/> goes up — which is the failure these tests catch.
+        /// </summary>
+        public ValueTask<bool> ExistsAsync(string hashHex, CancellationToken cancellationToken = default)
+        {
+            ExistsCallCount++;
+            if (ExistsException is not null)
+            {
+                throw ExistsException;
+            }
+            return ValueTask.FromResult(Exists);
         }
 
         public ValueTask PutBlobAsync(string hashHex, byte[] bytes, string? contentType, CancellationToken cancellationToken = default)

@@ -74,6 +74,24 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
     }
 
     /// <summary>
+    /// Cheap existence probe (slice 2.1): a plain <see cref="File.Exists"/>
+    /// check against both possible on-disk locations, no read/decompress/
+    /// verify — mirrors the Rust reference's
+    /// <c>DirPersistence::has_blob</c> (<c>store.rs:719</c>), which is
+    /// exactly this same two-path <c>is_file</c> check with no
+    /// verification either. Note the resulting parity: a blob whose on-disk
+    /// bytes are corrupt still answers "exists" here (same as Rust) — HEAD
+    /// and PUT-idempotency are existence checks, not integrity re-checks;
+    /// <see cref="TryGetBlobAsync"/> is what looks at the actual bytes and
+    /// filters out corruption.
+    /// </summary>
+    public ValueTask<bool> ExistsAsync(string hashHex, CancellationToken cancellationToken = default)
+    {
+        var exists = File.Exists(GetPath(hashHex)) || File.Exists(GetEncodedPath(hashHex));
+        return ValueTask.FromResult(exists);
+    }
+
+    /// <summary>
     /// Serves the stored encoding as-is (docs/BLOB_HTTP_SURFACE.md
     /// "Content encoding"): identity bytes when that's what's on disk, the
     /// raw zstd frame (never decompressed) when only the encoded form

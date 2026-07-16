@@ -143,6 +143,18 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
         );
     }
 
+    /// <summary>
+    /// A real origin <c>HEAD /blobs/{hash}</c> — no body transfer, no
+    /// decompress, no BLAKE3 verify, no local write-back. Satisfies both
+    /// <see cref="IRemoteBlobPushTarget.ExistsAsync"/> (the reconcile sweep)
+    /// and, since slice 2.1, <see cref="IBlobStoreProvider.ExistsAsync"/> —
+    /// same signature, same cheap-probe contract, one implementation. Note
+    /// this provider is never registered as the top-level
+    /// <see cref="IBlobStoreProvider"/> directly (always behind
+    /// <see cref="ChainedBlobStoreProvider"/>), so the "throw on open
+    /// breaker" behavior below is caught there and degrades to a miss —
+    /// matching <see cref="TryGetBlobAsync"/>'s own breaker-open posture.
+    /// </summary>
     public async ValueTask<bool> ExistsAsync(string hashHex, CancellationToken ct = default)
     {
         if (IsCircuitOpen())

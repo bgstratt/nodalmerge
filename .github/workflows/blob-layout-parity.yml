@@ -131,12 +131,73 @@ name: blob-layout-parity
 #                                                 dedicated dotnet CI step,
 #                                                 added alongside the CI
 #                                                 follow-up for slice 3.1)
+#   hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobStoreProvider.cs
+#                                                 (slice 2.1's new ExistsAsync
+#                                                 default member)
+#   hosts/dotnet/src/NodalMerge.Host.Composition/HttpRemoteBlobStoreProvider.cs
+#   hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobStoreProvider.cs
+#   hosts/dotnet/src/NodalMerge.Host.Composition/ChainedBlobStoreProvider.cs
+#   hosts/dotnet/src/NodalMerge.DotNetHost/WebApplicationExtensions.cs   (HEAD +
+#                                                 PUT-idempotency call sites
+#                                                 slice 2.1 routes through
+#                                                 ExistsAsync instead of a full
+#                                                 TryGetBlobAsync read)
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs
-#                                                 (slice 0.2's .NET half —
-#                                                 both tests are RED/Skip-gated
-#                                                 until slice 2.1, so this file
-#                                                 intentionally has no dotnet
-#                                                 CI step yet either)
+#                                                 (slice 0.2's .NET half — both
+#                                                 tests were RED/Skip-gated
+#                                                 until slice 2.1 un-gated them;
+#                                                 now green and run below)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobStoreProviderExistsAsyncDefaultTests.cs
+#                                                 (slice 2.1's ⚠ compat pin: a
+#                                                 provider implementing ONLY
+#                                                 the two original
+#                                                 IBlobStoreProvider members
+#                                                 still compiles and still
+#                                                 answers ExistsAsync correctly
+#                                                 via the default)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderExistsAsyncTests.cs
+#                                                 (slice 2.1 — FileBlobStoreProvider's
+#                                                 cheap File.Exists override)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpEncodingNegotiationTests.cs
+#                                                 (slice 2.1 changed
+#                                                 Head_ignores_accept_encoding_and_behaves_as_before's
+#                                                 expectation: HEAD no longer
+#                                                 sets Content-Length, matching
+#                                                 the Rust reference and the
+#                                                 frozen head-found vector.
+#                                                 This file previously ran in
+#                                                 NO workflow at all — added
+#                                                 below alongside the fix that
+#                                                 depends on it)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/HttpRemoteBlobStoreProviderTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobStoreProviderTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ChainedBlobStoreProviderTests.cs
+#                                                 (these three previously ran
+#                                                 in NO workflow either — slice
+#                                                 2.1 added ExistsAsync
+#                                                 overrides/composition to all
+#                                                 three providers, so their
+#                                                 suites are wired in below.
+#                                                 RemoteBlobLinkAggregatorTests.cs
+#                                                 joined them: the aggregator IS
+#                                                 the single "remote" the chain
+#                                                 sees once >1 remote link is
+#                                                 configured, so it needed its
+#                                                 own ExistsAsync override or
+#                                                 2.1's benefit silently
+#                                                 vanished for the three-link
+#                                                 deployment.
+#                                                 Sibling files this same audit
+#                                                 found equally uncovered —
+#                                                 ChainedBlobStoreProviderHttpIntegrationTests.cs,
+#                                                 S3DirectChainCompositionTests.cs,
+#                                                 ProviderS3DelegatedBlobResolverIntegrationTests.cs
+#                                                 — are NOT touched by slice
+#                                                 2.1's production changes and
+#                                                 are left for the broader CI
+#                                                 follow-up, now tracked as
+#                                                 Phase 8 (deferred) in
+#                                                 blob-cas-remediation.md)
 
 on:
   push:
@@ -172,12 +233,26 @@ on:
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/ServiceCollectionExtensions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/NodalMergeHostProviderOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/HttpRemoteBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/ChainedBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobLinkAggregator.cs"
+      - "hosts/dotnet/src/NodalMerge.DotNetHost/WebApplicationExtensions.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobStoreProviderExistsAsyncDefaultTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderExistsAsyncTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpEncodingNegotiationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/HttpRemoteBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ChainedBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RemoteBlobLinkAggregatorTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   pull_request:
     paths:
@@ -211,12 +286,26 @@ on:
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/ServiceCollectionExtensions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/NodalMergeHostProviderOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/HttpRemoteBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/ChainedBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobLinkAggregator.cs"
+      - "hosts/dotnet/src/NodalMerge.DotNetHost/WebApplicationExtensions.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobStoreProviderExistsAsyncDefaultTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderExistsAsyncTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpEncodingNegotiationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/HttpRemoteBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ChainedBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RemoteBlobLinkAggregatorTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   workflow_dispatch:
 
@@ -296,3 +385,27 @@ jobs:
 
       - name: "Run cross-runtime zstd interop test (dotnet-as-consumer: decodes a rust-produced header-less frame; slice 3.1, finding #4)"
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ZstdInteropTests"
+
+      - name: "Run non-hydrating-backend conformance harness, .NET half (slice 2.1 — HEAD/PUT-idempotency must route through ExistsAsync, never a full TryGetBlobAsync read)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~NonHydratingBlobBackendConformanceTests"
+
+      - name: "Run IBlobStoreProvider.ExistsAsync additive-compat pin (slice 2.1 — a two-member-only provider must still compile and answer correctly via the default)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobStoreProviderExistsAsyncDefaultTests"
+
+      - name: "Run FileBlobStoreProvider.ExistsAsync cheap-probe tests (slice 2.1)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobStoreProviderExistsAsyncTests"
+
+      - name: "Run blob HTTP encoding negotiation tests (HEAD no longer sets Content-Length — slice 2.1 parity fix)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobHttpEncodingNegotiationTests"
+
+      - name: "Run HttpRemoteBlobStoreProvider tests (ExistsAsync now doubles as IBlobStoreProvider's cheap probe — slice 2.1)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~HttpRemoteBlobStoreProviderTests"
+
+      - name: "Run S3DirectBlobStoreProvider tests, including its new ExistsAsync bucket-HEAD probe (slice 2.1)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~S3DirectBlobStoreProviderTests"
+
+      - name: "Run ChainedBlobStoreProvider tests, including its new ExistsAsync composition (local-then-remote cheap probe — slice 2.1)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ChainedBlobStoreProviderTests"
+
+      - name: "Run RemoteBlobLinkAggregator tests, including its ExistsAsync ordered-fallback probe (the chain sees this, not the individual links, once >1 remote link is configured — slice 2.1)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RemoteBlobLinkAggregatorTests"

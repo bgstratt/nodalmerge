@@ -119,12 +119,82 @@ public sealed class ChainedBlobStoreProviderTests
         Assert.False(result.Found);
     }
 
+    /// <summary>
+    /// Slice 2.1 (nodalmerge-studio/plans/blob-cas-remediation.md):
+    /// <see cref="ChainedBlobStoreProvider.ExistsAsync"/> must answer a local
+    /// hit without ever touching the remote link or either side's full-read
+    /// method — the whole point of the cheap probe.
+    /// </summary>
+    [Fact]
+    public async Task ExistsAsync_local_hit_makes_zero_remote_calls_and_zero_full_reads()
+    {
+        var local = new CountingBlobStoreProvider();
+        var remote = new CountingBlobStoreProvider();
+        await local.PutBlobAsync(HashA, [1, 2, 3], null, CancellationToken.None);
+
+        var chain = new ChainedBlobStoreProvider(local, remote, NullLogger<ChainedBlobStoreProvider>.Instance);
+        var exists = await chain.ExistsAsync(HashA);
+
+        Assert.True(exists);
+        Assert.Equal(0, local.GetCalls);
+        Assert.Equal(0, remote.ExistsCalls);
+        Assert.Equal(0, remote.GetCalls);
+    }
+
+    /// <summary>
+    /// A local miss must fall through to the remote's own cheap probe — not
+    /// to a full remote <c>TryGetBlobAsync</c> read/write-back.
+    /// </summary>
+    [Fact]
+    public async Task ExistsAsync_local_miss_falls_through_to_remote_exists_probe_without_a_full_read()
+    {
+        var local = new CountingBlobStoreProvider();
+        var remote = new CountingBlobStoreProvider();
+        await remote.PutBlobAsync(HashB, [4, 5, 6], null, CancellationToken.None);
+
+        var chain = new ChainedBlobStoreProvider(local, remote, NullLogger<ChainedBlobStoreProvider>.Instance);
+        var exists = await chain.ExistsAsync(HashB);
+
+        Assert.True(exists);
+        Assert.Equal(1, remote.ExistsCalls);
+        Assert.Equal(0, remote.GetCalls);
+        // Existence-only: must NOT write through to local the way a real
+        // TryGetBlobAsync miss-then-fetch would.
+        Assert.False((await local.TryGetBlobAsync(HashB)).Found);
+    }
+
+    [Fact]
+    public async Task ExistsAsync_neither_side_has_it_returns_false()
+    {
+        var local = new CountingBlobStoreProvider();
+        var remote = new CountingBlobStoreProvider();
+
+        var chain = new ChainedBlobStoreProvider(local, remote, NullLogger<ChainedBlobStoreProvider>.Instance);
+
+        Assert.False(await chain.ExistsAsync(HashC));
+    }
+
+    [Fact]
+    public async Task ExistsAsync_remote_probe_exception_is_swallowed_and_returns_false()
+    {
+        var local = new CountingBlobStoreProvider();
+        var remote = new ThrowingBlobStoreProvider();
+
+        var chain = new ChainedBlobStoreProvider(local, remote, NullLogger<ChainedBlobStoreProvider>.Instance);
+
+        // Must not throw — a degraded remote just means "not confirmed
+        // present", matching TryGetBlobAsync's local-first-availability
+        // stance for the same failure.
+        Assert.False(await chain.ExistsAsync(HashD));
+    }
+
     private sealed class CountingBlobStoreProvider : IBlobStoreProvider
     {
         private readonly Dictionary<string, (byte[] Bytes, string? ContentType)> _blobs = new(StringComparer.Ordinal);
 
         public int GetCalls { get; private set; }
         public int PutCalls { get; private set; }
+        public int ExistsCalls { get; private set; }
 
         public ValueTask<BlobReadResult> TryGetBlobAsync(string hashHex, CancellationToken cancellationToken = default)
         {
@@ -146,6 +216,19 @@ public sealed class ChainedBlobStoreProviderTests
             PutCalls++;
             _blobs[hashHex] = (bytes, contentType);
             return ValueTask.CompletedTask;
+        }
+
+        /// <summary>
+        /// Explicit cheap override so tests can prove
+        /// <see cref="ChainedBlobStoreProvider.ExistsAsync"/> routes through
+        /// this rather than falling back to <see cref="TryGetBlobAsync"/> —
+        /// see the analogous note on
+        /// <c>NonHydratingBlobBackendConformanceTests.CountingBlobStoreProvider</c>.
+        /// </summary>
+        public ValueTask<bool> ExistsAsync(string hashHex, CancellationToken cancellationToken = default)
+        {
+            ExistsCalls++;
+            return ValueTask.FromResult(_blobs.ContainsKey(hashHex));
         }
     }
 

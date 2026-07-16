@@ -102,6 +102,20 @@ public sealed class BlobHttpEncodingNegotiationTests : IAsyncLifetime
         Assert.Equal(CompressiblePayload, bytes);
     }
 
+    /// <summary>
+    /// Slice 2.1 (nodalmerge-studio/plans/blob-cas-remediation.md) changed
+    /// what "behaves as before" means for Content-Length specifically: HEAD
+    /// used to answer via a full <c>TryGetBlobAsync</c> read (so it happened
+    /// to know the real decompressed length), but that is exactly the
+    /// hydration cost 2.1 removes — HEAD now answers via the cheap
+    /// <c>ExistsAsync</c> probe, which cannot know the length without paying
+    /// for the read it exists to avoid. This is not a regression: it brings
+    /// .NET into parity with the Rust reference's <c>head_blob</c>
+    /// (<c>blob_http.rs:256</c>), which has never set Content-Length on HEAD
+    /// (only Content-Type + ETag on 200), and matches the frozen golden
+    /// vector <c>head-found</c> (blob-http-surface-vectors.v1.json), which
+    /// does not require one either.
+    /// </summary>
     [Fact]
     public async Task Head_ignores_accept_encoding_and_behaves_as_before()
     {
@@ -112,7 +126,7 @@ public sealed class BlobHttpEncodingNegotiationTests : IAsyncLifetime
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.DoesNotContain(response.Content.Headers.ContentEncoding, v => string.Equals(v, "zstd", StringComparison.OrdinalIgnoreCase));
-        Assert.Equal(CompressiblePayload.Length, response.Content.Headers.ContentLength);
+        Assert.Null(response.Content.Headers.ContentLength);
     }
 
     [Fact]

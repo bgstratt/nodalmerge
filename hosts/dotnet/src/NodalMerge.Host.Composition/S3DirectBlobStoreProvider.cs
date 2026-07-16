@@ -172,6 +172,80 @@ public sealed class S3DirectBlobStoreProvider : IBlobStoreProvider
     }
 
     /// <summary>
+    /// Cheap existence probe (slice 2.1): resolves the same presigned
+    /// <c>op=get</c> URL <see cref="TryGetBlobAsync"/> would use, but issues
+    /// an HTTP <c>HEAD</c> against the bucket instead of a <c>GET</c> — no
+    /// body transfer, no decompress, no BLAKE3 verify. This still costs one
+    /// origin round-trip (URL resolution — the reference presign backend has
+    /// no dedicated "head" op, only <c>get</c>/<c>put</c>, see
+    /// <c>server/s3-blobs/src/lib.rs:133</c>) plus one bucket round-trip, but
+    /// avoids the expensive part entirely: downloading and verifying bytes
+    /// that are then thrown away.
+    ///
+    /// ⚠ Unverified assumption, flagged rather than silently relied on: this
+    /// depends on the bucket honoring an HTTP HEAD against a URL presigned
+    /// for GET. This is standard, documented behavior for AWS S3 itself, but
+    /// has not been verified here against a real S3-compatible backend
+    /// (no MinIO/testcontainers harness in this environment) — if a
+    /// deployment's object store rejects method-mismatched presigned
+    /// requests, this call surfaces as a thrown
+    /// <see cref="InvalidOperationException"/> (an unexpected bucket status),
+    /// not a silent wrong answer.
+    /// </summary>
+    public async ValueTask<bool> ExistsAsync(string hashHex, CancellationToken cancellationToken = default)
+    {
+        if (IsGetCapabilityProbeCoolingDown())
+        {
+            _logger.LogDebug(
+                "s3-direct GET URL resolution recently answered 501 for {Hash}; skipping existence probe during cooldown",
+                hashHex
+            );
+            return false;
+        }
+
+        if (IsCircuitOpen())
+        {
+            _logger.LogWarning(
+                "s3-direct origin URL resolution short-circuited by open breaker for {Hash}; existence probe degraded to absent",
+                hashHex
+            );
+            return false;
+        }
+
+        var resolved = await TryResolveUrlAsync(hashHex, "get", sizeBytes: null, contentType: null, cancellationToken);
+        if (resolved is null)
+        {
+            // Clean 501 (no s3-direct capability) or exhausted-retry
+            // transient failure — either way, degraded absence, matching
+            // TryGetBlobAsync's posture for the same two cases.
+            return false;
+        }
+
+        using var bucketResponse = await SendToBucketAsync(
+            HttpMethod.Head,
+            resolved.Url,
+            body: null,
+            contentType: null,
+            contentEncoding: null,
+            cancellationToken
+        );
+
+        if (bucketResponse.StatusCode == HttpStatusCode.OK)
+        {
+            return true;
+        }
+
+        if (bucketResponse.StatusCode == HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+
+        throw new InvalidOperationException(
+            $"s3-direct bucket HEAD for {hashHex} returned unexpected status {(int)bucketResponse.StatusCode}"
+        );
+    }
+
+    /// <summary>
     /// Compress (maybe) -> resolve a presigned PUT URL for the
     /// (possibly-compressed) byte count -> PUT to the bucket -> confirm the
     /// upload. Any failure along this path throws — an unconfirmed upload

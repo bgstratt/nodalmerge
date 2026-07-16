@@ -68,6 +68,24 @@ public sealed class NonHydratingBlobBackendConformanceTests
             _blobs[hashHex] = (bytes, contentType);
             return ValueTask.CompletedTask;
         }
+
+        /// <summary>
+        /// Deliberate explicit override (slice 2.1) — this is what makes the
+        /// two tests below meaningful. Without it, this class would fall
+        /// through to <see cref="IBlobStoreProvider"/>'s default
+        /// <c>ExistsAsync</c>, which itself calls <see cref="TryGetBlobAsync"/>
+        /// (the additive-compat fallback for third-party providers — see
+        /// <c>BlobStoreProviderExistsAsyncDefaultTests</c>) and would bump
+        /// <see cref="GetCalls"/> regardless of what production code does.
+        /// This override models "a provider that CAN answer existence
+        /// cheaply" — exactly the File/Http/S3Direct shape slice 2.1 adds —
+        /// so <see cref="GetCalls"/> staying 0 actually proves production
+        /// code routed through <c>ExistsAsync</c> instead of the full read.
+        /// </summary>
+        public ValueTask<bool> ExistsAsync(string hashHex, CancellationToken cancellationToken = default)
+        {
+            return ValueTask.FromResult(_blobs.ContainsKey(hashHex));
+        }
     }
 
     private static async Task<(WebApplication App, HttpClient Client, CountingBlobStoreProvider Provider)> BuildAppAsync()
@@ -98,7 +116,7 @@ public sealed class NonHydratingBlobBackendConformanceTests
         return (app, app.GetTestClient(), provider);
     }
 
-    [Fact(Skip = "RED: fails until slice 2.1 — see nodalmerge-studio/plans/blob-cas-remediation.md; HEAD must answer via a cheap existence probe (ExistsAsync), not a full TryGetBlobAsync read")]
+    [Fact]
     public async Task Head_does_not_hydrate_bytes_through_a_full_read()
     {
         var (app, client, provider) = await BuildAppAsync();
@@ -120,7 +138,7 @@ public sealed class NonHydratingBlobBackendConformanceTests
         }
     }
 
-    [Fact(Skip = "RED: fails until slice 2.1 — see nodalmerge-studio/plans/blob-cas-remediation.md; PUT-idempotency's already-present check must use a cheap existence probe (ExistsAsync), not a full TryGetBlobAsync read")]
+    [Fact]
     public async Task Put_of_already_present_blob_does_not_hydrate_bytes_through_a_full_read()
     {
         var (app, client, provider) = await BuildAppAsync();

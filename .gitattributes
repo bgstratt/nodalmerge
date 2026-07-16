@@ -1,0 +1,15 @@
+# Byte-exact fixtures.
+#
+# These files are consumed as raw bytes: a zstd frame is fed to a decoder, and a
+# CAS blob is keyed by the digest of its own content. Any EOL conversion silently
+# corrupts them, and the resulting test failure points at the decoder or the hash
+# rather than at git. Mark them binary so no conversion is ever applied.
+
+*.zst binary
+
+# Content-addressed blob fixtures: filename is the blake3 of the file's bytes.
+engine/commands/fixtures/blob-layout-v1/** binary
+**/fixtures/**/blake3/** binary
+
+# JSON fixtures are deliberately left as text — nothing hashes them bytewise,
+# and readable diffs are worth more than the uniformity.

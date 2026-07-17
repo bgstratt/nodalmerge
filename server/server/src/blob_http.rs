@@ -42,6 +42,13 @@
 //! and axum's `Bytes` extractor itself returns a `413 Payload Too Large`
 //! rejection when the (possibly chunked, possibly `Content-Length`-less)
 //! body stream exceeds that limit while buffering.
+//!
+//! S6.2 (blob-cas-remediation.md): every handler splits into a cheap, pure
+//! validation prefix that stays on the async worker and a store-touching
+//! tail that runs on the blocking pool via [`off_worker`] — see its doc for
+//! why. Scheduling only: statuses, bodies, headers, and the order of
+//! side effects within a request (hash → inventory mark → store) are
+//! unchanged.
 
 use std::sync::Arc;
 
@@ -192,6 +199,37 @@ pub fn blob_routes(cfg: BlobHttpConfig) -> Router<Rooms> {
         .route_layer(DefaultBodyLimit::max(max_bytes))
 }
 
+/// S6.2 — run a store-touching closure on tokio's blocking pool and await
+/// it, keeping the async worker free to serve WS/sync traffic.
+///
+/// Every `BlobPersistence` method is synchronous by design (the trait is
+/// implemented sync by Dir/S3/Composite and the test fakes): file I/O plus
+/// BLAKE3 verify/zstd decode on `DirPersistence`, and on `S3BlobStore` a
+/// bridge that *blocks the calling thread* for up to `op_timeout + 15s`
+/// (bounded since 6.1, but still parked). PUT additionally BLAKE3-hashes
+/// an up-to-64 MiB body. Enough of that running in-line on handlers
+/// starves everything else sharing the runtime — hence this boundary at
+/// the handler layer rather than an async-trait conversion (the sync trait
+/// is load-bearing across four implementations).
+///
+/// `Err` is the `JoinError` case: the closure panicked, or the runtime is
+/// shutting down. Either way it must surface as a logged 500 — never a
+/// hang, a torn-down connection, or a silent success.
+async fn off_worker<T, F>(f: F) -> Result<T, Response>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.map_err(|join_err| {
+        tracing::error!(?join_err, "blob HTTP blocking task failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "internal error"})),
+        )
+            .into_response()
+    })
+}
+
 async fn get_blob(
     State(rooms): State<Rooms>,
     Path(hash_hex): Path<String>,
@@ -212,37 +250,43 @@ async fn get_blob(
         None => return non_canonical_response(), // unreachable: canonical checked above
     };
 
-    // S3.1b (docs/BLOB_HTTP_SURFACE.md "Content encoding"): if the client
-    // advertises `Accept-Encoding: zstd` and the store holds the stored
-    // zstd form, serve those bytes as-is — no recompress-on-serve. Identity
-    // requests (no header, or the store has no `.zst` form) are unchanged.
-    if accepts_zstd(&headers) {
-        if let Some((bytes, encoding)) = rooms.persistence.get_blob_encoded(&hash) {
-            return (
+    let wants_zstd = accepts_zstd(&headers);
+    let persistence = Arc::clone(&rooms.persistence);
+    off_worker(move || {
+        // S3.1b (docs/BLOB_HTTP_SURFACE.md "Content encoding"): if the client
+        // advertises `Accept-Encoding: zstd` and the store holds the stored
+        // zstd form, serve those bytes as-is — no recompress-on-serve. Identity
+        // requests (no header, or the store has no `.zst` form) are unchanged.
+        if wants_zstd {
+            if let Some((bytes, encoding)) = persistence.get_blob_encoded(&hash) {
+                return (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                        (header::CONTENT_ENCODING, encoding.to_string()),
+                        (header::ETAG, format!("\"{hash_hex}\"")),
+                    ],
+                    bytes,
+                )
+                    .into_response();
+            }
+        }
+
+        match persistence.get_blob(&hash) {
+            Some(bytes) => (
                 StatusCode::OK,
                 [
                     (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                    (header::CONTENT_ENCODING, encoding.to_string()),
                     (header::ETAG, format!("\"{hash_hex}\"")),
                 ],
                 bytes,
             )
-                .into_response();
+                .into_response(),
+            None => not_found_response(),
         }
-    }
-
-    match rooms.persistence.get_blob(&hash) {
-        Some(bytes) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                (header::ETAG, format!("\"{hash_hex}\"")),
-            ],
-            bytes,
-        )
-            .into_response(),
-        None => not_found_response(),
-    }
+    })
+    .await
+    .unwrap_or_else(|resp| resp)
 }
 
 /// S4.2 — `HEAD /blobs/{hash}`. Deliberately *not* a thin wrapper around
@@ -270,18 +314,25 @@ async fn head_blob(
             Some(h) => h,
             None => return non_canonical_response(), // unreachable: canonical checked above
         };
-        if rooms.persistence.has_blob(&hash) {
-            (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                    (header::ETAG, format!("\"{hash_hex}\"")),
-                ],
-            )
-                .into_response()
-        } else {
-            not_found_response()
-        }
+        // S6.2 — `has_blob` is a file stat locally but a real bucket HEAD
+        // (thread-blocking bridge) on S3 backends; off the async worker.
+        let persistence = Arc::clone(&rooms.persistence);
+        off_worker(move || {
+            if persistence.has_blob(&hash) {
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                        (header::ETAG, format!("\"{hash_hex}\"")),
+                    ],
+                )
+                    .into_response()
+            } else {
+                not_found_response()
+            }
+        })
+        .await
+        .unwrap_or_else(|resp| resp)
     }
     .await;
     let (parts, _body) = resp.into_parts();
@@ -324,15 +375,21 @@ async fn resolve_blob_url(
         None => return non_canonical_response(), // unreachable: canonical checked above
     };
 
+    // S6.2 — presign resolution looks pure but is not: in S3 Delegate mode
+    // it is a full HTTP round trip through the thread-blocking bridge; off
+    // the async worker. Query validation (op/size) stays on the worker —
+    // its 400s never touch the store.
+    let persistence = Arc::clone(&rooms.persistence);
     let presigned = match query.op.as_deref() {
         Some("get") => {
             // `size` is meaningful only for `op=put` per the doc; if a
             // caller sends it on `op=get` anyway, pass it through as a
             // best-effort size hint rather than erroring.
             let size_hint = query.size.as_deref().and_then(|s| s.parse::<u64>().ok());
-            rooms
-                .persistence
-                .resolve_get_url(GLOBAL_ROOM_PLACEHOLDER, &hash, size_hint)
+            off_worker(move || {
+                persistence.resolve_get_url(GLOBAL_ROOM_PLACEHOLDER, &hash, size_hint)
+            })
+            .await
         }
         Some("put") => {
             let size = match query.size.as_deref().map(str::parse::<u64>) {
@@ -343,14 +400,22 @@ async fn resolve_blob_url(
                     )
                 }
             };
-            rooms.persistence.resolve_put_url(
-                GLOBAL_ROOM_PLACEHOLDER,
-                &hash,
-                size,
-                query.content_type.as_deref(),
-            )
+            let content_type = query.content_type.clone();
+            off_worker(move || {
+                persistence.resolve_put_url(
+                    GLOBAL_ROOM_PLACEHOLDER,
+                    &hash,
+                    size,
+                    content_type.as_deref(),
+                )
+            })
+            .await
         }
         _ => return bad_request_response("op must be 'get' or 'put'"),
+    };
+    let presigned = match presigned {
+        Ok(p) => p,
+        Err(resp) => return resp,
     };
 
     match presigned {
@@ -389,28 +454,38 @@ async fn confirm_blob_uploaded(
         None => return non_canonical_response(), // unreachable: canonical checked above
     };
 
-    // Distinguish "no presign-capable backend at all" (501) from "a real
-    // backend accepted without verification" (Delegate mode, 200) — see
-    // `store::BlobPersistence::supports_presigned_urls`'s doc for why
-    // `verify_uploaded`'s own `Ok(())` can't be used for this on its own.
-    if !rooms.persistence.supports_presigned_urls() {
-        return StatusCode::NOT_IMPLEMENTED.into_response();
-    }
-
-    match rooms.persistence.verify_uploaded(GLOBAL_ROOM_PLACEHOLDER, &hash) {
-        Ok(()) => {
-            // S5.3: Uploading -> Active per docs/delegated-storage-gc.md's
-            // normative lifecycle guidance, immediately rather than waiting
-            // for the next scheduled mark pass.
-            if let Some(inv) = &cfg.gc_inventory {
-                if let Err(e) = inv.upsert_active_seen(UPLOAD_MARK_SENTINEL, &hash_hex, std::time::SystemTime::now()) {
-                    tracing::warn!(?e, hash = %hash_hex, "gc inventory upsert after verify_uploaded failed");
-                }
-            }
-            StatusCode::OK.into_response()
+    // S6.2 — `verify_uploaded` is a bucket HEAD through the thread-blocking
+    // bridge in S3 Direct mode, and the inventory upsert is a synchronous
+    // SQLite write; both off the async worker. `supports_presigned_urls`
+    // rides along (pure, but it belongs with the store logic it gates).
+    let persistence = Arc::clone(&rooms.persistence);
+    let gc_inventory = cfg.gc_inventory.clone();
+    off_worker(move || {
+        // Distinguish "no presign-capable backend at all" (501) from "a real
+        // backend accepted without verification" (Delegate mode, 200) — see
+        // `store::BlobPersistence::supports_presigned_urls`'s doc for why
+        // `verify_uploaded`'s own `Ok(())` can't be used for this on its own.
+        if !persistence.supports_presigned_urls() {
+            return StatusCode::NOT_IMPLEMENTED.into_response();
         }
-        Err(msg) => (StatusCode::CONFLICT, Json(json!({"error": msg}))).into_response(),
-    }
+
+        match persistence.verify_uploaded(GLOBAL_ROOM_PLACEHOLDER, &hash) {
+            Ok(()) => {
+                // S5.3: Uploading -> Active per docs/delegated-storage-gc.md's
+                // normative lifecycle guidance, immediately rather than waiting
+                // for the next scheduled mark pass.
+                if let Some(inv) = &gc_inventory {
+                    if let Err(e) = inv.upsert_active_seen(UPLOAD_MARK_SENTINEL, &hash_hex, std::time::SystemTime::now()) {
+                        tracing::warn!(?e, hash = %hash_hex, "gc inventory upsert after verify_uploaded failed");
+                    }
+                }
+                StatusCode::OK.into_response()
+            }
+            Err(msg) => (StatusCode::CONFLICT, Json(json!({"error": msg}))).into_response(),
+        }
+    })
+    .await
+    .unwrap_or_else(|resp| resp)
 }
 
 /// Format a Unix-epoch second count as an ISO-8601 UTC timestamp
@@ -495,29 +570,41 @@ async fn put_blob(
 
     // d. (Oversize bodies never reach here — `DefaultBodyLimit` + the
     // `Bytes` extractor reject them with 413 before the handler runs.)
-    let computed = Hash::of(&body);
-    if computed != path_hash {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"error": "hash mismatch"})),
-        )
-            .into_response();
-    }
-
-    // S5.3: either branch below means the bytes now genuinely exist under
-    // `hash_hex` — mark it Active immediately (see `gc_inventory`'s doc).
-    if let Some(inv) = &cfg.gc_inventory {
-        if let Err(e) = inv.upsert_active_seen(UPLOAD_MARK_SENTINEL, &hash_hex, std::time::SystemTime::now()) {
-            tracing::warn!(?e, hash = %hash_hex, "gc inventory upsert after PUT failed");
+    //
+    // S6.2 — everything from here down runs off the async worker: the
+    // BLAKE3 hash of an up-to-64 MiB body, the SQLite inventory upsert,
+    // and the store round trip (file I/O, or a bucket HEAD + PUT through
+    // the thread-blocking bridge on S3 backends). Order within the request
+    // is unchanged: hash → 422 check → inventory mark → dedupe → persist.
+    let persistence = Arc::clone(&rooms.persistence);
+    let gc_inventory = cfg.gc_inventory.clone();
+    off_worker(move || {
+        let computed = Hash::of(&body);
+        if computed != path_hash {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": "hash mismatch"})),
+            )
+                .into_response();
         }
-    }
 
-    if rooms.persistence.has_blob(&path_hash) {
-        return StatusCode::OK.into_response();
-    }
+        // S5.3: either branch below means the bytes now genuinely exist under
+        // `hash_hex` — mark it Active immediately (see `gc_inventory`'s doc).
+        if let Some(inv) = &gc_inventory {
+            if let Err(e) = inv.upsert_active_seen(UPLOAD_MARK_SENTINEL, &hash_hex, std::time::SystemTime::now()) {
+                tracing::warn!(?e, hash = %hash_hex, "gc inventory upsert after PUT failed");
+            }
+        }
 
-    rooms.persistence.persist_blob(&path_hash, &body);
-    StatusCode::CREATED.into_response()
+        if persistence.has_blob(&path_hash) {
+            return StatusCode::OK.into_response();
+        }
+
+        persistence.persist_blob(&path_hash, &body);
+        StatusCode::CREATED.into_response()
+    })
+    .await
+    .unwrap_or_else(|resp| resp)
 }
 
 /// `None` = authorized (or anonymous access, when no token is configured).

@@ -73,6 +73,17 @@ name: blob-layout-parity
 #                                                 endpoint is an in-test
 #                                                 TcpListener, so it lives here
 #                                                 rather than blob-s3-gc-minio.yml)
+#   server/server/tests/blob_http_offload.rs (slice 6.2 — the blob HTTP
+#                                                 handlers must run their
+#                                                 blocking work (store I/O,
+#                                                 BLAKE3, zstd, the 6.1 S3
+#                                                 bridge) on the blocking
+#                                                 pool, never in-line on the
+#                                                 async workers; deterministic
+#                                                 starvation probes + the
+#                                                 panic-in-blocking-op→500
+#                                                 pin. Docker-free: the slow
+#                                                 store is an in-test fake)
 #   server/server/tests/blob_relay_nonhydrating_backend.rs (S4.2 relay
 #                                                 contract; previously shipped
 #                                                 without a CI step — added
@@ -293,6 +304,11 @@ on:
       # (the stalled endpoint is an in-test TcpListener), so it lives in this
       # workflow rather than blob-s3-gc-minio.yml.
       - "server/s3-blobs/tests/bridge_timeouts.rs"
+      # slice 6.2 — blob HTTP off-worker scheduling gate: blocking store work
+      # (I/O, BLAKE3, zstd, the 6.1 S3 bridge) must run on the blocking pool,
+      # never park the async workers; a panic in the offloaded op maps to 500.
+      # Docker-free (the slow store is an in-test fake), so it lives here.
+      - "server/server/tests/blob_http_offload.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -369,6 +385,11 @@ on:
       # (the stalled endpoint is an in-test TcpListener), so it lives in this
       # workflow rather than blob-s3-gc-minio.yml.
       - "server/s3-blobs/tests/bridge_timeouts.rs"
+      # slice 6.2 — blob HTTP off-worker scheduling gate: blocking store work
+      # (I/O, BLAKE3, zstd, the 6.1 S3 bridge) must run on the blocking pool,
+      # never park the async workers; a panic in the offloaded op maps to 500.
+      # Docker-free (the slow store is an in-test fake), so it lives here.
+      - "server/server/tests/blob_http_offload.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -446,6 +467,9 @@ jobs:
 
       - name: Run blob HTTP surface vectors (GET/HEAD/PUT /blobs/{hash})
         run: cargo test -p nodalmerge-server --test blob_http_surface
+
+      - name: Run blob HTTP off-worker scheduling gate (slice 6.2 — blocking store work (I/O, BLAKE3, zstd, the 6.1 S3 bridge) must run on the blocking pool, never park the async workers; a panic in the offloaded op must map to a logged 500, not a hang or silent success)
+        run: cargo test -p nodalmerge-server --test blob_http_offload
 
       - name: Run S3 key layout vectors + Delegate-mode hydrate/tree-walk unit gates (slice 2.2, finding #10)
         run: cargo test -p nodalmerge-s3-blobs --lib

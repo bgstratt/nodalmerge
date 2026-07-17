@@ -102,6 +102,52 @@ name: blob-layout-parity
 #                                                 blob-cas-remediation.md
 #                                                 while its fake was promoted
 #                                                 to nodalmerge-blobstore-conformance)
+#   server/server/tests/blob_request_persistence_fallback.rs (slice 2.4,
+#                                                 latent finding — the WS
+#                                                 `blob-request` fallthrough
+#                                                 (bytes-over-WS, past the F6
+#                                                 redirect split) served ONLY
+#                                                 the room's in-memory
+#                                                 `blob_store` with no
+#                                                 `persistence.get_blob`
+#                                                 fallback, so a peer without
+#                                                 direct blob IO asking for a
+#                                                 hash that's durable but was
+#                                                 never relayed into THIS room
+#                                                 process (restart, sibling
+#                                                 room, out-of-band upload)
+#                                                 got nothing. Fixed by
+#                                                 falling back to
+#                                                 `persistence.get_blob` on an
+#                                                 in-memory miss, served in
+#                                                 the same `BlobPackEntry`
+#                                                 shape as a hit; the
+#                                                 in-memory store is
+#                                                 deliberately NOT warmed with
+#                                                 fallback bytes (it's an
+#                                                 unbounded HashMap with no
+#                                                 eviction — see
+#                                                 `MemoryBlobStore`,
+#                                                 `core/crdt/src/storage.rs`).
+#                                                 A non-hydrating (S3-shaped)
+#                                                 backend's fallback is
+#                                                 pinned as a structural
+#                                                 no-op, unchanged by this
+#                                                 slice (slice 2.2's "S3
+#                                                 never hydrates" contract).
+#                                                 `ws_handler.rs` previously
+#                                                 ran in NO blob workflow at
+#                                                 all (filed by slice 4.2);
+#                                                 both it and this new test
+#                                                 file are added to the
+#                                                 paths: filters below,
+#                                                 closing part of that gap.
+#   server/server/src/ws_handler.rs (the file slice 2.4 fixed, guarded by
+#                                                 blob_request_persistence_fallback.rs
+#                                                 above; was previously absent
+#                                                 from every paths: filter in
+#                                                 this workflow — see that
+#                                                 file's header note)
 #   server/server/tests/blob_nonhydrating_conformance.rs (slice 0.2's
 #                                                 non-hydrating-backend
 #                                                 conformance harness — GC
@@ -377,6 +423,11 @@ on:
       - "server/server/src/tree_walk.rs"
       - "server/server/src/blob_http.rs"
       - "server/server/src/gc_store.rs"
+      # slice 2.4, latent finding — the WS blob-request bytes-over-WS
+      # fallthrough must fall back to persistence.get_blob on an in-memory
+      # miss. ws_handler.rs previously ran in NO blob workflow at all
+      # (filed by slice 4.2); added here alongside its new test file.
+      - "server/server/src/ws_handler.rs"
       - "server/server/src/main.rs"
       - "server/dev-server/src/main.rs"
       - "server/axum-embed/src/lib.rs"
@@ -388,6 +439,8 @@ on:
       - "server/server/tests/zstd_interop.rs"
       - "server/server/tests/blob_relay_nonhydrating_backend.rs"
       - "server/server/tests/blob_nonhydrating_conformance.rs"
+      # slice 2.4 — the fallback + non-hydrating structural-no-op pin above.
+      - "server/server/tests/blob_request_persistence_fallback.rs"
       # slice 2.2 — blob_nonhydrating_conformance.rs drives the studio GC entry
       # point (collect_studio_live_hashes), the ONLY place walk_tree is reachable
       # from GC. Without this line a change to the live-set walk could break that
@@ -490,6 +543,11 @@ on:
       - "server/server/src/tree_walk.rs"
       - "server/server/src/blob_http.rs"
       - "server/server/src/gc_store.rs"
+      # slice 2.4, latent finding — the WS blob-request bytes-over-WS
+      # fallthrough must fall back to persistence.get_blob on an in-memory
+      # miss. ws_handler.rs previously ran in NO blob workflow at all
+      # (filed by slice 4.2); added here alongside its new test file.
+      - "server/server/src/ws_handler.rs"
       - "server/server/src/main.rs"
       - "server/dev-server/src/main.rs"
       - "server/axum-embed/src/lib.rs"
@@ -501,6 +559,8 @@ on:
       - "server/server/tests/zstd_interop.rs"
       - "server/server/tests/blob_relay_nonhydrating_backend.rs"
       - "server/server/tests/blob_nonhydrating_conformance.rs"
+      # slice 2.4 — the fallback + non-hydrating structural-no-op pin above.
+      - "server/server/tests/blob_request_persistence_fallback.rs"
       # slice 2.2 — blob_nonhydrating_conformance.rs drives the studio GC entry
       # point (collect_studio_live_hashes), the ONLY place walk_tree is reachable
       # from GC. Without this line a change to the live-set walk could break that
@@ -624,6 +684,9 @@ jobs:
 
       - name: Run non-hydrating-backend relay contract (S4.2)
         run: cargo test -p nodalmerge-server --test blob_relay_nonhydrating_backend
+
+      - name: Run WS blob-request persistence fallback gate (slice 2.4, latent finding — an in-memory blob_store miss on the bytes-over-WS fallthrough must fall back to persistence.get_blob; Dir serves real BLAKE3-verified-on-read bytes in the same envelope shape as an in-memory hit and the in-memory store is not warmed, while a non-hydrating (S3-shaped) backend's fallback is pinned as a structural no-op per slice 2.2's "S3 never hydrates" contract)
+        run: cargo test -p nodalmerge-server --test blob_request_persistence_fallback
 
       - name: Run non-hydrating-backend conformance harness (slice 0.2 harness, fully ungated as of slice 2.3 — GC-live-set/tree-walk went green in 2.2, archive describe/export digest parity + fail-loud in 2.3)
         run: cargo test -p nodalmerge-server --test blob_nonhydrating_conformance

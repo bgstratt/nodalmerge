@@ -65,6 +65,11 @@ on:
       - "server/server/tests/studio_gc.rs"
       - "server/server/src/gc_service.rs"
       - "server/server/src/gc_store.rs"
+      # slice 6.4 — studio_live_hashes.rs now reads Rooms' GC scan caches
+      # (GcScanCaches lives in room.rs, keyed by room_nodes_version from
+      # store.rs above). A room.rs change can therefore break the studio GC
+      # collection; without this line the suites here would never fire on it.
+      - "server/server/src/room.rs"
       - ".github/workflows/studio-live-hashes-parity.yml"
   pull_request:
     paths:
@@ -81,6 +86,11 @@ on:
       - "server/server/tests/studio_gc.rs"
       - "server/server/src/gc_service.rs"
       - "server/server/src/gc_store.rs"
+      # slice 6.4 — studio_live_hashes.rs now reads Rooms' GC scan caches
+      # (GcScanCaches lives in room.rs, keyed by room_nodes_version from
+      # store.rs above). A room.rs change can therefore break the studio GC
+      # collection; without this line the suites here would never fire on it.
+      - "server/server/src/room.rs"
       - ".github/workflows/studio-live-hashes-parity.yml"
   workflow_dispatch:
 

@@ -159,3 +159,13 @@ jobs:
       # same fixed bucket name, so they must not overlap.
       - name: Run S3 blob round-trip + GC grace against real minio (testcontainers; NODALMERGE_REQUIRE_DOCKER=1 fails closed if Docker is unavailable)
         run: cargo test -p nodalmerge-s3-blobs --test minio_round_trip -- --test-threads=1
+
+      # Slice 6.3 — the sweep now runs its per-object tombstone/delete action
+      # chains 16-at-a-time (buffer_unordered) inside the one bridge call; this
+      # smoke pins that concurrency changed wall time, never the two-phase
+      # protocol, over a mixed 50-object population. The same file's
+      # bench_sweep_delete_10k is #[ignore]d and deliberately NOT run in CI
+      # (timing bounds flake; run by hand with --ignored --nocapture).
+      # Covered by the existing server/s3-blobs/** paths: glob above.
+      - name: Run bulk-sweep behavior-equality smoke against real minio (slice 6.3)
+        run: cargo test -p nodalmerge-s3-blobs --test minio_sweep_scale -- --test-threads=1

@@ -125,6 +125,29 @@ pub trait NodePersistence: Send + Sync + std::fmt::Debug {
     fn can_enumerate_rooms(&self) -> bool {
         false
     }
+
+    /// blob-cas-remediation.md slice 6.4 — a cheap, **monotonic** version of
+    /// this room's persisted node set, used to key the GC scan caches
+    /// (`Rooms`'s cold-room live-set cache and `studio_live_hashes`'s
+    /// cold-room studio-map cache).
+    ///
+    /// Contract: any change to the set of nodes `load_room_nodes(room_id)`
+    /// would return MUST change this value. Persisted nodes are append-only
+    /// on every backend in this workspace (there is no delete/compaction
+    /// path through this trait), so "changes" means "grows", and a
+    /// max-of-autoincrement is a valid implementation.
+    ///
+    /// Default `None` means "this backend cannot answer cheaply" — and the
+    /// callers' contract for `None` is **never cache, always rescan**, i.e.
+    /// exactly the pre-6.4 behavior. That makes this default safe by
+    /// construction rather than a 2.1-style silent-wrong-answer trap: an
+    /// adapter that never overrides it only pays the old full-scan cost, it
+    /// can never serve a stale live set. (`PostgresNodeStore` has the same
+    /// `seq` column and could trivially override; left as a follow-up so
+    /// this slice's cache correctness is proven against one backend first.)
+    fn room_nodes_version(&self, _room_id: &str) -> Option<u64> {
+        None
+    }
 }
 
 /// Why [`BlobPersistence::hydrate_blob`] could not produce a blob's bytes.
@@ -525,6 +548,15 @@ impl<N: NodePersistence, B: BlobPersistence> NodePersistence for Composite<N, B>
     fn can_enumerate_rooms(&self) -> bool {
         self.nodes.can_enumerate_rooms()
     }
+    /// Must forward — same reasoning as `get_blob_hydrates` below: for the
+    /// production `Composite<DirPersistence-or-Postgres, S3BlobStore>`
+    /// wiring, inheriting the trait default (`None`) would silently disable
+    /// the 6.4 GC scan caches on exactly the deployments they exist for.
+    /// Safe-but-slow rather than wrong, yet the same shape of hole. Pinned
+    /// by `composite_forwards_room_nodes_version_to_the_node_half`.
+    fn room_nodes_version(&self, room_id: &str) -> Option<u64> {
+        self.nodes.room_nodes_version(room_id)
+    }
 }
 
 impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B> {
@@ -879,6 +911,27 @@ impl NodePersistence for DirPersistence {
 
     fn can_enumerate_rooms(&self) -> bool {
         true
+    }
+
+    /// Slice 6.4 — `MAX(seq)` for the room. `seq` is the table's
+    /// `AUTOINCREMENT` primary key: monotonic, never reused (SQLite
+    /// AUTOINCREMENT guarantees no rowid re-issue even after deletes), and
+    /// rows are append-only through this trait — so any node that could
+    /// change `load_room_nodes`'s answer strictly raises this value.
+    /// `None` when the room has no rows (a deleted/unknown room must not
+    /// look like a cacheable empty one) or on any query error — the
+    /// callers' `None` contract is "rescan from scratch", so an error here
+    /// degrades to the pre-6.4 full scan, never to a stale cache hit.
+    fn room_nodes_version(&self, room_id: &str) -> Option<u64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT MAX(seq) FROM nodes WHERE room_id = ?1",
+            params![room_id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten()
+        .map(|v| v.max(0) as u64)
     }
 }
 

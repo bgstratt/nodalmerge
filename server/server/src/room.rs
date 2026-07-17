@@ -398,6 +398,145 @@ const MIN_PHYSICAL_GRACE: Duration = Duration::from_millis(1);
 /// programmatically via [`Rooms::with_blob_upload_grace`].
 pub const DEFAULT_BLOB_UPLOAD_GRACE: Duration = Duration::from_secs(60 * 60);
 
+/// blob-cas-remediation.md slice 6.4 — per-room GC scan caches, shared by
+/// [`Rooms::sweep_blobs`]'s cold-room live-set scan and
+/// [`crate::studio_live_hashes`]'s cold-room studio-map replay.
+///
+/// ## What is cached, and why it is safe
+///
+/// Both caches hold a **pure projection of a room's persisted node
+/// history** — the extracted `SetBlob` hash set here, the resolved
+/// `studio/`-prefixed engine map there — keyed by
+/// [`crate::store::NodePersistence::room_nodes_version`], a monotonic
+/// version that advances on every persisted node. Nothing time- or
+/// config-dependent is ever cached: retention classification
+/// (`retain_intermediate_days`, "now"), the upload-grace union, and admin
+/// pins are all recomputed from scratch every run *on top of* the cached
+/// projections, so changing any of them changes the live set immediately,
+/// cache or no cache.
+///
+/// ## Invalidation
+///
+/// * **Version mismatch in either direction** (advance, regression, or a
+///   backend that answers `None`) → the entry is ignored and the room is
+///   rescanned. `None` additionally means the fresh result is *not*
+///   cached — a backend that can't version its rooms gets the exact
+///   pre-6.4 always-rescan behavior.
+/// * **Room disappears from enumeration** (`known_room_ids` +
+///   residents) → entry evicted on the next sweep, so a deleted store
+///   directory can't resurrect a phantom room's live set.
+/// * **Residency**: resident, fully-hydrated rooms never consult these
+///   caches at all — their in-memory graph is the source of truth
+///   (`StateGraph::referenced_blob_hashes` is already incremental). A room
+///   evicted after accepting nodes re-enters the cold path with an
+///   advanced version (every accepted node is written through
+///   `persist_node(s)` before it could matter), so the stale entry loses
+///   the version comparison and is replaced.
+#[derive(Debug, Default)]
+pub struct GcScanCaches {
+    /// room id → (room_nodes_version, extracted `SetBlob` hash set).
+    cold_live: Mutex<HashMap<String, (u64, HashSet<nodalmerge_core::Hash>)>>,
+    /// room id → (room_nodes_version, resolved `studio/` engine-map
+    /// projection). `Arc` so a cache hit hands the map out without cloning
+    /// potentially-large payload bytes.
+    studio_maps: Mutex<HashMap<String, (u64, Arc<HashMap<String, (Vec<u8>, bool)>>)>>,
+    /// Full cold-room scans performed (cache miss / uncacheable) — the
+    /// deterministic "did the second tick actually skip the work" signal
+    /// the 6.4 tests assert on, instead of wall time.
+    cold_scans: AtomicUsize,
+    cold_hits: AtomicUsize,
+    studio_scans: AtomicUsize,
+    studio_hits: AtomicUsize,
+}
+
+/// Snapshot of [`GcScanCaches`]' counters, for tests/observability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcScanCacheStats {
+    pub cold_scans: usize,
+    pub cold_hits: usize,
+    pub studio_scans: usize,
+    pub studio_hits: usize,
+}
+
+impl GcScanCaches {
+    /// Look up the cold-room live-set cache. `None` unless the entry exists
+    /// AND matches `version` exactly.
+    fn cold_live_get(&self, room_id: &str, version: u64) -> Option<HashSet<nodalmerge_core::Hash>> {
+        let map = self.cold_live.lock().expect("cold_live poisoned");
+        match map.get(room_id) {
+            Some((v, hashes)) if *v == version => Some(hashes.clone()),
+            _ => None,
+        }
+    }
+
+    fn cold_live_put(&self, room_id: &str, version: u64, hashes: HashSet<nodalmerge_core::Hash>) {
+        self.cold_live
+            .lock()
+            .expect("cold_live poisoned")
+            .insert(room_id.to_string(), (version, hashes));
+    }
+
+    /// Evict entries (both caches) for rooms no longer known to the store.
+    fn retain_rooms(&self, known: &std::collections::HashSet<String>) {
+        self.cold_live
+            .lock()
+            .expect("cold_live poisoned")
+            .retain(|id, _| known.contains(id));
+        self.studio_maps
+            .lock()
+            .expect("studio_maps poisoned")
+            .retain(|id, _| known.contains(id));
+    }
+
+    /// See [`Self::cold_live_get`] — same version-exact contract.
+    pub(crate) fn studio_map_get(
+        &self,
+        room_id: &str,
+        version: u64,
+    ) -> Option<Arc<HashMap<String, (Vec<u8>, bool)>>> {
+        let map = self.studio_maps.lock().expect("studio_maps poisoned");
+        match map.get(room_id) {
+            Some((v, resolved)) if *v == version => Some(Arc::clone(resolved)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn studio_map_put(
+        &self,
+        room_id: &str,
+        version: u64,
+        resolved: Arc<HashMap<String, (Vec<u8>, bool)>>,
+    ) {
+        self.studio_maps
+            .lock()
+            .expect("studio_maps poisoned")
+            .insert(room_id.to_string(), (version, resolved));
+    }
+
+    /// Evict studio-map entries for rooms outside `known` — called by
+    /// `collect_studio_live_hashes`, whose enumeration (persisted ∪
+    /// resident) is broader than `sweep_blobs`'s.
+    pub(crate) fn retain_studio_rooms(&self, known: &std::collections::HashSet<String>) {
+        self.studio_maps
+            .lock()
+            .expect("studio_maps poisoned")
+            .retain(|id, _| known.contains(id));
+    }
+
+    pub(crate) fn count_cold_scan(&self) {
+        self.cold_scans.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn count_cold_hit(&self) {
+        self.cold_hits.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn count_studio_scan(&self) {
+        self.studio_scans.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn count_studio_hit(&self) {
+        self.studio_hits.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Global registry of rooms, lazily created on first connection.
 ///
 /// Also carries the server's persistent Ed25519 keypair (E1) so every
@@ -451,6 +590,8 @@ pub struct Rooms {
     /// [`DEFAULT_BLOB_UPLOAD_GRACE`], which documents why this is bounded
     /// and why it is not the presign TTL.
     pub(crate) blob_upload_grace: Duration,
+    /// blob-cas-remediation.md slice 6.4 — see [`GcScanCaches`].
+    pub(crate) gc_scan_caches: Arc<GcScanCaches>,
 }
 
 impl Rooms {
@@ -512,6 +653,7 @@ impl Rooms {
             peer_rate_bytes,
             gc_inventory: None,
             blob_upload_grace: DEFAULT_BLOB_UPLOAD_GRACE,
+            gc_scan_caches: Arc::new(GcScanCaches::default()),
         }
     }
 
@@ -825,64 +967,12 @@ impl Rooms {
         if !self.persistence.is_durable() {
             return 0;
         }
-        // Snapshot the room list so we don't hold the outer lock while
-        // reading per-room graphs.
-        let resident: Vec<(String, Arc<Room>)> = {
-            let map = self.rooms.read().await;
-            map.iter()
-                .map(|(k, v)| (k.clone(), Arc::clone(v)))
-                .collect()
-        };
-        // Only a *fully hydrated* resident room's in-memory graph is a
-        // trustworthy substitute for the persisted-node fallback scan
-        // below (slice 1.4, bug 1). A room still replaying its background
-        // hydration is resident but its graph may be empty/partial, so it
-        // must fall through to `load_room_nodes` like a cold room would.
-        let resident_ids: std::collections::HashSet<&str> = resident
-            .iter()
-            .filter(|(_, room)| room.hydrated.load(Ordering::SeqCst))
-            .map(|(id, _)| id.as_str())
-            .collect();
-
-        let mut live = std::collections::HashSet::new();
-        for (_, room) in &resident {
-            live.extend(collect_live_blob_hashes(room).await);
-        }
-
-        // blob-cas-remediation.md slice 1.1 (finding #1) — the altitude
-        // fix. `known_room_ids()` returning empty is ambiguous: it means
-        // both "there are genuinely no cold rooms" and "this backend never
-        // implemented enumeration" (the trait default — true of every
-        // `Composite`/Postgres/Mongo wiring before this slice). Treating
-        // the latter as the former is exactly how a cold room's blobs got
-        // permanently deleted. Fail closed: refuse to run the delete pass
-        // at all unless the backend can prove its enumeration is complete.
-        if !self.persistence.can_enumerate_rooms() {
-            tracing::warn!(
-                "blob GC sweep: persistence backend cannot enumerate known_room_ids() \
-                 (NodePersistence::can_enumerate_rooms() == false); refusing to run the \
-                 delete pass so blobs owned only by a cold/non-resident room are not \
-                 destroyed"
-            );
-            metrics::counter!(
-                "nodalmerge_blob_gc_skipped_total",
-                "reason" => "cannot_enumerate_rooms"
-            )
-            .increment(1);
+        let Some(live) = self.collect_global_live_blob_hashes().await else {
+            // `None` means the union above could not be proven complete —
+            // either the backend can't enumerate rooms (slice 1.1) or the
+            // cold-room scan task was lost. Either way: no delete pass.
             return 0;
-        }
-        for id in self.persistence.known_room_ids() {
-            if resident_ids.contains(id.as_str()) {
-                continue; // already covered via the resident graph above
-            }
-            let nodes = self.persistence.load_room_nodes(&id);
-            live.extend(blob_hashes_referenced_by(nodes.iter()));
-        }
-
-        // blob-cas-remediation.md slice 1.3 (finding #3) — union in uploads
-        // the gc inventory has seen recently. See
-        // `collect_recent_upload_hashes`.
-        live.extend(self.collect_recent_upload_hashes(SystemTime::now()));
+        };
 
         // PR-05 compatibility bridge: run the shared GC coordinator in
         // MarkOnly mode once, globally, to exercise host-neutral contracts
@@ -917,12 +1007,221 @@ impl Rooms {
         // read it (see `S3BlobStore::blob_gc_sweep`'s doc for the
         // bucket-versioning premise that made it so, and why that premise
         // was wrong).
-        let deleted = self.persistence.blob_gc_sweep(&live, physical_grace);
+        //
+        // Slice 6.4 (same family as 6.2's `off_worker`): the physical sweep
+        // is blocking work — filesystem I/O on Dir, and on S3 one bridge
+        // call that parks the calling thread for up to `sweep_timeout`
+        // (15 min). This runs inside the GC sweeper task, which is spawned
+        // onto the *shared* server runtime (`spawn_blob_gc_sweeper` /
+        // `gc_service::spawn_gc_sweeper` — plain `tokio::spawn`), so
+        // leaving it inline would park a worker every tick. A lost blocking
+        // task reads as "swept nothing" — the conservative outcome, same as
+        // the S3 backend's own timeout posture.
+        let sweep_persistence = Arc::clone(&self.persistence);
+        let deleted = match tokio::task::spawn_blocking(move || {
+            sweep_persistence.blob_gc_sweep(&live, physical_grace)
+        })
+        .await
+        {
+            Ok(deleted) => deleted,
+            Err(e) => {
+                tracing::error!(%e, "blob GC sweep: blocking sweep task failed; no deletions reported");
+                0
+            }
+        };
         if deleted > 0 {
             metrics::counter!("nodalmerge_blob_gc_deleted_total").increment(deleted as u64);
             tracing::info!(deleted, "blob GC reclaimed blobs");
         }
         deleted
+    }
+
+    /// The global live blob-hash union `sweep_blobs` feeds the physical
+    /// sweep: resident-hydrated rooms via their (incrementally cached)
+    /// in-memory graphs, every other known room via its persisted nodes,
+    /// plus the slice-1.3 recent-upload union. Public so the 6.4
+    /// cache-equivalence tests can compare this exact computation between a
+    /// warm-cache `Rooms` and a fresh one without mutating any store.
+    ///
+    /// Returns `None` when the union cannot be proven complete — the
+    /// backend can't enumerate rooms (slice 1.1's fail-closed rule) or the
+    /// cold-scan blocking task was lost — in which case the caller must not
+    /// delete anything.
+    pub async fn collect_global_live_blob_hashes(
+        &self,
+    ) -> Option<std::collections::HashSet<nodalmerge_core::Hash>> {
+        // Snapshot the room list so we don't hold the outer lock while
+        // reading per-room graphs.
+        let resident: Vec<(String, Arc<Room>)> = {
+            let map = self.rooms.read().await;
+            map.iter()
+                .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                .collect()
+        };
+        // Only a *fully hydrated* resident room's in-memory graph is a
+        // trustworthy substitute for the persisted-node fallback scan
+        // below (slice 1.4, bug 1). A room still replaying its background
+        // hydration is resident but its graph may be empty/partial, so it
+        // must fall through to `load_room_nodes` like a cold room would.
+        let resident_ids: std::collections::HashSet<String> = resident
+            .iter()
+            .filter(|(_, room)| room.hydrated.load(Ordering::SeqCst))
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut live = std::collections::HashSet::new();
+        for (_, room) in &resident {
+            live.extend(collect_live_blob_hashes(room).await);
+        }
+
+        // blob-cas-remediation.md slice 1.1 (finding #1) — the altitude
+        // fix. `known_room_ids()` returning empty is ambiguous: it means
+        // both "there are genuinely no cold rooms" and "this backend never
+        // implemented enumeration" (the trait default — true of every
+        // `Composite`/Postgres/Mongo wiring before this slice). Treating
+        // the latter as the former is exactly how a cold room's blobs got
+        // permanently deleted. Fail closed: refuse to run the delete pass
+        // at all unless the backend can prove its enumeration is complete.
+        if !self.persistence.can_enumerate_rooms() {
+            tracing::warn!(
+                "blob GC sweep: persistence backend cannot enumerate known_room_ids() \
+                 (NodePersistence::can_enumerate_rooms() == false); refusing to run the \
+                 delete pass so blobs owned only by a cold/non-resident room are not \
+                 destroyed"
+            );
+            metrics::counter!(
+                "nodalmerge_blob_gc_skipped_total",
+                "reason" => "cannot_enumerate_rooms"
+            )
+            .increment(1);
+            return None;
+        }
+
+        // Slice 6.4 — the cold-room scan, off-worker and cached. Blocking
+        // for the same reason as the physical sweep (SQLite reads +
+        // postcard unpacking, on the shared runtime's sweeper task), so the
+        // whole loop runs in one `spawn_blocking` closure. Per room:
+        //
+        //   version = room_nodes_version(id)   (monotonic; None = uncacheable)
+        //   cache hit at exactly that version  → reuse the extracted set
+        //   miss / mismatch / None             → full load_room_nodes scan,
+        //                                        re-cached only when versioned
+        //
+        // The extracted set is a pure function of the room's persisted
+        // node history — nothing time- or config-dependent is cached, so
+        // version advance is the ONLY invalidation this layer needs (see
+        // `GcScanCaches`' doc for the full trigger inventory). Entries for
+        // rooms no longer enumerated are evicted here too.
+        let persistence = Arc::clone(&self.persistence);
+        let caches = Arc::clone(&self.gc_scan_caches);
+        let cold_ids: Vec<String> = self
+            .persistence
+            .known_room_ids()
+            .into_iter()
+            .filter(|id| !resident_ids.contains(id.as_str()))
+            .collect();
+        let known_for_retention: std::collections::HashSet<String> = cold_ids
+            .iter()
+            .cloned()
+            .chain(resident_ids.iter().cloned())
+            .collect();
+        let cold_live = tokio::task::spawn_blocking(move || {
+            let mut out = std::collections::HashSet::new();
+            for id in &cold_ids {
+                let version = persistence.room_nodes_version(id);
+                if let Some(v) = version {
+                    if let Some(cached) = caches.cold_live_get(id, v) {
+                        caches.count_cold_hit();
+                        out.extend(cached);
+                        continue;
+                    }
+                }
+                caches.count_cold_scan();
+                let nodes = persistence.load_room_nodes(id);
+                let hashes = blob_hashes_referenced_by(nodes.iter());
+                if let Some(v) = version {
+                    caches.cold_live_put(id, v, hashes.clone());
+                }
+                out.extend(hashes);
+            }
+            caches.retain_rooms(&known_for_retention);
+            out
+        })
+        .await;
+        match cold_live {
+            Ok(cold) => live.extend(cold),
+            Err(e) => {
+                // A lost cold scan means the union is incomplete — the same
+                // fail-closed posture as a non-enumerable backend.
+                tracing::error!(%e, "blob GC sweep: cold-room scan task failed; refusing the delete pass");
+                metrics::counter!(
+                    "nodalmerge_blob_gc_skipped_total",
+                    "reason" => "cold_scan_failed"
+                )
+                .increment(1);
+                return None;
+            }
+        }
+
+        // blob-cas-remediation.md slice 1.3 (finding #3) — union in uploads
+        // the gc inventory has seen recently. See
+        // `collect_recent_upload_hashes`. Recomputed every call, never
+        // cached: it is a function of *now* and of inventory rows no room
+        // seq ever advances for.
+        live.extend(self.collect_recent_upload_hashes(SystemTime::now()));
+        Some(live)
+    }
+
+    /// Slice 6.4 test seam — counter snapshot for the deterministic
+    /// "second tick does near-zero re-scan work" assertions.
+    pub fn gc_scan_cache_stats(&self) -> GcScanCacheStats {
+        GcScanCacheStats {
+            cold_scans: self.gc_scan_caches.cold_scans.load(Ordering::Relaxed),
+            cold_hits: self.gc_scan_caches.cold_hits.load(Ordering::Relaxed),
+            studio_scans: self.gc_scan_caches.studio_scans.load(Ordering::Relaxed),
+            studio_hits: self.gc_scan_caches.studio_hits.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Slice 6.4 **sabotage seam, tests only** — plant a cold-room cache
+    /// entry that claims the room's *current* version while holding
+    /// `hashes` that may be arbitrarily wrong. This simulates exactly the
+    /// bug the version keying prevents ("a mutation happened but the cache
+    /// was not invalidated") so the cache-equivalence test can prove it
+    /// would detect that bug — see `tests/gc_recompute_cache.rs`. Returns
+    /// `false` (and plants nothing) when the backend can't version the
+    /// room, since such rooms are never served from cache at all.
+    #[doc(hidden)]
+    pub fn debug_gc_plant_stale_cold_cache_entry(
+        &self,
+        room_id: &str,
+        hashes: std::collections::HashSet<nodalmerge_core::Hash>,
+    ) -> bool {
+        match self.persistence.room_nodes_version(room_id) {
+            Some(v) => {
+                self.gc_scan_caches.cold_live_put(room_id, v, hashes);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Slice 6.4 sabotage seam for the studio-map cache — same contract as
+    /// [`Self::debug_gc_plant_stale_cold_cache_entry`].
+    #[doc(hidden)]
+    pub fn debug_gc_plant_stale_studio_map_entry(
+        &self,
+        room_id: &str,
+        resolved: HashMap<String, (Vec<u8>, bool)>,
+    ) -> bool {
+        match self.persistence.room_nodes_version(room_id) {
+            Some(v) => {
+                self.gc_scan_caches
+                    .studio_map_put(room_id, v, Arc::new(resolved));
+                true
+            }
+            None => false,
+        }
     }
 
     /// blob-cas-remediation.md slice 1.3 (finding #3) — hashes the GC asset

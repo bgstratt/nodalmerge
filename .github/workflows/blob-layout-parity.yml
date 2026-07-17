@@ -317,6 +317,41 @@ name: blob-layout-parity
 #                                                 read as Missing, matching the zstd
 #                                                 path and Rust's DirPersistence::get_blob,
 #                                                 never served as a hit)
+#   server/server/tests/gc_io_batching.rs (slice 6.3 — the coordinator's
+#                                                 mark pass runs as ONE batched
+#                                                 SQLite transaction; these
+#                                                 smokes pin row-for-row
+#                                                 equality with the per-row
+#                                                 path and unchanged
+#                                                 mark/candidate semantics
+#                                                 across runs. The file also
+#                                                 holds an #[ignore]d bench
+#                                                 (100k-hash timing, loose 3x
+#                                                 bound) which CI deliberately
+#                                                 does NOT run — timing bounds
+#                                                 flake; run by hand with
+#                                                 --ignored --nocapture)
+#   server/server/tests/gc_recompute_cache.rs (slice 6.4 — GC scan caches:
+#                                                 cold-room live-set + studio-map
+#                                                 projections cached keyed by
+#                                                 NodePersistence::room_nodes_version.
+#                                                 Cache-equivalence oracle vs a
+#                                                 from-scratch Rooms under
+#                                                 mutations, sabotage-seam
+#                                                 divergence proof (a planted
+#                                                 stale entry MUST fail the
+#                                                 oracle), deterministic
+#                                                 scan-counter assertions, the
+#                                                 Composite room_nodes_version
+#                                                 forwarding pin. Also holds an
+#                                                 #[ignore]d many-cold-room
+#                                                 bench CI does not run — same
+#                                                 reasoning as above)
+#   core/gc/src/** (slice 6.3 — the coordinator's mark pass and the
+#                                                 AssetInventoryStore batch
+#                                                 method live here; gc_io_batching.rs
+#                                                 drives the real GcCoordinator,
+#                                                 so a change here must fire it)
 #   NOTE: slice 3.2's fix exposed that several pre-existing tests keyed blob
 #   fixtures by fabricated placeholder hashes (e.g. "sha256:abc") rather than
 #   the real BLAKE3 hash of the bytes they stored — silently relying on the
@@ -389,6 +424,17 @@ on:
       # slice 5.1 — migration-marker safety gate: .layout-v2 only on a fully
       # clean pass; deferred entries retry on the next startup.
       - "server/server/tests/blob_migration_marker.rs"
+      # slice 6.3 — batched GC mark pass (behavior-equality smokes; the
+      # #[ignore]d 100k bench is deliberately NOT run in CI). core/gc holds
+      # the coordinator + the AssetInventoryStore batch method the suite
+      # drives — without that glob a coordinator change could break the mark
+      # pass with this workflow never firing (the known paths:-filter bite).
+      - "server/server/tests/gc_io_batching.rs"
+      - "core/gc/src/**"
+      # slice 6.4 — GC scan caches: equivalence oracle + sabotage-seam
+      # divergence proof + deterministic scan counters + the Composite
+      # room_nodes_version forwarding pin. Its #[ignore]d bench is not run.
+      - "server/server/tests/gc_recompute_cache.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -491,6 +537,17 @@ on:
       # slice 5.1 — migration-marker safety gate: .layout-v2 only on a fully
       # clean pass; deferred entries retry on the next startup.
       - "server/server/tests/blob_migration_marker.rs"
+      # slice 6.3 — batched GC mark pass (behavior-equality smokes; the
+      # #[ignore]d 100k bench is deliberately NOT run in CI). core/gc holds
+      # the coordinator + the AssetInventoryStore batch method the suite
+      # drives — without that glob a coordinator change could break the mark
+      # pass with this workflow never firing (the known paths:-filter bite).
+      - "server/server/tests/gc_io_batching.rs"
+      - "core/gc/src/**"
+      # slice 6.4 — GC scan caches: equivalence oracle + sabotage-seam
+      # divergence proof + deterministic scan counters + the Composite
+      # room_nodes_version forwarding pin. Its #[ignore]d bench is not run.
+      - "server/server/tests/gc_recompute_cache.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -588,6 +645,12 @@ jobs:
 
       - name: Run migration-marker safety gate (slice 5.1 — .layout-v2 only lands on a fully clean pass; any deferred entry leaves it absent so the next startup retries, and a partial destination left by an interrupted copy is repaired from the legacy source, never adopted)
         run: cargo test -p nodalmerge-server --test blob_migration_marker
+
+      - name: Run GC mark-pass batching smokes (slice 6.3 — the coordinator's mark pass is one batched SQLite txn; rows must be identical to the per-row path and mark/candidate semantics unchanged. The 100k timing bench in the same file is #[ignore]d and NOT run here — timing bounds flake in CI)
+        run: cargo test -p nodalmerge-server --test gc_io_batching
+
+      - name: Run GC recomputation-cache gates (slice 6.4 — cold-room live-set + studio-map caches keyed by room_nodes_version; cache-equivalence vs from-scratch under mutations, planted-stale-entry divergence proof, deterministic scan counters, Composite forwarding pin. The many-cold-room bench is #[ignore]d and NOT run here)
+        run: cargo test -p nodalmerge-server --test gc_recompute_cache
 
       - name: Run S3 key layout vectors + Delegate-mode hydrate/tree-walk unit gates (slice 2.2, finding #10)
         run: cargo test -p nodalmerge-s3-blobs --lib

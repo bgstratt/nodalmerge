@@ -66,6 +66,7 @@
 //! parity note.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use nodalmerge_core::{Hash, StateGraph, SyncNode};
 use nodalmerge_gc::{GcError, GcResult};
@@ -544,11 +545,24 @@ fn classify_repo_room(
 
 // ─── Tree resolution ────────────────────────────────────────────────────────
 
+/// Resolve one retained snapshot's blob references into the live set.
+///
+/// Slice 6.4: cas-tree walks accumulate into `walk_live`/`expanded` — ONE
+/// shared pair threaded across every snapshot (and room) in a GC run, so a
+/// subtree shared by N retained generations is fetched and parsed once per
+/// run instead of once per snapshot. Safety of the sharing (including why
+/// `expanded` must be a separate set from the live output, contra the
+/// plan's shorthand) is argued and pinned at
+/// [`tree_walk::walk_tree_into`]. The legacy inline-`TreeEntries` branch
+/// keeps writing file hashes straight into `live` — there is no walk to
+/// share.
 fn resolve_snapshot_into(
     persistence: &dyn BlobPersistence,
     room_id: &str,
     snap: &ParsedSnapshot,
     live: &mut HashSet<String>,
+    walk_live: &mut HashSet<Hash>,
+    expanded: &mut HashSet<Hash>,
 ) -> GcResult<()> {
     if let Some(entries) = &snap.tree_entries {
         // Legacy inline map (pre-Phase-1, or a producer that never adopted
@@ -565,7 +579,7 @@ fn resolve_snapshot_into(
             snap.snapshot_id, snap.tree_hash
         ))
     })?;
-    let walked = tree_walk::walk_tree(persistence, &root_hash).map_err(|e| {
+    tree_walk::walk_tree_into(persistence, &root_hash, walk_live, expanded).map_err(|e| {
         // Slice 2.2 (finding #10). `GcError` (core/gc) has only the three
         // generic variants, and widening that shared enum is out of this
         // slice's scope — so the distinctness lives in `TreeWalkError` (a
@@ -589,9 +603,6 @@ fn resolve_snapshot_into(
             snap.snapshot_id, snap.tree_hash
         ))
     })?;
-    for h in walked {
-        live.insert(h.to_hex());
-    }
     Ok(())
 }
 
@@ -603,6 +614,8 @@ fn collect_room_live_hashes(
     retain_intermediate_days: i64,
     now_nanos: i128,
     live: &mut HashSet<String>,
+    walk_live: &mut HashSet<Hash>,
+    expanded: &mut HashSet<Hash>,
 ) -> GcResult<()> {
     let data = parse_room_studio_data(room_id, resolved)?;
 
@@ -631,7 +644,7 @@ fn collect_room_live_hashes(
         if !retained_snapshot_ids.contains(&snap.snapshot_id) {
             continue; // expired Intermediate — its bytes are reclaimable
         }
-        resolve_snapshot_into(persistence, room_id, snap, live)?;
+        resolve_snapshot_into(persistence, room_id, snap, live, walk_live, expanded)?;
     }
 
     Ok(())
@@ -639,43 +652,101 @@ fn collect_room_live_hashes(
 
 // ─── Room enumeration + resolved-map fetch (resident + cold rooms) ─────────
 
+/// Project a full `resolve_with_meta()` map down to the `studio/` entries
+/// this module classifies — the shape both the resident path and the
+/// slice-6.4 cold-room cache store.
+fn filter_studio_entries(
+    resolved_with_meta: HashMap<String, (u64, [u8; 32], Vec<u8>, bool)>,
+) -> HashMap<String, (Vec<u8>, bool)> {
+    resolved_with_meta
+        .into_iter()
+        .filter(|(k, _)| k.starts_with(STUDIO_KEY_PREFIX))
+        .map(|(k, (_, _, v, is_blob))| (k, (v, is_blob)))
+        .collect()
+}
+
 async fn resolve_room_studio_map(
     rooms: &Rooms,
     room_id: &str,
-) -> Result<HashMap<String, (Vec<u8>, bool)>, String> {
+) -> Result<Arc<HashMap<String, (Vec<u8>, bool)>>, String> {
     let resident = {
         let map = rooms.rooms.read().await;
         map.get(room_id).cloned()
     };
 
-    let resolved_with_meta: HashMap<String, (u64, [u8; 32], Vec<u8>, bool)> =
-        if let Some(room) = resident {
-            room.graph.read().await.resolve_with_meta()
-        } else {
-            // Cold room: replay persisted nodes into an ephemeral graph.
-            // `load_room_nodes` returns nodes in the order they were
-            // originally accepted (insertion/`seq` order), so a single-pass
-            // batch apply is expected to succeed — any rejection here means
-            // this room's history can't be faithfully reconstructed, which
-            // must abort the whole collection (fail closed), not silently
-            // scan a partial graph.
-            let nodes: Vec<SyncNode> = rooms.persistence.load_room_nodes(room_id);
-            let mut graph = StateGraph::new();
-            let result = graph.apply_remote_batch(nodes);
-            if !result.rejected.is_empty() {
-                return Err(format!(
-                    "{} node(s) rejected while replaying room history for GC scan",
-                    result.rejected.len()
-                ));
-            }
-            graph.resolve_with_meta()
-        };
+    // Only a **fully hydrated** resident room's in-memory graph is a
+    // trustworthy source — the same rule `Rooms::sweep_blobs` has enforced
+    // since slice 1.4 (bug 1): `get_or_create` makes a room resident
+    // *before* its background hydration has replayed persisted nodes, so
+    // residency alone can mean an empty/partial graph. Until 6.4 this
+    // function keyed on residency alone, so a GC run landing inside a large
+    // room's hydration window would scan a partial graph and under-report
+    // live hashes — the still-hydrating room now falls through to the
+    // cold-room replay below, which reads persisted nodes directly.
+    if let Some(room) = resident {
+        if room.hydrated.load(std::sync::atomic::Ordering::SeqCst) {
+            let resolved = room.graph.read().await.resolve_with_meta();
+            return Ok(Arc::new(filter_studio_entries(resolved)));
+        }
+    }
 
-    Ok(resolved_with_meta
-        .into_iter()
-        .filter(|(k, _)| k.starts_with(STUDIO_KEY_PREFIX))
-        .map(|(k, (_, _, v, is_blob))| (k, (v, is_blob)))
-        .collect())
+    // Cold room: replay persisted nodes into an ephemeral graph.
+    // `load_room_nodes` returns nodes in the order they were originally
+    // accepted (insertion/`seq` order), so a single-pass batch apply is
+    // expected to succeed — any rejection here means this room's history
+    // can't be faithfully reconstructed, which must abort the whole
+    // collection (fail closed), not silently scan a partial graph.
+    //
+    // Slice 6.4, two changes:
+    //
+    // * **Cached**, keyed by `room_nodes_version` — the replay output is a
+    //   pure projection of persisted node history, so version advance is
+    //   the only invalidation this layer needs (classification inputs —
+    //   "now", `retain_intermediate_days` — are applied downstream, never
+    //   cached). The version is read BEFORE the replay on purpose: a node
+    //   appended mid-replay leaves an entry whose stored version is
+    //   *older* than the data it holds, and a monotonic version means that
+    //   entry can only ever lose its next comparison (one wasted rescan),
+    //   never get served stale. Reading it after would invert that.
+    //   `None` (backend can't version) → never cached, pre-6.4 behavior.
+    // * **Off-worker** — the replay re-verifies signatures over the whole
+    //   history (`apply_remote_batch`), plus SQLite reads and postcard
+    //   unpacking: real blocking CPU/IO. This runs inside the GC sweeper
+    //   task, which `gc_service::spawn_gc_sweeper` puts on the *shared*
+    //   server runtime with a plain `tokio::spawn`, so inline it would
+    //   park a worker the WS handlers need. A lost blocking task fails the
+    //   collection (fail closed), same as a rejected replay.
+    let version = rooms.persistence.room_nodes_version(room_id);
+    if let Some(v) = version {
+        if let Some(cached) = rooms.gc_scan_caches.studio_map_get(room_id, v) {
+            rooms.gc_scan_caches.count_studio_hit();
+            return Ok(cached);
+        }
+    }
+    rooms.gc_scan_caches.count_studio_scan();
+    let persistence = Arc::clone(&rooms.persistence);
+    let replay_room_id = room_id.to_string();
+    let replayed = tokio::task::spawn_blocking(move || {
+        let nodes: Vec<SyncNode> = persistence.load_room_nodes(&replay_room_id);
+        let mut graph = StateGraph::new();
+        let result = graph.apply_remote_batch(nodes);
+        if !result.rejected.is_empty() {
+            return Err(format!(
+                "{} node(s) rejected while replaying room history for GC scan",
+                result.rejected.len()
+            ));
+        }
+        Ok(filter_studio_entries(graph.resolve_with_meta()))
+    })
+    .await
+    .map_err(|e| format!("cold-room replay task failed: {e}"))?;
+    let resolved = Arc::new(replayed?);
+    if let Some(v) = version {
+        rooms
+            .gc_scan_caches
+            .studio_map_put(room_id, v, Arc::clone(&resolved));
+    }
+    Ok(resolved)
 }
 
 async fn enumerate_all_room_ids(rooms: &Rooms) -> Vec<String> {
@@ -697,24 +768,65 @@ pub async fn collect_studio_live_hashes(
 ) -> GcResult<HashSet<String>> {
     let now_nanos = system_time_to_nanos(std::time::SystemTime::now());
     let room_ids = enumerate_all_room_ids(rooms).await;
+
+    // Slice 6.4 — evict cached studio maps for rooms that no longer exist
+    // anywhere (persisted or resident). Version keying can't catch removal
+    // (a deleted room answers `None`, it doesn't answer "lower"), so
+    // enumeration is the second invalidation trigger.
+    let known: HashSet<String> = room_ids.iter().cloned().collect();
+    rooms.gc_scan_caches.retain_studio_rooms(&known);
+
     let mut live: HashSet<String> = HashSet::new();
+    // Slice 6.4 — ONE walk-state pair for the whole run (see
+    // `resolve_snapshot_into` / `tree_walk::walk_tree_into`): tree objects
+    // are content-addressed, so sharing across snapshots AND rooms is the
+    // same union as fresh per-snapshot walks, minus the redundant fetches.
+    // Never cached across runs: a fresh pair per collection means a blob
+    // deleted between runs can't leave a phantom "already expanded" mark.
+    let mut walk_live: HashSet<Hash> = HashSet::new();
+    let mut expanded: HashSet<Hash> = HashSet::new();
 
     for room_id in &room_ids {
         let resolved = resolve_room_studio_map(rooms, room_id)
             .await
             .map_err(|e| GcError::Backend(format!("room {room_id}: {e}")))?;
         let is_repo_room = room_id.starts_with("repo/");
-        collect_room_live_hashes(
-            rooms.persistence.as_ref(),
-            room_id,
-            &resolved,
-            is_repo_room,
-            retain_intermediate_days,
-            now_nanos,
-            &mut live,
-        )?;
+
+        // Classification + tree walk off-worker, same reasoning as the
+        // cold-room replay above (the walk's `hydrate_blob` on an S3
+        // backend blocks on the 6.1 bridge for up to `op_timeout` per tree
+        // object). The accumulator sets move in and out of the closure —
+        // no locking, and a lost task aborts the run fail-closed.
+        let persistence = Arc::clone(&rooms.persistence);
+        let closure_room_id = room_id.clone();
+        let (mut_live, mut_walk_live, mut_expanded, room_result) = {
+            let (mut live_in, mut walk_in, mut expanded_in) = (live, walk_live, expanded);
+            tokio::task::spawn_blocking(move || {
+                let result = collect_room_live_hashes(
+                    persistence.as_ref(),
+                    &closure_room_id,
+                    &resolved,
+                    is_repo_room,
+                    retain_intermediate_days,
+                    now_nanos,
+                    &mut live_in,
+                    &mut walk_in,
+                    &mut expanded_in,
+                );
+                (live_in, walk_in, expanded_in, result)
+            })
+            .await
+            .map_err(|e| {
+                GcError::Backend(format!("room {room_id}: classification task failed: {e}"))
+            })?
+        };
+        live = mut_live;
+        walk_live = mut_walk_live;
+        expanded = mut_expanded;
+        room_result?;
     }
 
+    live.extend(walk_live.iter().map(Hash::to_hex));
     Ok(live)
 }
 

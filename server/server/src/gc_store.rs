@@ -93,6 +93,22 @@ fn status_to_str(s: GcRunStatus) -> &'static str {
     }
 }
 
+/// One statement shared by [`AssetInventoryStore::upsert_active_seen`] and
+/// its slice-6.3 batch override — the batch is the same row write in a
+/// transaction, and a drift between the two would mean a marked hash's row
+/// depends on *which* code path marked it.
+const UPSERT_ACTIVE_SEEN_SQL: &str = "INSERT INTO gc_assets
+   (hash, object_key, bucket, namespace, first_seen_at, last_seen_at, state,
+    pending_delete_at, deleted_at, last_marked_run_id, mark_count, is_admin_pinned, updated_at)
+ VALUES (?1, ?2, ?3, 'blobs', ?4, ?4, 'Active', NULL, NULL, ?5, 1, 0, ?4)
+ ON CONFLICT(hash) DO UPDATE SET
+   last_seen_at = ?4,
+   state = 'Active',
+   pending_delete_at = NULL,
+   last_marked_run_id = ?5,
+   mark_count = gc_assets.mark_count + 1,
+   updated_at = ?4";
+
 /// SQLite-backed `AssetInventoryStore` + `GcRunStore`.
 pub struct SqliteGcStore {
     conn: Mutex<Connection>,
@@ -225,20 +241,55 @@ impl AssetInventoryStore for SqliteGcStore {
         let (bucket, object_key) = (self.key_scheme)(hash);
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO gc_assets
-               (hash, object_key, bucket, namespace, first_seen_at, last_seen_at, state,
-                pending_delete_at, deleted_at, last_marked_run_id, mark_count, is_admin_pinned, updated_at)
-             VALUES (?1, ?2, ?3, 'blobs', ?4, ?4, 'Active', NULL, NULL, ?5, 1, 0, ?4)
-             ON CONFLICT(hash) DO UPDATE SET
-               last_seen_at = ?4,
-               state = 'Active',
-               pending_delete_at = NULL,
-               last_marked_run_id = ?5,
-               mark_count = gc_assets.mark_count + 1,
-               updated_at = ?4",
+            UPSERT_ACTIVE_SEEN_SQL,
             params![hash, object_key, bucket, now_ms, run_id],
         )
         .map_err(|e| GcError::Backend(e.to_string()))?;
+        Ok(())
+    }
+
+    /// blob-cas-remediation.md slice 6.3 — the whole mark pass as ONE
+    /// SQLite transaction with one cached prepared statement, instead of
+    /// one autocommit per hash (100k hashes = 100k txns before this).
+    ///
+    /// Deliberately a *single* transaction rather than chunked ones: SQLite
+    /// commits a 100k-row upsert txn comfortably (WAL, one journal sync at
+    /// commit), and all-or-nothing is the easier invariant to reason about
+    /// on a GC path — a mark pass that fails midway leaves the previous
+    /// run's marks exactly as they were, the coordinator surfaces `Err`,
+    /// and the run fails closed before any sweep phase. Chunking would buy
+    /// nothing but a new partial-application state to think about.
+    ///
+    /// Holding the connection mutex for the whole batch is intentional too:
+    /// the mark pass IS the GC's own critical section, and the only other
+    /// writers on this file are the upload-time upserts in `blob_http.rs`,
+    /// which merely block for the commit's duration (well under a second at
+    /// 100k rows — measured in `tests/gc_io_batching.rs`).
+    fn upsert_active_seen_batch(
+        &self,
+        run_id: &str,
+        hashes: &[&str],
+        now: SystemTime,
+    ) -> GcResult<()> {
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        let now_ms = to_unix_millis(now);
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction()
+            .map_err(|e| GcError::Backend(e.to_string()))?;
+        {
+            let mut stmt = tx
+                .prepare_cached(UPSERT_ACTIVE_SEEN_SQL)
+                .map_err(|e| GcError::Backend(e.to_string()))?;
+            for hash in hashes {
+                let (bucket, object_key) = (self.key_scheme)(hash);
+                stmt.execute(params![hash, object_key, bucket, now_ms, run_id])
+                    .map_err(|e| GcError::Backend(e.to_string()))?;
+            }
+        }
+        tx.commit().map_err(|e| GcError::Backend(e.to_string()))?;
         Ok(())
     }
 
@@ -436,6 +487,49 @@ mod tests {
             .unwrap()
             .collect();
         assert!(pending.iter().any(|r| r.hash == "h-restart"));
+    }
+
+    /// Slice 6.3 — the batch override must leave rows byte-for-byte
+    /// equivalent to the per-hash path (same statement, same bindings), for
+    /// both the insert arm and the on-conflict re-mark arm. Compared via
+    /// `iter_unmarked_candidates` with a sentinel (full `AssetRecord`s),
+    /// not just `asset_state`.
+    #[test]
+    fn batch_upsert_rows_match_per_hash_upsert_rows() {
+        let now = SystemTime::now();
+        let hashes = ["h-a", "h-b", "h-c"];
+
+        let dir_loop = tmpdir();
+        let store_loop = SqliteGcStore::open(&dir_loop, local_key_scheme()).unwrap();
+        let dir_batch = tmpdir();
+        let store_batch = SqliteGcStore::open(&dir_batch, local_key_scheme()).unwrap();
+
+        // Insert arm, then a second run re-marks (conflict arm).
+        for run in ["run-1", "run-2"] {
+            for h in &hashes {
+                store_loop.upsert_active_seen(run, h, now).unwrap();
+            }
+            store_batch.upsert_active_seen_batch(run, &hashes, now).unwrap();
+        }
+
+        let recs = |s: &SqliteGcStore| -> Vec<AssetRecord> {
+            let mut v: Vec<AssetRecord> =
+                s.iter_unmarked_candidates("_no-such-run").unwrap().collect();
+            v.sort_by(|a, b| a.hash.cmp(&b.hash));
+            v
+        };
+        let (a, b) = (recs(&store_loop), recs(&store_batch));
+        assert_eq!(a.len(), 3);
+        for (l, r) in a.iter().zip(b.iter()) {
+            assert_eq!(l.hash, r.hash);
+            assert_eq!(l.object_key, r.object_key);
+            assert_eq!(l.bucket, r.bucket);
+            assert_eq!(l.state, r.state);
+            assert_eq!(l.last_marked_run_id, r.last_marked_run_id);
+            assert_eq!(l.mark_count, r.mark_count, "conflict arm must bump mark_count identically");
+            assert_eq!(l.last_seen_at, r.last_seen_at);
+            assert_eq!(l.first_seen_at, r.first_seen_at);
+        }
     }
 
     #[test]

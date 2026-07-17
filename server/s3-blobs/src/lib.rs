@@ -152,6 +152,16 @@ fn block_on_shared_runtime<T: Send + 'static>(
 /// `<path_prefix>blake3/`, so the blob listing never sees tombstones.
 const TOMBSTONE_INFIX: &str = ".tombstones/blake3";
 
+/// Slice 6.3 — how many sweep PUT/DELETE actions run concurrently inside
+/// [`S3BlobStore::blob_gc_sweep`]'s single bridge call. 16 keeps the sweep
+/// an order of magnitude faster than the old one-await-per-object shape
+/// while staying far below S3's per-prefix request limits (≥3500 write
+/// req/s) and below anything that would starve the 2-worker bridge runtime;
+/// per-object step ordering (tombstone-before-delete) is preserved inside
+/// each buffered action, so concurrency never touches the two-phase
+/// protocol.
+const SWEEP_IO_CONCURRENCY: usize = 16;
+
 fn now_unix_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -401,7 +411,36 @@ impl S3BlobStore {
                         object_store::ClientOptions::new()
                             .with_timeout(cfg.op_timeout)
                             .with_connect_timeout(cfg.connect_timeout),
-                    );
+                    )
+                    // Slice 6.3 (closing 6.1's filed follow-up): object_store's
+                    // default RetryConfig is max_retries=10 / retry_timeout=180s
+                    // *per request*. Single ops never felt it — the bridge
+                    // aborts them at `op_timeout` regardless — but inside
+                    // `blob_gc_sweep` (one bridge call bounded only by
+                    // `sweep_timeout`) each internal request could legally
+                    // retry toward that 180s, multiplying a flaky bucket's
+                    // sweep toward the 15-minute ceiling. Bound the retry
+                    // budget near `op_timeout`, with a couple of quick
+                    // retries for genuinely transient blips.
+                    //
+                    // The +5s margin is load-bearing, not slack: the client
+                    // layer must never give up *before* the bridge's own
+                    // `op_timeout` bound, or a hung bucket's single op
+                    // surfaces through the `Ok(Err(_))` arm as a generic
+                    // backend error instead of the bridge's `Timeout` —
+                    // reclassifying persist_blob's 503-Unavailable ("write
+                    // unconfirmed, retry") as 500-Backend ("origin broken").
+                    // `blob_put_durability.rs` pins exactly that against a
+                    // stalled bucket. So: single ops still cut off by the
+                    // bridge at `op_timeout` (classification unchanged),
+                    // while sweep-internal requests — which have no bridge
+                    // bound of their own — are capped at `op_timeout + 5s`
+                    // instead of 3 minutes.
+                    .with_retry(object_store::RetryConfig {
+                        max_retries: 2,
+                        retry_timeout: cfg.op_timeout + Duration::from_secs(5),
+                        ..Default::default()
+                    });
                 if let Some(ep) = &cfg.endpoint {
                     b = b.with_endpoint(ep);
                     if !cfg.require_https {
@@ -857,7 +896,44 @@ impl BlobPersistence for S3BlobStore {
                     tombs.entry(hex).or_default().push((meta.location.clone(), stamped_ms));
                 }
 
-                let mut deleted = 0usize;
+                // ── Slice 6.3: plan-then-execute instead of one awaited
+                // delete per object (the old N+1). The LIST pass below only
+                // *classifies* each object into a per-object action; the
+                // actions then run [`SWEEP_IO_CONCURRENCY`] at a time via
+                // `buffer_unordered`. Two-phase semantics are untouched
+                // because every ordering that matters is *within* one
+                // object's action — tombstone-PUT-before-delete on the
+                // zero-grace branch, blob-delete-before-tombstone-cleanup on
+                // the aged branch — and each action keeps its own steps
+                // strictly sequential. Nothing orders one object against
+                // another today either: the old loop's cross-object ordering
+                // was an accident of iteration, not a protocol requirement.
+                //
+                // `buffer_unordered` over per-object action chains was
+                // chosen over `ObjectStore::delete_stream` deliberately:
+                // the AWS impl's bulk `DeleteObjects` would fold blob keys
+                // and tombstone keys into shared 1000-key batches, erasing
+                // exactly those per-object orderings — and a bulk batch's
+                // partial-failure reporting would have to be re-mapped back
+                // onto "which blob may I now count as deleted / whose
+                // tombstone may I clear". Sixteen in-flight ops is far under
+                // any S3 per-prefix request limit and turns the N sequential
+                // round-trips into ~N/16.
+                enum SweepAction {
+                    /// Live again — clear its leftover tombstone key(s).
+                    ClearTombstones(Vec<ObjectPath>),
+                    /// Tombstone aged past grace — delete the blob, then its
+                    /// tombstone key(s).
+                    DeleteAged { blob: ObjectPath, tombs: Vec<ObjectPath> },
+                    /// First sighting — write a tombstone; if (and only if)
+                    /// the caller asked for zero grace, delete same-call
+                    /// (matching `DirPersistence`'s branch exactly —
+                    /// `Rooms::sweep_blobs` never passes a literal zero, see
+                    /// `MIN_PHYSICAL_GRACE`, slice 1.4).
+                    Tombstone { tomb_key: ObjectPath, blob: ObjectPath, delete_now: bool },
+                }
+
+                let mut actions: Vec<SweepAction> = Vec::new();
                 let mut stream = s3.list(Some(&prefix));
                 while let Some(meta) = stream.next().await {
                     let Ok(meta) = meta else { continue };
@@ -875,11 +951,9 @@ impl BlobPersistence for S3BlobStore {
                         // SetBlob arriving between sweeps) doesn't doom the
                         // object next round.
                         if let Some(existing) = tombs.get(&hex) {
-                            for (path, _) in existing {
-                                if let Err(e) = s3.delete(path).await {
-                                    tracing::warn!(?e, key = %path, "blob_gc_sweep: clear tombstone failed");
-                                }
-                            }
+                            actions.push(SweepAction::ClearTombstones(
+                                existing.iter().map(|(p, _)| p.clone()).collect(),
+                            ));
                         }
                         continue;
                     }
@@ -893,41 +967,77 @@ impl BlobPersistence for S3BlobStore {
                             // than delete. Fail closed.
                             let age_ms = now_ms.saturating_sub(newest_ms);
                             if age_ms >= grace_ms {
-                                if let Err(e) = s3.delete(&meta.location).await {
-                                    tracing::warn!(?e, key = %meta.location, "blob_gc_sweep: delete failed");
-                                    continue;
-                                }
-                                for (path, _) in tombs.get(&hex).into_iter().flatten() {
-                                    let _ = s3.delete(path).await;
-                                }
-                                deleted += 1;
+                                actions.push(SweepAction::DeleteAged {
+                                    blob: meta.location.clone(),
+                                    tombs: tombs
+                                        .get(&hex)
+                                        .into_iter()
+                                        .flatten()
+                                        .map(|(p, _)| p.clone())
+                                        .collect(),
+                                });
                             }
                         }
                         None => {
-                            // No tombstone yet — create one. This is the
-                            // first sighting; deletion waits for a later,
-                            // separate sweep call unless the caller
-                            // explicitly asked for a zero grace (matching
-                            // `DirPersistence`'s branch exactly).
-                            // `Rooms::sweep_blobs` never passes a literal
-                            // zero — see `MIN_PHYSICAL_GRACE` (slice 1.4).
-                            let tomb_key = ObjectPath::from(format!("{tombs_prefix}/{hex}.{now_ms}"));
-                            if let Err(e) = s3.put(&tomb_key, Bytes::new().into()).await {
-                                tracing::warn!(?e, key = %tomb_key, "blob_gc_sweep: create tombstone failed");
-                                continue;
-                            }
-                            if grace.is_zero() {
-                                if let Err(e) = s3.delete(&meta.location).await {
-                                    tracing::warn!(?e, key = %meta.location, "blob_gc_sweep: immediate delete failed");
-                                    continue;
-                                }
-                                let _ = s3.delete(&tomb_key).await;
-                                deleted += 1;
-                            }
+                            let tomb_key =
+                                ObjectPath::from(format!("{tombs_prefix}/{hex}.{now_ms}"));
+                            actions.push(SweepAction::Tombstone {
+                                tomb_key,
+                                blob: meta.location.clone(),
+                                delete_now: grace.is_zero(),
+                            });
                         }
                     }
                 }
-                deleted
+
+                futures_util::stream::iter(actions.into_iter().map(|action| {
+                    let s3 = s3.clone();
+                    async move {
+                        match action {
+                            SweepAction::ClearTombstones(paths) => {
+                                for path in &paths {
+                                    if let Err(e) = s3.delete(path).await {
+                                        tracing::warn!(?e, key = %path, "blob_gc_sweep: clear tombstone failed");
+                                    }
+                                }
+                                0usize
+                            }
+                            SweepAction::DeleteAged { blob, tombs } => {
+                                // Blob first; a failed blob delete keeps the
+                                // tombstone so a later sweep retries — never
+                                // clear a tombstone for bytes still present.
+                                if let Err(e) = s3.delete(&blob).await {
+                                    tracing::warn!(?e, key = %blob, "blob_gc_sweep: delete failed");
+                                    return 0;
+                                }
+                                for path in &tombs {
+                                    let _ = s3.delete(path).await;
+                                }
+                                1
+                            }
+                            SweepAction::Tombstone { tomb_key, blob, delete_now } => {
+                                // Tombstone before any delete — the write
+                                // that makes an aborted/crashed sweep safe.
+                                if let Err(e) = s3.put(&tomb_key, Bytes::new().into()).await {
+                                    tracing::warn!(?e, key = %tomb_key, "blob_gc_sweep: create tombstone failed");
+                                    return 0;
+                                }
+                                if !delete_now {
+                                    return 0;
+                                }
+                                if let Err(e) = s3.delete(&blob).await {
+                                    tracing::warn!(?e, key = %blob, "blob_gc_sweep: immediate delete failed");
+                                    return 0;
+                                }
+                                let _ = s3.delete(&tomb_key).await;
+                                1
+                            }
+                        }
+                    }
+                }))
+                .buffer_unordered(SWEEP_IO_CONCURRENCY)
+                .fold(0usize, |acc, n| async move { acc + n })
+                .await
         });
         match res {
             Ok(deleted) => deleted,

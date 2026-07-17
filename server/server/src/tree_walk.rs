@@ -163,17 +163,63 @@ pub fn walk_tree(
     persistence: &dyn BlobPersistence,
     root_hash: &Hash,
 ) -> Result<HashSet<Hash>, TreeWalkError> {
-    let mut out = HashSet::new();
+    let mut live = HashSet::new();
+    let mut expanded = HashSet::new();
+    walk_tree_into(persistence, root_hash, &mut live, &mut expanded)?;
+    Ok(live)
+}
+
+/// blob-cas-remediation.md slice 6.4 — [`walk_tree`], but accumulating into
+/// caller-owned sets so **one** pair of sets can be threaded across every
+/// retained snapshot in a GC run: tree objects are content-addressed, so a
+/// subtree shared by N generations (or N rooms) has one hash, one content,
+/// and one expansion — fetching and parsing it once per *run* instead of
+/// once per *snapshot* changes nothing about the union while removing the
+/// re-walk of shared subtrees.
+///
+/// ## Why `expanded` is a separate set from `live` (the plan's "the visited
+/// set IS the live output set" claim, verified and found *almost* right)
+///
+/// `live` receives two different kinds of hash: tree objects this walk has
+/// **fully expanded**, and terminal entries (v1 values, v2 `"f"` files)
+/// whose bytes are never read. Skipping expansion on `live` membership
+/// alone would therefore let a *terminal* insert suppress a later
+/// *directory* expansion of the same hash — fine within one fresh-set walk
+/// (where that alias means the file's bytes literally are that tree
+/// object's bytes, a corner the old single-set walk already resolved
+/// order-dependently), but across shared sets it would also let a hash
+/// inserted by an unrelated *earlier snapshot's* terminal entry cancel this
+/// snapshot's subtree expansion — silently dropping the subtree's children
+/// from the live set, i.e. GC deleting live data. So expansion is skipped
+/// only on `expanded` membership: hashes proven to have their full
+/// transitive contribution already in `live`. Consequence (strictly safer
+/// than before): a hash referenced both as a file and as a directory now
+/// always gets its directory expansion, where the old walk's answer
+/// depended on traversal order — the shared walk can only ever *add*
+/// hashes relative to the old per-snapshot union, never lose one.
+///
+/// Callers must not persist these sets across GC runs — they are valid only
+/// as long as the blob store's tree objects are (within a run, guaranteed:
+/// a failed fetch aborts the whole collection fail-closed before any
+/// partial state could be acted on).
+pub fn walk_tree_into(
+    persistence: &dyn BlobPersistence,
+    root_hash: &Hash,
+    live: &mut HashSet<Hash>,
+    expanded: &mut HashSet<Hash>,
+) -> Result<(), TreeWalkError> {
     // (hash, depth-of-this-directory-in-the-chain). The root is depth 0.
     let mut stack: Vec<(Hash, usize)> = vec![(*root_hash, 0)];
 
     while let Some((hash, depth)) = stack.pop() {
         // v2 subtrees are shared across generations by construction (identical
         // content ⇒ identical hash) — short-circuit on repeat visits so a large
-        // shared subtree is fetched/parsed at most once per walk.
-        if !out.insert(hash) {
+        // shared subtree is fetched/parsed at most once per walk (and, with
+        // caller-shared sets, at most once per GC run).
+        if !expanded.insert(hash) {
             continue;
         }
+        live.insert(hash);
 
         if depth > MAX_TREE_DEPTH {
             return Err(TreeWalkError::TooDeep { hash: hash.to_hex(), depth });
@@ -245,8 +291,10 @@ pub fn walk_tree(
                     .map_err(|e| TreeWalkError::Malformed(format!("{}: {e}", hash.to_hex())))?;
                 for hex in tree.entries.values() {
                     let h = parse_entry_hash(&hash, hex)?;
-                    // v1 entries are always file blobs — never recurse.
-                    out.insert(h);
+                    // v1 entries are always file blobs — never recurse, and
+                    // never mark `expanded` (terminal insert, not an
+                    // expansion — see the doc above).
+                    live.insert(h);
                 }
             }
             2 => {
@@ -256,7 +304,7 @@ pub fn walk_tree(
                     let h = parse_entry_hash(&hash, &entry.h)?;
                     match entry.k.as_str() {
                         "f" => {
-                            out.insert(h);
+                            live.insert(h);
                         }
                         "d" => {
                             stack.push((h, depth + 1));
@@ -279,7 +327,7 @@ pub fn walk_tree(
         }
     }
 
-    Ok(out)
+    Ok(())
 }
 
 fn parse_entry_hash(tree_hash: &Hash, hex: &str) -> Result<Hash, TreeWalkError> {
@@ -300,6 +348,9 @@ mod tests {
     #[derive(Default, Debug)]
     struct TestBlobs {
         map: Mutex<StdHashMap<Hash, Vec<u8>>>,
+        /// Fetches served — the deterministic "was this subtree re-walked"
+        /// signal for the slice-6.4 shared-set tests.
+        gets: std::sync::atomic::AtomicUsize,
     }
 
     impl TestBlobs {
@@ -316,6 +367,7 @@ mod tests {
 
     impl BlobPersistence for TestBlobs {
         fn get_blob(&self, hash: &Hash) -> Option<Vec<u8>> {
+            self.gets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.map.lock().unwrap().get(hash).cloned()
         }
         fn persist_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), crate::store::PersistBlobError> {
@@ -408,6 +460,91 @@ mod tests {
         }));
         let live = walk_tree(&store, &root).expect("walk succeeds");
         assert_eq!(live, HashSet::from([root]));
+    }
+
+    // ── slice 6.4 — walk_tree_into's shared-set semantics ───────────────────
+
+    /// Two roots sharing a subtree, walked with ONE shared set pair: the
+    /// second walk must not re-fetch the shared subtree (that is the whole
+    /// point of sharing), and the union must equal the two fresh walks'
+    /// union exactly.
+    #[test]
+    fn shared_sets_skip_refetch_of_already_expanded_subtrees_without_changing_the_union() {
+        let store = TestBlobs::default();
+        let file_shared = file_hash("shared-file");
+        let subtree = store.put_json(serde_json::json!({
+            "nodalmerge": "tree", "version": 2,
+            "entries": [{"n": "x.txt", "k": "f", "h": file_shared}]
+        }));
+        let root_a = store.put_json(serde_json::json!({
+            "nodalmerge": "tree", "version": 2,
+            "entries": [
+                {"n": "a.txt", "k": "f", "h": file_hash("only-a")},
+                {"n": "dir", "k": "d", "h": subtree.to_hex()},
+            ]
+        }));
+        let root_b = store.put_json(serde_json::json!({
+            "nodalmerge": "tree", "version": 2,
+            "entries": [
+                {"n": "b.txt", "k": "f", "h": file_hash("only-b")},
+                {"n": "dir", "k": "d", "h": subtree.to_hex()},
+            ]
+        }));
+
+        // Reference union: two independent fresh walks.
+        let mut fresh_union = walk_tree(&store, &root_a).unwrap();
+        fresh_union.extend(walk_tree(&store, &root_b).unwrap());
+        let fetches_before = store.gets.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Shared walk: root_b's visit of `subtree` must cost zero fetches.
+        let mut live = HashSet::new();
+        let mut expanded = HashSet::new();
+        walk_tree_into(&store, &root_a, &mut live, &mut expanded).unwrap();
+        let after_a = store.gets.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after_a - fetches_before, 2, "root_a + subtree");
+        walk_tree_into(&store, &root_b, &mut live, &mut expanded).unwrap();
+        let after_b = store.gets.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after_b - after_a, 1, "root_b only — the shared subtree must not be re-fetched");
+
+        assert_eq!(live, fresh_union, "sharing must never change the union");
+    }
+
+    /// The exact hazard `expanded` exists to prevent (see walk_tree_into's
+    /// doc): a hash already in `live` via a *terminal* ("f") entry from an
+    /// earlier snapshot's walk must still get its *directory* expansion in
+    /// a later walk. Keying the skip on `live` membership — the naive
+    /// reading of the plan's "the visited set IS the live output set" —
+    /// would drop `inner` here: GC deleting live data.
+    #[test]
+    fn shared_sets_terminal_insert_does_not_suppress_a_later_directory_expansion() {
+        let store = TestBlobs::default();
+        let inner = file_hash("inner-file");
+        let subtree = store.put_json(serde_json::json!({
+            "nodalmerge": "tree", "version": 2,
+            "entries": [{"n": "inner.txt", "k": "f", "h": inner}]
+        }));
+        // Snapshot A stores the subtree's *bytes* as a file (content-
+        // addressed alias: same bytes, same hash, entry kind "f").
+        let root_a = store.put_json(serde_json::json!({
+            "nodalmerge": "tree", "version": 2,
+            "entries": [{"n": "tree-as-file.json", "k": "f", "h": subtree.to_hex()}]
+        }));
+        // Snapshot B references the same hash as a directory.
+        let root_b = store.put_json(serde_json::json!({
+            "nodalmerge": "tree", "version": 2,
+            "entries": [{"n": "dir", "k": "d", "h": subtree.to_hex()}]
+        }));
+
+        let mut live = HashSet::new();
+        let mut expanded = HashSet::new();
+        walk_tree_into(&store, &root_a, &mut live, &mut expanded).unwrap();
+        let inner_hash = hash_from_hex(&inner).unwrap();
+        assert!(!live.contains(&inner_hash), "A's terminal entry must not expand");
+        walk_tree_into(&store, &root_b, &mut live, &mut expanded).unwrap();
+        assert!(
+            live.contains(&inner_hash),
+            "B's directory expansion must not be suppressed by A's terminal insert"
+        );
     }
 
     #[test]

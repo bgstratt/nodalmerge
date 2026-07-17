@@ -13,6 +13,36 @@ pub trait LiveHashSource: Send + Sync {
 pub trait AssetInventoryStore: Send + Sync {
     fn upsert_active_seen(&self, run_id: &str, hash: &str, now: SystemTime) -> GcResult<()>;
 
+    /// Mark a whole live set in one call (blob-cas-remediation.md slice 6.3).
+    ///
+    /// The default loops [`Self::upsert_active_seen`] — semantically
+    /// identical to what the coordinator's mark pass did before this method
+    /// existed, just unbatched. That makes this default **correct, not a
+    /// trap**: unlike a default that *answers differently* than a real
+    /// override would (the 2.1 `RemoteBlobLinkAggregator` hole), an
+    /// implementor that never overrides this only pays the old per-row
+    /// cost, it never gets a wrong answer. Stores with transactional
+    /// semantics should override to amortize commit cost across the batch
+    /// (`SqliteGcStore` collapses 100k autocommits into one transaction).
+    ///
+    /// Error contract: `Err` means the batch is **not known to be fully
+    /// applied** — the coordinator treats that exactly like a failed
+    /// per-row upsert (the run fails, nothing sweeps this run). A partial
+    /// application left behind by a non-transactional default is harmless
+    /// in that world: marks only ever *protect*, and the failed run never
+    /// reaches its sweep phase.
+    fn upsert_active_seen_batch(
+        &self,
+        run_id: &str,
+        hashes: &[&str],
+        now: SystemTime,
+    ) -> GcResult<()> {
+        for hash in hashes {
+            self.upsert_active_seen(run_id, hash, now)?;
+        }
+        Ok(())
+    }
+
     fn iter_unmarked_candidates(
         &self,
         run_id: &str,

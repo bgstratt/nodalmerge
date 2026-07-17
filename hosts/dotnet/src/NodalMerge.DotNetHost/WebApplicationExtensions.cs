@@ -719,8 +719,14 @@ public static class WebApplicationExtensions
 
     /// <summary>
     /// True when the request's <c>Accept-Encoding</c> header lists
-    /// <c>zstd</c> as one of its (comma-separated, optionally
-    /// <c>;q=</c>-weighted) tokens.
+    /// <c>zstd</c> as one of its comma-separated codings AND that coding is
+    /// not refused by its own <c>q=0</c> parameter (slice 3.4,
+    /// blob-cas-remediation.md: "Accept-Encoding: zstd;q=0 treated as
+    /// accept (both hosts)"). Mirrors the Rust reference's
+    /// <c>accepts_zstd</c>/<c>coding_accepts_zstd</c> (<c>blob_http.rs</c>).
+    /// Only the <c>q=0</c> refusal is honored — a nonzero <c>q</c> or no
+    /// <c>q</c> at all keeps the pre-3.4 accept-if-mentioned behavior; this
+    /// is a MAY-serve optimization, not full qvalue-preference ordering.
     /// </summary>
     private static bool AcceptsZstdEncoding(HttpContext context)
     {
@@ -732,19 +738,84 @@ public static class WebApplicationExtensions
 
         foreach (var rawToken in header.Split(','))
         {
-            var token = rawToken.AsSpan().Trim();
-            var semicolon = token.IndexOf(';');
-            if (semicolon >= 0)
-            {
-                token = token[..semicolon].Trim();
-            }
-
-            if (token.Equals("zstd", StringComparison.OrdinalIgnoreCase))
+            if (CodingAcceptsZstd(rawToken))
             {
                 return true;
             }
         }
 
+        return false;
+    }
+
+    /// <summary>
+    /// Whether one <c>Accept-Encoding</c> list element (e.g. <c>"zstd;q=0"</c>,
+    /// <c>" gzip "</c>) names <c>zstd</c> and is not refused by that same
+    /// element's own <c>q=0</c> parameter. Parameters are per-coding —
+    /// <c>"gzip;q=0, zstd"</c> must still accept zstd; <c>gzip</c>'s
+    /// <c>q=0</c> must not leak onto the next token.
+    /// </summary>
+    private static bool CodingAcceptsZstd(string rawToken)
+    {
+        var token = rawToken.AsSpan();
+        var semicolon = token.IndexOf(';');
+        var name = (semicolon >= 0 ? token[..semicolon] : token).Trim();
+        if (!name.Equals("zstd", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        if (semicolon < 0)
+        {
+            return true;
+        }
+
+        foreach (var rawParam in token[(semicolon + 1)..].ToString().Split(';'))
+        {
+            var param = rawParam.AsSpan().Trim();
+            var eq = param.IndexOf('=');
+            if (eq < 0)
+            {
+                continue;
+            }
+            var key = param[..eq].Trim();
+            var value = param[(eq + 1)..].Trim();
+            if (key.Equals("q", StringComparison.OrdinalIgnoreCase) && IsQValueZero(value))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// RFC 9110 qvalue syntax is <c>( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )</c>.
+    /// Recognizes every all-zero spelling of the zero branch — <c>0</c>,
+    /// <c>0.</c>, <c>0.0</c>, <c>0.00</c>, <c>0.000</c> — and nothing else (a
+    /// malformed or &gt;3-decimal value is treated as "not q=0", i.e.
+    /// accepted; this only needs to catch refusal, not validate the header).
+    /// </summary>
+    private static bool IsQValueZero(ReadOnlySpan<char> value)
+    {
+        if (value.SequenceEqual("0"))
+        {
+            return true;
+        }
+        if (value.Length >= 2 && value[0] == '0' && value[1] == '.')
+        {
+            var rest = value[2..];
+            if (rest.Length > 3)
+            {
+                return false;
+            }
+            foreach (var c in rest)
+            {
+                if (c != '0')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
         return false;
     }
 
@@ -844,6 +915,23 @@ public static class WebApplicationExtensions
         if (!IsAuthorizedBlobRequest(context, options))
         {
             return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        // Slice 3.4 (blob-cas-remediation.md), parity with Rust's put_blob
+        // (blob_http.rs: "Content-Encoding on PUT is reserved ... reject
+        // with 415 until pre-compressed uploads are implemented"). Rust
+        // rejects on header PRESENCE alone (any value, including
+        // "identity") — before touching the body — so a compressed-body PUT
+        // never reaches the hash check and silently 422s (if the wire bytes
+        // don't hash to the plaintext path hash) or, worse, gets accepted
+        // and stored as identity bytes (if they happen to). Match exactly:
+        // any Content-Encoding header value 415s here, before body/hash work.
+        if (context.Request.Headers.ContainsKey("Content-Encoding"))
+        {
+            return Results.Json(
+                new { error = "Content-Encoding not supported on PUT" },
+                statusCode: StatusCodes.Status415UnsupportedMediaType
+            );
         }
 
         var request = context.Request;

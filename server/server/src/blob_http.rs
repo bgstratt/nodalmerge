@@ -526,18 +526,53 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// Whether the request's `Accept-Encoding` header lists `zstd` (case-
-/// insensitive; a comma-separated list per RFC 9110, `q`-values ignored —
-/// this is a MAY-serve optimization, not content negotiation with a
-/// fallback penalty).
+/// insensitive; a comma-separated list per RFC 9110) AND does not refuse it
+/// via `q=0` (S6.4/3.4, blob-cas-remediation.md finding "Accept-Encoding:
+/// zstd;q=0 treated as accept"). This honors only the `q=0` refusal case —
+/// a nonzero `q` or no `q` at all keeps the pre-3.4 accept-if-mentioned
+/// behavior; this is a MAY-serve optimization, not full qvalue-preference
+/// ordering (a client sending `zstd;q=0.1, gzip;q=0.9` still gets zstd here
+/// if the store has it — that ordering question is out of scope).
 fn accepts_zstd(headers: &HeaderMap) -> bool {
     headers
         .get(header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
-        .map(|v| {
-            v.split(',')
-                .any(|tok| tok.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("zstd"))
-        })
+        .map(|v| v.split(',').any(coding_accepts_zstd))
         .unwrap_or(false)
+}
+
+/// Whether one `Accept-Encoding` list element (e.g. `"zstd;q=0"`, `" gzip "`)
+/// names `zstd` and is not refused by that same element's own `q=0`
+/// parameter. Parameters are per-coding — `"gzip;q=0, zstd"` must still
+/// accept zstd; `gzip`'s `q=0` must not leak onto the next token.
+fn coding_accepts_zstd(token: &str) -> bool {
+    let mut parts = token.split(';');
+    let name = parts.next().unwrap_or("").trim();
+    if !name.eq_ignore_ascii_case("zstd") {
+        return false;
+    }
+    !parts.any(|param| {
+        let param = param.trim();
+        let mut kv = param.splitn(2, '=');
+        let key = kv.next().unwrap_or("").trim();
+        let value = kv.next().unwrap_or("").trim();
+        key.eq_ignore_ascii_case("q") && is_qvalue_zero(value)
+    })
+}
+
+/// RFC 9110 qvalue syntax is `( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )`.
+/// This recognizes every all-zero spelling of the zero branch — `0`, `0.`,
+/// `0.0`, `0.00`, `0.000` — and nothing else (a malformed or >3-decimal
+/// value is treated as "not q=0", i.e. accepted; this function only needs to
+/// catch refusal, not validate the header).
+fn is_qvalue_zero(raw: &str) -> bool {
+    if raw == "0" {
+        return true;
+    }
+    match raw.strip_prefix("0.") {
+        Some(rest) => rest.len() <= 3 && rest.bytes().all(|b| b == b'0'),
+        None => false,
+    }
 }
 
 async fn put_blob(
@@ -699,5 +734,66 @@ mod tests {
     fn iso8601_leap_day() {
         // 2024-02-29T00:00:00Z (2024 is a leap year).
         assert_eq!(format_iso8601_utc(1_709_164_800), "2024-02-29T00:00:00Z");
+    }
+
+    // ─── slice 3.4: q=0 refusal (unit-level, below the HTTP-router tests in
+    // tests/blob_http_surface.rs) ───────────────────────────────────────────
+
+    #[test]
+    fn is_qvalue_zero_recognizes_every_all_zero_spelling() {
+        for z in ["0", "0.", "0.0", "0.00", "0.000"] {
+            assert!(is_qvalue_zero(z), "{z} must be recognized as q=0");
+        }
+    }
+
+    #[test]
+    fn is_qvalue_zero_rejects_nonzero_and_malformed() {
+        for nz in ["1", "0.5", "0.0001", "1.0", "", "not-a-number", "00"] {
+            assert!(!is_qvalue_zero(nz), "{nz} must NOT be recognized as q=0");
+        }
+    }
+
+    #[test]
+    fn coding_accepts_zstd_bare_name() {
+        assert!(coding_accepts_zstd("zstd"));
+        assert!(coding_accepts_zstd(" zstd "));
+        assert!(coding_accepts_zstd("ZSTD"));
+    }
+
+    #[test]
+    fn coding_accepts_zstd_refuses_on_q0() {
+        assert!(!coding_accepts_zstd("zstd;q=0"));
+        assert!(!coding_accepts_zstd("zstd ; q=0.000"));
+        assert!(!coding_accepts_zstd("ZSTD;Q=0"));
+    }
+
+    #[test]
+    fn coding_accepts_zstd_keeps_nonzero_q() {
+        assert!(coding_accepts_zstd("zstd;q=0.5"));
+        assert!(coding_accepts_zstd("zstd;q=1"));
+    }
+
+    #[test]
+    fn coding_accepts_zstd_rejects_other_codings() {
+        assert!(!coding_accepts_zstd("gzip"));
+        assert!(!coding_accepts_zstd("gzip;q=0"));
+        assert!(!coding_accepts_zstd(""));
+    }
+
+    #[test]
+    fn accepts_zstd_honors_q0_across_a_list() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT_ENCODING, "zstd;q=0, gzip".parse().unwrap());
+        assert!(!accepts_zstd(&headers));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT_ENCODING, "gzip;q=0, zstd".parse().unwrap());
+        assert!(accepts_zstd(&headers));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT_ENCODING, "zstd".parse().unwrap());
+        assert!(accepts_zstd(&headers));
+
+        assert!(!accepts_zstd(&HeaderMap::new()));
     }
 }

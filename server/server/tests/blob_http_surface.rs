@@ -247,6 +247,13 @@ async fn blob_http_surface_vectors_conform() {
 // vector-driven: the frozen vectors file (engine/commands/) has no
 // Accept-Encoding-aware vectors yet, and none of the existing 15 vectors
 // send that header, so they must stay green unchanged (asserted above).
+//
+// Slice 3.4 (blob-cas-remediation.md): the `q=0`-refusal tests below are
+// hand-written for the same reason — the vector schema has no request-header
+// slot at all (no field carries a request Accept-Encoding/Content-Encoding),
+// so extending it would mean teaching both this file's and the .NET
+// consumer's struct a field neither the doc nor the fixture reads elsewhere.
+// Paired native tests here + BlobHttpEncodingNegotiationTests.cs instead.
 
 fn compressible_payload() -> Vec<u8> {
     b"the quick brown fox jumps over the lazy dog. ".repeat(500)
@@ -320,6 +327,129 @@ async fn get_with_accept_encoding_zstd_serves_stored_zstd_bytes() {
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     assert_eq!(body.as_ref(), payload.as_slice());
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Shared setup for the `q=0` negotiation tests below: a zstd-compression-on
+/// store seeded with a real `.zst` sibling — same shape as
+/// `get_with_accept_encoding_zstd_serves_stored_zstd_bytes`'s setup, factored
+/// out because five tests need it instead of one.
+fn seed_zstd_router(tag: &str) -> (Router, PathBuf, Vec<u8>, String) {
+    let dir = tmpdir(tag);
+    let persistence: SharedPersistence = Arc::new(
+        DirPersistence::open_with_compression(
+            &dir,
+            BlobCompressionConfig {
+                enabled: true,
+                level: 3,
+                min_bytes: 16,
+            },
+        )
+        .unwrap(),
+    );
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&[0x63u8; 32]),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    );
+    let router: Router = blob_http::blob_routes(BlobHttpConfig::default()).with_state(rooms.clone());
+
+    let payload = compressible_payload();
+    let hash = Hash::of(&payload);
+    let hash_hex = hash.to_hex();
+    persistence.persist_blob(&hash, &payload);
+    // Sanity: the compression-on store really did write the .zst form.
+    let encoded_path = dir.join("blobs").join("blake3").join(format!("{hash_hex}.zst"));
+    assert!(encoded_path.is_file(), "test setup expected a .zst write");
+
+    (router, dir, payload, hash_hex)
+}
+
+async fn assert_identity_response(router: &Router, hash_hex: &str, accept_encoding: &str, payload: &[u8]) {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/blobs/{hash_hex}"))
+        .header(header::ACCEPT_ENCODING, accept_encoding)
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    assert!(
+        resp.headers().get(header::CONTENT_ENCODING).is_none(),
+        "Accept-Encoding: {accept_encoding} must be treated as a zstd refusal (identity response), got Content-Encoding: {:?}",
+        resp.headers().get(header::CONTENT_ENCODING)
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), payload);
+}
+
+async fn assert_zstd_response(router: &Router, hash_hex: &str, accept_encoding: &str, payload: &[u8]) {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/blobs/{hash_hex}"))
+        .header(header::ACCEPT_ENCODING, accept_encoding)
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
+        Some("zstd"),
+        "Accept-Encoding: {accept_encoding} must still be served the stored zstd form"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let decoded = zstd::stream::decode_all(&body[..]).expect("response body must be a valid zstd frame");
+    assert_eq!(decoded, payload);
+}
+
+/// RFC 9110 `q=0` means "do not send this coding" — bare `zstd;q=0`.
+#[tokio::test]
+async fn get_with_accept_encoding_zstd_q0_serves_identity_bytes() {
+    let (router, dir, payload, hash_hex) = seed_zstd_router("content-encoding-q0-bare");
+    assert_identity_response(&router, &hash_hex, "zstd;q=0", &payload).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every qvalue-zero spelling RFC 9110 allows (up to three fractional
+/// digits), plus whitespace around the `;`/`=` the RFC also allows, must
+/// refuse zstd identically.
+#[tokio::test]
+async fn get_with_accept_encoding_zstd_q0_syntax_variants_all_refuse() {
+    let (router, dir, payload, hash_hex) = seed_zstd_router("content-encoding-q0-variants");
+    for variant in ["zstd;q=0", "zstd;q=0.0", "zstd;q=0.00", "zstd;q=0.000", "zstd ; q=0", "ZSTD;Q=0"] {
+        assert_identity_response(&router, &hash_hex, variant, &payload).await;
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `zstd;q=0, gzip` — zstd is refused by its own per-coding `q=0`; the
+/// absence of a stored gzip form means identity either way, but this
+/// specifically exercises that the comma-separated list is still walked and
+/// zstd's parameter doesn't leak onto the next token.
+#[tokio::test]
+async fn get_with_accept_encoding_zstd_q0_then_gzip_serves_identity_bytes() {
+    let (router, dir, payload, hash_hex) = seed_zstd_router("content-encoding-q0-then-gzip");
+    assert_identity_response(&router, &hash_hex, "zstd;q=0, gzip", &payload).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `gzip;q=0, zstd` — the opposite order: gzip's `q=0` must NOT leak onto
+/// zstd's (unparameterized, so accepted) token. Parameters are per-coding.
+#[tokio::test]
+async fn get_with_accept_encoding_gzip_q0_then_zstd_still_serves_zstd_bytes() {
+    let (router, dir, payload, hash_hex) = seed_zstd_router("content-encoding-gzip-q0-then-zstd");
+    assert_zstd_response(&router, &hash_hex, "gzip;q=0, zstd", &payload).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A nonzero (or fractional non-zero) `q` is NOT a refusal — this slice only
+/// honors `q=0`, it does not build qvalue-preference ordering.
+#[tokio::test]
+async fn get_with_accept_encoding_zstd_nonzero_q_still_serves_zstd_bytes() {
+    let (router, dir, payload, hash_hex) = seed_zstd_router("content-encoding-q-nonzero");
+    assert_zstd_response(&router, &hash_hex, "zstd;q=0.5", &payload).await;
     let _ = std::fs::remove_dir_all(&dir);
 }
 

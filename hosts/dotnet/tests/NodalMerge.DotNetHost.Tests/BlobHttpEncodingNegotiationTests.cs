@@ -102,6 +102,166 @@ public sealed class BlobHttpEncodingNegotiationTests : IAsyncLifetime
         Assert.Equal(CompressiblePayload, bytes);
     }
 
+    // ─── slice 3.4 (blob-cas-remediation.md): `q=0` refusal + PUT
+    // Content-Encoding -> 415 parity. Hand-written, not vector-driven — the
+    // frozen vector schema (blob-http-surface-vectors.v1.json, read by
+    // BlobHttpSurfaceTests.cs) has no request-header slot at all, so these
+    // pair with the equivalent hand-written tests in
+    // server/server/tests/blob_http_surface.rs instead of forcing the schema.
+
+    /// RFC 9110 `q=0` means "do not send this coding" — bare `zstd;q=0`.
+    [Fact]
+    public async Task Get_with_accept_encoding_zstd_q0_returns_identity_bytes()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/blobs/{_hash}");
+        request.Headers.TryAddWithoutValidation("Accept-Encoding", "zstd;q=0");
+
+        using var response = await _originClient!.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.DoesNotContain(response.Content.Headers.ContentEncoding, v => string.Equals(v, "zstd", StringComparison.OrdinalIgnoreCase));
+        var bytes = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(CompressiblePayload, bytes);
+    }
+
+    /// Every qvalue-zero spelling RFC 9110 allows, plus whitespace, must
+    /// refuse zstd identically (mirrors the Rust unit tests in blob_http.rs).
+    [Theory]
+    [InlineData("zstd;q=0")]
+    [InlineData("zstd;q=0.0")]
+    [InlineData("zstd;q=0.00")]
+    [InlineData("zstd;q=0.000")]
+    [InlineData("zstd ; q=0")]
+    [InlineData("ZSTD;Q=0")]
+    public async Task Get_with_accept_encoding_zstd_q0_syntax_variants_all_refuse(string acceptEncoding)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/blobs/{_hash}");
+        request.Headers.TryAddWithoutValidation("Accept-Encoding", acceptEncoding);
+
+        using var response = await _originClient!.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.DoesNotContain(response.Content.Headers.ContentEncoding, v => string.Equals(v, "zstd", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// `zstd;q=0, gzip` — the comma-separated list must still be walked and
+    /// zstd's own `q=0` must be honored regardless of position.
+    [Fact]
+    public async Task Get_with_accept_encoding_zstd_q0_then_gzip_returns_identity_bytes()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/blobs/{_hash}");
+        request.Headers.TryAddWithoutValidation("Accept-Encoding", "zstd;q=0, gzip");
+
+        using var response = await _originClient!.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.DoesNotContain(response.Content.Headers.ContentEncoding, v => string.Equals(v, "zstd", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// `gzip;q=0, zstd` — the opposite order: `gzip`'s `q=0` must NOT leak
+    /// onto `zstd`'s (unparameterized, so accepted) token. Parameters are
+    /// per-coding. This scenario was already correct before the fix (today's
+    /// bug is "any q is ignored", not "q is shared across the list") — kept
+    /// as a pin against a fix that scopes q globally instead of per-coding.
+    [Fact]
+    public async Task Get_with_gzip_q0_then_zstd_still_returns_content_encoding_zstd()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/blobs/{_hash}");
+        request.Headers.TryAddWithoutValidation("Accept-Encoding", "gzip;q=0, zstd");
+
+        using var response = await _originClient!.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains(response.Content.Headers.ContentEncoding, v => string.Equals(v, "zstd", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// A nonzero `q` is NOT a refusal — this slice only honors `q=0`, it does
+    /// not build qvalue-preference ordering. Also a pre-existing-correct pin.
+    [Fact]
+    public async Task Get_with_accept_encoding_zstd_nonzero_q_still_returns_content_encoding_zstd()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/blobs/{_hash}");
+        request.Headers.TryAddWithoutValidation("Accept-Encoding", "zstd;q=0.5");
+
+        using var response = await _originClient!.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains(response.Content.Headers.ContentEncoding, v => string.Equals(v, "zstd", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Parity with Rust (<c>blob_http.rs</c>'s <c>put_blob</c>, which rejects
+    /// any PUT carrying a <c>Content-Encoding</c> header with 415 before ever
+    /// hashing the body): this pins the failure mode the plan calls "worse
+    /// than a 422" — the request's literal wire bytes DO hash to the path
+    /// hash (a client could construct this by accident, or by mislabeling an
+    /// identity PUT), so pre-fix .NET happily stored them under that hash
+    /// with no indication they were ever labeled compressed. Post-fix: 415,
+    /// nothing persisted.
+    /// </summary>
+    [Fact]
+    public async Task Put_with_content_encoding_header_and_hash_matching_literal_bytes_is_rejected_415_not_stored()
+    {
+        var literalBytes = System.Text.Encoding.UTF8.GetBytes("arbitrary bytes labeled zstd but never actually compressed, slice 3.4");
+        var hash = Hasher.Hash(literalBytes).ToString();
+
+        using var request = new HttpRequestMessage(HttpMethod.Put, $"/blobs/{hash}") { Content = new ByteArrayContent(literalBytes) };
+        request.Content.Headers.ContentEncoding.Add("zstd");
+
+        using var response = await _originClient!.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        Assert.False(
+            File.Exists(Path.Combine(_originRoot!, "blake3", hash)),
+            "a PUT carrying Content-Encoding must never persist, even when the wire bytes happen to hash correctly"
+        );
+    }
+
+    /// <summary>
+    /// The other pre-fix failure mode the plan names: a real content-encoded
+    /// body whose path hash is the (correct, per docs/BLOB_HTTP_SURFACE.md)
+    /// hash of the PLAINTEXT never matches the compressed wire bytes, so
+    /// pre-fix .NET 422s ("hash mismatch") instead of the 415 the header
+    /// itself should have produced. Captured here so both pre-fix failure
+    /// modes the plan describes have a named, checked test.
+    /// </summary>
+    [Fact]
+    public async Task Put_with_content_encoding_header_and_plaintext_path_hash_is_rejected_415_not_422()
+    {
+        var plaintext = System.Text.Encoding.UTF8.GetBytes("plaintext this PUT pretends to be a zstd frame of, slice 3.4");
+        var hash = Hasher.Hash(plaintext).ToString();
+        var wireBytes = System.Text.Encoding.UTF8.GetBytes("stand-in compressed bytes, deliberately different from the plaintext above");
+
+        using var request = new HttpRequestMessage(HttpMethod.Put, $"/blobs/{hash}") { Content = new ByteArrayContent(wireBytes) };
+        request.Content.Headers.ContentEncoding.Add("zstd");
+
+        using var response = await _originClient!.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        Assert.False(File.Exists(Path.Combine(_originRoot!, "blake3", hash)));
+    }
+
+    /// <summary>
+    /// Parity check on WHICH header values trigger the 415: Rust's
+    /// <c>put_blob</c> rejects on <c>headers.contains_key(CONTENT_ENCODING)</c>
+    /// — ANY value, including <c>identity</c> — not just <c>zstd</c>. .NET
+    /// must match exactly rather than special-casing "identity" as exempt.
+    /// </summary>
+    [Fact]
+    public async Task Put_with_content_encoding_identity_header_is_also_rejected_415()
+    {
+        var literalBytes = System.Text.Encoding.UTF8.GetBytes("identity-labeled bytes, slice 3.4 parity check");
+        var hash = Hasher.Hash(literalBytes).ToString();
+
+        using var request = new HttpRequestMessage(HttpMethod.Put, $"/blobs/{hash}") { Content = new ByteArrayContent(literalBytes) };
+        request.Content.Headers.ContentEncoding.Add("identity");
+
+        using var response = await _originClient!.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        Assert.False(File.Exists(Path.Combine(_originRoot!, "blake3", hash)));
+    }
+
     /// <summary>
     /// Slice 2.1 (nodalmerge-studio/plans/blob-cas-remediation.md) changed
     /// what "behaves as before" means for Content-Length specifically: HEAD

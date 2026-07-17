@@ -8,56 +8,42 @@
 # its line removed, or stays here with a filed reason. The check FAILS if a now-covered
 # or deleted entry is left here, so the list can only shrink.
 #
-# Format: one item id per line, then `# <reason>`. Reason tags for C2 triage:
-#   C2:needs-nothing    — pure logic/vectors; a plain dotnet/cargo step covers it
-#   C2:needs-ffi        — requires the native host FFI (DLL/.so) present on the runner
-#   C2:needs-docker     — requires a MinIO/Docker container (blob-s3-gc-minio.yml pattern)
-#   PARITY:<pair>       — cross-runtime parity-pair member (C3). BOTH members of a pair
-#                         must be baselined together (even an already-covered side) until
-#                         the pair is fully covered, then both lines leave together.
+# Format: one item id per line, then `# <reason>`. Reason tags:
+#   C2:needs-nothing / C2:needs-ffi / C2:needs-docker — setup class (all now wired
+#   except the entry below); PARITY:<pair> — cross-runtime pair member (all 7 pairs
+#   now fully covered on both runtimes, none remain here).
 #
-# CLOSED by C2 so far (removed from this file, now covered):
+# CLOSED by C2 (removed from this file, now covered):
 #   - Rust (server-core-suites.yml): nodalmerge-gc {conformance, fault_injection},
 #     nodalmerge-host-ffi {abi, room_token_ffi}, nodalmerge-server
-#     {archive_portability_vectors, backpressure_lagged, graph_query_routes,
-#     idle_eviction, lamport_ceiling, metrics_endpoint, persistence, rate_limit,
-#     token_expiry}.
+#     {archive_portability_vectors, backpressure_lagged, blob_layout_vectors_v3,
+#     branch_fork_vectors, graph_query_routes, idle_eviction, lamport_ceiling,
+#     metrics_endpoint, persistence, rate_limit, spec_auth_vectors, token_expiry}.
+#   - Rust (blob-s3-gc-minio.yml): server blob_url_resolution_minio (real MinIO).
 #   - .NET managed (dotnet-host-managed-suites.yml): FileBlobZstdEncodingTests,
 #     Runtime{DagPersistenceService, DispatchClosePolicy, ErrorEnvelopeBuilder,
-#     FrameProcessor, MessageProcessor, Protocol, TokenValidationService}Tests.
-#   - Parity pairs CLOSED (both sides now covered, left together): blob-layout-v3
-#     (rust blob_layout_vectors_v3.rs + .NET BlobLayoutParityTests), spec-auth
-#     (rust spec_auth_vectors.rs + .NET SpecAuthVectorsTests), branch-fork
-#     (rust branch_fork_vectors.rs + .NET BranchForkVectorsTests), query-materialization
-#     (rust query_materialization_vectors.rs + .NET QueryMaterializationVectorsTests).
+#     FrameProcessor, MessageProcessor, Protocol, TokenValidationService}Tests,
+#     SpecAuthVectorsTests, BranchForkVectorsTests, QueryMaterializationVectorsTests.
+#   - .NET FFI (dotnet-host-ffi-suites.yml): Ffi{Binding, HttpEndpoint, WebSocketEndpoint,
+#     WebSocketLoopRunner}Tests, RuntimeWebSocketEndpointTests,
+#     ChainedBlobStoreProviderHttpIntegrationTests, Provider{Composition, Durability,
+#     HostRestartDurabilityIntegration, ProfileRuntimeIntegration,
+#     ProfileTokenEndpointIntegration}Tests, RoomTokenEmbeddedProviderTests,
+#     Row19AutomatedScenarioHarnessTests, S3DirectChainCompositionTests,
+#     DemoReadinessSmokeTests.
+#   - All 7 parity pairs (C3) now fully covered on both runtimes.
 
 # ---------------------------------------------------------------------------
-# Rust — Docker-gated (MinIO); wire into blob-s3-gc-minio.yml (the 1.3 pattern).
+# DEFERRED — needs multi-process orchestration, not just a container. Filed follow-up.
 # ---------------------------------------------------------------------------
-rust:server/server/tests/blob_url_resolution_minio.rs                # C2:needs-docker (MinIO — blob-s3-gc-minio.yml pattern)
-
-# ---------------------------------------------------------------------------
-# .NET DotNetHost.Tests — require the native host FFI (DLL/.so) on the runner.
-# Wire following the FFI gating pattern (category b): a job that builds the native
-# host + runtime-local FFI and places the DLL/.so alongside the test assembly.
-# ---------------------------------------------------------------------------
-dotnet:NodalMerge.DotNetHost.Tests.ChainedBlobStoreProviderHttpIntegrationTests   # C2:needs-ffi (HTTP origin over host FFI)
-dotnet:NodalMerge.DotNetHost.Tests.DemoReadinessSmokeTests                          # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.FfiBindingTests                                  # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.FfiHttpEndpointTests                             # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.FfiWebSocketEndpointTests                        # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.FfiWebSocketLoopRunnerTests                      # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.ProviderCompositionTests                         # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.ProviderDurabilityTests                          # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.ProviderHostRestartDurabilityIntegrationTests    # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.ProviderProfileRuntimeIntegrationTests           # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.ProviderProfileTokenEndpointIntegrationTests     # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.RoomTokenEmbeddedProviderTests                   # C2:needs-ffi (known flake — FFI DllNotFound load-order)
-dotnet:NodalMerge.DotNetHost.Tests.Row19AutomatedScenarioHarnessTests               # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.RuntimeWebSocketEndpointTests                    # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.S3DirectChainCompositionTests                    # C2:needs-ffi
-
-# ---------------------------------------------------------------------------
-# .NET DotNetHost.Tests — Docker-gated (MinIO).
-# ---------------------------------------------------------------------------
-dotnet:NodalMerge.DotNetHost.Tests.S3DirectMinioEndToEndTests                       # C2:needs-docker (MinIO)
+# S3DirectMinioEndToEndTests is not a self-contained testcontainers test: it requires a
+# SEPARATELY-LAUNCHED dotnet S3-direct origin host (bound to :7979 with the full
+# NODALMERGE_S3_* config) AND a MinIO bucket, then reads NODALMERGE_TEST_S3DIRECT_ORIGIN_BASEURL
+# to find that origin. With the env unset it prints a message and returns — a vacuous pass
+# (verified: 11ms, no container). Wiring it honestly needs a workflow that stands up MinIO,
+# builds+launches the S3-direct host as a background process, exports the base URL, runs the
+# test, and tears both down. That orchestration can't be validated locally with confidence and
+# is deferred as its own slice (follow-up filed). Until then it stays baselined rather than
+# wired-then-vacuously-green. The rust blob_url_resolution_minio.rs above already gives real
+# MinIO coverage of the same /url + /uploaded routes through the axum router.
+dotnet:NodalMerge.DotNetHost.Tests.S3DirectMinioEndToEndTests                       # C2:needs-docker+host-process (deferred — multi-process orchestration; see note above)

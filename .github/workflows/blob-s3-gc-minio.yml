@@ -107,6 +107,8 @@ on:
       - "server/server/src/room.rs"
       - "server/server/src/gc_store.rs"
       - "server/server/src/blob_http.rs"
+      # C2 — blob_url_resolution_minio.rs (this test file itself, so a change to it fires here)
+      - "server/server/tests/blob_url_resolution_minio.rs"
       # slice 2.2 — minio_round_trip.rs now drives walk_tree against a real
       # bucket (s3_direct_tree_walk_*), the only real gate for the S3 hydrating
       # tree read. The fake in blob-conformance is a port and cannot gate it.
@@ -140,6 +142,8 @@ on:
       - "server/server/src/room.rs"
       - "server/server/src/gc_store.rs"
       - "server/server/src/blob_http.rs"
+      # C2 — blob_url_resolution_minio.rs (this test file itself, so a change to it fires here)
+      - "server/server/tests/blob_url_resolution_minio.rs"
       # slice 2.2 — minio_round_trip.rs now drives walk_tree against a real
       # bucket (s3_direct_tree_walk_*), the only real gate for the S3 hydrating
       # tree read. The fake in blob-conformance is a port and cannot gate it.
@@ -201,3 +205,14 @@ jobs:
       # Covered by the existing server/s3-blobs/** paths: glob above.
       - name: Run bulk-sweep behavior-equality smoke against real minio (slice 6.3)
         run: cargo test -p nodalmerge-s3-blobs --test minio_sweep_scale -- --test-threads=1
+
+      # C2 (dotnet-host-readiness.md) — blob_url_resolution_minio.rs is the only test
+      # anywhere that drives the room-agnostic /blobs/{hash}/url + /uploaded routes
+      # through the real axum router against an actual bucket (vs the Docker-free
+      # blob_url_resolution_vectors.rs in blob-layout-parity.yml, which pins the delegate
+      # placeholder without a bucket). It ran in NO workflow. Its start_minio() returns
+      # None (graceful skip) rather than honoring NODALMERGE_REQUIRE_DOCKER — on
+      # ubuntu-latest Docker is preinstalled so it runs for real; hardening that skip into
+      # a fail-closed like minio_round_trip's is a filed follow-up, not done here.
+      - name: Run blob URL-resolution end-to-end against real minio (S4.2 — /url + /uploaded through the real router and bucket)
+        run: cargo test -p nodalmerge-server --test blob_url_resolution_minio -- --test-threads=1

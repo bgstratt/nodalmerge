@@ -55,9 +55,9 @@ jobs:
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeProtocolTests"
       - name: Run RuntimeTokenValidationServiceTests
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeTokenValidationServiceTests"
-      - name: Run SpecAuthVectorsTests (parity: spec-auth .NET side)
+      - name: "Run SpecAuthVectorsTests (parity: spec-auth .NET side)"
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~SpecAuthVectorsTests"
-      - name: Run BranchForkVectorsTests (parity: branch-fork .NET side; isolated — BranchFork006 flakes only under cross-class parallelism)
+      - name: "Run BranchForkVectorsTests (parity: branch-fork .NET side; isolated — BranchFork006 flakes only under cross-class parallelism)"
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BranchForkVectorsTests"
-      - name: Run QueryMaterializationVectorsTests (parity: query-materialization .NET side)
+      - name: "Run QueryMaterializationVectorsTests (parity: query-materialization .NET side)"
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~QueryMaterializationVectorsTests"

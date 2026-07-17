@@ -488,6 +488,14 @@ on:
       # divergence proof + deterministic scan counters + the Composite
       # room_nodes_version forwarding pin. Its #[ignore]d bench is not run.
       - "server/server/tests/gc_recompute_cache.rs"
+      # slice 7.5 — pluggable LiveHashCollector seam: gc_service.rs ran five GC
+      # suites in this workflow without being a paths trigger itself (a
+      # gc_service change could break every one of them with this workflow
+      # never firing — the known paths:-filter bite). Added together with the
+      # seam pin: the generic service must run a NON-studio live source
+      # end-to-end, fail closed on a failing source, and compose unions.
+      - "server/server/src/gc_service.rs"
+      - "server/server/tests/gc_live_source_seam.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -608,6 +616,14 @@ on:
       # divergence proof + deterministic scan counters + the Composite
       # room_nodes_version forwarding pin. Its #[ignore]d bench is not run.
       - "server/server/tests/gc_recompute_cache.rs"
+      # slice 7.5 — pluggable LiveHashCollector seam: gc_service.rs ran five GC
+      # suites in this workflow without being a paths trigger itself (a
+      # gc_service change could break every one of them with this workflow
+      # never firing — the known paths:-filter bite). Added together with the
+      # seam pin: the generic service must run a NON-studio live source
+      # end-to-end, fail closed on a failing source, and compose unions.
+      - "server/server/src/gc_service.rs"
+      - "server/server/tests/gc_live_source_seam.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -714,6 +730,12 @@ jobs:
 
       - name: Run GC recomputation-cache gates (slice 6.4 — cold-room live-set + studio-map caches keyed by room_nodes_version; cache-equivalence vs from-scratch under mutations, planted-stale-entry divergence proof, deterministic scan counters, Composite forwarding pin. The many-cold-room bench is #[ignore]d and NOT run here)
         run: cargo test -p nodalmerge-server --test gc_recompute_cache
+
+      - name: Run pluggable live-source seam gates (slice 7.5 — gc_service runs a full staged GC against an injected NON-studio LiveHashCollector, fails closed when the source errors, and UnionLiveHashCollector composes sources through the service; the studio source is composition-supplied only)
+        run: cargo test -p nodalmerge-server --test gc_live_source_seam
+
+      - name: Run gc_service unit suite (GcMode parsing + slice 7.5 UnionLiveHashCollector semantics — set union of members, fail-closed on any member error, refusal of the empty union; previously these ran in no workflow, the --lib filter above only covers store::)
+        run: "cargo test -p nodalmerge-server --lib gc_service::"
 
       - name: Run S3 key layout vectors + Delegate-mode hydrate/tree-walk unit gates (slice 2.2, finding #10)
         run: cargo test -p nodalmerge-s3-blobs --lib

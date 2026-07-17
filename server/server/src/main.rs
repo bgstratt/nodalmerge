@@ -1,6 +1,6 @@
 use nodalmerge_server::{
     blob_http, gc_blob_objects, gc_pin_store, gc_service, gc_store, keypair, metrics, room, store,
-    ws_handler,
+    studio_live_hashes, ws_handler,
 };
 
 use std::sync::Arc;
@@ -182,8 +182,12 @@ async fn main() {
                 grace: std::time::Duration::from_secs(grace),
                 max_deletes_per_run: parse_u64_flag(&args, "--gc-max-deletes-per-run", 100).unwrap_or(100),
                 require_head_before_delete: parse_bool_flag(&args, "--gc-require-head-before-delete", true),
-                retain_intermediate_days: parse_i64_flag(&args, "--gc-retain-intermediate-days", 30).unwrap_or(30),
             };
+            // Slice 7.5 — `--gc-retain-intermediate-days` is a studio
+            // classification knob, so it rides on the studio collector
+            // (built below), not on the generic `GcServiceConfig`.
+            let retain_intermediate_days =
+                parse_i64_flag(&args, "--gc-retain-intermediate-days", 30).unwrap_or(30);
             tracing::info!(
                 interval_secs = blob_gc_interval,
                 grace_secs = grace,
@@ -197,10 +201,18 @@ async fn main() {
                 (Some(path), Some(inventory)) => {
                     let pins = std::sync::Arc::new(gc_pin_store::StaticPinStore::from_env_and_args(&args));
                     let objects = std::sync::Arc::new(gc_blob_objects::LocalBlobObjectStore::new(path));
+                    // Slice 7.5 — this binary is a studio composition, so
+                    // it injects the studio-domain live-set source here;
+                    // `gc_service` itself no longer knows any concrete one.
+                    let live = std::sync::Arc::new(studio_live_hashes::StudioLiveHashCollector::new(
+                        rooms.clone(),
+                        retain_intermediate_days,
+                    ));
                     let _handle = gc_service::spawn_gc_sweeper(
                         rooms.clone(),
                         std::time::Duration::from_secs(blob_gc_interval),
                         gc_cfg,
+                        live,
                         std::sync::Arc::clone(inventory),
                         pins,
                         objects,

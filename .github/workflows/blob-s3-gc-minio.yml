@@ -92,6 +92,12 @@ on:
     branches: [main]
     paths:
       - "server/s3-blobs/**"
+      # slice 7.5 — the server-s3 binary's composition now injects the studio
+      # LiveHashCollector into the GC service (both backend arms). No workflow
+      # anywhere compiled this binary before (docker.yml's image builds only
+      # nodalmerge-server), so its wiring could break with CI green; the build
+      # step below is the 8.0-convention stub for that gap.
+      - "server/server-s3/**"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
       - "server/server/src/gc_store.rs"
@@ -114,6 +120,12 @@ on:
   pull_request:
     paths:
       - "server/s3-blobs/**"
+      # slice 7.5 — the server-s3 binary's composition now injects the studio
+      # LiveHashCollector into the GC service (both backend arms). No workflow
+      # anywhere compiled this binary before (docker.yml's image builds only
+      # nodalmerge-server), so its wiring could break with CI green; the build
+      # step below is the 8.0-convention stub for that gap.
+      - "server/server-s3/**"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
       - "server/server/src/gc_store.rs"
@@ -154,6 +166,16 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      # Slice 7.5 (8.0 stub convention) — compile gate for the server-s3
+      # binary's composition (GC live-source injection lands there). This was
+      # the FIRST CI step anywhere to compile nodalmerge-server-s3; whether
+      # this workflow is its permanent home is a Phase 8 question — it lives
+      # here because this is the S3-backend workflow and the binary is the S3
+      # composition. (nodalmerge-dev-server still builds in NO workflow —
+      # filed, not fixed here.)
+      - name: Build the server-s3 binary (slice 7.5 — composition compile gate; needs Phase 8 follow-up for a permanent home)
+        run: cargo build -p nodalmerge-server-s3
 
       # --test-threads=1: each test starts its own MinIO container against the
       # same fixed bucket name, so they must not overlap.

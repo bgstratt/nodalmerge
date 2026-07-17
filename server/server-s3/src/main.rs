@@ -50,7 +50,7 @@ use axum::{routing::get, Router};
 use nodalmerge_s3_blobs::{S3Auth, S3BlobObjectStore, S3BlobStore, S3BlobStoreConfig};
 use nodalmerge_server::{
     blob_http, gc_blob_objects, gc_pin_store, gc_service, gc_store, keypair, metrics, room, store,
-    ws_handler,
+    studio_live_hashes, ws_handler,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{fmt, EnvFilter};
@@ -256,12 +256,23 @@ async fn main() {
                 grace: std::time::Duration::from_secs(grace),
                 max_deletes_per_run: parse_u64_flag(&args, "--gc-max-deletes-per-run", 100).unwrap_or(100),
                 require_head_before_delete: parse_bool_flag(&args, "--gc-require-head-before-delete", true),
-                retain_intermediate_days: parse_i64_flag(&args, "--gc-retain-intermediate-days", 30).unwrap_or(30),
             };
+            // Slice 7.5 — studio classification knob; rides on the studio
+            // collector built at the spawn sites below, not on the generic
+            // `GcServiceConfig`.
+            let retain_intermediate_days =
+                parse_i64_flag(&args, "--gc-retain-intermediate-days", 30).unwrap_or(30);
             tracing::info!(interval_secs = blob_gc_interval, grace_secs = grace, mode = ?gc_mode, backend = backend.as_str(), "gc sweeper enabled");
             match (&store_path, &gc_inventory) {
                 (Some(path), Some(inventory)) => {
                     let pins = Arc::new(gc_pin_store::StaticPinStore::from_env_and_args(&args));
+                    // Slice 7.5 — studio composition: both backend arms
+                    // inject the same studio-domain live-set source;
+                    // `gc_service` itself no longer knows any concrete one.
+                    let live = Arc::new(studio_live_hashes::StudioLiveHashCollector::new(
+                        rooms.clone(),
+                        retain_intermediate_days,
+                    ));
                     match &s3_cfg_for_gc {
                         Some(s3_cfg) => {
                             let objects = match S3BlobObjectStore::new(s3_cfg.clone()) {
@@ -275,6 +286,7 @@ async fn main() {
                                 rooms.clone(),
                                 std::time::Duration::from_secs(blob_gc_interval),
                                 gc_cfg,
+                                live,
                                 Arc::clone(inventory),
                                 pins,
                                 objects,
@@ -286,6 +298,7 @@ async fn main() {
                                 rooms.clone(),
                                 std::time::Duration::from_secs(blob_gc_interval),
                                 gc_cfg,
+                                live,
                                 Arc::clone(inventory),
                                 pins,
                                 objects,

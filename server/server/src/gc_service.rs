@@ -1,13 +1,14 @@
 //! S5.3 — staged GC coordinator wiring + scheduling.
 //!
-//! Ties together the studio-domain `LiveHashSource`
-//! (`studio_live_hashes.rs`), the real `AssetInventoryStore`/`GcRunStore`
-//! (`gc_store.rs`), the config-driven `AdminPinStore` (`gc_pin_store.rs`),
-//! and a `BlobObjectStore` (`gc_blob_objects.rs` locally, or
-//! `nodalmerge-s3-blobs`'s S3 variant — this module is generic over that
-//! last piece so it never needs to know which) into one schedulable GC
-//! service, coexisting with the legacy `Rooms::sweep_blobs` path behind a
-//! single `--gc-mode` flag.
+//! Ties together an injected [`LiveHashCollector`] (slice 7.5 — the
+//! composition layer supplies it; the studio-domain one lives in
+//! `studio_live_hashes.rs` and this module never names it), the real
+//! `AssetInventoryStore`/`GcRunStore` (`gc_store.rs`), the config-driven
+//! `AdminPinStore` (`gc_pin_store.rs`), and a `BlobObjectStore`
+//! (`gc_blob_objects.rs` locally, or `nodalmerge-s3-blobs`'s S3 variant —
+//! this module is generic over that piece so it never needs to know which)
+//! into one schedulable GC service, coexisting with the legacy
+//! `Rooms::sweep_blobs` path behind a single `--gc-mode` flag.
 //!
 //! ## Mode coexistence (`GcMode`)
 //!
@@ -32,6 +33,8 @@
 //! values; both `main.rs` and `server-s3/main.rs` call it.
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -42,7 +45,81 @@ use nodalmerge_gc::{GcCoordinator, GcCoordinatorConfig, GcError, GcResult};
 use crate::gc_pin_store::StaticPinStore;
 use crate::gc_store::SqliteGcStore;
 use crate::room::Rooms;
-use crate::studio_live_hashes;
+
+/// Slice 7.5 — the pluggable live-set factory. The coordinator's own
+/// `LiveHashSource` trait is sync (it runs inside `run_once`), but every
+/// real live-set computation on this server is async (room reads, cold
+/// replays, tree walks through the 6.1 bridge), so what the composition
+/// layer injects is this async twin: called once per tick, up front, and
+/// the result wrapped in [`PrecomputedLiveHashSource`] — the same
+/// precompute-then-wrap dance S5.3 introduced, minus the hard-wired callee.
+///
+/// Threaded through [`run_new_coordinator_once`]/[`spawn_gc_sweeper`] the
+/// way `BlobObjectStore` already is: a generic `Arc` the binaries supply
+/// (`main.rs`/`server-s3/main.rs` build the studio-domain collector from
+/// `studio_live_hashes.rs`; tests hand in whatever they like). This module
+/// has no compile-time knowledge of any concrete source.
+pub trait LiveHashCollector: Send + Sync {
+    /// Compute the full live set for one coordinator run. An `Err` is a
+    /// failed run: `GcCoordinator::run_once` fail-closed semantics apply
+    /// (no mutation, run ledger records `Failed`).
+    fn collect_live_hashes(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = GcResult<HashSet<String>>> + Send + '_>>;
+}
+
+/// Slice 7.5 — set-union composition of live-hash sources, built for 1.2's
+/// "studio hashes ∪ room-DAG blob references" (this slice ships the
+/// combinator; 1.2 wires its second source).
+///
+/// Fail-closed on BOTH axes, per the GC discipline everywhere else in this
+/// plan:
+///
+/// * **any member errors → the union errors.** A source that fails must not
+///   silently contribute nothing — "nothing" here means "nothing is live",
+///   i.e. delete it all (1.3 filed the fail-open family; this refuses to be
+///   the next instance).
+/// * **zero members → error.** An empty union's honest answer is the empty
+///   set, and an empty live set tells sweephard to reclaim every blob on
+///   the server. No real composition wants that; it's a wiring bug, so
+///   refuse loudly rather than report it as truth (same posture as 1.1's
+///   "can't enumerate → refuse to delete").
+pub struct UnionLiveHashCollector {
+    sources: Vec<Arc<dyn LiveHashCollector>>,
+}
+
+impl UnionLiveHashCollector {
+    pub fn new(sources: Vec<Arc<dyn LiveHashCollector>>) -> Self {
+        Self { sources }
+    }
+}
+
+impl LiveHashCollector for UnionLiveHashCollector {
+    fn collect_live_hashes(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = GcResult<HashSet<String>>> + Send + '_>> {
+        Box::pin(async move {
+            if self.sources.is_empty() {
+                return Err(GcError::Invariant(
+                    "union of zero live-hash sources (an empty live set would mark \
+                     everything reclaimable; this is a wiring bug, not a live set)"
+                        .to_string(),
+                ));
+            }
+            let mut union: HashSet<String> = HashSet::new();
+            for (idx, source) in self.sources.iter().enumerate() {
+                // Sequential on purpose: sources share the room locks and
+                // the blocking pool, and the first failure aborts the run —
+                // there is nothing to win by racing them.
+                let set = source.collect_live_hashes().await.map_err(|e| {
+                    GcError::Backend(format!("live-hash source {idx}: {e}"))
+                })?;
+                union.extend(set);
+            }
+            Ok(union)
+        })
+    }
+}
 
 /// The `--gc-mode` flag's value space. See module docs for how the two
 /// deletion paths coexist.
@@ -88,8 +165,6 @@ pub struct GcServiceConfig {
     pub grace: Duration,
     pub max_deletes_per_run: u64,
     pub require_head_before_delete: bool,
-    /// Mirrors `RetentionPolicyOptions.RetainIntermediateDays` (default 30).
-    pub retain_intermediate_days: i64,
 }
 
 impl Default for GcServiceConfig {
@@ -99,7 +174,6 @@ impl Default for GcServiceConfig {
             grace: Duration::from_secs(24 * 60 * 60),
             max_deletes_per_run: 100,
             require_head_before_delete: true,
-            retain_intermediate_days: studio_live_hashes::DEFAULT_RETAIN_INTERMEDIATE_DAYS,
         }
     }
 }
@@ -136,17 +210,18 @@ impl LiveHashSource for PrecomputedLiveHashSource {
 /// Generic over the blob-object backend so this crate never needs to know
 /// about S3 (`nodalmerge-s3-blobs` supplies its own `BlobObjectStore` impl
 /// and calls this the same way `main.rs`/`server-s3/main.rs` do for local
-/// disk).
-pub async fn run_new_coordinator_once<B: BlobObjectStore>(
-    rooms: &Rooms,
+/// disk), and — slice 7.5 — generic over the live-set factory for the same
+/// reason: the studio-domain source is a composition-layer choice, not this
+/// module's business.
+pub async fn run_new_coordinator_once<L: LiveHashCollector + ?Sized, B: BlobObjectStore>(
+    live: &L,
     mode: GcRunMode,
     cfg: &GcServiceConfig,
     inventory: Arc<SqliteGcStore>,
     pins: Arc<StaticPinStore>,
     objects: Arc<B>,
 ) -> GcResult<GcRunDelta> {
-    let live_result =
-        studio_live_hashes::collect_studio_live_hashes(rooms, cfg.retain_intermediate_days).await;
+    let live_result = live.collect_live_hashes().await;
     let live_source = Arc::new(PrecomputedLiveHashSource::new(live_result));
     let coordinator_cfg = GcCoordinatorConfig {
         grace_window: cfg.grace,
@@ -160,9 +235,10 @@ pub async fn run_new_coordinator_once<B: BlobObjectStore>(
     coordinator.run_once(mode, SystemTime::now())
 }
 
-async fn run_gc_tick<B: BlobObjectStore>(
+async fn run_gc_tick<L: LiveHashCollector + ?Sized, B: BlobObjectStore>(
     rooms: &Rooms,
     cfg: &GcServiceConfig,
+    live: &Arc<L>,
     inventory: &Arc<SqliteGcStore>,
     pins: &Arc<StaticPinStore>,
     objects: &Arc<B>,
@@ -174,7 +250,7 @@ async fn run_gc_tick<B: BlobObjectStore>(
         }
         GcMode::New(mode) => {
             match run_new_coordinator_once(
-                rooms,
+                live.as_ref(),
                 mode,
                 cfg,
                 Arc::clone(inventory),
@@ -210,10 +286,16 @@ async fn run_gc_tick<B: BlobObjectStore>(
 /// either the legacy sweep or the new coordinator per `cfg.mode` on every
 /// tick (see module docs). `interval.is_zero()` disables scheduling
 /// entirely (returns `None`), mirroring every other sweeper in `room.rs`.
-pub fn spawn_gc_sweeper<B: BlobObjectStore + Send + Sync + 'static>(
+/// `rooms` still rides along for the legacy `sweep_blobs` arm; the new
+/// coordinator only ever sees the injected `live` collector.
+pub fn spawn_gc_sweeper<
+    L: LiveHashCollector + ?Sized + 'static,
+    B: BlobObjectStore + Send + Sync + 'static,
+>(
     rooms: Rooms,
     interval: Duration,
     cfg: GcServiceConfig,
+    live: Arc<L>,
     inventory: Arc<SqliteGcStore>,
     pins: Arc<StaticPinStore>,
     objects: Arc<B>,
@@ -227,7 +309,7 @@ pub fn spawn_gc_sweeper<B: BlobObjectStore + Send + Sync + 'static>(
         ticker.tick().await; // skip the immediate t=0 tick
         loop {
             ticker.tick().await;
-            run_gc_tick(&rooms, &cfg, &inventory, &pins, &objects).await;
+            run_gc_tick(&rooms, &cfg, &live, &inventory, &pins, &objects).await;
         }
     }))
 }
@@ -250,5 +332,76 @@ mod tests {
     #[test]
     fn default_mode_is_legacy() {
         assert_eq!(GcServiceConfig::default().mode, GcMode::Legacy);
+    }
+
+    // ─── Slice 7.5 — UnionLiveHashCollector semantics ──────────────────────
+
+    /// Fixed-set collector for the union tests below (and nothing else —
+    /// the end-to-end "generic service runs a non-studio source" pin lives
+    /// in tests/gc_live_source_seam.rs).
+    struct StaticCollector(HashSet<String>);
+
+    impl LiveHashCollector for StaticCollector {
+        fn collect_live_hashes(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = GcResult<HashSet<String>>> + Send + '_>> {
+            let set = self.0.clone();
+            Box::pin(async move { Ok(set) })
+        }
+    }
+
+    /// Always-failing collector — stands in for a source whose room reads /
+    /// cold replays / tree walks fell over mid-collection.
+    struct FailingCollector;
+
+    impl LiveHashCollector for FailingCollector {
+        fn collect_live_hashes(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = GcResult<HashSet<String>>> + Send + '_>> {
+            Box::pin(async { Err(GcError::Backend("collector exploded".to_string())) })
+        }
+    }
+
+    fn set_of(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn union_is_the_set_union_of_its_members() {
+        // Overlap on "b" on purpose: set semantics, not concatenation.
+        let union = UnionLiveHashCollector::new(vec![
+            Arc::new(StaticCollector(set_of(&["a", "b"]))),
+            Arc::new(StaticCollector(set_of(&["b", "c"]))),
+        ]);
+        let live = union.collect_live_hashes().await.expect("both members succeed");
+        assert_eq!(live, set_of(&["a", "b", "c"]));
+    }
+
+    #[tokio::test]
+    async fn union_fails_closed_when_any_member_fails() {
+        // Both orders: a failure must poison the union whether it comes
+        // before or after a successful member — a source that errors must
+        // not silently contribute nothing (1.3's fail-open family; this
+        // combinator refuses to be the next instance).
+        let fail_first = UnionLiveHashCollector::new(vec![
+            Arc::new(FailingCollector) as Arc<dyn LiveHashCollector>,
+            Arc::new(StaticCollector(set_of(&["a"]))),
+        ]);
+        assert!(fail_first.collect_live_hashes().await.is_err());
+
+        let fail_last = UnionLiveHashCollector::new(vec![
+            Arc::new(StaticCollector(set_of(&["a"]))) as Arc<dyn LiveHashCollector>,
+            Arc::new(FailingCollector),
+        ]);
+        assert!(fail_last.collect_live_hashes().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn union_of_zero_sources_is_an_error_not_an_empty_live_set() {
+        // An empty live set says "reclaim everything"; an empty union is a
+        // wiring bug. Refuse loudly (same posture as 1.1's can't-enumerate
+        // guard), never answer with the dangerous truth-shaped default.
+        let union = UnionLiveHashCollector::new(Vec::new());
+        assert!(union.collect_live_hashes().await.is_err());
     }
 }

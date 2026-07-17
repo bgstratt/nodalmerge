@@ -26,7 +26,7 @@ use nodalmerge_server::gc_service::{self, GcMode, GcServiceConfig};
 use nodalmerge_server::gc_store::{local_key_scheme, SqliteGcStore};
 use nodalmerge_server::room::{import_nodes, Rooms};
 use nodalmerge_server::store::{DirPersistence, SharedPersistence};
-use nodalmerge_server::studio_live_hashes::collect_studio_live_hashes;
+use nodalmerge_server::studio_live_hashes::{collect_studio_live_hashes, StudioLiveHashCollector};
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -368,8 +368,15 @@ fn gc_cfg(mode: GcMode, grace: Duration) -> GcServiceConfig {
         grace,
         max_deletes_per_run: 100,
         require_head_before_delete: true,
-        retain_intermediate_days: 30,
     }
+}
+
+/// Slice 7.5 — `run_new_coordinator_once` takes the live-set source by
+/// injection now; these tests compose the studio collector explicitly,
+/// exactly like `main.rs`/`server-s3/main.rs` do (retain days stays at the
+/// 30 the old `GcServiceConfig.retain_intermediate_days` field carried).
+fn studio_live(rooms: &Rooms) -> StudioLiveHashCollector {
+    StudioLiveHashCollector::new(rooms.clone(), 30)
 }
 
 #[tokio::test]
@@ -398,7 +405,7 @@ async fn dryrun_mutates_nothing() {
     let objects = Arc::new(LocalBlobObjectStore::new(&dir));
 
     let cfg = gc_cfg(GcMode::New(GcRunMode::DryRun), Duration::from_secs(3600));
-    let delta = gc_service::run_new_coordinator_once(&rooms, GcRunMode::DryRun, &cfg, Arc::clone(&inventory), pins, objects)
+    let delta = gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::DryRun, &cfg, Arc::clone(&inventory), pins, objects)
         .await
         .expect("dryrun must succeed");
     assert!(delta.marked_count >= 2, "expects at least tree+file marked live");
@@ -439,7 +446,7 @@ async fn markonly_marks_without_sweeping() {
     let objects = Arc::new(LocalBlobObjectStore::new(&dir));
     let cfg = gc_cfg(GcMode::New(GcRunMode::MarkOnly), Duration::from_secs(3600));
 
-    gc_service::run_new_coordinator_once(&rooms, GcRunMode::MarkOnly, &cfg, Arc::clone(&inventory), pins, objects)
+    gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::MarkOnly, &cfg, Arc::clone(&inventory), pins, objects)
         .await
         .expect("markonly must succeed");
 
@@ -485,7 +492,7 @@ async fn sweepsoft_then_sweephard_reclaims_orphan_and_respects_max_deletes() {
     // Short grace so hard-sweep is observable without sleeping 24h.
     let grace = Duration::from_millis(50);
     let cfg = gc_cfg(GcMode::New(GcRunMode::SweepSoft), grace);
-    let delta = gc_service::run_new_coordinator_once(&rooms, GcRunMode::SweepSoft, &cfg, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+    let delta = gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepSoft, &cfg, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
         .await
         .expect("sweepsoft must succeed");
     assert_eq!(delta.newly_pending_count, 2, "both orphans tombstoned");
@@ -505,7 +512,7 @@ async fn sweepsoft_then_sweephard_reclaims_orphan_and_respects_max_deletes() {
     // hard-deleted this run.
     let mut cfg_hard = gc_cfg(GcMode::New(GcRunMode::SweepHard), grace);
     cfg_hard.max_deletes_per_run = 1;
-    let delta = gc_service::run_new_coordinator_once(&rooms, GcRunMode::SweepHard, &cfg_hard, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+    let delta = gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepHard, &cfg_hard, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
         .await
         .expect("sweephard must succeed");
     assert_eq!(delta.hard_deleted_count, 1, "max_deletes_per_run must cap this run's deletes");
@@ -542,7 +549,7 @@ async fn re_referenced_during_grace_returns_active_and_survives() {
     let grace = Duration::from_secs(3600); // long — must not elapse in this test
 
     let cfg_soft = gc_cfg(GcMode::New(GcRunMode::SweepSoft), grace);
-    gc_service::run_new_coordinator_once(&rooms, GcRunMode::SweepSoft, &cfg_soft, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+    gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepSoft, &cfg_soft, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
         .await
         .unwrap();
     assert_eq!(inventory.asset_state(&revived.to_hex()), Some(AssetState::PendingDelete));
@@ -558,7 +565,7 @@ async fn re_referenced_during_grace_returns_active_and_survives() {
 
     // A markonly run re-marks it live -> Active, clearing pending_delete_at.
     let cfg_mark = gc_cfg(GcMode::New(GcRunMode::MarkOnly), grace);
-    gc_service::run_new_coordinator_once(&rooms, GcRunMode::MarkOnly, &cfg_mark, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+    gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::MarkOnly, &cfg_mark, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
         .await
         .unwrap();
     assert_eq!(inventory.asset_state(&revived.to_hex()), Some(AssetState::Active), "re-referenced blob must return to Active");
@@ -566,7 +573,7 @@ async fn re_referenced_during_grace_returns_active_and_survives() {
     // Even a hard sweep afterward must not delete it (still Active, not
     // PendingDelete, so it's never a hard-sweep candidate).
     let cfg_hard = gc_cfg(GcMode::New(GcRunMode::SweepHard), Duration::ZERO);
-    gc_service::run_new_coordinator_once(&rooms, GcRunMode::SweepHard, &cfg_hard, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+    gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepHard, &cfg_hard, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
         .await
         .unwrap();
     assert!(
@@ -602,7 +609,7 @@ async fn run_ledger_records_failure_and_performs_zero_deletes_on_fail_closed() {
     let objects = Arc::new(LocalBlobObjectStore::new(&dir));
     let cfg = gc_cfg(GcMode::New(GcRunMode::SweepHard), Duration::ZERO);
 
-    let result = gc_service::run_new_coordinator_once(&rooms, GcRunMode::SweepHard, &cfg, Arc::clone(&inventory), pins, objects).await;
+    let result = gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepHard, &cfg, Arc::clone(&inventory), pins, objects).await;
     assert!(result.is_err(), "fail-closed: the run must return Err");
 
     // Zero deletes: the orphan blob must still be on disk.
@@ -629,7 +636,7 @@ async fn inventory_state_survives_store_reopen() {
         let pins = Arc::new(StaticPinStore::new(std::iter::empty()));
         let objects = Arc::new(LocalBlobObjectStore::new(&dir));
         let cfg = gc_cfg(GcMode::New(GcRunMode::SweepSoft), Duration::from_secs(3600));
-        gc_service::run_new_coordinator_once(&rooms, GcRunMode::SweepSoft, &cfg, Arc::clone(&inventory), pins, objects)
+        gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepSoft, &cfg, Arc::clone(&inventory), pins, objects)
             .await
             .unwrap();
         assert_eq!(inventory.asset_state(&orphan.to_hex()), Some(AssetState::PendingDelete));
@@ -709,14 +716,14 @@ async fn ordinary_setblob_blob_must_survive_sweepsoft_then_sweephard() {
 
     let grace = Duration::from_millis(50);
     let cfg_soft = gc_cfg(GcMode::New(GcRunMode::SweepSoft), grace);
-    gc_service::run_new_coordinator_once(&rooms, GcRunMode::SweepSoft, &cfg_soft, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+    gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepSoft, &cfg_soft, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
         .await
         .expect("sweepsoft must succeed");
 
     tokio::time::sleep(Duration::from_millis(80)).await; // elapse grace
 
     let cfg_hard = gc_cfg(GcMode::New(GcRunMode::SweepHard), grace);
-    gc_service::run_new_coordinator_once(&rooms, GcRunMode::SweepHard, &cfg_hard, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+    gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepHard, &cfg_hard, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
         .await
         .expect("sweephard must succeed");
 

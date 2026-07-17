@@ -830,6 +830,41 @@ pub async fn collect_studio_live_hashes(
     Ok(live)
 }
 
+/// Slice 7.5 — [`collect_studio_live_hashes`] packaged as the
+/// [`crate::gc_service::LiveHashCollector`] the GC service takes by
+/// injection. `gc_service.rs` used to call the free function directly
+/// (compile-time studio knowledge in the generic service); now the
+/// composition layer (`main.rs`/`server-s3/main.rs`) builds one of these
+/// and hands it in, and the service knows only the trait.
+///
+/// Holds its own `Rooms` handle (`Rooms` is a cheap shared-state clone —
+/// the same rooms/caches/persistence the server runs on) plus the one knob
+/// the studio classification needs; a knob on the collector, not on
+/// `GcServiceConfig`, so the generic config carries no studio-only fields.
+///
+/// This module still lives in the `nodalmerge-server` crate because 6.4
+/// coupled its caches to `Rooms` (`gc_scan_caches`) — a physical move to a
+/// studio composition crate is filed as a follow-up, not done here.
+pub struct StudioLiveHashCollector {
+    rooms: Rooms,
+    retain_intermediate_days: i64,
+}
+
+impl StudioLiveHashCollector {
+    pub fn new(rooms: Rooms, retain_intermediate_days: i64) -> Self {
+        Self { rooms, retain_intermediate_days }
+    }
+}
+
+impl crate::gc_service::LiveHashCollector for StudioLiveHashCollector {
+    fn collect_live_hashes(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = GcResult<HashSet<String>>> + Send + '_>>
+    {
+        Box::pin(collect_studio_live_hashes(&self.rooms, self.retain_intermediate_days))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

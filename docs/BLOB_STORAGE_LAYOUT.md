@@ -176,6 +176,16 @@ A blob with hash `<hex>` exists as **exactly one** of:
 - Readers that verify on read verify the **decompressed** bytes. A corrupt
   frame or a decompressed-hash mismatch is treated as a missing blob
   (plus a warning), never served.
+  **Contractual exemption (decided 2026-07-16, blob-cas-remediation 3.2,
+  both runtimes):** the HTTP origin's zstd **pass-through** response
+  (`Accept-Encoding: zstd` → the stored frame byte-for-byte, no
+  decode-then-recode) does not — cannot, structurally — verify before
+  serving: the hash is of the plaintext, and checking the frame means the
+  full decompress the pass-through exists to avoid. On that path the
+  fetching client completes the check after decompress (all reference
+  readers do, as of blob-cas-remediation 3.3), so "never served" is an
+  end-to-end property there, not a server-side one. See
+  `BLOB_HTTP_SURFACE.md` "Content encoding" for the normative statement.
 - Writers compress at their discretion; parity does **not** require two
   stores to hold the same blob under the same encoding. Recommended
   defaults: compression **on** for server-side durable stores (zstd level

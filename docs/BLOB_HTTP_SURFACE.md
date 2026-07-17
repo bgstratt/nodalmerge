@@ -36,8 +36,11 @@ cf. `/sync/blob-url` + `/api/sync/blob-url`). The Rust server serves only `/blob
   hint, never identity) and `ETag: "<hash>"` (quoted).
 - Missing → **404**, body `{"error":"not found"}`.
 - Servers verify stored bytes against the hash on read where their store supports it
-  (the Rust store already does); a corrupt stored blob is served as 404, never as wrong
-  bytes.
+  (both stores do, as of blob-cas-remediation 3.2); a corrupt stored blob is served as
+  404, never as wrong bytes. **Scope: this server-side verify applies to identity
+  responses.** The zstd pass-through response is contractually exempt — see "Content
+  encoding" below; there, "never wrong bytes" is an end-to-end guarantee the client
+  completes after decompress, not a server-side one.
 
 ### HEAD
 - Same status codes as GET, no body. Exists for cheap existence checks (the reconcile
@@ -76,6 +79,20 @@ cf. `/sync/blob-url` + `/api/sync/blob-url`). The Rust server serves only `/blob
 - PUT with `Content-Encoding` is reserved; servers MAY reject it with **415** until
   implemented.
 - The hash is always BLAKE3 of the uncompressed bytes (layout invariant).
+- **Encoded pass-through exemption (contractual, decided 2026-07-16 —
+  blob-cas-remediation 3.2, both runtimes).** A zstd response is the stored at-rest
+  frame served **byte-for-byte** (`get_blob_encoded`, and the .NET encoded branch),
+  not decode-then-recode. The server structurally cannot verify it: the hash is of the
+  **plaintext**, so checking the frame means fully decompressing — the exact work the
+  pass-through exists to avoid. Integrity on this path is completed by the client
+  ("Clients MUST decompress before verifying/caching", above; the reference readers do —
+  `HttpRemoteBlobStoreProvider` since Phase 3, the web SDK since blob-cas-remediation
+  3.3). Accepted consequence: the same corrupt stored blob answers **404** on an
+  identity GET (verify-on-read fails) and **200 + the corrupt frame** on an encoded GET;
+  a client that decompresses and verifies rejects it there, so end-to-end "never wrong
+  bytes" holds. Deliberately **no** verify-on-encoded-GET option exists: it would
+  silently cost a full decompress per GET to buy a property the client already
+  provides.
 
 ## Storage
 

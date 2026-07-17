@@ -422,6 +422,14 @@ on:
       - "server/server/src/room.rs"
       - "server/server/src/tree_walk.rs"
       - "server/server/src/blob_http.rs"
+      # slice 7.1 — shared CLI-flag/GC-bootstrap module both main.rs and
+      # server-s3/main.rs now call through; previously two independently
+      # duplicated (drift-prone) copies inside each main.rs.
+      - "server/server/src/cli_args.rs"
+      # slice 7.3 — shared proleptic-Gregorian date module
+      # (civil_from_days/days_from_civil), previously one direction each,
+      # duplicated, inside blob_http.rs and studio_live_hashes.rs.
+      - "server/server/src/date_util.rs"
       - "server/server/src/gc_store.rs"
       # slice 2.4, latent finding — the WS blob-request bytes-over-WS
       # fallthrough must fall back to persistence.get_blob on an in-memory
@@ -513,6 +521,10 @@ on:
       - "hosts/dotnet/src/NodalMerge.Host.Composition/ChainedBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobLinkAggregator.cs"
       - "hosts/dotnet/src/NodalMerge.DotNetHost/WebApplicationExtensions.cs"
+      # slice 7.3 — shared canonical-blob-hash predicate, previously
+      # duplicated three times (WebApplicationExtensions, FileBlobGcCoordinator,
+      # FileBlobStoreProvider).
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/BlobHash.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
@@ -550,6 +562,14 @@ on:
       - "server/server/src/room.rs"
       - "server/server/src/tree_walk.rs"
       - "server/server/src/blob_http.rs"
+      # slice 7.1 — shared CLI-flag/GC-bootstrap module both main.rs and
+      # server-s3/main.rs now call through; previously two independently
+      # duplicated (drift-prone) copies inside each main.rs.
+      - "server/server/src/cli_args.rs"
+      # slice 7.3 — shared proleptic-Gregorian date module
+      # (civil_from_days/days_from_civil), previously one direction each,
+      # duplicated, inside blob_http.rs and studio_live_hashes.rs.
+      - "server/server/src/date_util.rs"
       - "server/server/src/gc_store.rs"
       # slice 2.4, latent finding — the WS blob-request bytes-over-WS
       # fallthrough must fall back to persistence.get_blob on an in-memory
@@ -641,6 +661,10 @@ on:
       - "hosts/dotnet/src/NodalMerge.Host.Composition/ChainedBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobLinkAggregator.cs"
       - "hosts/dotnet/src/NodalMerge.DotNetHost/WebApplicationExtensions.cs"
+      # slice 7.3 — shared canonical-blob-hash predicate, previously
+      # duplicated three times (WebApplicationExtensions, FileBlobGcCoordinator,
+      # FileBlobStoreProvider).
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/BlobHash.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
@@ -736,6 +760,12 @@ jobs:
 
       - name: Run gc_service unit suite (GcMode parsing + slice 7.5 UnionLiveHashCollector semantics — set union of members, fail-closed on any member error, refusal of the empty union; previously these ran in no workflow, the --lib filter above only covers store::)
         run: "cargo test -p nodalmerge-server --lib gc_service::"
+
+      - name: "Run cli_args unit suite (slice 7.1 -- the golden flag-to-config matrix for every parser both main.rs and server-s3/main.rs now share, incl. the GcSweepCommon bootstrap; previously these ran in no workflow, same --lib-filter blind spot the step above was added for)"
+        run: "cargo test -p nodalmerge-server --lib cli_args::"
+
+      - name: "Run date_util unit suite (slice 7.3 -- the civil_from_days/days_from_civil round-trip property test the two pre-extraction copies lacked, incl. the 2024-02-29 pin and century-boundary spot checks; previously these ran in no workflow, same --lib-filter blind spot)"
+        run: "cargo test -p nodalmerge-server --lib date_util::"
 
       - name: Run S3 key layout vectors + Delegate-mode hydrate/tree-walk unit gates (slice 2.2, finding #10)
         run: cargo test -p nodalmerge-s3-blobs --lib

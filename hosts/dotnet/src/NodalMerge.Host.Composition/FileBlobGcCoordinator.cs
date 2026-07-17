@@ -1,3 +1,5 @@
+using NodalMerge.Host.Abstractions;
+
 namespace NodalMerge.Host.Composition;
 
 public sealed record FileBlobGcPolicy(
@@ -164,7 +166,7 @@ public sealed class FileBlobGcCoordinator
     /// </summary>
     private static string? TryGetCanonicalBareHash(string name)
     {
-        if (IsCanonicalHashName(name))
+        if (BlobHash.IsCanonical(name))
         {
             return name;
         }
@@ -173,32 +175,13 @@ public sealed class FileBlobGcCoordinator
         if (name.EndsWith(zstSuffix, StringComparison.Ordinal))
         {
             var candidate = name[..^zstSuffix.Length];
-            if (IsCanonicalHashName(candidate))
+            if (BlobHash.IsCanonical(candidate))
             {
                 return candidate;
             }
         }
 
         return null;
-    }
-
-    private static bool IsCanonicalHashName(string name)
-    {
-        if (name.Length != 64)
-        {
-            return false;
-        }
-
-        foreach (var c in name)
-        {
-            var isLowerHex = (c is >= '0' and <= '9') || (c is >= 'a' and <= 'f');
-            if (!isLowerHex)
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     /// <summary>

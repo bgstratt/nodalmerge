@@ -73,6 +73,7 @@ use nodalmerge_gc::{GcError, GcResult};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::date_util::days_from_civil;
 use crate::room::Rooms;
 use crate::store::{hash_from_hex, BlobPersistence};
 use crate::tree_walk;
@@ -285,19 +286,6 @@ fn parse_timestamp_nanos(s: &str) -> Option<i128> {
     let days = days_from_civil(year, month, day);
     let secs = days * 86_400 + hour * 3600 + minute * 60 + second - offset_seconds;
     Some((secs as i128) * 1_000_000_000 + frac_nanos as i128)
-}
-
-/// Howard Hinnant's `days_from_civil` (inverse of `blob_http.rs`'s
-/// `civil_from_days`): proleptic-Gregorian (year, month, day) → days since
-/// 1970-01-01. <http://howardhinnant.github.io/date_algorithms.html#days_from_civil>
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400; // [0, 399]
-    let mm = m as i64;
-    let doy = (153 * (if mm > 2 { mm - 3 } else { mm + 9 }) + 2) / 5 + d as i64 - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    era * 146_097 + doe - 719_468
 }
 
 /// Convert `SystemTime` to nanoseconds since the Unix epoch for comparison

@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NodalMerge.DotNetHost.Ffi;
 using NodalMerge.DotNetHost.Runtime;
+using NodalMerge.Host.Abstractions;
 using NodalMerge.Host.Abstractions.Providers;
 using NodalMerge.Host.Composition;
 using System.Security.Cryptography;
@@ -950,7 +951,7 @@ public static class WebApplicationExtensions
 
     private static (int Status, string? Error) ValidateBlobRequest(HttpContext context, string hash, BlobHttpOptions options)
     {
-        if (!IsCanonicalBlobHash(hash))
+        if (!BlobHash.IsCanonical(hash))
         {
             return (StatusCodes.Status400BadRequest, "non-canonical hash");
         }
@@ -992,7 +993,7 @@ public static class WebApplicationExtensions
         BlobHttpOptions options,
         CancellationToken cancellationToken)
     {
-        if (!IsCanonicalBlobHash(hash))
+        if (!BlobHash.IsCanonical(hash))
         {
             return Results.Json(new { error = "non-canonical hash" }, statusCode: StatusCodes.Status400BadRequest);
         }
@@ -1086,24 +1087,6 @@ public static class WebApplicationExtensions
         }
 
         return (buffer.ToArray(), false);
-    }
-
-    private static bool IsCanonicalBlobHash(string hash)
-    {
-        if (hash.Length != 64)
-        {
-            return false;
-        }
-
-        foreach (var c in hash)
-        {
-            if (c is < '0' or > '9' && c is < 'a' or > 'f')
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     private static bool IsAuthorizedBlobRequest(HttpContext context, BlobHttpOptions options)

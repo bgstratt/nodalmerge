@@ -136,7 +136,7 @@ public sealed class LegacySyncBlobUrlCompatTests
         await app.StartAsync();
         var client = app.GetTestClient();
 
-        // Not 64 lowercase hex chars — the new route's IsCanonicalBlobHash
+        // Not 64 lowercase hex chars — the new route's BlobHash.IsCanonical
         // check would 400 this; the legacy route must accept any non-empty
         // hash, exactly as loose as `main` was.
         var response = await client.GetAsync("/sync/blob-url?hash=not-a-real-hash&op=get");

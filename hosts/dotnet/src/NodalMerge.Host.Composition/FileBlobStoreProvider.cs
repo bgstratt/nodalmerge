@@ -1,5 +1,6 @@
 using Blake3;
 using Microsoft.Extensions.Logging;
+using NodalMerge.Host.Abstractions;
 using NodalMerge.Host.Abstractions.Providers;
 
 namespace NodalMerge.Host.Composition;
@@ -33,7 +34,7 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
         // the store (writes reject it, see GetPath), so reads answer
         // Missing rather than throw — matching Rust readers, which treat
         // foreign names as absent (docs/BLOB_STORAGE_LAYOUT.md §3).
-        if (!IsCanonicalHash(hashHex))
+        if (!BlobHash.IsCanonical(hashHex))
         {
             return BlobReadResult.Missing;
         }
@@ -117,7 +118,7 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
     public ValueTask<bool> ExistsAsync(string hashHex, CancellationToken cancellationToken = default)
     {
         // Slice 5.2: non-canonical → false, same posture as TryGetBlobAsync.
-        if (!IsCanonicalHash(hashHex))
+        if (!BlobHash.IsCanonical(hashHex))
         {
             return ValueTask.FromResult(false);
         }
@@ -135,7 +136,7 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
     public async ValueTask<EncodedBlobResult> TryGetEncodedBlobAsync(string hashHex, CancellationToken ct = default)
     {
         // Slice 5.2: non-canonical → Missing, same posture as TryGetBlobAsync.
-        if (!IsCanonicalHash(hashHex))
+        if (!BlobHash.IsCanonical(hashHex))
         {
             return EncodedBlobResult.Missing;
         }
@@ -252,7 +253,7 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
         // Rust host can't read. The provider boundary now matches Rust:
         // exactly 64 lowercase hex, uppercase deliberately rejected rather
         // than normalized.
-        if (!IsCanonicalHash(hashHex))
+        if (!BlobHash.IsCanonical(hashHex))
         {
             throw new ArgumentException(
                 $"Blob hash must be exactly 64 lowercase hex characters, got '{hashHex}'.",
@@ -267,33 +268,6 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
     private string GetEncodedPath(string hashHex)
     {
         return GetPath(hashHex) + ".zst";
-    }
-
-    /// <summary>
-    /// Canonical on-disk blob name shape (docs/BLOB_STORAGE_LAYOUT.md §3):
-    /// exactly 64 lowercase hex characters. The .NET twin of Rust's
-    /// <c>is_canonical_blob_name</c> (store.rs) — anything else is foreign,
-    /// to be rejected by writers and treated as absent by readers, never
-    /// adopted.
-    /// </summary>
-    internal static bool IsCanonicalHash(string hashHex)
-    {
-        if (hashHex is not { Length: 64 })
-        {
-            return false;
-        }
-
-        foreach (var c in hashHex)
-        {
-            if (c is (>= '0' and <= '9') or (>= 'a' and <= 'f'))
-            {
-                continue;
-            }
-
-            return false;
-        }
-
-        return true;
     }
 
     /// <summary>

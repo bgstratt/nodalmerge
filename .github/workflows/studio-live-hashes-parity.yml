@@ -54,6 +54,11 @@ on:
     paths:
       - "engine/commands/work-unit-status-vectors.v1.json"
       - "server/server/src/studio_live_hashes.rs"
+      # slice 7.3 — studio_live_hashes.rs's timestamp parsing now calls the
+      # shared days_from_civil in date_util.rs (previously a local copy); a
+      # change there can break parse_timestamp_nanos without touching this
+      # file at all.
+      - "server/server/src/date_util.rs"
       # slice 2.2 — studio_live_hashes.rs resolves cas-tree snapshots through
       # tree_walk::walk_tree, which reads blobs through the BlobPersistence
       # trait in store.rs. Both suites below transitively exercise them, so a
@@ -75,6 +80,11 @@ on:
     paths:
       - "engine/commands/work-unit-status-vectors.v1.json"
       - "server/server/src/studio_live_hashes.rs"
+      # slice 7.3 — studio_live_hashes.rs's timestamp parsing now calls the
+      # shared days_from_civil in date_util.rs (previously a local copy); a
+      # change there can break parse_timestamp_nanos without touching this
+      # file at all.
+      - "server/server/src/date_util.rs"
       # slice 2.2 — studio_live_hashes.rs resolves cas-tree snapshots through
       # tree_walk::walk_tree, which reads blobs through the BlobPersistence
       # trait in store.rs. Both suites below transitively exercise them, so a

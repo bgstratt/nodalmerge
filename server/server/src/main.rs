@@ -1,6 +1,11 @@
 use nodalmerge_server::{
-    blob_http, gc_blob_objects, gc_pin_store, gc_service, gc_store, keypair, metrics, room, store,
-    studio_live_hashes, ws_handler,
+    blob_http, cli_args, gc_blob_objects, gc_service, gc_store, keypair, metrics, room, store,
+    ws_handler,
+};
+use nodalmerge_server::cli_args::{
+    parse_blob_compression_arg, parse_blob_token_arg, parse_broadcast_capacity_arg,
+    parse_i32_flag, parse_idle_timeout_arg, parse_peer_rate_bytes_arg, parse_peer_rate_nodes_arg,
+    parse_store_arg, parse_u64_flag, parse_usize_flag,
 };
 
 use std::sync::Arc;
@@ -175,23 +180,15 @@ async fn main() {
     let blob_gc_interval = parse_u64_flag(&args, "--blob-gc-interval", 0).unwrap_or(0);
     if blob_gc_interval > 0 {
         if rooms.persistence.is_durable() {
-            let grace = parse_u64_flag(&args, "--blob-gc-grace", 86400).unwrap_or(86400);
-            let gc_mode = parse_gc_mode_arg(&args).unwrap_or_default();
-            let gc_cfg = gc_service::GcServiceConfig {
-                mode: gc_mode,
-                grace: std::time::Duration::from_secs(grace),
-                max_deletes_per_run: parse_u64_flag(&args, "--gc-max-deletes-per-run", 100).unwrap_or(100),
-                require_head_before_delete: parse_bool_flag(&args, "--gc-require-head-before-delete", true),
-            };
-            // Slice 7.5 — `--gc-retain-intermediate-days` is a studio
-            // classification knob, so it rides on the studio collector
-            // (built below), not on the generic `GcServiceConfig`.
-            let retain_intermediate_days =
-                parse_i64_flag(&args, "--gc-retain-intermediate-days", 30).unwrap_or(30);
+            // Slice 7.1 — grace/gc_mode/max_deletes/require_head/
+            // retain_intermediate_days parsing + the studio-union live-hash
+            // collector + the admin pin store: byte-for-byte identical to
+            // server-s3/main.rs's copy, now shared in one place.
+            let common = cli_args::parse_gc_sweep_common(&args, &rooms);
             tracing::info!(
                 interval_secs = blob_gc_interval,
-                grace_secs = grace,
-                mode = ?gc_mode,
+                grace_secs = common.gc_cfg.grace.as_secs(),
+                mode = ?common.gc_cfg.mode,
                 "gc sweeper enabled"
             );
             // `rooms.persistence.is_durable()` already guarantees
@@ -199,31 +196,19 @@ async fn main() {
             // is never durable), but guard explicitly rather than assume.
             match (&store_path, &gc_inventory) {
                 (Some(path), Some(inventory)) => {
-                    let pins = std::sync::Arc::new(gc_pin_store::StaticPinStore::from_env_and_args(&args));
+                    // This binary always backs the GC object store with the
+                    // local on-disk blob root (`server-s3`'s binary is the
+                    // one that additionally selects an S3 object store —
+                    // see its own comment; that divergence is real, not
+                    // accidental, so it isn't shared here).
                     let objects = std::sync::Arc::new(gc_blob_objects::LocalBlobObjectStore::new(path));
-                    // Slice 7.5 — this binary is a studio composition, so
-                    // it injects the live-set source here; `gc_service`
-                    // itself no longer knows any concrete one. Slice 1.2 —
-                    // the source is the UNION of the studio-domain
-                    // classifier and the room-DAG SetBlob references (the
-                    // protection the legacy sweep always had): either alone
-                    // under-reports, and an under-reported live set is a
-                    // delete list.
-                    let live = std::sync::Arc::new(gc_service::UnionLiveHashCollector::new(vec![
-                        std::sync::Arc::new(studio_live_hashes::StudioLiveHashCollector::new(
-                            rooms.clone(),
-                            retain_intermediate_days,
-                        ))
-                            as std::sync::Arc<dyn gc_service::LiveHashCollector>,
-                        std::sync::Arc::new(room::RoomDagLiveHashCollector::new(rooms.clone())),
-                    ]));
                     let _handle = gc_service::spawn_gc_sweeper(
                         rooms.clone(),
                         std::time::Duration::from_secs(blob_gc_interval),
-                        gc_cfg,
-                        live,
+                        common.gc_cfg,
+                        common.live,
                         std::sync::Arc::clone(inventory),
-                        pins,
+                        common.pins,
                         objects,
                     );
                 }
@@ -287,352 +272,6 @@ async fn main() {
     tracing::info!(%addr, "NodalMerge server listening on ws://{addr}/ws/<room> and http://{addr}/blobs/<hash>");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
-}
-
-/// F4: Parse `--store <path>` (or `--store=<path>`) from the CLI.
-/// Returns `None` when absent, so the default stays in-memory.
-fn parse_store_arg(args: &[String]) -> Option<std::path::PathBuf> {
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        if a == "--store" {
-            return args.get(i + 1).map(std::path::PathBuf::from);
-        }
-        if let Some(val) = a.strip_prefix("--store=") {
-            return Some(std::path::PathBuf::from(val));
-        }
-        i += 1;
-    }
-    None
-}
-
-/// S3.1b: Parse `--blob-compression <zstd|off>` (or `--blob-compression=<...>`).
-/// Returns `None` when absent, so the caller applies the default (`zstd`,
-/// i.e. on) — see `docs/BLOB_STORAGE_LAYOUT.md` §8.
-fn parse_blob_compression_arg(args: &[String]) -> Option<String> {
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        if a == "--blob-compression" {
-            return args.get(i + 1).cloned();
-        }
-        if let Some(v) = a.strip_prefix("--blob-compression=") {
-            return Some(v.to_string());
-        }
-        i += 1;
-    }
-    None
-}
-
-/// S2.1b: Parse `--blob-token <token>` (or `--blob-token=<token>`), falling
-/// back to the `NODALMERGE_BLOB_TOKEN` env var when the flag is absent.
-/// `None` means the blob HTTP origin is anonymous (no token configured).
-fn parse_blob_token_arg(args: &[String]) -> Option<String> {
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        if a == "--blob-token" {
-            if let Some(v) = args.get(i + 1) {
-                return Some(v.clone());
-            }
-        }
-        if let Some(v) = a.strip_prefix("--blob-token=") {
-            return Some(v.to_string());
-        }
-        i += 1;
-    }
-    std::env::var("NODALMERGE_BLOB_TOKEN").ok().filter(|s| !s.is_empty())
-}
-
-/// Parse `--idle-timeout <seconds>` (or `--idle-timeout=<seconds>`).
-/// `0` disables eviction. Returns `None` to fall through to the default
-/// (300 s, 5 min). Invalid values also fall back to the default with a
-/// warning — the server does not refuse to start on a typo.
-fn parse_idle_timeout_arg(args: &[String]) -> Option<u64> {
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        let raw = if a == "--idle-timeout" {
-            args.get(i + 1).map(|s| s.as_str())
-        } else if let Some(v) = a.strip_prefix("--idle-timeout=") {
-            Some(v)
-        } else {
-            None
-        };
-        if let Some(s) = raw {
-            return match s.parse::<u64>() {
-                Ok(n) => Some(n),
-                Err(_) => {
-                    eprintln!("warning: --idle-timeout expects a non-negative integer (seconds); got {s:?}, using default 300");
-                    None
-                }
-            };
-        }
-        i += 1;
-    }
-    None
-}
-
-/// G1: Parse `--broadcast-capacity <N>` (or `--broadcast-capacity=<N>`).
-/// Returns `None` to fall through to the default (512). Zero or invalid
-/// values log a warning and fall back to the default — the server does
-/// not refuse to start on a typo, and `tokio::sync::broadcast::channel`
-/// rejects capacity=0 outright.
-fn parse_broadcast_capacity_arg(args: &[String]) -> Option<usize> {
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        let raw = if a == "--broadcast-capacity" {
-            args.get(i + 1).map(|s| s.as_str())
-        } else if let Some(v) = a.strip_prefix("--broadcast-capacity=") {
-            Some(v)
-        } else {
-            None
-        };
-        if let Some(s) = raw {
-            return match s.parse::<usize>() {
-                Ok(0) => {
-                    eprintln!("warning: --broadcast-capacity must be > 0; got 0, using default 512");
-                    None
-                }
-                Ok(n) => Some(n),
-                Err(_) => {
-                    eprintln!("warning: --broadcast-capacity expects a positive integer; got {s:?}, using default 512");
-                    None
-                }
-            };
-        }
-        i += 1;
-    }
-    None
-}
-
-/// G3: Parse `--peer-rate-nodes <N>` (or `--peer-rate-nodes=<N>`), the
-/// per-peer ceiling on inbound nodes per second. Returns `None` to fall
-/// through to the default (200 nodes/s). `0` explicitly disables the
-/// node-count limiter. Invalid values log a warning and fall back to the
-/// default.
-fn parse_peer_rate_nodes_arg(args: &[String]) -> Option<u32> {
-    parse_u32_flag(args, "--peer-rate-nodes", 200)
-}
-
-/// G3: Parse `--peer-rate-bytes <MIB>` (or `--peer-rate-bytes=<MIB>`), the
-/// per-peer ceiling on inbound decoded-pack *bytes* per second. The CLI
-/// value is in MiB for ergonomics; we convert to bytes here. Returns
-/// `None` to fall through to the default (4 MiB/s = 4 194 304 B/s). `0`
-/// explicitly disables the byte-rate limiter. Values that would overflow
-/// `u32` after MiB→bytes conversion fall back to the default with a
-/// warning.
-fn parse_peer_rate_bytes_arg(args: &[String]) -> Option<u32> {
-    // Read as u32 MiB, multiply by 1 MiB, saturating (u32::MAX ≈ 4 GiB).
-    let mib = parse_u32_flag(args, "--peer-rate-bytes", 4)?;
-    Some(mib.saturating_mul(1024 * 1024))
-}
-
-/// Shared helper for `--peer-rate-*` flags: parses a non-negative `u32`.
-/// `default_for_msg` is only used in the warning text so the operator
-/// sees the correct fallback per flag. Returns `None` when the flag is
-/// absent or invalid.
-fn parse_u32_flag(args: &[String], flag: &str, default_for_msg: u32) -> Option<u32> {
-    let eq_prefix = format!("{flag}=");
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        let raw = if a == flag {
-            args.get(i + 1).map(|s| s.as_str())
-        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
-            Some(v)
-        } else {
-            None
-        };
-        if let Some(s) = raw {
-            return match s.parse::<u32>() {
-                Ok(n) => Some(n),
-                Err(_) => {
-                    eprintln!("warning: {flag} expects a non-negative integer; got {s:?}, using default {default_for_msg}");
-                    None
-                }
-            };
-        }
-        i += 1;
-    }
-    None
-}
-
-/// G4: shared helper for `--blob-gc-*` flags (and anything else that wants
-/// a non-negative `u64`). Mirrors `parse_u32_flag`.
-fn parse_u64_flag(args: &[String], flag: &str, default_for_msg: u64) -> Option<u64> {
-    let eq_prefix = format!("{flag}=");
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        let raw = if a == flag {
-            args.get(i + 1).map(|s| s.as_str())
-        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
-            Some(v)
-        } else {
-            None
-        };
-        if let Some(s) = raw {
-            return match s.parse::<u64>() {
-                Ok(n) => Some(n),
-                Err(_) => {
-                    eprintln!("warning: {flag} expects a non-negative integer; got {s:?}, using default {default_for_msg}");
-                    None
-                }
-            };
-        }
-        i += 1;
-    }
-    None
-}
-
-/// E4: Parse a `usize` CLI flag (e.g. `--snapshot-interval 100`).
-fn parse_usize_flag(args: &[String], flag: &str, default_for_msg: usize) -> Option<usize> {
-    let eq_prefix = format!("{flag}=");
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        let raw = if a == flag {
-            args.get(i + 1).map(|s| s.as_str())
-        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
-            Some(v)
-        } else {
-            None
-        };
-        if let Some(s) = raw {
-            return match s.parse::<usize>() {
-                Ok(n) => Some(n),
-                Err(_) => {
-                    eprintln!("warning: {flag} expects a non-negative integer; got {s:?}, using default {default_for_msg}");
-                    None
-                }
-            };
-        }
-        i += 1;
-    }
-    None
-}
-
-/// S5.3: Parse `--gc-mode <off|legacy|dryrun|markonly|sweepsoft|sweephard>`
-/// (or `--gc-mode=<...>`). `None` when absent or unrecognized — callers fall
-/// back to `GcMode::default()` (`Legacy`, preserving pre-S5.3 behavior).
-fn parse_gc_mode_arg(args: &[String]) -> Option<gc_service::GcMode> {
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        let raw = if a == "--gc-mode" {
-            args.get(i + 1).map(|s| s.as_str())
-        } else if let Some(v) = a.strip_prefix("--gc-mode=") {
-            Some(v)
-        } else {
-            None
-        };
-        if let Some(s) = raw {
-            return match gc_service::GcMode::parse(s) {
-                Some(m) => Some(m),
-                None => {
-                    eprintln!(
-                        "warning: --gc-mode expects off|legacy|dryrun|markonly|sweepsoft|sweephard; got {s:?}, using default legacy"
-                    );
-                    None
-                }
-            };
-        }
-        i += 1;
-    }
-    None
-}
-
-/// S5.3: Parse a `bool` CLI flag (e.g. `--gc-require-head-before-delete
-/// false`). Accepts `true`/`false`/`1`/`0` (case-insensitive). Returns
-/// `default_for_msg` (not `Option`, since every caller of this flag wants a
-/// concrete value, not a further fallback decision) when absent or invalid.
-fn parse_bool_flag(args: &[String], flag: &str, default_for_msg: bool) -> bool {
-    let eq_prefix = format!("{flag}=");
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        let raw = if a == flag {
-            args.get(i + 1).map(|s| s.as_str())
-        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
-            Some(v)
-        } else {
-            None
-        };
-        if let Some(s) = raw {
-            return match s.to_ascii_lowercase().as_str() {
-                "true" | "1" => true,
-                "false" | "0" => false,
-                _ => {
-                    eprintln!(
-                        "warning: {flag} expects true/false/1/0; got {s:?}, using default {default_for_msg}"
-                    );
-                    default_for_msg
-                }
-            };
-        }
-        i += 1;
-    }
-    default_for_msg
-}
-
-/// S5.3: Parse an `i64` CLI flag (e.g. `--gc-retain-intermediate-days 30`).
-/// Mirrors `parse_i32_flag`; signed since it's compared against an `i128`
-/// nanosecond timestamp domain, not used as a byte-count/index.
-fn parse_i64_flag(args: &[String], flag: &str, default_for_msg: i64) -> Option<i64> {
-    let eq_prefix = format!("{flag}=");
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        let raw = if a == flag {
-            args.get(i + 1).map(|s| s.as_str())
-        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
-            Some(v)
-        } else {
-            None
-        };
-        if let Some(s) = raw {
-            return match s.parse::<i64>() {
-                Ok(n) => Some(n),
-                Err(_) => {
-                    eprintln!("warning: {flag} expects an integer; got {s:?}, using default {default_for_msg}");
-                    None
-                }
-            };
-        }
-        i += 1;
-    }
-    None
-}
-
-/// S3.1b: Parse an `i32` CLI flag (e.g. `--blob-compression-level 3`).
-/// Mirrors `parse_usize_flag`; signed because zstd's C API takes a signed
-/// level (negative "fast" levels are valid, even though we default to 3).
-fn parse_i32_flag(args: &[String], flag: &str, default_for_msg: i32) -> Option<i32> {
-    let eq_prefix = format!("{flag}=");
-    let mut i = 1;
-    while i < args.len() {
-        let a = &args[i];
-        let raw = if a == flag {
-            args.get(i + 1).map(|s| s.as_str())
-        } else if let Some(v) = a.strip_prefix(&eq_prefix) {
-            Some(v)
-        } else {
-            None
-        };
-        if let Some(s) = raw {
-            return match s.parse::<i32>() {
-                Ok(n) => Some(n),
-                Err(_) => {
-                    eprintln!("warning: {flag} expects an integer; got {s:?}, using default {default_for_msg}");
-                    None
-                }
-            };
-        }
-        i += 1;
-    }
-    None
 }
 
 /// D4: Replay a base64-encoded node pack and print resolved state + hash.

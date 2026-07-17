@@ -474,9 +474,12 @@ impl S3BlobStore {
     }
 
     /// Canonical relative layout: `<path_prefix>blake3/<hex>` — no room
-    /// segment, no sharding. See `docs/BLOB_STORAGE_LAYOUT.md`.
+    /// segment, no sharding. See `docs/BLOB_STORAGE_LAYOUT.md`. Delegates to
+    /// [`blake3_object_key`], the same derivation [`s3_key_scheme`] (below)
+    /// uses for the GC ledger's `KeyScheme` — slice 7.3, collapsing what
+    /// were two independent `format!`s that had to agree byte-for-byte.
     fn key_for(&self, hash: &Hash) -> String {
-        format!("{}blake3/{}", self.cfg.path_prefix, hash.to_hex())
+        blake3_object_key(&self.cfg.path_prefix, &hash.to_hex())
     }
 
     /// Presign a GET via object_store (Direct mode).
@@ -1201,12 +1204,23 @@ impl nodalmerge_gc::contracts::BlobObjectStore for S3BlobObjectStore {
     }
 }
 
+/// Slice 7.3 (blob-cas-remediation.md): the single `{path_prefix}blake3/{hex}`
+/// derivation shared by [`S3BlobStore::key_for`] (takes a typed [`Hash`]) and
+/// [`s3_key_scheme`] (takes an already-hex-encoded `&str`, for the GC
+/// ledger's `KeyScheme` closure). Both MUST agree byte-for-byte — a
+/// diverging copy here means GC HEADs/DELETEs a different object than the
+/// one blob traffic actually reads/writes — so this is the one place that
+/// spells the layout out; see `docs/BLOB_STORAGE_LAYOUT.md`.
+fn blake3_object_key(path_prefix: &str, hex_hash: &str) -> String {
+    format!("{path_prefix}blake3/{hex_hash}")
+}
+
 /// S5.3 — a `gc_store::KeyScheme` that derives `(bucket, object_key)` the
-/// same way [`S3BlobStore::key_for`] does (`{path_prefix}blake3/{hex}`), so
-/// `AssetRecord` rows the GC ledger writes line up with what
-/// [`S3BlobObjectStore`] actually HEADs/DELETEs.
+/// same way [`S3BlobStore::key_for`] does, so `AssetRecord` rows the GC
+/// ledger writes line up with what [`S3BlobObjectStore`] actually
+/// HEADs/DELETEs.
 pub fn s3_key_scheme(bucket: String, path_prefix: String) -> nodalmerge_server::gc_store::KeyScheme {
-    std::sync::Arc::new(move |hash: &str| (bucket.clone(), format!("{path_prefix}blake3/{hash}")))
+    std::sync::Arc::new(move |hash: &str| (bucket.clone(), blake3_object_key(&path_prefix, hash)))
 }
 
 #[cfg(test)]

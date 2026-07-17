@@ -15,7 +15,7 @@ public sealed class ProviderHttpEndpointTests
 {
     // Canonical 64-lowercase-hex test hash — matches the shared parity
     // vectors' `canonical_hash` (engine/commands/blob-layout-vectors.v1.json)
-    // so it satisfies IsCanonicalBlobHash / the blob-surface hash-validation
+    // so it satisfies BlobHash.IsCanonical / the blob-surface hash-validation
     // rule shared by GET/HEAD/PUT /blobs/{hash} and the new URL-resolution
     // endpoints.
     private const string CanonicalHash =

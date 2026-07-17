@@ -7,6 +7,10 @@ pub mod adapter_context;
 pub mod archive_adapter;
 pub mod archive_export;
 pub mod blob_http;
+pub mod cli_args;
+// Internal-only (both call sites live in this crate); no external consumer
+// needs it, so it stays crate-private unlike the other modules here.
+mod date_util;
 pub mod gc_adapter;
 pub mod gc_blob_objects;
 pub mod gc_pin_store;

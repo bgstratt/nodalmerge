@@ -98,6 +98,11 @@ on:
       # nodalmerge-server), so its wiring could break with CI green; the build
       # step below is the 8.0-convention stub for that gap.
       - "server/server-s3/**"
+      # slice 7.1 — server-s3/main.rs's GC-sweeper bootstrap (grace/gc_mode/
+      # studio-union collector/pin store) now calls through this shared
+      # module; a change here can break the compile gate below without
+      # touching anything under server/server-s3/**.
+      - "server/server/src/cli_args.rs"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
       - "server/server/src/gc_store.rs"
@@ -126,6 +131,11 @@ on:
       # nodalmerge-server), so its wiring could break with CI green; the build
       # step below is the 8.0-convention stub for that gap.
       - "server/server-s3/**"
+      # slice 7.1 — server-s3/main.rs's GC-sweeper bootstrap (grace/gc_mode/
+      # studio-union collector/pin store) now calls through this shared
+      # module; a change here can break the compile gate below without
+      # touching anything under server/server-s3/**.
+      - "server/server/src/cli_args.rs"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
       - "server/server/src/gc_store.rs"

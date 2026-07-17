@@ -69,6 +69,7 @@ use nodalmerge_gc::contracts::AssetInventoryStore;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::date_util::civil_from_days;
 use crate::room::Rooms;
 use crate::store::{hash_from_hex, is_canonical_blob_name};
 
@@ -496,7 +497,9 @@ async fn confirm_blob_uploaded(
 /// (`YYYY-MM-DDTHH:MM:SSZ`). Hand-rolled rather than pulling in `chrono`/
 /// `time` — no crate in this workspace currently depends on either, and
 /// `main.rs` already hand-rolls its own base64 codec for the same "don't
-/// add a dependency for one small pure function" reason.
+/// add a dependency for one small pure function" reason. The
+/// days-since-epoch → (y, m, d) conversion itself is shared —
+/// `crate::date_util::civil_from_days`, slice 7.3.
 fn format_iso8601_utc(unix_secs: u64) -> String {
     // Clamp rather than overflow on the (never-produced-in-this-codebase)
     // `u64::MAX` "unknown expiry" sentinel some `PresignedUrl` constructors
@@ -509,24 +512,6 @@ fn format_iso8601_utc(unix_secs: u64) -> String {
     let minute = (secs_of_day % 3600) / 60;
     let second = secs_of_day % 60;
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-/// Howard Hinnant's `civil_from_days`: days-since-epoch (1970-01-01) →
-/// (year, month, day), proleptic Gregorian. Pure integer arithmetic, no
-/// external date/time dependency.
-/// <http://howardhinnant.github.io/date_algorithms.html#civil_from_days>
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
-    let year = if m <= 2 { y + 1 } else { y };
-    (year, m, d)
 }
 
 /// Whether the request's `Accept-Encoding` header lists `zstd` (case-

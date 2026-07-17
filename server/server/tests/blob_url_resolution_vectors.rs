@@ -28,7 +28,7 @@ use nodalmerge_core::Hash;
 use nodalmerge_server::blob_http::{self, BlobHttpConfig};
 use nodalmerge_server::room::Rooms;
 use nodalmerge_server::store::{
-    BlobPersistence, Composite, DirPersistence, NoPersistence, PresignedUrl, SharedPersistence,
+    BlobPersistence, Composite, DirPersistence, NoPersistence, PersistBlobError, PresignedUrl, SharedPersistence,
 };
 use serde::Deserialize;
 use tower::ServiceExt;
@@ -74,7 +74,9 @@ struct FakePresignBackend {
 }
 
 impl BlobPersistence for FakePresignBackend {
-    fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) {}
+    fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) -> Result<(), PersistBlobError> {
+        Ok(())
+    }
 
     fn resolve_get_url(
         &self,

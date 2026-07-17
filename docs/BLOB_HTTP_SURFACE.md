@@ -59,6 +59,17 @@ cf. `/sync/blob-url` + `/api/sync/blob-url`). The Rust server serves only `/blob
 - Durability: PUT against a server without a durable blob store (e.g. Rust
   `NoPersistence`) is not meaningful; an origin deployment requires a durable store
   (Rust: `--store <path>`; .NET: `Providers:BlobStorage = File` or better).
+- Durability truthfulness (blob-cas-remediation.md slice 4.2, finding #8): a `200`/`201`
+  means the bytes are confirmed at rest as far as the configured store can confirm. A
+  persist failure is answered **503** `{"error":"blob write failed"}` when the backend
+  never answered (timeout / unreachable — retrying the same PUT is correct and
+  idempotent) or **500** (same body) when the write was attempted and reported failure
+  (disk full, permissions, bucket error reply). The server never answers `201` for a
+  write it could not confirm. This is a failure-path-only tightening of the pre-2026-07
+  behavior (which answered `201` unconditionally); success-path statuses are unchanged,
+  and clients already treat 5xx as retryable per "Client behavior" below. (.NET's
+  origin has always surfaced provider write exceptions as 500s; this brings the Rust
+  origin to parity and adds the 503 class.)
 
 ### Auth (v1)
 - Optional static bearer token. When the server has **no token configured**, the blob

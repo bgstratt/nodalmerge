@@ -84,6 +84,17 @@ name: blob-layout-parity
 #                                                 panic-in-blocking-op→500
 #                                                 pin. Docker-free: the slow
 #                                                 store is an in-test fake)
+#   server/server/tests/blob_put_durability.rs (slice 4.2, finding #8 — PUT
+#                                                 must not lie about durability:
+#                                                 a failed persist_blob answers
+#                                                 503 (backend unavailable) or
+#                                                 500 (write failed), leaves NO
+#                                                 Active GC-inventory row, and a
+#                                                 later GET/HEAD agrees. Real
+#                                                 DirPersistence fs failure +
+#                                                 injectable fake + S3BlobStore
+#                                                 vs a stalled TcpListener —
+#                                                 Docker-free, so it lives here)
 #   server/server/tests/blob_relay_nonhydrating_backend.rs (S4.2 relay
 #                                                 contract; previously shipped
 #                                                 without a CI step — added
@@ -309,6 +320,13 @@ on:
       # never park the async workers; a panic in the offloaded op maps to 500.
       # Docker-free (the slow store is an in-test fake), so it lives here.
       - "server/server/tests/blob_http_offload.rs"
+      # slice 4.2 (finding #8) — PUT durability truthfulness gate: a failed
+      # persist must answer 5xx (503 unavailable / 500 write-failed) and leave
+      # NO Active inventory row; GET/HEAD stay consistent. Covers Dir (real fs
+      # failure), an injectable failing fake, and S3BlobStore against a stalled
+      # TcpListener — Docker-free by the same reasoning as bridge_timeouts.rs,
+      # so it lives here rather than blob-s3-gc-minio.yml.
+      - "server/server/tests/blob_put_durability.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -390,6 +408,13 @@ on:
       # never park the async workers; a panic in the offloaded op maps to 500.
       # Docker-free (the slow store is an in-test fake), so it lives here.
       - "server/server/tests/blob_http_offload.rs"
+      # slice 4.2 (finding #8) — PUT durability truthfulness gate: a failed
+      # persist must answer 5xx (503 unavailable / 500 write-failed) and leave
+      # NO Active inventory row; GET/HEAD stay consistent. Covers Dir (real fs
+      # failure), an injectable failing fake, and S3BlobStore against a stalled
+      # TcpListener — Docker-free by the same reasoning as bridge_timeouts.rs,
+      # so it lives here rather than blob-s3-gc-minio.yml.
+      - "server/server/tests/blob_put_durability.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -470,6 +495,9 @@ jobs:
 
       - name: Run blob HTTP off-worker scheduling gate (slice 6.2 — blocking store work (I/O, BLAKE3, zstd, the 6.1 S3 bridge) must run on the blocking pool, never park the async workers; a panic in the offloaded op must map to a logged 500, not a hang or silent success)
         run: cargo test -p nodalmerge-server --test blob_http_offload
+
+      - name: Run PUT durability-truthfulness gate (slice 4.2, finding #8 — a failed persist_blob must answer 5xx and leave no Active inventory row, never a 201 with nothing durably stored; Docker-free, the stalled bucket is an in-test TcpListener)
+        run: cargo test -p nodalmerge-server --test blob_put_durability
 
       - name: Run S3 key layout vectors + Delegate-mode hydrate/tree-walk unit gates (slice 2.2, finding #10)
         run: cargo test -p nodalmerge-s3-blobs --lib

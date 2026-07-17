@@ -93,7 +93,7 @@ async fn room_survives_restart_with_nodes_and_blobs() {
         .await;
         assert_eq!(accepted, 4);
         assert!(errs.is_empty());
-        persistence.persist_blob(&blob_hash, &blob_bytes);
+        persistence.persist_blob(&blob_hash, &blob_bytes).unwrap();
         drop(room);
     }
 

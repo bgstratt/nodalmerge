@@ -435,7 +435,7 @@ mod tests {
         let blob = b"export-blob".to_vec();
         let hash = Hash::of(&blob);
         room.blobs.write().await.put(blob.clone());
-        room.persistence.persist_blob(&hash, &blob);
+        room.persistence.persist_blob(&hash, &blob).expect("test seed blob should persist");
     }
 
     #[tokio::test]

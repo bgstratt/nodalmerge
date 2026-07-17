@@ -27,7 +27,7 @@ use std::collections::HashMap as StdHashMap;
 use std::sync::Mutex;
 
 use nodalmerge_core::Hash;
-use nodalmerge_server::store::BlobPersistence;
+use nodalmerge_server::store::{BlobPersistence, PersistBlobError};
 use nodalmerge_server::tree_walk::{walk_tree, TreeWalkError};
 
 #[derive(Default, Debug)]
@@ -48,8 +48,9 @@ impl BlobPersistence for MemBlobs {
     fn get_blob(&self, hash: &Hash) -> Option<Vec<u8>> {
         self.map.lock().unwrap().get(hash).cloned()
     }
-    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), PersistBlobError> {
         self.map.lock().unwrap().insert(*hash, bytes.to_vec());
+        Ok(())
     }
 }
 

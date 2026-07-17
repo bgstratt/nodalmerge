@@ -46,9 +46,13 @@
 //! S6.2 (blob-cas-remediation.md): every handler splits into a cheap, pure
 //! validation prefix that stays on the async worker and a store-touching
 //! tail that runs on the blocking pool via [`off_worker`] — see its doc for
-//! why. Scheduling only: statuses, bodies, headers, and the order of
-//! side effects within a request (hash → inventory mark → store) are
-//! unchanged.
+//! why.
+//!
+//! S4.2b (blob-cas-remediation.md slice 4.2, finding #8): PUT no longer
+//! lies about durability. `persist_blob` is fallible at the trait level, a
+//! failed write returns 5xx (503 backend-unavailable / 500 write-failed),
+//! and the GC-inventory `Active` mark happens only AFTER a confirmed write
+//! — see `put_blob`'s ordering comment.
 
 use std::sync::Arc;
 
@@ -609,8 +613,20 @@ async fn put_blob(
     // S6.2 — everything from here down runs off the async worker: the
     // BLAKE3 hash of an up-to-64 MiB body, the SQLite inventory upsert,
     // and the store round trip (file I/O, or a bucket HEAD + PUT through
-    // the thread-blocking bridge on S3 backends). Order within the request
-    // is unchanged: hash → 422 check → inventory mark → dedupe → persist.
+    // the thread-blocking bridge on S3 backends).
+    //
+    // S4.2b (finding #8) — order within the request is: hash → 422 check →
+    // dedupe → persist → inventory mark → status. The inventory `Active`
+    // upsert comes strictly AFTER a confirmed write (either dedupe branch:
+    // the bytes already exist; or a persist that returned `Ok`). It used to
+    // come before, which combined with the infallible-`persist_blob` 201 to
+    // make a failed write invisible twice over: the client dropped its copy
+    // on the 201, and the 1.3 upload-window union
+    // (`Rooms::collect_recent_upload_hashes` reading recent `Active` rows)
+    // "protected" a hash the store never held — until the window lapsed and
+    // there was nothing to reclaim, or worse, a later identical upload was
+    // deduped against a phantom. A failed persist now returns 5xx and
+    // leaves NO `Active` row, so GC state and store state agree.
     let persistence = Arc::clone(&rooms.persistence);
     let gc_inventory = cfg.gc_inventory.clone();
     off_worker(move || {
@@ -623,23 +639,57 @@ async fn put_blob(
                 .into_response();
         }
 
-        // S5.3: either branch below means the bytes now genuinely exist under
-        // `hash_hex` — mark it Active immediately (see `gc_inventory`'s doc).
-        if let Some(inv) = &gc_inventory {
-            if let Err(e) = inv.upsert_active_seen(UPLOAD_MARK_SENTINEL, &hash_hex, std::time::SystemTime::now()) {
-                tracing::warn!(?e, hash = %hash_hex, "gc inventory upsert after PUT failed");
-            }
-        }
-
         if persistence.has_blob(&path_hash) {
+            // Bytes already durably present — mark and answer 200.
+            mark_upload_active(&gc_inventory, &hash_hex);
             return StatusCode::OK.into_response();
         }
 
-        persistence.persist_blob(&path_hash, &body);
+        if let Err(e) = persistence.persist_blob(&path_hash, &body) {
+            // No inventory mark: nothing was confirmed stored, so nothing
+            // may look live to GC. The status split is the error's own
+            // classification — see `PersistBlobError`'s variant docs.
+            tracing::error!(%e, hash = %hash_hex, "blob PUT persist failed");
+            return persist_failure_response(&e);
+        }
+        mark_upload_active(&gc_inventory, &hash_hex);
         StatusCode::CREATED.into_response()
     })
     .await
     .unwrap_or_else(|resp| resp)
+}
+
+/// S5.3/S4.2b: upsert `hash_hex` as `Active` in the GC inventory — called
+/// only once the bytes are confirmed to exist (dedupe hit, or persist `Ok`).
+/// An upsert *failure* stays warn-only on purpose: the bytes ARE durable at
+/// this point, so failing the request would tell the client to re-send data
+/// the server already holds; the cost is bounded (the 1.3 upload-window
+/// union won't protect this hash until its `SetBlob` op lands — the same
+/// fail-open inventory-read shape already filed under 1.3's follow-ups,
+/// which wants one decision, not another local patch).
+fn mark_upload_active(gc_inventory: &Option<Arc<dyn AssetInventoryStore>>, hash_hex: &str) {
+    if let Some(inv) = gc_inventory {
+        if let Err(e) =
+            inv.upsert_active_seen(UPLOAD_MARK_SENTINEL, hash_hex, std::time::SystemTime::now())
+        {
+            tracing::warn!(?e, hash = %hash_hex, "gc inventory upsert after PUT failed");
+        }
+    }
+}
+
+/// S4.2b status mapping: `Unavailable` (backend never answered — timeout,
+/// dead bridge, unreachable endpoint) is `503 Service Unavailable`, because
+/// retrying the same PUT is exactly right and idempotent under content
+/// addressing; `Backend` (the write was attempted and reported failure —
+/// disk full, permissions, bucket error reply) is `500`, because the origin
+/// is broken and a retry alone won't fix it.
+fn persist_failure_response(e: &crate::store::PersistBlobError) -> Response {
+    use crate::store::PersistBlobError;
+    let status = match e {
+        PersistBlobError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        PersistBlobError::Backend(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(json!({"error": "blob write failed"}))).into_response()
 }
 
 /// `None` = authorized (or anonymous access, when no token is configured).

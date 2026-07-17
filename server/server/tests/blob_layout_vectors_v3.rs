@@ -204,7 +204,7 @@ async fn compression_on_round_trip_smaller_on_disk_and_byte_identical() {
 
     let payload = compressible_payload();
     let hash = Hash::of(&payload);
-    store.persist_blob(&hash, &payload);
+    store.persist_blob(&hash, &payload).unwrap();
 
     let encoded_path = dir.join("blobs").join("blake3").join(format!("{}.zst", hash.to_hex()));
     let identity_path = dir.join("blobs").join("blake3").join(hash.to_hex());
@@ -236,7 +236,7 @@ async fn compression_on_corrupt_zst_on_disk_yields_none() {
 
     let payload = compressible_payload();
     let hash = Hash::of(&payload);
-    store.persist_blob(&hash, &payload);
+    store.persist_blob(&hash, &payload).unwrap();
 
     let encoded_path = dir.join("blobs").join("blake3").join(format!("{}.zst", hash.to_hex()));
     assert!(encoded_path.is_file());
@@ -264,7 +264,7 @@ async fn compression_on_small_blob_stays_identity() {
     let payload = b"tiny payload, well under min_bytes".to_vec();
     assert!(payload.len() < cfg.min_bytes);
     let hash = Hash::of(&payload);
-    store.persist_blob(&hash, &payload);
+    store.persist_blob(&hash, &payload).unwrap();
 
     let identity_path = dir.join("blobs").join("blake3").join(hash.to_hex());
     let encoded_path = dir.join("blobs").join("blake3").join(format!("{}.zst", hash.to_hex()));
@@ -287,7 +287,7 @@ async fn compression_on_incompressible_blob_stays_identity() {
     let payload = incompressible_payload();
     assert!(payload.len() >= cfg.min_bytes);
     let hash = Hash::of(&payload);
-    store.persist_blob(&hash, &payload);
+    store.persist_blob(&hash, &payload).unwrap();
 
     let identity_path = dir.join("blobs").join("blake3").join(hash.to_hex());
     let encoded_path = dir.join("blobs").join("blake3").join(format!("{}.zst", hash.to_hex()));
@@ -336,7 +336,7 @@ async fn compression_off_reader_still_reads_zst_written_by_compression_on_store(
     let writer = DirPersistence::open_with_compression(&dir, on_cfg).unwrap();
     let payload = compressible_payload();
     let hash = Hash::of(&payload);
-    writer.persist_blob(&hash, &payload);
+    writer.persist_blob(&hash, &payload).unwrap();
     drop(writer);
 
     let reader: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap()); // compression off

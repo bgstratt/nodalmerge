@@ -136,15 +136,15 @@ async fn multi_room_live_set_matches_hand_computed_union() {
     // tree blob referencing one file each. ──────────────────────────────
     let room_a = rooms.get_or_create("repo/repo-a").await;
     let (file_x, file_x_bytes) = (Hash::of(b"file-x-contents"), b"file-x-contents".to_vec());
-    persistence.persist_blob(&file_x, &file_x_bytes);
+    persistence.persist_blob(&file_x, &file_x_bytes).unwrap();
     let (tree0, tree0_bytes) = tree_v2_blob(serde_json::json!([{"n":"x.txt","k":"f","h":file_x.to_hex()}]));
-    persistence.persist_blob(&tree0, &tree0_bytes);
+    persistence.persist_blob(&tree0, &tree0_bytes).unwrap();
     room_a.blobs.write().await.put(tree0_bytes.clone());
 
     let (file_y, file_y_bytes) = (Hash::of(b"file-y-contents"), b"file-y-contents".to_vec());
-    persistence.persist_blob(&file_y, &file_y_bytes);
+    persistence.persist_blob(&file_y, &file_y_bytes).unwrap();
     let (tree1, tree1_bytes) = tree_v2_blob(serde_json::json!([{"n":"y.txt","k":"f","h":file_y.to_hex()}]));
-    persistence.persist_blob(&tree1, &tree1_bytes);
+    persistence.persist_blob(&tree1, &tree1_bytes).unwrap();
 
     install_studio_entry(
         &room_a, &sk, "studio/repository-snapshot/v1/gen-0",
@@ -159,14 +159,14 @@ async fn multi_room_live_set_matches_hand_computed_union() {
     // must NOT be live) plus a head generation. ─────────────────────────
     let room_b = rooms.get_or_create("repo/repo-b").await;
     let (file_stale, file_stale_bytes) = (Hash::of(b"stale-unique-file"), b"stale-unique-file".to_vec());
-    persistence.persist_blob(&file_stale, &file_stale_bytes);
+    persistence.persist_blob(&file_stale, &file_stale_bytes).unwrap();
     let (tree_stale, tree_stale_bytes) = tree_v2_blob(serde_json::json!([{"n":"s.txt","k":"f","h":file_stale.to_hex()}]));
-    persistence.persist_blob(&tree_stale, &tree_stale_bytes);
+    persistence.persist_blob(&tree_stale, &tree_stale_bytes).unwrap();
 
     let (file_head_b, file_head_b_bytes) = (Hash::of(b"repo-b-head-file"), b"repo-b-head-file".to_vec());
-    persistence.persist_blob(&file_head_b, &file_head_b_bytes);
+    persistence.persist_blob(&file_head_b, &file_head_b_bytes).unwrap();
     let (tree_head_b, tree_head_b_bytes) = tree_v2_blob(serde_json::json!([{"n":"h.txt","k":"f","h":file_head_b.to_hex()}]));
-    persistence.persist_blob(&tree_head_b, &tree_head_b_bytes);
+    persistence.persist_blob(&tree_head_b, &tree_head_b_bytes).unwrap();
 
     install_studio_entry(
         &room_b, &sk, "studio/repository-snapshot/v1/gen-0",
@@ -187,9 +187,9 @@ async fn multi_room_live_set_matches_hand_computed_union() {
     // unconditionally per the conservative non-repo-room rule. ──────────
     let room_legacy = rooms.get_or_create("studio").await;
     let (file_w, file_w_bytes) = (Hash::of(b"legacy-room-file"), b"legacy-room-file".to_vec());
-    persistence.persist_blob(&file_w, &file_w_bytes);
+    persistence.persist_blob(&file_w, &file_w_bytes).unwrap();
     let (tree_w, tree_w_bytes) = tree_v2_blob(serde_json::json!([{"n":"w.txt","k":"f","h":file_w.to_hex()}]));
-    persistence.persist_blob(&tree_w, &tree_w_bytes);
+    persistence.persist_blob(&tree_w, &tree_w_bytes).unwrap();
     install_studio_entry(
         &room_legacy, &sk, "studio/repository-snapshot/v1/legacy-gen",
         snapshot_envelope("legacy-gen", "repo-legacy", 0, "2000-01-01T00:00:00Z", &tree_w.to_hex(), None, None, None),
@@ -233,20 +233,20 @@ async fn expired_intermediate_generation_without_shared_blobs_is_excluded() {
     let room = rooms.get_or_create("repo/repo-c").await;
 
     let (file_bootstrap, fb_bytes) = (Hash::of(b"bootstrap-file"), b"bootstrap-file".to_vec());
-    persistence.persist_blob(&file_bootstrap, &fb_bytes);
+    persistence.persist_blob(&file_bootstrap, &fb_bytes).unwrap();
     let (tree_bootstrap, tb_bytes) = tree_v2_blob(serde_json::json!([{"n":"b.txt","k":"f","h":file_bootstrap.to_hex()}]));
-    persistence.persist_blob(&tree_bootstrap, &tb_bytes);
+    persistence.persist_blob(&tree_bootstrap, &tb_bytes).unwrap();
 
     let (file_unique_stale, fus_bytes) = (Hash::of(b"unique-stale-file"), b"unique-stale-file".to_vec());
-    persistence.persist_blob(&file_unique_stale, &fus_bytes);
+    persistence.persist_blob(&file_unique_stale, &fus_bytes).unwrap();
     let (tree_unique_stale, tus_bytes) =
         tree_v2_blob(serde_json::json!([{"n":"u.txt","k":"f","h":file_unique_stale.to_hex()}]));
-    persistence.persist_blob(&tree_unique_stale, &tus_bytes);
+    persistence.persist_blob(&tree_unique_stale, &tus_bytes).unwrap();
 
     let (file_head, fh_bytes) = (Hash::of(b"repo-c-head-file"), b"repo-c-head-file".to_vec());
-    persistence.persist_blob(&file_head, &fh_bytes);
+    persistence.persist_blob(&file_head, &fh_bytes).unwrap();
     let (tree_head, th_bytes) = tree_v2_blob(serde_json::json!([{"n":"h.txt","k":"f","h":file_head.to_hex()}]));
-    persistence.persist_blob(&tree_head, &th_bytes);
+    persistence.persist_blob(&tree_head, &th_bytes).unwrap();
 
     install_studio_entry(
         &room, &sk, "studio/repository-snapshot/v1/gen-0",
@@ -295,19 +295,19 @@ async fn active_work_unit_seed_stays_live_past_the_retention_window() {
     // Bootstrap generation with its OWN unique tree — not shared with
     // gen-seed below (see the isolation note above).
     let (file_bootstrap, fb_bytes) = (Hash::of(b"repo-d-bootstrap-file"), b"repo-d-bootstrap-file".to_vec());
-    persistence.persist_blob(&file_bootstrap, &fb_bytes);
+    persistence.persist_blob(&file_bootstrap, &fb_bytes).unwrap();
     let (tree_bootstrap, tb_bytes) = tree_v2_blob(serde_json::json!([{"n":"b.txt","k":"f","h":file_bootstrap.to_hex()}]));
-    persistence.persist_blob(&tree_bootstrap, &tb_bytes);
+    persistence.persist_blob(&tree_bootstrap, &tb_bytes).unwrap();
 
     let (file_seed, fs_bytes) = (Hash::of(b"seed-file"), b"seed-file".to_vec());
-    persistence.persist_blob(&file_seed, &fs_bytes);
+    persistence.persist_blob(&file_seed, &fs_bytes).unwrap();
     let (tree_seed, ts_bytes) = tree_v2_blob(serde_json::json!([{"n":"s.txt","k":"f","h":file_seed.to_hex()}]));
-    persistence.persist_blob(&tree_seed, &ts_bytes);
+    persistence.persist_blob(&tree_seed, &ts_bytes).unwrap();
 
     let (file_head, fh_bytes) = (Hash::of(b"repo-d-head"), b"repo-d-head".to_vec());
-    persistence.persist_blob(&file_head, &fh_bytes);
+    persistence.persist_blob(&file_head, &fh_bytes).unwrap();
     let (tree_head, th_bytes) = tree_v2_blob(serde_json::json!([{"n":"h.txt","k":"f","h":file_head.to_hex()}]));
-    persistence.persist_blob(&tree_head, &th_bytes);
+    persistence.persist_blob(&tree_head, &th_bytes).unwrap();
 
     install_studio_entry(
         &room, &sk, "studio/repository-snapshot/v1/gen-0",
@@ -381,9 +381,9 @@ async fn dryrun_mutates_nothing() {
     let room = rooms.get_or_create("repo/repo-dry").await;
 
     let (file, file_bytes) = (Hash::of(b"dryrun-live-file"), b"dryrun-live-file".to_vec());
-    persistence.persist_blob(&file, &file_bytes);
+    persistence.persist_blob(&file, &file_bytes).unwrap();
     let (tree, tree_bytes) = tree_v2_blob(serde_json::json!([{"n":"f.txt","k":"f","h":file.to_hex()}]));
-    persistence.persist_blob(&tree, &tree_bytes);
+    persistence.persist_blob(&tree, &tree_bytes).unwrap();
     install_studio_entry(
         &room, &sk, "studio/repository-snapshot/v1/gen-0",
         snapshot_envelope("gen-0", "repo-dry", 0, "2020-01-01T00:00:00Z", &tree.to_hex(), None, Some("Bootstrap"), None),
@@ -391,7 +391,7 @@ async fn dryrun_mutates_nothing() {
 
     // An orphan blob nothing references — dryrun must not touch it either.
     let (orphan, orphan_bytes) = (Hash::of(b"dryrun-orphan"), b"dryrun-orphan".to_vec());
-    persistence.persist_blob(&orphan, &orphan_bytes);
+    persistence.persist_blob(&orphan, &orphan_bytes).unwrap();
 
     let inventory = Arc::new(SqliteGcStore::open(&dir, local_key_scheme()).unwrap());
     let pins = Arc::new(StaticPinStore::new(std::iter::empty()));
@@ -426,9 +426,9 @@ async fn markonly_marks_without_sweeping() {
     let room = rooms.get_or_create("repo/repo-mark").await;
 
     let (file, file_bytes) = (Hash::of(b"markonly-file"), b"markonly-file".to_vec());
-    persistence.persist_blob(&file, &file_bytes);
+    persistence.persist_blob(&file, &file_bytes).unwrap();
     let (tree, tree_bytes) = tree_v2_blob(serde_json::json!([{"n":"f.txt","k":"f","h":file.to_hex()}]));
-    persistence.persist_blob(&tree, &tree_bytes);
+    persistence.persist_blob(&tree, &tree_bytes).unwrap();
     install_studio_entry(
         &room, &sk, "studio/repository-snapshot/v1/gen-0",
         snapshot_envelope("gen-0", "repo-mark", 0, "2020-01-01T00:00:00Z", &tree.to_hex(), None, Some("Bootstrap"), None),
@@ -458,9 +458,9 @@ async fn sweepsoft_then_sweephard_reclaims_orphan_and_respects_max_deletes() {
     let room = rooms.get_or_create("repo/repo-soft").await;
 
     let (file, file_bytes) = (Hash::of(b"softhard-live-file"), b"softhard-live-file".to_vec());
-    persistence.persist_blob(&file, &file_bytes);
+    persistence.persist_blob(&file, &file_bytes).unwrap();
     let (tree, tree_bytes) = tree_v2_blob(serde_json::json!([{"n":"f.txt","k":"f","h":file.to_hex()}]));
-    persistence.persist_blob(&tree, &tree_bytes);
+    persistence.persist_blob(&tree, &tree_bytes).unwrap();
     install_studio_entry(
         &room, &sk, "studio/repository-snapshot/v1/gen-0",
         snapshot_envelope("gen-0", "repo-soft", 0, "2020-01-01T00:00:00Z", &tree.to_hex(), None, Some("Bootstrap"), None),
@@ -473,8 +473,8 @@ async fn sweepsoft_then_sweephard_reclaims_orphan_and_respects_max_deletes() {
     // listing-based drift job; see the helper's doc).
     let (orphan1, orphan1_bytes) = (Hash::of(b"orphan-one"), b"orphan-one".to_vec());
     let (orphan2, orphan2_bytes) = (Hash::of(b"orphan-two"), b"orphan-two".to_vec());
-    persistence.persist_blob(&orphan1, &orphan1_bytes);
-    persistence.persist_blob(&orphan2, &orphan2_bytes);
+    persistence.persist_blob(&orphan1, &orphan1_bytes).unwrap();
+    persistence.persist_blob(&orphan2, &orphan2_bytes).unwrap();
 
     let inventory = Arc::new(SqliteGcStore::open(&dir, local_key_scheme()).unwrap());
     seed_prior_active(&inventory, &orphan1);
@@ -533,7 +533,7 @@ async fn re_referenced_during_grace_returns_active_and_survives() {
     // mark pass — see `seed_prior_active`'s doc for why that's required for
     // this design to ever consider it a sweep candidate).
     let (revived, revived_bytes) = (Hash::of(b"about-to-be-revived"), b"about-to-be-revived".to_vec());
-    persistence.persist_blob(&revived, &revived_bytes);
+    persistence.persist_blob(&revived, &revived_bytes).unwrap();
 
     let inventory = Arc::new(SqliteGcStore::open(&dir, local_key_scheme()).unwrap());
     seed_prior_active(&inventory, &revived);
@@ -550,7 +550,7 @@ async fn re_referenced_during_grace_returns_active_and_survives() {
     // Now reference it: install a v2 tree blob + a Bootstrap snapshot
     // pointing at it, so the next mark pass sees it live again.
     let (tree, tree_bytes) = tree_v2_blob(serde_json::json!([{"n":"r.txt","k":"f","h":revived.to_hex()}]));
-    persistence.persist_blob(&tree, &tree_bytes);
+    persistence.persist_blob(&tree, &tree_bytes).unwrap();
     install_studio_entry(
         &room, &sk, "studio/repository-snapshot/v1/gen-0",
         snapshot_envelope("gen-0", "repo-revive", 0, "2020-01-01T00:00:00Z", &tree.to_hex(), None, Some("Bootstrap"), None),
@@ -587,7 +587,7 @@ async fn run_ledger_records_failure_and_performs_zero_deletes_on_fail_closed() {
 
     // An orphan that would otherwise be eligible for hard delete.
     let (orphan, orphan_bytes) = (Hash::of(b"would-be-deleted-if-not-for-the-failure"), b"would-be-deleted-if-not-for-the-failure".to_vec());
-    persistence.persist_blob(&orphan, &orphan_bytes);
+    persistence.persist_blob(&orphan, &orphan_bytes).unwrap();
 
     // A retained (Bootstrap) snapshot whose TreeHash is unresolvable —
     // forces the whole collect to fail.
@@ -622,7 +622,7 @@ async fn inventory_state_survives_store_reopen() {
         let persistence: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap());
         let rooms = Rooms::new(SigningKey::from_bytes(&[0x25u8; 32]), Arc::clone(&persistence), 512, 0, 0);
         let _room = rooms.get_or_create("repo/repo-restart").await;
-        persistence.persist_blob(&orphan, &orphan_bytes);
+        persistence.persist_blob(&orphan, &orphan_bytes).unwrap();
 
         let inventory = Arc::new(SqliteGcStore::open(&dir, local_key_scheme()).unwrap());
         seed_prior_active(&inventory, &orphan);
@@ -693,7 +693,7 @@ async fn ordinary_setblob_blob_must_survive_sweepsoft_then_sweephard() {
     let room = rooms.get_or_create("peer-room").await;
 
     let (avatar, avatar_bytes) = (Hash::of(b"an-ordinary-avatar-upload"), b"an-ordinary-avatar-upload".to_vec());
-    persistence.persist_blob(&avatar, &avatar_bytes);
+    persistence.persist_blob(&avatar, &avatar_bytes).unwrap();
     let node = make_setblob_node(&sk, "avatar", avatar);
     let (accepted, _, errs) = import_nodes(&room, vec![node]).await;
     assert_eq!(accepted, 1, "expected the ordinary SetBlob node to be accepted: {errs:?}");
@@ -754,19 +754,19 @@ async fn failed_work_unit_seed_stays_live_past_the_retention_window() {
     // Bootstrap generation with its OWN unique tree — not shared with
     // gen-seed below.
     let (file_bootstrap, fb_bytes) = (Hash::of(b"repo-e-bootstrap-file"), b"repo-e-bootstrap-file".to_vec());
-    persistence.persist_blob(&file_bootstrap, &fb_bytes);
+    persistence.persist_blob(&file_bootstrap, &fb_bytes).unwrap();
     let (tree_bootstrap, tb_bytes) = tree_v2_blob(serde_json::json!([{"n":"b.txt","k":"f","h":file_bootstrap.to_hex()}]));
-    persistence.persist_blob(&tree_bootstrap, &tb_bytes);
+    persistence.persist_blob(&tree_bootstrap, &tb_bytes).unwrap();
 
     let (file_seed, fs_bytes) = (Hash::of(b"repo-e-seed-file"), b"repo-e-seed-file".to_vec());
-    persistence.persist_blob(&file_seed, &fs_bytes);
+    persistence.persist_blob(&file_seed, &fs_bytes).unwrap();
     let (tree_seed, ts_bytes) = tree_v2_blob(serde_json::json!([{"n":"s.txt","k":"f","h":file_seed.to_hex()}]));
-    persistence.persist_blob(&tree_seed, &ts_bytes);
+    persistence.persist_blob(&tree_seed, &ts_bytes).unwrap();
 
     let (file_head, fh_bytes) = (Hash::of(b"repo-e-head-file"), b"repo-e-head-file".to_vec());
-    persistence.persist_blob(&file_head, &fh_bytes);
+    persistence.persist_blob(&file_head, &fh_bytes).unwrap();
     let (tree_head, th_bytes) = tree_v2_blob(serde_json::json!([{"n":"h.txt","k":"f","h":file_head.to_hex()}]));
-    persistence.persist_blob(&tree_head, &th_bytes);
+    persistence.persist_blob(&tree_head, &th_bytes).unwrap();
 
     install_studio_entry(
         &room, &sk, "studio/repository-snapshot/v1/gen-0",

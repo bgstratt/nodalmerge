@@ -267,8 +267,8 @@ fn s3_blob_gc_two_phase_honors_grace_and_tombstones_first() {
     let live_hash = Hash::of(&live_bytes);
     let orphan_bytes = b"uploaded-but-never-referenced".to_vec();
     let orphan_hash = Hash::of(&orphan_bytes);
-    store.persist_blob(&live_hash, &live_bytes);
-    store.persist_blob(&orphan_hash, &orphan_bytes);
+    store.persist_blob(&live_hash, &live_bytes).unwrap();
+    store.persist_blob(&orphan_hash, &orphan_bytes).unwrap();
     assert!(store.has_blob(&live_hash), "sanity: live object uploaded");
     assert!(store.has_blob(&orphan_hash), "sanity: orphan object uploaded");
 
@@ -338,7 +338,7 @@ fn s3_blob_gc_clears_tombstone_when_object_becomes_live_again() {
 
     let bytes = b"unreferenced-then-referenced".to_vec();
     let hash = Hash::of(&bytes);
-    store.persist_blob(&hash, &bytes);
+    store.persist_blob(&hash, &bytes).unwrap();
 
     // Not live yet → tombstoned.
     let empty = std::collections::HashSet::new();
@@ -399,7 +399,7 @@ fn s3_min_physical_grace_floor_is_effective_end_to_end() {
     // An orphan: bytes in the bucket, referenced by no node in any room.
     let orphan_bytes = b"orphan-through-the-real-s3-wiring".to_vec();
     let orphan_hash = Hash::of(&orphan_bytes);
-    blobs.persist_blob(&orphan_hash, &orphan_bytes);
+    blobs.persist_blob(&orphan_hash, &orphan_bytes).unwrap();
 
     let persistence: SharedPersistence = Arc::new(Composite::new(nodes, blobs));
     let rooms = Rooms::new(
@@ -478,7 +478,7 @@ fn s3_direct_tree_walk_resolves_tree_objects_from_the_real_bucket() {
     // faithful repo snapshot rather than a dangling reference.
     let file_bytes = b"a real repo file, living only in the bucket".to_vec();
     let file_hash = Hash::of(&file_bytes);
-    store.persist_blob(&file_hash, &file_bytes);
+    store.persist_blob(&file_hash, &file_bytes).unwrap();
 
     // The tree object is *also* an ordinary CAS blob (TREE_OBJECT_FORMAT.md).
     let tree_bytes = serde_json::to_vec(&serde_json::json!({
@@ -488,7 +488,7 @@ fn s3_direct_tree_walk_resolves_tree_objects_from_the_real_bucket() {
     }))
     .unwrap();
     let tree_hash = Hash::of(&tree_bytes);
-    store.persist_blob(&tree_hash, &tree_bytes);
+    store.persist_blob(&tree_hash, &tree_bytes).unwrap();
 
     assert!(store.has_blob(&tree_hash), "sanity: the tree object really is in the bucket");
     assert!(
@@ -521,7 +521,7 @@ fn s3_direct_tree_walk_recurses_into_nested_directories_from_the_real_bucket() {
 
     let leaf_bytes = b"nested file".to_vec();
     let leaf_hash = Hash::of(&leaf_bytes);
-    store.persist_blob(&leaf_hash, &leaf_bytes);
+    store.persist_blob(&leaf_hash, &leaf_bytes).unwrap();
 
     let subtree_bytes = serde_json::to_vec(&serde_json::json!({
         "nodalmerge": "tree", "version": 2,
@@ -529,7 +529,7 @@ fn s3_direct_tree_walk_recurses_into_nested_directories_from_the_real_bucket() {
     }))
     .unwrap();
     let subtree_hash = Hash::of(&subtree_bytes);
-    store.persist_blob(&subtree_hash, &subtree_bytes);
+    store.persist_blob(&subtree_hash, &subtree_bytes).unwrap();
 
     let root_bytes = serde_json::to_vec(&serde_json::json!({
         "nodalmerge": "tree", "version": 2,
@@ -537,7 +537,7 @@ fn s3_direct_tree_walk_recurses_into_nested_directories_from_the_real_bucket() {
     }))
     .unwrap();
     let root_hash = Hash::of(&root_bytes);
-    store.persist_blob(&root_hash, &root_bytes);
+    store.persist_blob(&root_hash, &root_bytes).unwrap();
 
     let live = nodalmerge_server::tree_walk::walk_tree(&store, &root_hash)
         .expect("nested tree walk must resolve every directory level from the bucket");
@@ -652,11 +652,11 @@ fn s3_direct_archive_export_digest_matches_a_dir_backed_export_of_the_same_room(
     // Hydrating baseline: DirPersistence really holds the bytes.
     let dir_persistence: SharedPersistence =
         Arc::new(DirPersistence::open(tmp_dir("minio-archive-dir")).expect("open dir"));
-    dir_persistence.persist_blob(&blob_hash, &blob_bytes);
+    dir_persistence.persist_blob(&blob_hash, &blob_bytes).unwrap();
 
     // The production S3 shape: real nodes on disk, blobs in the real bucket.
     let s3 = S3BlobStore::new(test_cfg(&endpoint)).expect("build S3BlobStore");
-    s3.persist_blob(&blob_hash, &blob_bytes);
+    s3.persist_blob(&blob_hash, &blob_bytes).unwrap();
     assert!(s3.has_blob(&blob_hash), "sanity: the blob really is in the bucket");
     assert!(
         s3.get_blob(&blob_hash).is_none(),

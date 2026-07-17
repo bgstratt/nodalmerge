@@ -47,7 +47,7 @@ use std::time::Duration;
 
 use nodalmerge_core::Hash;
 use nodalmerge_server::store::{
-    parse_blob_entry_name, BlobPersistence, HydrateError, PresignedUrl,
+    parse_blob_entry_name, BlobPersistence, HydrateError, PersistBlobError, PresignedUrl,
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -712,26 +712,43 @@ impl BlobPersistence for S3BlobStore {
     /// Fallback path: when a small blob arrives over the WS, push it up
     /// to S3 so a later peer's `resolve_get_url` finds something.
     /// Direct mode only — Delegate mode has no creds and treats this as
-    /// a no-op (the client should be using `request-upload` instead).
-    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
+    /// a **documented structural no-op** (`Ok`, not an error — the client
+    /// should be using `request-upload` instead; see
+    /// `PersistBlobError`'s doc for why "never writes through this path,
+    /// by design" is not a failed write).
+    ///
+    /// Error classification (4.2): a bridge/op timeout is
+    /// [`PersistBlobError::Unavailable`] — the bucket never answered, the
+    /// write is *unconfirmed*, retry is the right move (503 at the HTTP
+    /// origin). A bucket that answered with an error is
+    /// [`PersistBlobError::Backend`] (500). One honest edge: the
+    /// object_store client layer carries its own `op_timeout` (6.1's
+    /// 3-deep bounds), so a client-layer timeout that beats the bridge's
+    /// identical bound surfaces through the `Ok(Err(_))` arm and reports
+    /// as `Backend` — both are genuine failure; the split only tunes the
+    /// status code, and the message still names the timeout.
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), PersistBlobError> {
         let Some(s3) = self.s3.clone() else {
             tracing::trace!(
                 "persist_blob skipped in Delegate mode; client should request-upload instead"
             );
-            return;
+            return Ok(());
         };
         let path = ObjectPath::from(self.key_for(hash));
         let payload = Bytes::copy_from_slice(bytes);
-        // This trait method returns `()`, so a timeout can only be logged.
-        // Loudly: an unpersisted blob means a later peer's resolve_get_url
-        // finds nothing, and this log line is the only breadcrumb.
         let res = block_on_shared_runtime("persist_put", self.cfg.op_timeout, async move {
             s3.put(&path, payload.into()).await
         });
         match res {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::warn!(?e, "S3 persist_blob failed"),
-            Err(e) => tracing::warn!(%e, "S3 persist_blob failed (bridge/timeout)"),
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => {
+                tracing::warn!(?e, "S3 persist_blob failed");
+                Err(PersistBlobError::Backend(format!("s3 put: {e}")))
+            }
+            Err(e) => {
+                tracing::warn!(%e, "S3 persist_blob failed (bridge/timeout)");
+                Err(PersistBlobError::Unavailable(e.to_string()))
+            }
         }
     }
 

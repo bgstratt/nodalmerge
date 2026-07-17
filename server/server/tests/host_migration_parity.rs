@@ -724,7 +724,7 @@ async fn run_current_archive_flow(fx: &GoldenFixture) -> CanonicalTrace {
     source_room.blobs.write().await.put(source_blob.clone());
     source_room
         .persistence
-        .persist_blob(&source_blob_hash, &source_blob);
+        .persist_blob(&source_blob_hash, &source_blob).unwrap();
 
     let url = format!("ws://{addr}/ws/{}", fx.room_id);
     let (ws, _resp) = tokio_tungstenite::connect_async(url)

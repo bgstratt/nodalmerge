@@ -57,7 +57,7 @@ use std::sync::Mutex;
 
 use ed25519_dalek::SigningKey;
 use nodalmerge_core::{Hash, MapOp, Op, StateGraph, SyncNode};
-use nodalmerge_server::store::{BlobPersistence, HydrateError};
+use nodalmerge_server::store::{BlobPersistence, HydrateError, PersistBlobError};
 
 /// A `BlobPersistence` fake shaped exactly like `S3BlobStore`
 /// (`server/s3-blobs/src/lib.rs:467`, Direct auth mode). See module docs.
@@ -164,9 +164,22 @@ impl BlobPersistence for NonHydratingBackend {
     /// now in the "bucket", so a later `hydrate_blob` returns them —
     /// exactly as MinIO does. (Before slice 2.2 this fake discarded them,
     /// which was fine only because nothing could read them back.)
-    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
+    ///
+    /// Slice 4.2 made the port **fallible** to match the real backend's new
+    /// signature; an in-memory insert cannot fail, so this port always
+    /// returns `Ok` — the real backend's failure classes
+    /// (`Backend`/`Unavailable`, and the success/failure↔presence coupling)
+    /// are gated by `server/s3-blobs/tests/put_durability.rs` (stalled
+    /// listener, Docker-free) and the MinIO suites. Per this file's
+    /// standing rule: **if this port and `S3BlobStore` ever disagree, the
+    /// MinIO tests are right and this file is wrong.** The alignment this
+    /// crate CAN pin — a persist that does not succeed must not leave a
+    /// phantom presence — is `persist_failure_must_not_leave_a_phantom_presence`
+    /// below.
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), PersistBlobError> {
         self.present.lock().unwrap().insert(*hash);
         self.bytes.lock().unwrap().insert(*hash, bytes.to_vec());
+        Ok(())
     }
 
     /// Mirrors `S3BlobStore`'s Direct-mode `verify_uploaded`: a real
@@ -415,15 +428,16 @@ mod tests {
             seen: Mutex<HashSet<Hash>>,
         }
         impl BlobPersistence for DefaultOnlyBackend {
-            fn persist_blob(&self, hash: &Hash, _bytes: &[u8]) {
+            fn persist_blob(&self, hash: &Hash, _bytes: &[u8]) -> Result<(), PersistBlobError> {
                 self.seen.lock().unwrap().insert(*hash);
+                Ok(())
             }
             // get_blob / has_blob: intentionally NOT overridden.
         }
 
         let backend = DefaultOnlyBackend::default();
         let hash = Hash::of(b"genuinely stored");
-        backend.persist_blob(&hash, b"genuinely stored");
+        backend.persist_blob(&hash, b"genuinely stored").unwrap();
 
         assert!(
             backend.seen.lock().unwrap().contains(&hash),
@@ -460,7 +474,9 @@ mod tests {
         #[derive(Debug, Default)]
         struct DeclaresButDoesntOverride;
         impl BlobPersistence for DeclaresButDoesntOverride {
-            fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) {}
+            fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) -> Result<(), PersistBlobError> {
+                Ok(())
+            }
             fn get_blob(&self, _hash: &Hash) -> Option<Vec<u8>> {
                 None
             }
@@ -485,7 +501,9 @@ mod tests {
         #[derive(Debug, Default)]
         struct OrdinaryHydratingBackend;
         impl BlobPersistence for OrdinaryHydratingBackend {
-            fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) {}
+            fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) -> Result<(), PersistBlobError> {
+                Ok(())
+            }
         }
         assert_eq!(
             OrdinaryHydratingBackend.hydrate_blob(&Hash::of(b"x")),
@@ -510,8 +528,9 @@ mod tests {
             present: Mutex<HashSet<Hash>>,
         }
         impl BlobPersistence for SilentlyNonHydrating {
-            fn persist_blob(&self, hash: &Hash, _bytes: &[u8]) {
+            fn persist_blob(&self, hash: &Hash, _bytes: &[u8]) -> Result<(), PersistBlobError> {
                 self.present.lock().unwrap().insert(*hash);
+                Ok(())
             }
             fn get_blob(&self, _hash: &Hash) -> Option<Vec<u8>> {
                 None // policy — but never declared via get_blob_hydrates()
@@ -523,7 +542,7 @@ mod tests {
 
         let backend = SilentlyNonHydrating::default();
         let hash = Hash::of(b"in the bucket, unreadable here");
-        backend.persist_blob(&hash, b"in the bucket, unreadable here");
+        backend.persist_blob(&hash, b"in the bucket, unreadable here").unwrap();
 
         assert!(backend.has_blob(&hash), "sanity: the backend knows it holds this");
         assert_eq!(
@@ -534,6 +553,71 @@ mod tests {
              corruption-None, so it answers Missing. Overriding get_blob to None without \
              also overriding get_blob_hydrates is the one remaining way to reintroduce \
              finding #10 in a new backend."
+        );
+    }
+
+    /// Slice 4.2 (finding #8) — the fallible-persist scenario, the half of
+    /// the new `persist_blob -> Result` contract a network-free port CAN
+    /// gate: **failure and presence must agree.** A backend whose
+    /// `persist_blob` returns `Err` must not afterwards report the hash via
+    /// `has_blob` — a phantom presence is finding #8 one layer down (the
+    /// PUT dedupe branch would answer `200 OK` for bytes nobody holds, and
+    /// GC would protect/track an object that never existed).
+    ///
+    /// The real backends are proven first, per 1.3's ordering rule:
+    /// `DirPersistence`'s fs-failure→`Err`→`has_blob == false` is pinned
+    /// against a real filesystem in
+    /// `server/server/tests/blob_put_durability.rs`, and `S3BlobStore`'s
+    /// timeout→`Unavailable` in `server/s3-blobs/tests/put_durability.rs`
+    /// (stalled listener; `has_blob` is a real bucket HEAD there, so a
+    /// failed PUT leaves nothing to find). This test pins the same
+    /// invariant in trait-shape form so the next backend/fake author trips
+    /// over it here instead of in production. And the mirror half:
+    /// `NonHydratingBackend`'s own persist is `Ok` and DOES record
+    /// presence + bytes, exactly as a bucket PUT that returned 200 would.
+    #[test]
+    fn persist_failure_must_not_leave_a_phantom_presence() {
+        /// The wrong shape on purpose: marks present BEFORE the write can
+        /// fail — the same mark-then-write ordering the pre-4.2 PUT handler
+        /// had with its inventory row.
+        #[derive(Debug, Default)]
+        struct MarksBeforeFailing {
+            present: Mutex<HashSet<Hash>>,
+        }
+        impl BlobPersistence for MarksBeforeFailing {
+            fn persist_blob(&self, hash: &Hash, _bytes: &[u8]) -> Result<(), PersistBlobError> {
+                self.present.lock().unwrap().insert(*hash);
+                Err(PersistBlobError::Backend("disk full (simulated)".into()))
+            }
+            fn has_blob(&self, hash: &Hash) -> bool {
+                self.present.lock().unwrap().contains(hash)
+            }
+        }
+
+        let broken = MarksBeforeFailing::default();
+        let hash = Hash::of(b"never actually stored");
+        let err = broken
+            .persist_blob(&hash, b"never actually stored")
+            .expect_err("this backend always fails");
+        assert!(matches!(err, PersistBlobError::Backend(_)));
+        assert!(
+            broken.has_blob(&hash),
+            "sanity: this deliberately-wrong backend exhibits the phantom — a correct \
+             backend must NOT (the assertion that matters is the one below, on the port)"
+        );
+
+        // The port itself: success records presence AND readable bytes;
+        // nothing is ever present that persist didn't succeed for.
+        let backend = NonHydratingBackend::default();
+        let hash = Hash::of(b"a real 200 from the bucket");
+        assert!(!backend.has_blob(&hash), "nothing present before persist");
+        backend
+            .persist_blob(&hash, b"a real 200 from the bucket")
+            .expect("in-memory persist cannot fail");
+        assert!(backend.has_blob(&hash), "Ok(()) means present");
+        assert_eq!(
+            backend.hydrate_blob(&hash).expect("bytes must be readable back"),
+            b"a real 200 from the bucket".to_vec(),
         );
     }
 }

@@ -316,8 +316,26 @@ pub async fn process_archive_import(
     } else {
         let mut store = room.blobs.write().await;
         for (hash, bytes) in &loaded.blobs {
+            // S4.2b (finding #8): persist first, and a failed persist fails
+            // the import — an ImportCompleted whose blobs never reached the
+            // durable store is the same durability lie as PUT's old 201.
+            // Reusing CheckpointNotFound for a backend failure follows 2.3's
+            // documented precedent (adding a backend variant to
+            // `ArchiveReasonClass` is a frozen cross-runtime contract change,
+            // filed, not absorbed here); the actionable detail rides in
+            // `reason_message`.
+            if let Err(e) = room.persistence.persist_blob(hash, bytes) {
+                return ArchiveWsResponse::ImportRejected(rejected(
+                    current_room_id,
+                    &archive_ref,
+                    ArchiveReasonClass::CheckpointNotFound,
+                    &format!(
+                        "archive import could not persist blob {}: {e}",
+                        hash.to_hex()
+                    ),
+                ));
+            }
             store.put(bytes.clone());
-            room.persistence.persist_blob(hash, bytes);
         }
         loaded.blobs.len() as u64
     };
@@ -1357,7 +1375,7 @@ mod tests {
         let _ = import_nodes(room, vec![node]).await;
 
         room.blobs.write().await.put(blob.clone());
-        room.persistence.persist_blob(&hash, &blob);
+        room.persistence.persist_blob(&hash, &blob).expect("test seed blob should persist");
     }
 
     #[tokio::test]

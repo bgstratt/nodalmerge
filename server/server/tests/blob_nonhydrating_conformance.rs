@@ -84,7 +84,7 @@ fn tree_walk_resolves_via_hydrate_blob_without_touching_the_get_blob_policy() {
     let file_hash = Hash::of(b"a file the tree names but the walk never fetches");
     let (tree_hash, tree_bytes) =
         tree_v2_blob(serde_json::json!([{"n": "a.txt", "k": "f", "h": file_hash.to_hex()}]));
-    backend.persist_blob(&tree_hash, &tree_bytes);
+    backend.persist_blob(&tree_hash, &tree_bytes).unwrap();
     assert!(backend.has_blob(&tree_hash), "sanity: the backend agrees the tree blob exists");
 
     let live = walk_tree(&backend, &tree_hash).expect(
@@ -142,7 +142,7 @@ fn composite_forwards_hydration_seam_to_the_blob_half() {
     );
 
     let (tree_hash, tree_bytes) = tree_v2_blob(serde_json::json!([]));
-    persistence.persist_blob(&tree_hash, &tree_bytes);
+    persistence.persist_blob(&tree_hash, &tree_bytes).unwrap();
     let bytes = persistence
         .hydrate_blob(&tree_hash)
         .expect("Composite must forward hydrate_blob to the blob half's real override");
@@ -160,10 +160,10 @@ async fn studio_gc_live_set_over_cas_tree_snapshot_does_not_fail_closed_on_non_h
 
     let file_bytes = b"repo file behind a cas tree, on a backend that never hydrates".to_vec();
     let file_hash = Hash::of(&file_bytes);
-    persistence.persist_blob(&file_hash, &file_bytes); // marks present; never re-readable
+    persistence.persist_blob(&file_hash, &file_bytes).unwrap(); // marks present; never re-readable
     let (tree_hash, tree_bytes) =
         tree_v2_blob(serde_json::json!([{"n": "a.txt", "k": "f", "h": file_hash.to_hex()}]));
-    persistence.persist_blob(&tree_hash, &tree_bytes); // the tree object is *also* a blob
+    persistence.persist_blob(&tree_hash, &tree_bytes).unwrap(); // the tree object is *also* a blob
 
     let node = make_mapset_node(
         &sk,
@@ -312,7 +312,7 @@ async fn archive_describe_blobs_digest_matches_between_hydrating_and_non_hydrati
     let dir = tmp_dir("archive-digest-parity-dir");
     let dir_persistence: SharedPersistence =
         Arc::new(DirPersistence::open(&dir).expect("dir persistence should open"));
-    dir_persistence.persist_blob(&blob_hash, &blob_bytes);
+    dir_persistence.persist_blob(&blob_hash, &blob_bytes).unwrap();
     let dir_room = room_referencing(&dir_persistence, room_id, &signer, blob_hash).await;
     let dir_digest = describe(&dir_room, room_id)
         .await
@@ -321,7 +321,7 @@ async fn archive_describe_blobs_digest_matches_between_hydrating_and_non_hydrati
     // Non-hydrating (S3 Direct-shaped): same node, same blob hash present in
     // the "bucket", but `get_blob` is always None.
     let s3_shaped_persistence = non_hydrating_persistence("archive-digest-parity-s3shape");
-    s3_shaped_persistence.persist_blob(&blob_hash, &blob_bytes);
+    s3_shaped_persistence.persist_blob(&blob_hash, &blob_bytes).unwrap();
     let s3_room = room_referencing(&s3_shaped_persistence, room_id, &signer, blob_hash).await;
     let s3_digest = describe(&s3_room, room_id).await.expect(
         "describe over the non-hydrating backend must succeed: the bytes ARE reachable \
@@ -372,14 +372,14 @@ async fn archive_export_manifest_blobs_digest_matches_between_hydrating_and_non_
     let dir = tmp_dir("archive-manifest-digest-dir");
     let dir_persistence: SharedPersistence =
         Arc::new(DirPersistence::open(&dir).expect("dir persistence should open"));
-    dir_persistence.persist_blob(&blob_hash, &blob_bytes);
+    dir_persistence.persist_blob(&blob_hash, &blob_bytes).unwrap();
     let _dir_room = room_referencing(&dir_persistence, room_id, &signer, blob_hash).await;
     let dir_manifest =
         build_external_manifest_document(&*dir_persistence, room_id, &signer, &"0".repeat(64), 0, &[])
             .expect("manifest build over DirPersistence must succeed");
 
     let s3_shaped = non_hydrating_persistence("archive-manifest-digest-s3shape");
-    s3_shaped.persist_blob(&blob_hash, &blob_bytes);
+    s3_shaped.persist_blob(&blob_hash, &blob_bytes).unwrap();
     let _s3_room = room_referencing(&s3_shaped, room_id, &signer, blob_hash).await;
     let s3_manifest =
         build_external_manifest_document(&*s3_shaped, room_id, &signer, &"0".repeat(64), 0, &[])
@@ -556,7 +556,7 @@ async fn archive_export_tolerates_a_genuinely_absent_referenced_blob_and_keeps_d
         ),
         ("s3shape", non_hydrating_persistence("archive-dangling-s3shape")),
     ] {
-        persistence.persist_blob(&present_hash, &present_bytes);
+        persistence.persist_blob(&present_hash, &present_bytes).unwrap();
         let room: Arc<Room> = Room::new(room_id.to_string(), Arc::clone(&persistence), 64);
         let (accepted, _, errs) = import_nodes(
             &room,
@@ -629,7 +629,7 @@ async fn room_hydrate_does_not_pull_file_payloads_through_a_non_hydrating_backen
     }
 
     let backend = Arc::new(NonHydratingBackend::default());
-    backend.persist_blob(&blob_hash, &blob_bytes);
+    backend.persist_blob(&blob_hash, &blob_bytes).unwrap();
     let persistence: SharedPersistence = Arc::new(Composite::new(
         DirPersistence::open(&dir).expect("reopen"),
         CountingBlobHalf(Arc::clone(&backend)),
@@ -676,7 +676,7 @@ impl BlobPersistence for CountingBlobHalf {
     fn get_blob(&self, hash: &Hash) -> Option<Vec<u8>> {
         self.0.get_blob(hash)
     }
-    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), nodalmerge_server::store::PersistBlobError> {
         self.0.persist_blob(hash, bytes)
     }
     fn has_blob(&self, hash: &Hash) -> bool {

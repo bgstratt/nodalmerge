@@ -1051,6 +1051,7 @@ async fn handle_client_message(
                 None => return true,
             };
             let mut stored = 0usize;
+            let mut stored_hashes: Vec<String> = Vec::new();
             let mut blob_store = room.blobs.write().await;
             for entry in &blobs {
                 let hash_hex = extract_blob_upload_entry_hash_text(entry);
@@ -1061,24 +1062,48 @@ async fn handle_client_message(
                     let actual = nodalmerge_core::Hash::of(&bytes);
                     if actual == expected {
                         // F4: write-through persistence for accepted blobs.
-                        room.persistence
-                            .persist_blob(&actual, &bytes);
-                        blob_store.put(bytes);
-                        stored += 1;
+                        //
+                        // S4.2b (finding #8): a failed persist means the blob
+                        // is NOT accepted — same treatment as a hash-mismatch
+                        // entry (skipped: not put in the in-memory store, not
+                        // counted, not broadcast as available), because the
+                        // blob-upload protocol has no per-entry ack/error
+                        // message to say more (frozen contract; the success
+                        // path's only "ack" is the room-wide blob-available
+                        // broadcast below). The uploader still holds its copy
+                        // and can re-send; advertising or serving bytes the
+                        // durable store rejected would vanish on restart
+                        // while peers were told they exist. `error!` is the
+                        // operator-facing half.
+                        match room.persistence.persist_blob(&actual, &bytes) {
+                            Ok(()) => {
+                                blob_store.put(bytes);
+                                stored += 1;
+                                stored_hashes.push(hash_hex.clone());
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    %e,
+                                    hash = %hash_hex,
+                                    room = %room.room_id,
+                                    "ws blob-upload persist failed; entry NOT stored or broadcast"
+                                );
+                            }
+                        }
                     }
                 }
             }
             // Blobs are served on-demand via blob-request.
             // Broadcast a lightweight notification so peers know new blobs are
             // available and can request them without waiting for the next delta.
+            // S4.2b: the list is the entries actually stored above — never the
+            // raw request's hash list, which would advertise entries whose
+            // persist failed (and, pre-4.2, even entries rejected by the hash
+            // check) as available.
             if plan_blob_store_mutation(stored) == BlobStoreMutationAction::BroadcastBlobAvailable {
-                let available: Vec<String> = blobs
-                    .iter()
-                    .filter_map(|e| e["hash"].as_str())
-                    .map(str::to_string)
-                    .collect();
-                let bcast = serde_json::to_string(&assemble_blob_available_envelope(available))
-                    .expect("blob-available envelope should always serialize");
+                let bcast =
+                    serde_json::to_string(&assemble_blob_available_envelope(stored_hashes))
+                        .expect("blob-available envelope should always serialize");
                 emit_room_broadcast(room, bcast);
             }
         }

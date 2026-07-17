@@ -37,7 +37,7 @@ use nodalmerge_core::Hash;
 use nodalmerge_server::blob_http::{self, BlobHttpConfig};
 use nodalmerge_server::room::Rooms;
 use nodalmerge_server::store::{
-    BlobPersistence, Composite, NoPersistence, PresignedUrl, SharedPersistence,
+    BlobPersistence, Composite, NoPersistence, PersistBlobError, PresignedUrl, SharedPersistence,
 };
 use tower::ServiceExt;
 
@@ -95,9 +95,10 @@ impl BlobPersistence for SlowBlobStore {
         self.blobs.lock().unwrap().contains_key(hash)
     }
 
-    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), PersistBlobError> {
         self.enter();
         self.blobs.lock().unwrap().insert(*hash, bytes.to_vec());
+        Ok(())
     }
 }
 
@@ -125,7 +126,9 @@ impl SlowPresignStore {
 }
 
 impl BlobPersistence for SlowPresignStore {
-    fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) {}
+    fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) -> Result<(), PersistBlobError> {
+        Ok(())
+    }
 
     fn resolve_get_url(
         &self,
@@ -160,7 +163,9 @@ impl BlobPersistence for PanickingBlobStore {
         panic!("deliberate test panic in the blocking store op");
     }
 
-    fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) {}
+    fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) -> Result<(), PersistBlobError> {
+        Ok(())
+    }
 }
 
 fn router_with(blob_half: impl BlobPersistence + 'static, key_seed: u8) -> Router {

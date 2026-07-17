@@ -318,8 +318,9 @@ mod tests {
         fn get_blob(&self, hash: &Hash) -> Option<Vec<u8>> {
             self.map.lock().unwrap().get(hash).cloned()
         }
-        fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
+        fn persist_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), crate::store::PersistBlobError> {
             self.map.lock().unwrap().insert(*hash, bytes.to_vec());
+            Ok(())
         }
     }
 

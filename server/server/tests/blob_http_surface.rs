@@ -123,7 +123,7 @@ async fn blob_http_surface_vectors_conform() {
     let seed_bytes = file.seed_blob.seed_content.as_bytes().to_vec();
     let seed_hash = Hash::of(&seed_bytes);
     let seed_hash_hex = seed_hash.to_hex();
-    persistence.persist_blob(&seed_hash, &seed_bytes);
+    persistence.persist_blob(&seed_hash, &seed_bytes).unwrap();
 
     // Two router variants sharing the same underlying store: one anonymous,
     // one gated behind `auth_token_for_tests`. Vectors pick between them via
@@ -285,7 +285,7 @@ async fn get_with_accept_encoding_zstd_serves_stored_zstd_bytes() {
     let payload = compressible_payload();
     let hash = Hash::of(&payload);
     let hash_hex = hash.to_hex();
-    persistence.persist_blob(&hash, &payload);
+    persistence.persist_blob(&hash, &payload).unwrap();
     // Sanity: the compression-on store really did write the .zst form.
     let encoded_path = dir.join("blobs").join("blake3").join(format!("{hash_hex}.zst"));
     assert!(encoded_path.is_file(), "test setup expected a .zst write");
@@ -359,7 +359,7 @@ fn seed_zstd_router(tag: &str) -> (Router, PathBuf, Vec<u8>, String) {
     let payload = compressible_payload();
     let hash = Hash::of(&payload);
     let hash_hex = hash.to_hex();
-    persistence.persist_blob(&hash, &payload);
+    persistence.persist_blob(&hash, &payload).unwrap();
     // Sanity: the compression-on store really did write the .zst form.
     let encoded_path = dir.join("blobs").join("blake3").join(format!("{hash_hex}.zst"));
     assert!(encoded_path.is_file(), "test setup expected a .zst write");

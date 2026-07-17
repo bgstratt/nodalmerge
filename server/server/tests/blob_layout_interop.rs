@@ -140,7 +140,7 @@ fn compression_off_store_reads_zst_written_by_compression_on_store() {
     {
         let writer = DirPersistence::open_with_compression(&store_root, on_cfg)
             .expect("open with compression on");
-        writer.persist_blob(&hash, &payload);
+        writer.persist_blob(&hash, &payload).unwrap();
         let encoded_path = store_root
             .join("blobs")
             .join("blake3")

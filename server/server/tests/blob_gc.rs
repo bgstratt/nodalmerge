@@ -78,8 +78,8 @@ async fn blob_gc_two_phase_deletes_orphans_only() {
     let live_hash = Hash::of(&live_bytes);
     let orphan_bytes = b"never-referenced".to_vec();
     let orphan_hash = Hash::of(&orphan_bytes);
-    persistence.persist_blob(&live_hash, &live_bytes);
-    persistence.persist_blob(&orphan_hash, &orphan_bytes);
+    persistence.persist_blob(&live_hash, &live_bytes).unwrap();
+    persistence.persist_blob(&orphan_hash, &orphan_bytes).unwrap();
     room.blobs.write().await.put(live_bytes.clone());
     room.blobs.write().await.put(orphan_bytes.clone());
 
@@ -151,7 +151,7 @@ async fn blob_gc_clears_tombstone_when_blob_becomes_live_again() {
 
     let bytes = b"refound".to_vec();
     let hash = Hash::of(&bytes);
-    persistence.persist_blob(&hash, &bytes);
+    persistence.persist_blob(&hash, &bytes).unwrap();
     room.blobs.write().await.put(bytes.clone());
 
     let blake3_dir = dir.join("blobs").join("blake3");
@@ -209,7 +209,7 @@ async fn blob_gc_protects_blobs_in_cold_non_resident_rooms() {
     let hash = Hash::of(&bytes);
     {
         let room_a = rooms.get_or_create("room-a").await;
-        persistence.persist_blob(&hash, &bytes);
+        persistence.persist_blob(&hash, &bytes).unwrap();
         room_a.blobs.write().await.put(bytes.clone());
         let node = make_setblob_node(&sk, "k", hash);
         let (accepted, _, _) = import_nodes(&room_a, vec![node]).await;
@@ -287,8 +287,8 @@ async fn blob_gc_two_phase_handles_zstd_encoded_blobs_and_ignores_foreign_files(
     let deleted_hash = Hash::of(&deleted_bytes);
     let revived_bytes = b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_vec();
     let revived_hash = Hash::of(&revived_bytes);
-    persistence.persist_blob(&deleted_hash, &deleted_bytes);
-    persistence.persist_blob(&revived_hash, &revived_bytes);
+    persistence.persist_blob(&deleted_hash, &deleted_bytes).unwrap();
+    persistence.persist_blob(&revived_hash, &revived_bytes).unwrap();
     room.blobs.write().await.put(deleted_bytes.clone());
     room.blobs.write().await.put(revived_bytes.clone());
 
@@ -400,7 +400,7 @@ async fn blob_gc_composite_must_forward_known_room_ids_for_cold_rooms() {
     let hash = Hash::of(&bytes);
     {
         let room_a = rooms.get_or_create("room-a").await;
-        persistence.persist_blob(&hash, &bytes);
+        persistence.persist_blob(&hash, &bytes).unwrap();
         room_a.blobs.write().await.put(bytes.clone());
         let node = make_setblob_node(&sk, "k", hash);
         let (accepted, _, _) = import_nodes(&room_a, vec![node]).await;
@@ -527,7 +527,7 @@ async fn blob_gc_fails_closed_when_backend_cannot_enumerate_rooms() {
     // default looked identical to "no other rooms exist."
     let orphan_bytes = b"orphan-under-a-non-enumerable-node-store".to_vec();
     let orphan_hash = Hash::of(&orphan_bytes);
-    persistence.persist_blob(&orphan_hash, &orphan_bytes);
+    persistence.persist_blob(&orphan_hash, &orphan_bytes).unwrap();
 
     let _room = rooms.get_or_create("only-resident-room").await;
 
@@ -576,7 +576,7 @@ async fn blob_gc_survives_write_through_during_still_hydrating_room() {
     // server process — nothing yet loaded into any in-memory `Room`.
     let bytes = b"referenced-by-a-not-yet-hydrated-room".to_vec();
     let hash = Hash::of(&bytes);
-    persistence.persist_blob(&hash, &bytes);
+    persistence.persist_blob(&hash, &bytes).unwrap();
     let node = make_setblob_node(&sk, "avatar", hash);
     persistence.persist_node(&room_id, &node);
 
@@ -641,7 +641,7 @@ async fn blob_gc_zero_grace_never_deletes_on_first_sighting() {
     // An orphan blob: on disk, but never referenced by any node.
     let orphan_bytes = b"never-referenced-zero-grace".to_vec();
     let orphan_hash = Hash::of(&orphan_bytes);
-    persistence.persist_blob(&orphan_hash, &orphan_bytes);
+    persistence.persist_blob(&orphan_hash, &orphan_bytes).unwrap();
 
     let blake3_dir = dir.join("blobs").join("blake3");
     let tombs_dir = dir.join("blobs").join(".tombstones").join("blake3");
@@ -769,7 +769,7 @@ async fn blob_gc_protects_recently_confirmed_upload_not_yet_referenced() {
 
     let bytes = b"confirmed-upload-awaiting-its-setblob-op".to_vec();
     let hash = Hash::of(&bytes);
-    persistence.persist_blob(&hash, &bytes);
+    persistence.persist_blob(&hash, &bytes).unwrap();
     // Exactly what blob_http.rs's PUT / upload-confirm paths do, sentinel
     // run id and all (blob_http.rs's UPLOAD_MARK_SENTINEL).
     inventory
@@ -835,7 +835,7 @@ async fn blob_gc_reclaims_unreferenced_upload_once_upload_window_elapses() {
 
     let bytes = b"uploaded-and-then-nobody-ever-referenced-it".to_vec();
     let hash = Hash::of(&bytes);
-    persistence.persist_blob(&hash, &bytes);
+    persistence.persist_blob(&hash, &bytes).unwrap();
     inventory
         .upsert_active_seen("upload", &hash.to_hex(), std::time::SystemTime::now())
         .unwrap();

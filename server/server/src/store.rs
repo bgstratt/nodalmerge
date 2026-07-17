@@ -172,6 +172,53 @@ impl std::fmt::Display for HydrateError {
 
 impl std::error::Error for HydrateError {}
 
+/// Why [`BlobPersistence::persist_blob`] could not make the bytes durable.
+///
+/// This exists so the blob HTTP origin can stop lying about durability
+/// (`blob-cas-remediation.md` slice 4.2, finding #8): before it, the trait
+/// method returned `()`, every backend logged-and-swallowed its own write
+/// failures, and `PUT /blobs/{hash}` answered `201 Created` whether or not
+/// anything was durably stored — the client then dropped its only copy.
+///
+/// The two variants carry the one distinction a caller can act on — *was the
+/// failure reported, or did the backend never answer?* — because that is
+/// what picks the HTTP status (500 vs 503) and the client's next move
+/// (investigate vs retry). Deliberately NOT a mirror of [`HydrateError`]:
+/// there is no `Missing` (persist creates), and no `Unhydratable`-style
+/// configuration variant — a backend that structurally never persists
+/// (S3 Delegate mode, `NoPersistence`) returns `Ok(())`, because "this
+/// deployment does not write through this path, by design and documented"
+/// is not a failed write. See each implementor for its own mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistBlobError {
+    /// The backend answered, and the answer was failure: a local
+    /// filesystem error (mkdir/write/rename — disk full, permissions) or a
+    /// bucket that replied to the PUT with an error. Nothing is durably
+    /// stored under this hash by this call. HTTP-facing callers map this
+    /// to `500` — the origin itself is broken, not merely busy.
+    Backend(String),
+    /// The backend never answered within its bound: an op timeout, a dead
+    /// bridge, an unreachable endpoint. Says nothing certain about whether
+    /// the write landed (a PUT can time out after the bucket applied it —
+    /// content addressing makes the retry idempotent, so callers must
+    /// treat this as "not confirmed durable"). Retryable; HTTP-facing
+    /// callers map this to `503 Service Unavailable`.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for PersistBlobError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PersistBlobError::Backend(e) => write!(f, "blob write failed: {e}"),
+            PersistBlobError::Unavailable(e) => {
+                write!(f, "blob backend unavailable (write not confirmed): {e}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PersistBlobError {}
+
 /// Blob-side persistence. See module docs for rationale.
 ///
 /// Blobs are a single global content-addressed pool — no room scoping, no
@@ -188,7 +235,21 @@ pub trait BlobPersistence: Send + Sync + std::fmt::Debug {
     }
 
     /// Persist a single blob, addressed only by its hash.
-    fn persist_blob(&self, hash: &Hash, bytes: &[u8]);
+    ///
+    /// ## Contract (slice 4.2, finding #8 — durability truthfulness)
+    ///
+    /// * `Ok(())` — the bytes are at rest under `hash` as far as this
+    ///   backend can confirm (written+renamed on disk, bucket PUT
+    ///   acknowledged), **or** this backend structurally never writes
+    ///   through this path and documents that at its impl (S3 Delegate
+    ///   mode, `NoPersistence`). Idempotent: already-present is `Ok`.
+    /// * `Err` — see [`PersistBlobError`]'s per-variant docs. An error here
+    ///   means the caller must NOT tell anyone the blob is stored: no
+    ///   `201`, no GC-inventory `Active` row, no `blob-available`
+    ///   broadcast. Callers may not discard the result silently — if a
+    ///   call site genuinely has nothing better than a log line, the log
+    ///   is `error!`-level and the site says why in a comment.
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), PersistBlobError>;
 
     /// Cheap existence check — does this store already hold `hash`?
     ///
@@ -487,7 +548,7 @@ impl<N: NodePersistence, B: BlobPersistence> BlobPersistence for Composite<N, B>
     fn hydrate_blob(&self, hash: &Hash) -> Result<Vec<u8>, HydrateError> {
         self.blobs.hydrate_blob(hash)
     }
-    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), PersistBlobError> {
         self.blobs.persist_blob(hash, bytes)
     }
     fn blob_gc_sweep(
@@ -546,7 +607,13 @@ impl NodePersistence for NoPersistence {
 }
 
 impl BlobPersistence for NoPersistence {
-    fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) {}
+    /// `Ok` on purpose (4.2): in-memory-only is this backend's documented
+    /// deployment shape, not a failed write — `blobs_durable()` below is
+    /// already the honest "nothing here survives a restart" signal, and a
+    /// PUT against a memory-only server has always meant exactly that.
+    fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) -> Result<(), PersistBlobError> {
+        Ok(())
+    }
     fn blobs_durable(&self) -> bool {
         false
     }
@@ -865,19 +932,27 @@ impl BlobPersistence for DirPersistence {
         Some((bytes, "zstd"))
     }
 
-    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) {
+    /// Every filesystem failure here is [`PersistBlobError::Backend`] (4.2):
+    /// a local disk that errors is a broken origin, not a busy one — there
+    /// is no timeout class on `std::fs`. The zstd branch keeps its 3.1b
+    /// fall-back-to-identity behavior (a failed *compression* is not a
+    /// failed *persist* while the identity write can still succeed); only
+    /// the identity write's own failure is terminal.
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), PersistBlobError> {
         let t0 = Instant::now();
         let dir = self.blake3_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
             tracing::warn!(?e, "persist_blob: create_dir_all failed");
-            return;
+            return Err(PersistBlobError::Backend(format!(
+                "create_dir_all {dir:?}: {e}"
+            )));
         }
         let identity_path = self.blob_path(hash);
         let encoded_path = self.blob_encoded_path(hash);
         // No-op if either encoding already exists (matches the pre-v3
         // idempotent-persist contract, extended to both forms).
         if identity_path.exists() || encoded_path.exists() {
-            return;
+            return Ok(());
         }
 
         if self.compression.enabled && should_compress_blob(bytes, &self.compression) {
@@ -889,7 +964,7 @@ impl BlobPersistence for DirPersistence {
                         let elapsed = t0.elapsed().as_secs_f64();
                         metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "blob")
                             .record(elapsed);
-                        return;
+                        return Ok(());
                     }
                     // Encode/write/rename failed partway — clean up the temp
                     // file and fall through to an identity write below so
@@ -907,15 +982,23 @@ impl BlobPersistence for DirPersistence {
         let tmp = dir.join(format!("{}.tmp", hash.to_hex()));
         if let Err(e) = std::fs::write(&tmp, bytes) {
             tracing::warn!(?e, "persist_blob: write tmp failed");
-            return;
+            return Err(PersistBlobError::Backend(format!(
+                "write tmp for {}: {e}",
+                hash.to_hex()
+            )));
         }
         if let Err(e) = std::fs::rename(&tmp, &identity_path) {
             tracing::warn!(?e, "persist_blob: rename failed");
             let _ = std::fs::remove_file(&tmp);
+            return Err(PersistBlobError::Backend(format!(
+                "rename into place for {}: {e}",
+                hash.to_hex()
+            )));
         }
         let elapsed = t0.elapsed().as_secs_f64();
         metrics::histogram!("nodalmerge_persistence_write_seconds", "kind" => "blob")
             .record(elapsed);
+        Ok(())
     }
 
     fn blob_gc_sweep(&self, live: &std::collections::HashSet<Hash>, grace: Duration) -> usize {
@@ -1309,7 +1392,7 @@ mod tests {
         let store = DirPersistence::open(&dir).unwrap();
         let bytes = b"hello world".to_vec();
         let h = Hash::of(&bytes);
-        store.persist_blob(&h, &bytes);
+        store.persist_blob(&h, &bytes).unwrap();
         let loaded = store.get_blob(&h);
         assert_eq!(loaded, Some(bytes));
     }
@@ -1320,7 +1403,7 @@ mod tests {
         let store = DirPersistence::open(&dir).unwrap();
         let bytes = b"truthy".to_vec();
         let h = Hash::of(&bytes);
-        store.persist_blob(&h, &bytes);
+        store.persist_blob(&h, &bytes).unwrap();
         // Overwrite with bogus content.
         let p = store.blob_path(&h);
         std::fs::write(&p, b"LIES").unwrap();
@@ -1333,7 +1416,7 @@ mod tests {
         let store = DirPersistence::open(&dir).unwrap();
         let bytes = b"shared across rooms".to_vec();
         let h = Hash::of(&bytes);
-        store.persist_blob(&h, &bytes);
+        store.persist_blob(&h, &bytes).unwrap();
         let expected = dir.join("blobs").join("blake3").join(h.to_hex());
         assert!(expected.is_file(), "expected blob at {expected:?}");
     }

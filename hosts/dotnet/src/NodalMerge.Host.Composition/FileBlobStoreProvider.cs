@@ -273,14 +273,22 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
     /// <summary>
     /// One-time migration from the legacy sharded <c>&lt;shard&gt;/&lt;hex&gt;.blob</c>
     /// layout to the canonical global <c>blake3/&lt;hex&gt;</c> layout,
-    /// guarded by a <c>.layout-v2</c> marker written last. Idempotent and
-    /// crash-safe: a re-run finds already-migrated files at their
-    /// destination and skips them (that collision IS the cross-room CAS
-    /// dedup), and anything that fails hash verification is quarantined
-    /// into <c>.migration-skipped/</c> rather than deleted. See
+    /// guarded by a <c>.layout-v2</c> marker written last — and, mirroring
+    /// Rust slice 5.1 (<c>migrate_legacy_blob_layout</c>, store.rs), written
+    /// ONLY when the pass was fully clean. Idempotent and crash-safe: a
+    /// re-run finds already-migrated files at their destination and drops
+    /// the duplicate only after BLAKE3-verifying the destination really
+    /// holds those bytes (a partial copy left by an interrupted pass is
+    /// repaired from the verified legacy source instead of adopted).
+    /// Read failures are treated as transient (AV lock etc.): the file
+    /// stays in place and the deferred marker makes the next construction
+    /// retry it. Only a genuine content-hash mismatch is terminal and
+    /// quarantined into <c>.migration-skipped/</c> rather than deleted —
+    /// and even then the marker is deferred once; the quarantined file has
+    /// left the scan scope, so the next pass is clean and converges. See
     /// docs/BLOB_STORAGE_LAYOUT.md §6.
     /// </summary>
-    private static void MigrateLegacyLayoutIfNeeded(string rootPath)
+    private void MigrateLegacyLayoutIfNeeded(string rootPath)
     {
         var marker = Path.Combine(rootPath, ".layout-v2");
         if (File.Exists(marker))
@@ -290,6 +298,12 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
 
         var blake3Dir = Path.Combine(rootPath, "blake3");
         var skippedDir = Path.Combine(rootPath, ".migration-skipped");
+
+        // Slice A1 (dotnet-host-readiness): any deferral — read failure,
+        // quarantine, failed repair/move — leaves the marker absent so the
+        // next construction rescans. A dirty pass only costs a cheap
+        // TopDirectoryOnly re-scan per boot.
+        var dirty = false;
 
         // Slice 5.2: enumerate legacy shard files only — never the canonical
         // blake3/ tree or any dot-directory (.migration-skipped,
@@ -320,15 +334,35 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
             {
                 bytes = File.ReadAllBytes(legacyFile);
             }
-            catch
+            catch (Exception ex)
             {
-                Quarantine(legacyFile, skippedDir);
+                // A read failure may be transient (AV scanner holding the
+                // file, etc.) — quarantining here would be terminal for a
+                // perfectly good blob. Leave it in place and defer the
+                // marker so the next construction retries it.
+                dirty = true;
+                _logger?.LogWarning(
+                    ex,
+                    "Legacy blob migration: cannot read {LegacyFile}; leaving it in place and deferring .layout-v2 for a retry next construction",
+                    legacyFile
+                );
                 continue;
             }
 
             var actualHash = Hasher.Hash(bytes).ToString();
             if (!string.Equals(actualHash, fileName, StringComparison.OrdinalIgnoreCase))
             {
+                // Genuinely corrupt (bytes don't hash to the name) —
+                // terminal, quarantine rather than delete. Still defer the
+                // marker this pass; the quarantined file leaves the scan
+                // scope, so the next pass converges cleanly.
+                dirty = true;
+                _logger?.LogWarning(
+                    "Legacy blob migration: {LegacyFile} hashes to {ActualHash} instead of its name; quarantining to {SkippedDir}",
+                    legacyFile,
+                    actualHash,
+                    skippedDir
+                );
                 Quarantine(legacyFile, skippedDir);
                 continue;
             }
@@ -337,13 +371,85 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
             var dest = Path.Combine(blake3Dir, actualHash);
             if (File.Exists(dest))
             {
-                // Already present — this collision IS the cross-room
-                // dedup the v2 layout is for. Drop the duplicate.
-                File.Delete(legacyFile);
+                // Already present — this collision IS the cross-room dedup
+                // the v2 layout is for — but verify the dest really holds
+                // these bytes before dropping the duplicate: an interrupted
+                // earlier marker-less pass can leave a partial file here,
+                // and deleting the legacy source on the strength of a
+                // partial copy would destroy the only good copy (Rust 5.1).
+                bool destOk;
+                try
+                {
+                    var destBytes = File.ReadAllBytes(dest);
+                    destOk = string.Equals(
+                        Hasher.Hash(destBytes).ToString(),
+                        actualHash,
+                        StringComparison.Ordinal
+                    );
+                }
+                catch
+                {
+                    destOk = false;
+                }
+
+                if (!destOk)
+                {
+                    // Repair from the already-verified legacy bytes via
+                    // write-tmp-then-atomic-replace: at no point is there
+                    // no good copy on disk (the legacy file stays until
+                    // the replace has landed).
+                    var temp = Path.Combine(
+                        blake3Dir,
+                        "." + actualHash + "." + Guid.NewGuid().ToString("N") + ".tmp"
+                    );
+                    try
+                    {
+                        File.WriteAllBytes(temp, bytes);
+                        File.Move(temp, dest, overwrite: true);
+                        _logger?.LogWarning(
+                            "Legacy blob migration: repaired partial/corrupt destination {Dest} from verified legacy source {LegacyFile}",
+                            dest,
+                            legacyFile
+                        );
+                    }
+                    catch (Exception ex)
+                    {
+                        // Repair failed — the legacy file is the only good
+                        // copy; leave it in place and defer the marker.
+                        dirty = true;
+                        _logger?.LogWarning(
+                            ex,
+                            "Legacy blob migration: cannot repair partial destination {Dest}; leaving legacy source {LegacyFile} in place and deferring",
+                            dest,
+                            legacyFile
+                        );
+                        TryDeleteTempFile(temp);
+                        continue;
+                    }
+                }
+
+                if (!TryDeleteLegacyDuplicate(legacyFile))
+                {
+                    dirty = true;
+                }
             }
             else
             {
-                File.Move(legacyFile, dest);
+                try
+                {
+                    File.Move(legacyFile, dest);
+                }
+                catch (Exception ex)
+                {
+                    dirty = true;
+                    _logger?.LogWarning(
+                        ex,
+                        "Legacy blob migration: cannot move {LegacyFile} to {Dest}; leaving it in place and deferring",
+                        legacyFile,
+                        dest
+                    );
+                    continue;
+                }
             }
         }
 
@@ -368,7 +474,58 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
             }
         }
 
+        if (dirty)
+        {
+            // Not a clean pass — leave .layout-v2 absent so the next
+            // construction rescans and retries the deferred entries
+            // (mirrors Rust 5.1's deferred-count gate on the marker).
+            _logger?.LogWarning(
+                "Legacy blob migration: incomplete pass; leaving .layout-v2 absent so the next construction retries"
+            );
+            return;
+        }
+
         File.WriteAllText(marker, string.Empty);
+    }
+
+    private bool TryDeleteLegacyDuplicate(string legacyFile)
+    {
+        try
+        {
+            File.Delete(legacyFile);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // The dest verifiably holds the bytes, so nothing is lost —
+            // but the leftover duplicate must defer the marker so a later
+            // pass can finish the dedup.
+            _logger?.LogWarning(
+                ex,
+                "Legacy blob migration: destination verified but could not delete legacy duplicate {LegacyFile}; deferring",
+                legacyFile
+            );
+            return false;
+        }
+    }
+
+    private void TryDeleteTempFile(string temp)
+    {
+        try
+        {
+            if (File.Exists(temp))
+            {
+                File.Delete(temp);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(
+                ex,
+                "Legacy blob migration: failed to clean up temp repair file {TempPath}",
+                temp
+            );
+        }
     }
 
     private static void Quarantine(string legacyFile, string skippedDir)

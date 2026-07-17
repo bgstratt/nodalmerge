@@ -4,8 +4,18 @@ All notable changes to the NodalMerge .NET host packages (`NodalMerge.Host.Abstr
 `NodalMerge.Host.Composition`, `NodalMerge.DotNetHost`, `NodalMerge.DotNetHost.Native.win-x64`,
 `NodalMerge.DotNetHost.Native.linux-x64`) are documented here.
 
-## Unreleased
+## 0.2.3 — 2026-07-17
 
+- **Fixed: `FileBlobStoreProvider` legacy-layout migration parity with Rust's slice-5.1
+  semantics** (`NodalMerge.Host.Composition`). The dedupe branch now BLAKE3-verifies the
+  destination before dropping a legacy duplicate: a corrupt or partial destination is repaired
+  from the already-verified legacy bytes (write-temp-then-atomic-replace, never leaving a window
+  with no good copy on disk) instead of deleting the only good copy. The `.layout-v2` completion
+  marker is written only on a fully clean pass — a transient read failure leaves the file in
+  place to be retried on the next construction, and a genuinely corrupt entry is quarantined
+  with the marker deferred so the next boot re-scans. Previously the dedupe branch deleted the
+  legacy copy without checking the destination, and the marker was written unconditionally, so a
+  transient failure could strand a file's migration permanently.
 - **Changed: `IInboundPackObserver` invocation moved off the WebSocket receive loop**
   (slice 6.5, nodalmerge-studio/plans/blob-cas-remediation.md). Since 0.2.2 the hook was
   awaited inline in `RuntimeWebSocketLoopRunner`'s receive loop — the per-observer try/catch
@@ -25,9 +35,6 @@ All notable changes to the NodalMerge .NET host packages (`NodalMerge.Host.Abstr
   hosts that register nothing get the defaults above. New metrics:
   `runtime_ws_inbound_pack_observer_dropped_total`,
   `runtime_ws_inbound_pack_observer_timeout_total`.
-
-## 0.2.3 — 2026-07-16
-
 - **Fixed: legacy `/sync/blob-url` (+ `/api/sync/blob-url`) compat regression, introduced
   during the 0.2.0 blob-layout-convergence work and never disclosed here.** Between the
   0.2.0 entry below and this release, an internal refactor (slice S4.1, adding the new

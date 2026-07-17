@@ -89,6 +89,24 @@ try {
     # Native runtime packages are packed here, *before* NodalMerge.DotNetHost below — that pack step
     # now needs to restore PackageReference entries pointing at these exact packages/version (see the
     # comment on that step), so they must already exist in $resolvedOutput by the time it runs.
+    # win-x64's native payload is a Windows .dll. On a non-Windows host (CI ubuntu runner,
+    # linux dev box) cargo produced .so files, not .dll, so the win-x64 <None Include> paths
+    # are missing and `dotnet pack` would fail NU5019. The win-x64 package must still EXIST in
+    # the feed because NodalMerge.DotNetHost references it as a PackageReference (restore needs
+    # it regardless of the runner OS), but its native content is never loaded off-Windows — so
+    # a placeholder .dll is correct here, mirroring the placeholder .so logic below on Windows.
+    $winReleaseDir = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "../../target/release"))
+    if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) {
+        New-Item -ItemType Directory -Force -Path $winReleaseDir | Out-Null
+        foreach ($dllName in @("nodalmerge_host_ffi.dll", "nodalmerge_runtime_local_ffi.dll")) {
+            $dllPath = Join-Path $winReleaseDir $dllName
+            if (-not (Test-Path -LiteralPath $dllPath)) {
+                Write-Warning "win-x64 native $dllName not present off-Windows; creating placeholder for package restore."
+                New-Item -ItemType File -Force -Path $dllPath | Out-Null
+            }
+        }
+    }
+
     Write-Host "Packing native runtime packages to $resolvedOutput ..."
     Invoke-Checked -Name "dotnet pack NodalMerge.DotNetHost.Native.win-x64" -Command {
         dotnet pack ./src/NodalMerge.DotNetHost.Native.win-x64/NodalMerge.DotNetHost.Native.win-x64.csproj -c Release -o $resolvedOutput /p:Version=$Version

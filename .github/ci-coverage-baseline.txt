@@ -1,0 +1,75 @@
+# ci-coverage-baseline.txt — the reviewed allow-list of test suites that are known
+# to run in NO workflow (or are deliberately excluded), consumed by
+# scripts/check-ci-coverage.ps1 (plan: nodalmerge-studio/plans/dotnet-host-readiness.md
+# phase C, executing the deferred Phase 8.1/8.3 of blob-cas-remediation.md).
+#
+# This is the ratchet's STARTING state: every entry here is a gap the audit surfaced.
+# C2 burns it down — each suite gets wired into a workflow and its line removed. The
+# check FAILS if a now-covered entry is left here, so the list can only shrink.
+#
+# Format: one item id per line, then `# <reason>`. Reason tags for C2 triage:
+#   C2:needs-nothing    — pure logic/vectors; a plain dotnet/cargo step covers it
+#   C2:needs-ffi        — requires the native host FFI (DLL/.so) present on the runner
+#   C2:needs-docker     — requires a MinIO/Docker container (blob-s3-gc-minio.yml pattern)
+#   PARITY:<pair>       — cross-runtime parity-pair member (C3). BOTH members of a pair
+#                         must be baselined together (even an already-covered side) until
+#                         the pair is fully covered, then both lines leave together.
+
+# ---------------------------------------------------------------------------
+# Parity pairs (C3) — one-sided today; both members pinned until the gap closes.
+# ---------------------------------------------------------------------------
+rust:server/server/tests/spec_auth_vectors.rs                        # PARITY:spec-auth C2:needs-nothing
+dotnet:NodalMerge.DotNetHost.Tests.SpecAuthVectorsTests              # PARITY:spec-auth C2:needs-nothing (known flake — SpecAuthVectorsTests)
+rust:server/server/tests/branch_fork_vectors.rs                      # PARITY:branch-fork C2:needs-nothing
+dotnet:NodalMerge.DotNetHost.Tests.BranchForkVectorsTests            # PARITY:branch-fork C2:needs-nothing (known flake — BranchForkVectorsTests)
+rust:server/server/tests/query_materialization_vectors.rs            # PARITY:query-materialization — rust side already covered; pinned until .NET twin lands
+dotnet:NodalMerge.DotNetHost.Tests.QueryMaterializationVectorsTests  # PARITY:query-materialization C2:needs-nothing
+rust:server/server/tests/blob_layout_vectors_v3.rs                   # PARITY:blob-layout-v3 C2:needs-nothing
+dotnet:NodalMerge.DotNetHost.Tests.BlobLayoutParityTests            # PARITY:blob-layout-v3 — .NET side already covered; pinned until rust v3 twin lands
+
+# ---------------------------------------------------------------------------
+# Rust server/core/engine integration targets running in no workflow.
+# ---------------------------------------------------------------------------
+rust:core/gc/tests/conformance.rs                                    # C2:needs-nothing (cargo test -p on the gc crate)
+rust:core/gc/tests/fault_injection.rs                                # C2:needs-nothing (cargo test -p on the gc crate)
+rust:engine/host-ffi/tests/abi.rs                                    # C2:needs-nothing (rust-side ABI shape; no external deps)
+rust:engine/host-ffi/tests/room_token_ffi.rs                         # C2:needs-nothing (rust-side token FFI)
+rust:server/server/tests/archive_portability_vectors.rs             # C2:needs-nothing
+rust:server/server/tests/backpressure_lagged.rs                      # C2:needs-nothing
+rust:server/server/tests/blob_url_resolution_minio.rs                # C2:needs-docker (MinIO — blob-s3-gc-minio.yml pattern)
+rust:server/server/tests/graph_query_routes.rs                       # C2:needs-nothing
+rust:server/server/tests/idle_eviction.rs                            # C2:needs-nothing
+rust:server/server/tests/lamport_ceiling.rs                          # C2:needs-nothing
+rust:server/server/tests/metrics_endpoint.rs                         # C2:needs-nothing
+rust:server/server/tests/persistence.rs                              # C2:needs-nothing
+rust:server/server/tests/rate_limit.rs                               # C2:needs-nothing
+rust:server/server/tests/token_expiry.rs                             # C2:needs-nothing
+
+# ---------------------------------------------------------------------------
+# .NET DotNetHost.Tests classes running in no workflow (the blob-layout-parity
+# dotnet job only --filters a handful of classes; the rest are unwired).
+# ---------------------------------------------------------------------------
+dotnet:NodalMerge.DotNetHost.Tests.ChainedBlobStoreProviderHttpIntegrationTests   # C2:needs-ffi (HTTP origin over host FFI)
+dotnet:NodalMerge.DotNetHost.Tests.DemoReadinessSmokeTests                          # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.FfiBindingTests                                  # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.FfiHttpEndpointTests                             # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.FfiWebSocketEndpointTests                        # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.FfiWebSocketLoopRunnerTests                      # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.FileBlobZstdEncodingTests                        # C2:needs-nothing (pure zstd encode/decode)
+dotnet:NodalMerge.DotNetHost.Tests.ProviderCompositionTests                         # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.ProviderDurabilityTests                          # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.ProviderHostRestartDurabilityIntegrationTests    # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.ProviderProfileRuntimeIntegrationTests           # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.ProviderProfileTokenEndpointIntegrationTests     # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.RoomTokenEmbeddedProviderTests                   # C2:needs-ffi (known flake — FFI DllNotFound load-order)
+dotnet:NodalMerge.DotNetHost.Tests.Row19AutomatedScenarioHarnessTests               # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.RuntimeDagPersistenceServiceTests                # C2:needs-nothing
+dotnet:NodalMerge.DotNetHost.Tests.RuntimeDispatchClosePolicyTests                  # C2:needs-nothing
+dotnet:NodalMerge.DotNetHost.Tests.RuntimeErrorEnvelopeBuilderTests                 # C2:needs-nothing
+dotnet:NodalMerge.DotNetHost.Tests.RuntimeFrameProcessorTests                       # C2:needs-nothing
+dotnet:NodalMerge.DotNetHost.Tests.RuntimeMessageProcessorTests                     # C2:needs-nothing (known flake — meter-capture dictionary race)
+dotnet:NodalMerge.DotNetHost.Tests.RuntimeProtocolTests                             # C2:needs-nothing
+dotnet:NodalMerge.DotNetHost.Tests.RuntimeTokenValidationServiceTests               # C2:needs-nothing
+dotnet:NodalMerge.DotNetHost.Tests.RuntimeWebSocketEndpointTests                    # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.S3DirectChainCompositionTests                    # C2:needs-ffi
+dotnet:NodalMerge.DotNetHost.Tests.S3DirectMinioEndToEndTests                       # C2:needs-docker (MinIO)

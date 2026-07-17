@@ -1,0 +1,34 @@
+name: ci-coverage-meta
+
+# The meta-check (plan: nodalmerge-studio/plans/dotnet-host-readiness.md phase C —
+# executing the deferred Phase 8.1/8.3 of blob-cas-remediation.md).
+#
+# Root cause it guards: this repo's CI is a set of per-suite workflows with
+# hand-maintained per-test-file steps and `paths:` filters. A test file can exist,
+# compile, and be green locally while running in NO workflow at all — the audit found
+# ~15 Rust integration-test files and ~34 .NET test classes in exactly that state.
+# scripts/check-ci-coverage.ps1 makes that a hard CI failure: every git-tracked
+# integration-test target (Rust tests/*.rs) and every .NET [Fact]/[Theory] class must
+# be named by some workflow step, OR carry an explicit line in
+# .github/ci-coverage-baseline.txt (the reviewed, only-shrinks allow-list).
+#
+# It also enforces the C3 parity rule: declared cross-runtime parity pairs
+# (spec-auth, branch-fork, query-materialization, zstd-interop, blob-layout v1/v3,
+# capcomp) must be covered on BOTH runtimes or baselined together — never one-sided.
+#
+# Deliberately triggers on EVERY push/PR with no paths: filter. This is the one
+# workflow whose whole job is to catch paths:-filter gaps, so it must not have one.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci-coverage-meta:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run CI coverage meta-check (every test suite must run in a workflow or be baselined)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/check-ci-coverage.ps1

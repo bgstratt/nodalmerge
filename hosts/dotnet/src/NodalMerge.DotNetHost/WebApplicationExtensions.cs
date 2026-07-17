@@ -265,9 +265,12 @@ public static class WebApplicationExtensions
         // Blob origin surface (docs/BLOB_HTTP_SURFACE.md, slice S2.1a): bound once
         // here and closed over by the handlers below, per that doc's guidance that
         // this doesn't need to be a DI service. Declared before first use since
-        // the URL-resolution routes (slice S4.1) and the legacy /sync/blob-url
-        // alias both close over it too.
+        // the URL-resolution routes (slice S4.1) close over it too. The legacy
+        // /sync/blob-url alias does NOT — slice 4.1 (blob-cas-remediation.md,
+        // finding #12) restored its pre-existing `main` behavior, which never
+        // consulted this options object at all (no hash-shape check, no auth).
         var blobHttpOptions = BlobHttpOptions.FromConfiguration(app.Configuration);
+        blobHttpOptions.Validate();
 
         app.MapGet("/", () => Results.Ok(new
         {
@@ -311,15 +314,18 @@ public static class WebApplicationExtensions
         app.MapPost("/sync/token/validate", HandleTokenValidateAsync);
         app.MapPost("/api/sync/token/validate", HandleTokenValidateAsync);
 
-        // Legacy blob-url resolver (pre-dates slice S4.1's frozen contract).
-        // Kept as an alias of GET /blobs/{hash}/url — same handler, same
-        // response shape ({"url":..., "expiresAtUtc":...}) and status codes;
-        // only the query-parameter surface (room/namespace) differs, per
-        // docs/BLOB_HTTP_SURFACE.md's "Blob URL resolution" section.
-        app.MapGet("/sync/blob-url", (HttpContext context, [AsParameters] BlobUrlQuery query, CancellationToken cancellationToken) =>
-            HandleBlobUrlAsync(context, query, blobHttpOptions, cancellationToken));
-        app.MapGet("/api/sync/blob-url", (HttpContext context, [AsParameters] BlobUrlQuery query, CancellationToken cancellationToken) =>
-            HandleBlobUrlAsync(context, query, blobHttpOptions, cancellationToken));
+        // Legacy blob-url resolver — shipped on `main` in 0.2.0, BEFORE the
+        // frozen GET /blobs/{hash}/url contract (slice S4.1) existed. Slice
+        // 4.1 (blob-cas-remediation.md, finding #12) restored `main`'s exact
+        // behavior here after it silently regressed: `main` returned
+        // `expiresAt` as unix seconds (not `expiresAtUtc` ISO-8601), answered
+        // 404 for "no backend" (not 501), and never validated the hash shape
+        // or checked auth at all (any non-empty hash, anonymous, always — see
+        // HandleLegacyBlobUrlAsync). This is now a DELIBERATELY DIFFERENT
+        // response shape/status/auth posture from the new route below, not an
+        // alias of it — do not "fix" it to match /blobs/{hash}/url again.
+        app.MapGet("/sync/blob-url", HandleLegacyBlobUrlAsync);
+        app.MapGet("/api/sync/blob-url", HandleLegacyBlobUrlAsync);
 
         app.MapGet("/blobs/{hash}", (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
             HandleBlobGetAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
@@ -551,40 +557,119 @@ public static class WebApplicationExtensions
     }
 
     /// <summary>
-    /// Legacy alias of <c>GET /blobs/{hash}/url</c> (docs/BLOB_HTTP_SURFACE.md
-    /// "Blob URL resolution"). Pre-S4.1 callers passed <c>hash</c>/<c>room</c>/
-    /// <c>namespace</c> as query parameters instead of a route segment; this
-    /// shim maps that shape onto the frozen handler so both routes share one
-    /// implementation, one response shape, and one set of status codes.
+    /// <c>GET /sync/blob-url</c> + <c>GET /api/sync/blob-url</c> — the legacy
+    /// blob URL resolver that shipped on <c>main</c> in 0.2.0, restored to
+    /// `main`'s exact behavior by slice 4.1 (blob-cas-remediation.md, finding
+    /// #12) after a later refactor (S4.1's frozen-contract slice) silently
+    /// turned it into a thin alias of <see cref="HandleBlobUrlResolveAsync"/>
+    /// with a different response shape, different status codes, and new
+    /// validation `main` never had. Ground truth is `main`'s own
+    /// <c>HandleBlobUrlAsync</c> (git history, pre-blobExpansion
+    /// WebApplicationExtensions.cs), reproduced verbatim here:
+    /// <list type="bullet">
+    /// <item>NO hash-shape validation and NO auth check — any non-empty hash
+    /// is accepted from anyone. This route never consults
+    /// <see cref="BlobHttpOptions"/> at all.</item>
+    /// <item><c>hash</c> empty/whitespace -&gt; 400 <c>{"error":"hash is
+    /// required"}</c> (distinct wording from the new route's "non-canonical
+    /// hash").</item>
+    /// <item><c>op=put</c> with a missing/non-positive <c>size</c> -&gt; 400
+    /// <c>{"error":"size must be a positive integer for op=put"}</c>.</item>
+    /// <item>anything other than <c>op=get</c>/<c>op=put</c> -&gt; 400
+    /// <c>{"error":"op must be 'get' or 'put'"}</c>.</item>
+    /// <item>the resolver answering "no presign-capable backend" (a
+    /// registered resolver returning <c>null</c>, e.g. the WsOnly/File
+    /// compositions) -&gt; <b>404</b>, NOT 501.</item>
+    /// <item>success -&gt; 200 <c>{"url":..., "expiresAt": &lt;unix
+    /// seconds&gt;}</c> — NOT <c>expiresAtUtc</c> ISO-8601.</item>
+    /// </list>
+    /// <c>room</c>/<c>namespace</c> query parameters (defaulting to
+    /// <c>"default"</c>/<c>"assets"</c>) are the one part of this surface that
+    /// predates and differs from the new route, kept for backward
+    /// compatibility with pre-S4.1 callers.
+    ///
+    /// Resolves <see cref="IBlobUrlResolverProvider"/> via
+    /// <c>context.RequestServices.GetRequiredService</c> rather than taking it
+    /// as a direct route-handler parameter (which is what `main` did): a
+    /// complex-typed parameter minimal API can't prove is a registered
+    /// service at endpoint-metadata-build time gets inferred as [FromBody],
+    /// which then throws for a GET route the moment ANY endpoint in the app
+    /// is first matched — including in test hosts that (legitimately) don't
+    /// register this service for an unrelated scenario. Runtime behavior is
+    /// unchanged: still throws (surfacing as an unhandled-exception 500) when
+    /// no resolver is registered, exactly like `main`'s direct injection did.
     /// </summary>
-    private static Task<IResult> HandleBlobUrlAsync(
+    private static async Task<IResult> HandleLegacyBlobUrlAsync(
         HttpContext context,
-        BlobUrlQuery query,
-        BlobHttpOptions options,
+        [AsParameters] BlobUrlQuery query,
         CancellationToken cancellationToken
     )
     {
+        if (string.IsNullOrWhiteSpace(query.Hash))
+        {
+            return Results.BadRequest(new { error = "hash is required" });
+        }
+
+        var resolver = context.RequestServices.GetRequiredService<IBlobUrlResolverProvider>();
         var room = string.IsNullOrWhiteSpace(query.Room) ? "default" : query.Room;
         var scope = string.IsNullOrWhiteSpace(query.Namespace) ? "assets" : query.Namespace;
+        var op = (query.Op ?? string.Empty).Trim().ToLowerInvariant();
 
-        return HandleBlobUrlResolveAsync(
-            context,
-            query.Hash,
-            query.Op,
-            query.Size,
-            query.ContentType,
-            room,
-            scope,
-            options,
-            cancellationToken
-        );
+        if (op == "put")
+        {
+            if (query.Size is null || query.Size <= 0)
+            {
+                return Results.BadRequest(new { error = "size must be a positive integer for op=put" });
+            }
+
+            var putUrl = await resolver.ResolvePutUrlAsync(
+                new BlobPutUrlRequest(room, scope, query.Hash, query.Size.Value, query.ContentType),
+                cancellationToken
+            );
+
+            if (putUrl is null)
+            {
+                return Results.StatusCode(StatusCodes.Status404NotFound);
+            }
+
+            return Results.Ok(new
+            {
+                url = putUrl.Url,
+                expiresAt = putUrl.ExpiresAtUtc.ToUnixTimeSeconds()
+            });
+        }
+
+        if (op == "get")
+        {
+            var getUrl = await resolver.ResolveGetUrlAsync(
+                new BlobGetUrlRequest(room, scope, query.Hash),
+                cancellationToken
+            );
+
+            if (getUrl is null)
+            {
+                return Results.StatusCode(StatusCodes.Status404NotFound);
+            }
+
+            return Results.Ok(new
+            {
+                url = getUrl.Url,
+                expiresAt = getUrl.ExpiresAtUtc.ToUnixTimeSeconds()
+            });
+        }
+
+        return Results.BadRequest(new { error = "op must be 'get' or 'put'" });
     }
 
     /// <summary>
     /// <c>GET /blobs/{hash}/url?op=get|put[&amp;size=&amp;contentType=]</c> —
     /// the frozen URL-resolution contract (docs/BLOB_HTTP_SURFACE.md "Blob URL
-    /// resolution (optional capability)", slice S4.1). Shared by the new
-    /// route and the legacy <c>/sync/blob-url</c> alias.
+    /// resolution (optional capability)", slice S4.1). NOT shared with the
+    /// legacy <c>/sync/blob-url</c> route as of slice 4.1
+    /// (blob-cas-remediation.md, finding #12) — that route was restored to
+    /// `main`'s pre-existing, differently-shaped behavior
+    /// (<see cref="HandleLegacyBlobUrlAsync"/>) and must not be routed through
+    /// here again.
     /// </summary>
     private static async Task<IResult> HandleBlobUrlResolveAsync(
         HttpContext context,

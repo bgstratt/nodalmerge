@@ -101,4 +101,35 @@ public sealed record RemoteBlobOriginOptions(
             );
         }
     }
+
+    /// <summary>
+    /// Resolves <see cref="BaseUrl"/> into the <see cref="Uri"/> used to build
+    /// every request against the origin (<see cref="HttpRemoteBlobStoreProvider"/>
+    /// and, for the URL-resolution/upload-confirm endpoints,
+    /// <see cref="S3DirectBlobStoreProvider"/>), guaranteeing a trailing "/" on
+    /// the path component.
+    ///
+    /// Slice 4.3 (blob-cas-remediation.md): a reverse-proxy path prefix in
+    /// <c>BaseUrl</c> (e.g. <c>https://host/nodalmerge</c>) was previously
+    /// discarded, because request paths were built root-relative
+    /// (<c>/blobs/{hash}</c>) against an <c>HttpClient.BaseAddress</c> that
+    /// itself never guaranteed a trailing slash. RFC 3986's relative-reference
+    /// merge algorithm treats a base path with no trailing "/" as ending in a
+    /// "file" segment that a relative reference REPLACES rather than extends —
+    /// <c>new Uri(new Uri("https://h/nodalmerge"), "blobs/x")</c> resolves to
+    /// <c>https://h/blobs/x</c>, silently dropping "nodalmerge" — so BOTH
+    /// halves of the fix are required together: this method guarantees the
+    /// base ends in "/", and callers must combine it with a RELATIVE path that
+    /// has NO leading "/" (e.g. <c>new Uri(ResolveBaseUri(), $"blobs/{hash}")</c>,
+    /// never <c>$"/blobs/{hash}"</c>). Building the absolute request Uri this
+    /// way, rather than relying on <c>HttpClient.BaseAddress</c> + a relative
+    /// <see cref="HttpRequestMessage"/> path, also makes request construction
+    /// independent of how the caller's <c>HttpClient</c> happens to be
+    /// configured.
+    /// </summary>
+    public Uri ResolveBaseUri()
+    {
+        var normalized = BaseUrl.EndsWith('/') ? BaseUrl : BaseUrl + "/";
+        return new Uri(normalized, UriKind.Absolute);
+    }
 }

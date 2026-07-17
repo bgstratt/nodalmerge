@@ -242,14 +242,73 @@ name: blob-layout-parity
 #                                                 Sibling files this same audit
 #                                                 found equally uncovered —
 #                                                 ChainedBlobStoreProviderHttpIntegrationTests.cs,
-#                                                 S3DirectChainCompositionTests.cs,
-#                                                 ProviderS3DelegatedBlobResolverIntegrationTests.cs
+#                                                 S3DirectChainCompositionTests.cs
 #                                                 — are NOT touched by slice
 #                                                 2.1's production changes and
 #                                                 are left for the broader CI
 #                                                 follow-up, now tracked as
 #                                                 Phase 8 (deferred) in
-#                                                 blob-cas-remediation.md)
+#                                                 blob-cas-remediation.md.
+#                                                 ProviderS3DelegatedBlobResolverIntegrationTests.cs
+#                                                 was ALSO on that uncovered
+#                                                 list until slice 4.1 pulled it
+#                                                 forward — see below, same
+#                                                 reasoning 1.3 used for
+#                                                 minio_round_trip.rs: a slice
+#                                                 whose production change this
+#                                                 suite actually exercises
+#                                                 shouldn't wait for Phase 8.)
+#   hosts/dotnet/src/NodalMerge.DotNetHost/BlobHttpOptions.cs (slice 4.3.1 —
+#                                                 Validate() rejects
+#                                                 non-positive MaxBlobBytes at
+#                                                 startup instead of 500ing the
+#                                                 first chunked PUT or silently
+#                                                 413ing everything)
+#   hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobOriginOptions.cs
+#                                                 (slice 4.3.2 — ResolveBaseUri()
+#                                                 guarantees a trailing "/" so a
+#                                                 reverse-proxy path prefix in
+#                                                 BaseUrl survives into every
+#                                                 request HttpRemoteBlobStoreProvider
+#                                                 / S3DirectBlobStoreProvider send)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/LegacySyncBlobUrlCompatTests.cs
+#                                                 (slice 4.1, finding #12 — new
+#                                                 file, golden tests for legacy
+#                                                 /sync/blob-url restored to
+#                                                 `main`'s pre-existing
+#                                                 behavior: unix-seconds
+#                                                 expiresAt, 404 not 501 for no
+#                                                 backend, loose/anonymous hash
+#                                                 handling — deliberately
+#                                                 different from the new frozen
+#                                                 /blobs/{hash}/url route)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderHttpEndpointTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderS3DelegatedBlobResolverIntegrationTests.cs
+#                                                 (slice 4.1 — both pre-existing
+#                                                 files exercised /sync/blob-url
+#                                                 under the WRONG (S4.1-alias)
+#                                                 assumptions the finding #12
+#                                                 fix corrects (expiresAtUtc,
+#                                                 501, canonical-hash
+#                                                 rejection); fixed in place to
+#                                                 assert `main`'s restored
+#                                                 shape. ProviderS3DelegatedBlobResolverIntegrationTests.cs
+#                                                 pulled forward from the Phase
+#                                                 8 backlog noted above, since
+#                                                 this slice's change is exactly
+#                                                 what it exercises.
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpOptionsValidationTests.cs
+#                                                 (slice 4.3.1, new file)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobOriginBaseUrlPathPrefixTests.cs
+#                                                 (slice 4.3.2, new file — both
+#                                                 HttpRemoteBlobStoreProvider and
+#                                                 S3DirectBlobStoreProvider,
+#                                                 both trailing-slash BaseUrl
+#                                                 spellings)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DelegatedBlobOptionsStaleKeyGuardTests.cs
+#                                                 (slice 4.3.3, new file — warns,
+#                                                 does not hard-fail, on stale
+#                                                 PutPath/GetPath config keys)
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobIdentityVerifyTests.cs
 #                                                 (slice 3.2, finding #13 — new
 #                                                 file, pins FileBlobStoreProvider's
@@ -331,6 +390,8 @@ on:
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
+      - "hosts/dotnet/src/NodalMerge.DotNetHost/BlobHttpOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobOriginOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/ServiceCollectionExtensions.cs"
@@ -358,6 +419,12 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobOriginOptionsTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ChainedBlobStoreProviderTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RemoteBlobLinkAggregatorTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/LegacySyncBlobUrlCompatTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderHttpEndpointTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderS3DelegatedBlobResolverIntegrationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpOptionsValidationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobOriginBaseUrlPathPrefixTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DelegatedBlobOptionsStaleKeyGuardTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   pull_request:
     paths:
@@ -419,6 +486,8 @@ on:
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
+      - "hosts/dotnet/src/NodalMerge.DotNetHost/BlobHttpOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobOriginOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/ServiceCollectionExtensions.cs"
@@ -446,6 +515,12 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobOriginOptionsTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ChainedBlobStoreProviderTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RemoteBlobLinkAggregatorTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/LegacySyncBlobUrlCompatTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderHttpEndpointTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderS3DelegatedBlobResolverIntegrationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpOptionsValidationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobOriginBaseUrlPathPrefixTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DelegatedBlobOptionsStaleKeyGuardTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   workflow_dispatch:
 
@@ -567,3 +642,21 @@ jobs:
 
       - name: "Run RemoteBlobLinkAggregator tests, including its ExistsAsync ordered-fallback probe (the chain sees this, not the individual links, once >1 remote link is configured — slice 2.1)"
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RemoteBlobLinkAggregatorTests"
+
+      - name: "Run legacy /sync/blob-url golden tests (slice 4.1, finding #12 — restored to main's pre-existing behavior: unix-seconds expiresAt, 404 not 501 for no backend, loose/anonymous hash handling)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~LegacySyncBlobUrlCompatTests"
+
+      - name: "Run provider HTTP endpoint tests, including /sync/blob-url under the WsOnly/File compositions (fixed in place by slice 4.1 to match main's restored shape)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderHttpEndpointTests"
+
+      - name: "Run S3-delegated /sync/blob-url integration tests (pulled forward from the Phase 8 backlog by slice 4.1, since this slice's fix is exactly what these exercise)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderS3DelegatedBlobResolverIntegrationTests"
+
+      - name: "Run BlobHttpOptions startup-validation tests (slice 4.3.1 — non-positive MaxBlobBytes rejected at startup, not 500/413 at request time)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobHttpOptionsValidationTests"
+
+      - name: "Run BaseUrl path-prefix resolution tests (slice 4.3.2 — a reverse-proxy path prefix in RemoteBlobOriginOptions.BaseUrl must survive into every HttpRemoteBlobStoreProvider/S3DirectBlobStoreProvider request, both trailing-slash spellings)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobOriginBaseUrlPathPrefixTests"
+
+      - name: "Run S3DelegatedBlobOptions stale-key guard tests (slice 4.3.3 — removed PutPath/GetPath config keys warn loudly, never hard-fail)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~S3DelegatedBlobOptionsStaleKeyGuardTests"

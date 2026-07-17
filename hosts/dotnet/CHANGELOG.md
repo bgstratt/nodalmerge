@@ -4,6 +4,40 @@ All notable changes to the NodalMerge .NET host packages (`NodalMerge.Host.Abstr
 `NodalMerge.Host.Composition`, `NodalMerge.DotNetHost`, `NodalMerge.DotNetHost.Native.win-x64`,
 `NodalMerge.DotNetHost.Native.linux-x64`) are documented here.
 
+## 0.2.3 — 2026-07-16
+
+- **Fixed: legacy `/sync/blob-url` (+ `/api/sync/blob-url`) compat regression, introduced
+  during the 0.2.0 blob-layout-convergence work and never disclosed here.** Between the
+  0.2.0 entry below and this release, an internal refactor (slice S4.1, adding the new
+  frozen `GET /blobs/{hash}/url` contract) silently turned this pre-existing route — which
+  shipped on `main` and predates 0.2.0 — into a thin alias of the new route, changing its
+  response shape and status codes without a corresponding disclosure here. Concretely, the
+  legacy route had started: emitting `expiresAtUtc` (ISO-8601) instead of its original
+  `expiresAt` (unix seconds); answering `501` instead of `404` when no presign-capable
+  backend is configured; and rejecting non-canonical/malformed hashes with `400`, which the
+  original route never did (it accepts any non-empty hash, anonymously, and always did).
+  This release restores the route's original, pre-0.2.0 behavior exactly (see
+  `docs/BLOB_HTTP_SURFACE.md`'s "Status and what's deferred" section for the full
+  before/after) — no config or client change required for existing pre-S4.1 callers.
+  The new `GET /blobs/{hash}/url` contract (introduced by S4.1, unaffected by this fix)
+  keeps its frozen shape.
+- **Additive: `BlobHttpOptions.Validate()`.** A non-positive `MaxBlobBytes` now fails fast
+  at startup with a clear `InvalidOperationException` instead of throwing an unhandled
+  `ArgumentOutOfRangeException` on the first chunked PUT (negative) or silently rejecting
+  every PUT with 413 (zero).
+- **Fixed: a reverse-proxy path prefix in `RemoteBlobOriginOptions:BaseUrl` (e.g.
+  `https://host/nodalmerge`) was silently dropped from every request
+  `HttpRemoteBlobStoreProvider`/`S3DirectBlobStoreProvider` sent** (they always hit
+  `/blobs/{hash}` at the bare host instead of `/nodalmerge/blobs/{hash}`). Deployments
+  behind a path-prefixed reverse proxy for the `ChainedRemote` blob provider were affected;
+  an unprefixed `BaseUrl` is unaffected.
+- **Additive: a startup warning (not a hard failure) when `S3DelegatedBlobOptions` config
+  still sets the removed `PutPath`/`GetPath` keys** from the pre-0.2.0 two-path delegate
+  presign protocol. These keys have been silently ignored by the options binder since the
+  0.2.0 presign-protocol-v1 migration below; a deployment that never migrated its config
+  degraded to the WS blob fallback with only a generic warning. Now names the exact stale
+  keys and the migration to make.
+
 ## 0.2.2 — 2026-07-16
 
 - **Additive: `IInboundPackObserver` hook** (`NodalMerge.Host.Abstractions.Providers`). Invoked

@@ -48,20 +48,17 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
         using var doc = await JsonDocument.ParseAsync(stream);
 
         Assert.Equal("https://upload.example/presigned", doc.RootElement.GetProperty("url").GetString());
-        // Slice S4.1 aligned /sync/blob-url's response shape to the frozen
-        // GET /blobs/{hash}/url contract (docs/BLOB_HTTP_SURFACE.md): an
-        // ISO-8601 "expiresAtUtc" string, not a unix-seconds "expiresAt".
-        // Protocol v1 itself still carries no expiry field (see
-        // docs/BLOB_STORAGE_LAYOUT.md §7) — the resolver computes its own
-        // from the configured TTL (default 900s), matching Rust's
-        // PresignedUrl::with_ttl.
-        var expiresAtUtc = DateTime.Parse(
-            doc.RootElement.GetProperty("expiresAtUtc").GetString()!,
-            null,
-            System.Globalization.DateTimeStyles.RoundtripKind
-        );
-        var now = DateTime.UtcNow;
-        Assert.InRange((expiresAtUtc - now).TotalSeconds, 890, 910);
+        // Slice 4.1 (blob-cas-remediation.md, finding #12) restored
+        // /sync/blob-url to `main`'s pre-existing response shape: a
+        // unix-seconds "expiresAt" integer, never the new frozen route's
+        // ISO-8601 "expiresAtUtc" string. Protocol v1 itself still carries no
+        // expiry field (see docs/BLOB_STORAGE_LAYOUT.md §7) — the resolver
+        // computes its own from the configured TTL (default 900s), matching
+        // Rust's PresignedUrl::with_ttl.
+        Assert.False(doc.RootElement.TryGetProperty("expiresAtUtc", out _), "legacy route must not emit expiresAtUtc");
+        var expiresAt = DateTimeOffset.FromUnixTimeSeconds(doc.RootElement.GetProperty("expiresAt").GetInt64());
+        var now = DateTimeOffset.UtcNow;
+        Assert.InRange((expiresAt - now).TotalSeconds, 890, 910);
 
         // Pin the actual outbound request shape against protocol v1.
         Assert.NotNull(handler.LastRequestBody);
@@ -78,7 +75,7 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
     }
 
     [Fact]
-    public async Task Sync_blob_url_returns_501_when_s3_delegated_resolver_fails()
+    public async Task Sync_blob_url_returns_404_when_s3_delegated_resolver_fails()
     {
         await using var app = BuildTestApp(
             new DelegatedServerErrorHandler(),
@@ -98,13 +95,17 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
         var client = app.GetTestClient();
         var response = await client.GetAsync($"/sync/blob-url?op=get&room=room-a&namespace=assets&hash={CanonicalHash}");
 
-        // The frozen contract answers "no presign-capable backend" with 501,
-        // not 404 (docs/BLOB_HTTP_SURFACE.md "Blob URL resolution").
-        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+        // Slice 4.1 (blob-cas-remediation.md, finding #12): the legacy route
+        // was restored to `main`'s behavior — a resolver that answers "no
+        // presigned URL" (S3DelegatedBlobUrlResolverProvider returns null on
+        // any failure, never throws) is 404 here, NOT the new frozen route's
+        // 501 (docs/BLOB_HTTP_SURFACE.md "Blob URL resolution" — that
+        // contract is for GET /blobs/{hash}/url only).
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
-    public async Task Sync_blob_url_retries_on_timeout_then_falls_back_to_501()
+    public async Task Sync_blob_url_retries_on_timeout_then_falls_back_to_404()
     {
         var handler = new DelegatedTimeoutHandler();
         await using var app = BuildTestApp(
@@ -128,7 +129,9 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
         var client = app.GetTestClient();
         var response = await client.GetAsync($"/sync/blob-url?op=get&room=room-a&namespace=assets&hash={CanonicalHash}");
 
-        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+        // Slice 4.1: legacy-route "no backend" is 404, not 501 — see
+        // Sync_blob_url_returns_404_when_s3_delegated_resolver_fails.
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         Assert.Equal(3, handler.CallCount);
     }
 
@@ -156,12 +159,14 @@ public sealed class ProviderS3DelegatedBlobResolverIntegrationTests
 
         var client = app.GetTestClient();
 
+        // Slice 4.1: legacy-route "no backend" is 404, not 501 — see
+        // Sync_blob_url_returns_404_when_s3_delegated_resolver_fails.
         var first = await client.GetAsync($"/sync/blob-url?op=get&room=room-a&namespace=assets&hash={CanonicalHash}");
-        Assert.Equal(HttpStatusCode.NotImplemented, first.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, first.StatusCode);
         Assert.Equal(1, handler.CallCount);
 
         var second = await client.GetAsync($"/sync/blob-url?op=get&room=room-a&namespace=assets&hash={CanonicalHash}");
-        Assert.Equal(HttpStatusCode.NotImplemented, second.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, second.StatusCode);
         Assert.Equal(1, handler.CallCount);
     }
 

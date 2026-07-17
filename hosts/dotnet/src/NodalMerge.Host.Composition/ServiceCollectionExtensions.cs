@@ -201,6 +201,10 @@ public static class ServiceCollectionExtensions
         {
             var delegatedOptions = S3DelegatedBlobOptions.FromConfiguration(configuration);
             delegatedOptions.Validate();
+            // Slice 4.3 (blob-cas-remediation.md): a loud, non-fatal warning
+            // when a deployment still sets the removed PutPath/GetPath keys —
+            // see S3DelegatedBlobOptions.WarnOnStaleKeys's doc.
+            S3DelegatedBlobOptions.WarnOnStaleKeys(configuration);
 
             services.AddSingleton(delegatedOptions);
             services.AddHttpClient("NodalMerge.S3DelegatedBlobResolver", (sp, httpClient) =>
@@ -243,7 +247,15 @@ public static class ServiceCollectionExtensions
             services.AddHttpClient(HttpRemoteBlobStoreProvider.HttpClientName, (sp, httpClient) =>
             {
                 var opts = sp.GetRequiredService<RemoteBlobOriginOptions>();
-                httpClient.BaseAddress = new Uri(opts.BaseUrl, UriKind.Absolute);
+                // BaseAddress is vestigial here (slice 4.3,
+                // blob-cas-remediation.md): HttpRemoteBlobStoreProvider and
+                // S3DirectBlobStoreProvider now build every request as an
+                // absolute Uri from RemoteBlobOriginOptions.ResolveBaseUri(),
+                // independent of this property, so a configured BaseUrl path
+                // prefix (reverse-proxy mount point) is never dropped. Still
+                // set for parity/diagnostics and in case any other consumer
+                // of this named client relies on it.
+                httpClient.BaseAddress = opts.ResolveBaseUri();
                 httpClient.Timeout = TimeSpan.FromSeconds(opts.TimeoutSeconds);
             })
             // Content encoding is negotiated explicitly via

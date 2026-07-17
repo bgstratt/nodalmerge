@@ -36,6 +36,7 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly RemoteBlobOriginOptions _options;
+    private readonly Uri _baseUri;
     private readonly ILogger<HttpRemoteBlobStoreProvider> _logger;
     private readonly object _circuitLock = new();
 
@@ -50,6 +51,7 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
     {
         _httpClientFactory = httpClientFactory;
         _options = options;
+        _baseUri = options.ResolveBaseUri();
         _logger = logger;
     }
 
@@ -255,7 +257,13 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
 
     private HttpRequestMessage CreateRequest(HttpMethod method, string hashHex)
     {
-        var request = new HttpRequestMessage(method, $"/blobs/{hashHex}");
+        // Slice 4.3 (blob-cas-remediation.md): built against _baseUri (which
+        // guarantees a trailing "/") with a RELATIVE path (no leading "/"),
+        // not a root-relative path against whatever HttpClient.BaseAddress
+        // happens to be — see RemoteBlobOriginOptions.ResolveBaseUri's doc for
+        // why the leading-slash spelling silently drops a reverse-proxy path
+        // prefix in BaseUrl.
+        var request = new HttpRequestMessage(method, new Uri(_baseUri, $"blobs/{hashHex}"));
         if (method == HttpMethod.Get)
         {
             // Content encoding (reserved v1.1, docs/BLOB_HTTP_SURFACE.md):
@@ -269,7 +277,7 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
 
     private HttpRequestMessage CreatePutRequest(string hashHex, byte[] bytes, string? contentType)
     {
-        var request = new HttpRequestMessage(HttpMethod.Put, $"/blobs/{hashHex}")
+        var request = new HttpRequestMessage(HttpMethod.Put, new Uri(_baseUri, $"blobs/{hashHex}"))
         {
             Content = new ByteArrayContent(bytes)
         };

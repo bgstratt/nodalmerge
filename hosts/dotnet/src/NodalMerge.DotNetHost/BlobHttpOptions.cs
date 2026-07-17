@@ -32,4 +32,26 @@ public sealed record BlobHttpOptions(string? AuthToken, long MaxBlobBytes)
             maxBlobBytes
         );
     }
+
+    /// <summary>
+    /// Fail fast at startup rather than at request time (slice 4.3,
+    /// blob-cas-remediation.md). Before this guard, a misconfigured negative
+    /// <see cref="MaxBlobBytes"/> threw an unhandled
+    /// <see cref="ArgumentOutOfRangeException"/> from the first chunked PUT's
+    /// <c>MemoryStream</c> allocation (a 500, not a config error), and a
+    /// misconfigured zero silently 413'd every PUT forever with no indication
+    /// why. Matches the exception style every sibling options record in
+    /// <c>NodalMerge.Host.Composition</c> already uses
+    /// (<c>throw new InvalidOperationException($"{SectionName}:Field ...")</c>
+    /// — see e.g. <c>S3DelegatedBlobOptions.Validate()</c>).
+    /// </summary>
+    public void Validate()
+    {
+        if (MaxBlobBytes <= 0)
+        {
+            throw new InvalidOperationException(
+                $"{SectionName}:MaxBlobBytes must be a positive number of bytes (got {MaxBlobBytes})"
+            );
+        }
+    }
 }

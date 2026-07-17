@@ -219,9 +219,22 @@ seam — see `BLOB_STORAGE_LAYOUT.md` §8's S3 note; the .NET client-side link t
   framework's default for an unmapped route is — not necessarily 501 — since the route
   doesn't exist yet).
 - **The .NET host's legacy `/sync/blob-url` route (and its `/api/sync/blob-url`
-  mirror) remain as an alias of `GET /blobs/{hash}/url`**: same handler, same response
-  shape (`{"url", "expiresAtUtc"}`), same status codes (400 malformed hash, 501 no
-  backend). The only difference is the query-parameter surface: the legacy route also
-  accepts `room`/`namespace` query parameters (defaulting to `"default"`/`"assets"` when
-  absent) for backward compatibility with pre-S4.1 callers; the new route carries no
-  room/namespace concept at all, consistent with this surface being room-agnostic.
+  mirror) is NOT an alias of `GET /blobs/{hash}/url`** — an earlier revision of this
+  doc claimed it was ("same handler, same response shape, same status codes"), which
+  was untrue and shipped a silent backward-compat break (finding #12,
+  blob-cas-remediation.md slice 4.1). The legacy route predates this section's frozen
+  contract (it shipped on `main` in 0.2.0) and was restored to its exact pre-existing
+  behavior rather than merged into the new shape:
+  - Response is `{"url", "expiresAt"}` — a unix-seconds integer, never the new route's
+    ISO-8601 `expiresAtUtc`.
+  - A resolver reporting "no presign-capable backend" (a registered resolver returning
+    `null`) is **404**, not 501.
+  - **No hash-shape validation and no auth check at all** — any non-empty hash is
+    accepted from anyone; an empty/whitespace hash is 400 `{"error": "hash is
+    required"}` (distinct wording from the new route's "non-canonical hash"). This
+    route never consults the blob-http auth token.
+  - It also accepts `room`/`namespace` query parameters (defaulting to
+    `"default"`/`"assets"` when absent) for backward compatibility with pre-S4.1
+    callers; the new route carries no room/namespace concept at all, consistent with
+    this surface being room-agnostic.
+  - Golden tests: `LegacySyncBlobUrlCompatTests.cs`.

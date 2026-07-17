@@ -116,9 +116,12 @@ public sealed class ProviderHttpEndpointTests
     [Fact]
     public async Task Sync_blob_url_put_uses_resolver_and_returns_url_payload()
     {
-        // Legacy /sync/blob-url is now an alias of GET /blobs/{hash}/url
-        // (slice S4.1): same response shape ({"url", "expiresAtUtc"}), not
-        // the old unix-seconds "expiresAt" field.
+        // Legacy /sync/blob-url was restored to `main`'s pre-existing
+        // behavior by slice 4.1 (blob-cas-remediation.md, finding #12): it is
+        // NOT an alias of GET /blobs/{hash}/url — unix-seconds "expiresAt",
+        // never the new route's ISO-8601 "expiresAtUtc". See
+        // LegacySyncBlobUrlCompatTests.cs for the full golden-behavior suite;
+        // this test only needed its expected field renamed/reshaped to match.
         var expiry = DateTimeOffset.UtcNow.AddMinutes(5);
         await using var app = BuildTestApp(services =>
         {
@@ -139,10 +142,8 @@ public sealed class ProviderHttpEndpointTests
         using var stream = await response.Content.ReadAsStreamAsync();
         using var doc = await JsonDocument.ParseAsync(stream);
         Assert.Equal("https://upload.example/put", doc.RootElement.GetProperty("url").GetString());
-        Assert.Equal(
-            expiry.UtcDateTime.ToString("o"),
-            doc.RootElement.GetProperty("expiresAtUtc").GetString()
-        );
+        Assert.False(doc.RootElement.TryGetProperty("expiresAtUtc", out _), "legacy route must not emit expiresAtUtc");
+        Assert.Equal(expiry.ToUnixTimeSeconds(), doc.RootElement.GetProperty("expiresAt").GetInt64());
     }
 
     [Fact]
@@ -160,15 +161,22 @@ public sealed class ProviderHttpEndpointTests
     }
 
     [Fact]
-    public async Task Sync_blob_url_rejects_malformed_hash()
+    public async Task Sync_blob_url_accepts_malformed_hash_unlike_the_new_route()
     {
+        // Slice 4.1 (blob-cas-remediation.md, finding #12): the legacy route
+        // was restored to `main`'s loose-hash, anonymous behavior — a
+        // malformed hash is NOT rejected here (contrast BlobUrl_rejects_malformed_hash
+        // below, the new frozen route, which does reject it). No backend is configured
+        // (BuildTestApp()'s default WsOnly composition), so a well-formed
+        // request falls through to "no presign-capable backend" -> 404, not
+        // the 400 this test previously (incorrectly) expected.
         await using var app = BuildTestApp();
         await app.StartAsync();
 
         var client = app.GetTestClient();
         var response = await client.GetAsync("/api/sync/blob-url?op=get&hash=not-a-hash");
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     // -- GET /blobs/{hash}/url (docs/BLOB_HTTP_SURFACE.md, slice S4.1) -------

@@ -70,6 +70,7 @@ public sealed class S3DirectBlobStoreProvider : IBlobStoreProvider
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly RemoteBlobOriginOptions _originOptions;
+    private readonly Uri _originBaseUri;
     private readonly S3DirectBlobOriginOptions _options;
     private readonly ILogger<S3DirectBlobStoreProvider> _logger;
     private readonly object _circuitLock = new();
@@ -88,6 +89,7 @@ public sealed class S3DirectBlobStoreProvider : IBlobStoreProvider
     {
         _httpClientFactory = httpClientFactory;
         _originOptions = originOptions;
+        _originBaseUri = originOptions.ResolveBaseUri();
         _options = options;
         _logger = logger;
     }
@@ -327,7 +329,11 @@ public sealed class S3DirectBlobStoreProvider : IBlobStoreProvider
     private async Task ConfirmUploadedAsync(string hashHex, CancellationToken cancellationToken)
     {
         var client = _httpClientFactory.CreateClient(HttpRemoteBlobStoreProvider.HttpClientName);
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"/blobs/{hashHex}/uploaded");
+        // Slice 4.3 (blob-cas-remediation.md): built against _originBaseUri
+        // (guaranteed trailing "/") with a relative path — see
+        // RemoteBlobOriginOptions.ResolveBaseUri's doc for why a leading "/"
+        // here would silently drop a reverse-proxy path prefix in BaseUrl.
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_originBaseUri, $"blobs/{hashHex}/uploaded"));
         ApplyOriginAuth(request);
 
         HttpResponseMessage response;
@@ -490,7 +496,7 @@ public sealed class S3DirectBlobStoreProvider : IBlobStoreProvider
             query += $"&contentType={Uri.EscapeDataString(contentType)}";
         }
 
-        var request = new HttpRequestMessage(HttpMethod.Get, $"/blobs/{hashHex}/url?{query}");
+        var request = new HttpRequestMessage(HttpMethod.Get, new Uri(_originBaseUri, $"blobs/{hashHex}/url?{query}"));
         ApplyOriginAuth(request);
         return request;
     }

@@ -201,9 +201,15 @@ async fn failing_source_fails_the_run_closed_through_the_service() {
 #[tokio::test]
 async fn union_of_sources_composes_through_the_service() {
     // The 1.2 shape, end-to-end with placeholder members: two sources, each
-    // protecting one blob; the union protects both, the orphan is swept.
-    // (1.2 swaps the members for the studio collector + a room-DAG source;
-    // the service-side plumbing it needs is what this test pins.)
+    // protecting one blob; the union protects both through sweepsoft AND
+    // sweephard, and only the orphan is reclaimed. (Slice 1.2 shipped: the
+    // binaries' members are now the studio collector + room.rs's
+    // `RoomDagLiveHashCollector`. This file stays deliberately
+    // studio-free — see the module docs — so the members here remain
+    // trivial stand-ins shaped like them; the same both-classes-survive
+    // pin through the REAL collectors is studio_gc.rs's
+    // `ordinary_setblob_blob_must_survive_sweepsoft_then_sweephard` +
+    // `sweepsoft_then_sweephard_reclaims_orphan_and_respects_max_deletes`.)
     let dir = tmpdir("union-source");
     let persistence = DirPersistence::open(&dir).unwrap();
 
@@ -226,14 +232,15 @@ async fn union_of_sources_composes_through_the_service() {
         Arc::new(StaticLiveSource::of(&[&b])),
     ]);
 
-    let cfg = gc_cfg(GcMode::New(GcRunMode::SweepSoft), Duration::from_secs(3600));
+    let grace = Duration::from_millis(50);
+    let cfg = gc_cfg(GcMode::New(GcRunMode::SweepSoft), grace);
     let delta = gc_service::run_new_coordinator_once(
         &union,
         GcRunMode::SweepSoft,
         &cfg,
         Arc::clone(&inventory),
-        pins,
-        objects,
+        Arc::clone(&pins),
+        Arc::clone(&objects),
     )
     .await
     .expect("sweepsoft must succeed");
@@ -241,6 +248,31 @@ async fn union_of_sources_composes_through_the_service() {
     assert_eq!(inventory.asset_state(&a.to_hex()), Some(AssetState::Active));
     assert_eq!(inventory.asset_state(&b.to_hex()), Some(AssetState::Active));
     assert_eq!(inventory.asset_state(&orphan.to_hex()), Some(AssetState::PendingDelete));
+
+    tokio::time::sleep(Duration::from_millis(80)).await; // elapse grace
+
+    // Slice 1.2 — extended through the hard sweep: each member's blob must
+    // survive physical deletion (a member's contribution is honored even
+    // when the OTHER member has never heard of the hash), and the orphan
+    // must actually be reclaimed — the union composes protections without
+    // becoming an everything-is-live-forever source.
+    let cfg_hard = gc_cfg(GcMode::New(GcRunMode::SweepHard), grace);
+    let delta = gc_service::run_new_coordinator_once(
+        &union,
+        GcRunMode::SweepHard,
+        &cfg_hard,
+        Arc::clone(&inventory),
+        pins,
+        objects,
+    )
+    .await
+    .expect("sweephard must succeed");
+    assert_eq!(delta.hard_deleted_count, 1, "exactly the orphan is reclaimed");
+
+    let blake3_dir = dir.join("blobs").join("blake3");
+    assert!(blake3_dir.join(a.to_hex()).is_file(), "member 1's blob survives the hard sweep");
+    assert!(blake3_dir.join(b.to_hex()).is_file(), "member 2's blob survives the hard sweep");
+    assert!(!blake3_dir.join(orphan.to_hex()).is_file(), "the orphan is physically deleted");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

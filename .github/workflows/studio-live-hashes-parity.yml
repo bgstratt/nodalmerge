@@ -111,5 +111,5 @@ jobs:
       - name: Run studio_live_hashes unit suite (classification, timestamp parsing, PascalCase payload shapes, WorkUnitStatus vectors)
         run: "cargo test -p nodalmerge-server --lib studio_live_hashes::"
 
-      - name: Run studio-domain GC retention integration suite (RED scenarios gating slices 1.2/1.6 are #[ignore]d until their slice ships)
+      - name: Run studio-domain GC retention integration suite (slice 1.2 shipped — the 0.3(b) ordinary-SetBlob RED is un-ignored and the production-shaped tests run the studio ∪ room-DAG UnionLiveHashCollector the binaries inject; no #[ignore]d REDs remain here)
         run: cargo test -p nodalmerge-server --test studio_gc

@@ -1351,6 +1351,76 @@ async fn collect_live_blob_hashes(
     room.graph.read().await.referenced_blob_hashes()
 }
 
+/// blob-cas-remediation.md slice 1.2 (finding #2) —
+/// [`Rooms::collect_global_live_blob_hashes`] packaged as the
+/// [`crate::gc_service::LiveHashCollector`] the GC service takes by
+/// injection, mirroring `studio_live_hashes.rs`'s `StudioLiveHashCollector`.
+///
+/// The new coordinator's studio-domain source only ever classifies
+/// `studio/`-prefixed engine-map entries, so an ordinary
+/// `SetBlob`-referenced blob (a plain avatar upload, say — nothing
+/// studio-shaped about it) was invisible to its live set and got reclaimed
+/// under `--gc-mode sweepsoft`/`sweephard`, even though the legacy
+/// `Rooms::sweep_blobs` protected it fine. The binaries now inject
+/// `UnionLiveHashCollector::new([studio, room-DAG])` so the coordinator's
+/// live set is a superset of what the legacy sweep would refuse to delete.
+///
+/// **This is a delegation, not a second scan.** The room-DAG live set the
+/// legacy sweep computes — every `SetBlob.blob_hash` across every room's
+/// full DAG, resident (hydrated, via the incrementally-cached in-memory
+/// graph) and cold (via `load_room_nodes` + the slice-6.4 version-keyed
+/// cold cache) alike, unioned with slice 1.3's recent-upload window — is
+/// exactly the protection this collector exists to add, so it calls the
+/// same function and inherits 6.4's caching and every fail-closed rule for
+/// free.
+///
+/// Fail-closed: `collect_global_live_blob_hashes` answers `None` when its
+/// union cannot be proven complete (the backend can't enumerate rooms —
+/// slice 1.1 — or the cold-scan blocking task was lost). Here `None`
+/// becomes `Err`, which fails the whole coordinator run (and, through
+/// `UnionLiveHashCollector`, poisons any union this collector is a member
+/// of): the coordinator equivalent of the legacy sweep's "no delete pass".
+/// Mapping `None` to an empty set instead would tell sweephard that
+/// nothing is live — the exact data-loss shape 1.1 closed.
+pub struct RoomDagLiveHashCollector {
+    rooms: Rooms,
+}
+
+impl RoomDagLiveHashCollector {
+    pub fn new(rooms: Rooms) -> Self {
+        Self { rooms }
+    }
+}
+
+impl crate::gc_service::LiveHashCollector for RoomDagLiveHashCollector {
+    fn collect_live_hashes(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = nodalmerge_gc::GcResult<std::collections::HashSet<String>>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            match self.rooms.collect_global_live_blob_hashes().await {
+                // The inventory keys assets by bare blake3 hex (see
+                // `gc_store::local_key_scheme` and the S3 variant), the same
+                // encoding the studio collector emits — `to_hex` is the whole
+                // translation.
+                Some(live) => Ok(live.iter().map(nodalmerge_core::Hash::to_hex).collect()),
+                None => Err(nodalmerge_gc::GcError::Backend(
+                    "room-DAG live set could not be proven complete (backend cannot \
+                     enumerate rooms, or the cold-room scan task was lost — see the \
+                     preceding blob GC warning); failing the run rather than treating \
+                     the gap as an empty live set"
+                        .to_string(),
+                )),
+            }
+        })
+    }
+}
+
 /// Spawn the background idle-eviction sweeper.
 ///
 /// Wakes every `interval` and calls [`Rooms::sweep_idle`]. `timeout == 0`

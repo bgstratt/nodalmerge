@@ -267,12 +267,20 @@ async fn main() {
                 (Some(path), Some(inventory)) => {
                     let pins = Arc::new(gc_pin_store::StaticPinStore::from_env_and_args(&args));
                     // Slice 7.5 — studio composition: both backend arms
-                    // inject the same studio-domain live-set source;
-                    // `gc_service` itself no longer knows any concrete one.
-                    let live = Arc::new(studio_live_hashes::StudioLiveHashCollector::new(
-                        rooms.clone(),
-                        retain_intermediate_days,
-                    ));
+                    // inject the same live-set source; `gc_service` itself
+                    // no longer knows any concrete one. Slice 1.2 — the
+                    // source is the UNION of the studio-domain classifier
+                    // and the room-DAG SetBlob references (the protection
+                    // the legacy sweep always had): either alone
+                    // under-reports, and an under-reported live set is a
+                    // delete list.
+                    let live = Arc::new(gc_service::UnionLiveHashCollector::new(vec![
+                        Arc::new(studio_live_hashes::StudioLiveHashCollector::new(
+                            rooms.clone(),
+                            retain_intermediate_days,
+                        )) as Arc<dyn gc_service::LiveHashCollector>,
+                        Arc::new(room::RoomDagLiveHashCollector::new(rooms.clone())),
+                    ]));
                     match &s3_cfg_for_gc {
                         Some(s3_cfg) => {
                             let objects = match S3BlobObjectStore::new(s3_cfg.clone()) {

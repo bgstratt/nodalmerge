@@ -24,8 +24,9 @@ use nodalmerge_blobstore_conformance::NonHydratingBackend;
 use nodalmerge_core::{BlobStore, Hash, MapOp, Op, StateGraph};
 use nodalmerge_gc::contracts::AssetInventoryStore;
 use nodalmerge_gc::types::AssetState;
+use nodalmerge_server::gc_service::LiveHashCollector;
 use nodalmerge_server::gc_store::{local_key_scheme, SqliteGcStore};
-use nodalmerge_server::room::{import_nodes, Rooms};
+use nodalmerge_server::room::{import_nodes, RoomDagLiveHashCollector, Rooms};
 use nodalmerge_server::store::{Composite, DirPersistence, NodePersistence, SharedPersistence};
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
@@ -541,6 +542,42 @@ async fn blob_gc_fails_closed_when_backend_cannot_enumerate_rooms() {
     assert!(
         blob_path.exists(),
         "orphan blob must survive when the node store can't enumerate rooms"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn room_dag_collector_fails_closed_when_backend_cannot_enumerate_rooms() {
+    // Slice 1.2 (finding #2) — the coordinator-side twin of the 1.1 test
+    // above. `RoomDagLiveHashCollector` delegates to
+    // `collect_global_live_blob_hashes`, whose "union can't be proven
+    // complete" answer is `None`; the collector must surface that as `Err`
+    // (failing the coordinator run, and poisoning any
+    // `UnionLiveHashCollector` it's a member of). Mapping it to
+    // `Ok(empty)` instead would compile, look reasonable, and tell
+    // sweephard that nothing is live — the exact data-loss shape 1.1
+    // closed on the legacy path. No other test can catch that mapping:
+    // every other coordinator fixture runs on `DirPersistence`, which
+    // always enumerates.
+    let dir = tmpdir("collector-not-enumerable");
+    let nodes = NotEnumerableNodeStore::default();
+    let blobs = DirPersistence::open(&dir).unwrap();
+    let persistence: SharedPersistence = Arc::new(Composite::new(nodes, blobs));
+    let rooms = Rooms::new(
+        SigningKey::from_bytes(&[0x0Bu8; 32]),
+        Arc::clone(&persistence),
+        512,
+        0,
+        0,
+    );
+    let _room = rooms.get_or_create("only-resident-room").await;
+
+    let collector = RoomDagLiveHashCollector::new(rooms.clone());
+    let result = collector.collect_live_hashes().await;
+    assert!(
+        result.is_err(),
+        "a non-enumerable backend must fail the collection, not report an empty live set"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -56,9 +56,10 @@ use crate::room::Rooms;
 ///
 /// Threaded through [`run_new_coordinator_once`]/[`spawn_gc_sweeper`] the
 /// way `BlobObjectStore` already is: a generic `Arc` the binaries supply
-/// (`main.rs`/`server-s3/main.rs` build the studio-domain collector from
-/// `studio_live_hashes.rs`; tests hand in whatever they like). This module
-/// has no compile-time knowledge of any concrete source.
+/// (`main.rs`/`server-s3/main.rs` build the slice-1.2 union of the
+/// studio-domain collector from `studio_live_hashes.rs` and the room-DAG
+/// collector from `room.rs`; tests hand in whatever they like). This
+/// module has no compile-time knowledge of any concrete source.
 pub trait LiveHashCollector: Send + Sync {
     /// Compute the full live set for one coordinator run. An `Err` is a
     /// failed run: `GcCoordinator::run_once` fail-closed semantics apply
@@ -69,8 +70,9 @@ pub trait LiveHashCollector: Send + Sync {
 }
 
 /// Slice 7.5 — set-union composition of live-hash sources, built for 1.2's
-/// "studio hashes ∪ room-DAG blob references" (this slice ships the
-/// combinator; 1.2 wires its second source).
+/// "studio hashes ∪ room-DAG blob references" (7.5 shipped the combinator;
+/// 1.2 wired `room.rs`'s `RoomDagLiveHashCollector` in as the second member
+/// in both binaries).
 ///
 /// Fail-closed on BOTH axes, per the GC discipline everywhere else in this
 /// plan:

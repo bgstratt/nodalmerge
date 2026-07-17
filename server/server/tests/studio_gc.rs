@@ -22,9 +22,11 @@ use nodalmerge_gc::contracts::{AssetInventoryStore, GcRunStore};
 use nodalmerge_gc::types::{AssetState, GcRunMode, GcRunStart};
 use nodalmerge_server::gc_blob_objects::LocalBlobObjectStore;
 use nodalmerge_server::gc_pin_store::StaticPinStore;
-use nodalmerge_server::gc_service::{self, GcMode, GcServiceConfig};
+use nodalmerge_server::gc_service::{
+    self, GcMode, GcServiceConfig, LiveHashCollector, UnionLiveHashCollector,
+};
 use nodalmerge_server::gc_store::{local_key_scheme, SqliteGcStore};
-use nodalmerge_server::room::{import_nodes, Rooms};
+use nodalmerge_server::room::{import_nodes, RoomDagLiveHashCollector, Rooms};
 use nodalmerge_server::store::{DirPersistence, SharedPersistence};
 use nodalmerge_server::studio_live_hashes::{collect_studio_live_hashes, StudioLiveHashCollector};
 
@@ -372,11 +374,31 @@ fn gc_cfg(mode: GcMode, grace: Duration) -> GcServiceConfig {
 }
 
 /// Slice 7.5 — `run_new_coordinator_once` takes the live-set source by
-/// injection now; these tests compose the studio collector explicitly,
-/// exactly like `main.rs`/`server-s3/main.rs` do (retain days stays at the
-/// 30 the old `GcServiceConfig.retain_intermediate_days` field carried).
+/// injection now; these tests compose the studio collector explicitly
+/// (retain days stays at the 30 the old
+/// `GcServiceConfig.retain_intermediate_days` field carried).
+///
+/// Slice 1.2 — this is no longer what the binaries inject (they inject
+/// [`production_live`]'s union). Tests that pin STUDIO classification
+/// behavior keep this studio-only source on purpose: under the union, a
+/// room-DAG contribution could mask a classification regression (a hash
+/// the classifier wrongly dropped would still be protected whenever a
+/// SetBlob op happens to reference it).
 fn studio_live(rooms: &Rooms) -> StudioLiveHashCollector {
     StudioLiveHashCollector::new(rooms.clone(), 30)
+}
+
+/// Slice 1.2 — the production-shaped live set: the same
+/// `UnionLiveHashCollector::new([studio, room-DAG])` composition
+/// `main.rs`/`server-s3/main.rs` inject. Tests that pin what the DEPLOYED
+/// coordinator protects (or reclaims — the 1.3 lesson: the reclaim gate is
+/// what proves a new protection source didn't just make everything live
+/// forever) go through this.
+fn production_live(rooms: &Rooms) -> UnionLiveHashCollector {
+    UnionLiveHashCollector::new(vec![
+        Arc::new(studio_live(rooms)) as Arc<dyn LiveHashCollector>,
+        Arc::new(RoomDagLiveHashCollector::new(rooms.clone())),
+    ])
 }
 
 #[tokio::test]
@@ -490,9 +512,15 @@ async fn sweepsoft_then_sweephard_reclaims_orphan_and_respects_max_deletes() {
     let objects = Arc::new(LocalBlobObjectStore::new(&dir));
 
     // Short grace so hard-sweep is observable without sleeping 24h.
+    //
+    // Slice 1.2 — this reclaim gate runs through `production_live`'s union
+    // deliberately: proving the orphans still get tombstoned AND hard-deleted
+    // with the room-DAG member wired in is what shows 1.2 added a protection
+    // source, not an everything-is-live-forever source (1.3's reclaim-gate
+    // lesson).
     let grace = Duration::from_millis(50);
     let cfg = gc_cfg(GcMode::New(GcRunMode::SweepSoft), grace);
-    let delta = gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepSoft, &cfg, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+    let delta = gc_service::run_new_coordinator_once(&production_live(&rooms), GcRunMode::SweepSoft, &cfg, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
         .await
         .expect("sweepsoft must succeed");
     assert_eq!(delta.newly_pending_count, 2, "both orphans tombstoned");
@@ -512,7 +540,7 @@ async fn sweepsoft_then_sweephard_reclaims_orphan_and_respects_max_deletes() {
     // hard-deleted this run.
     let mut cfg_hard = gc_cfg(GcMode::New(GcRunMode::SweepHard), grace);
     cfg_hard.max_deletes_per_run = 1;
-    let delta = gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepHard, &cfg_hard, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+    let delta = gc_service::run_new_coordinator_once(&production_live(&rooms), GcRunMode::SweepHard, &cfg_hard, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
         .await
         .expect("sweephard must succeed");
     assert_eq!(delta.hard_deleted_count, 1, "max_deletes_per_run must cap this run's deletes");
@@ -609,7 +637,11 @@ async fn run_ledger_records_failure_and_performs_zero_deletes_on_fail_closed() {
     let objects = Arc::new(LocalBlobObjectStore::new(&dir));
     let cfg = gc_cfg(GcMode::New(GcRunMode::SweepHard), Duration::ZERO);
 
-    let result = gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepHard, &cfg, Arc::clone(&inventory), pins, objects).await;
+    // Slice 1.2 — through `production_live`'s union: a studio-member
+    // failure must poison the WHOLE composed run (the room-DAG member
+    // succeeding for this room is irrelevant), which is exactly what the
+    // deployed wiring has to guarantee.
+    let result = gc_service::run_new_coordinator_once(&production_live(&rooms), GcRunMode::SweepHard, &cfg, Arc::clone(&inventory), pins, objects).await;
     assert!(result.is_err(), "fail-closed: the run must return Err");
 
     // Zero deletes: the orphan blob must still be on disk.
@@ -681,18 +713,20 @@ async fn run_store_records_running_then_succeeded() {
 // and Phase 1 for the finding each gates.
 
 #[tokio::test]
-#[ignore = "RED: fails until slice 1.2 — see nodalmerge-studio/plans/blob-cas-remediation.md"]
 async fn ordinary_setblob_blob_must_survive_sweepsoft_then_sweephard() {
-    // 0.3(b) — gates slice 1.2 (finding #2). `collect_studio_live_hashes`
-    // (studio_live_hashes.rs:666) only ever looks at `studio/`-prefixed
-    // engine-map keys (`resolve_room_studio_map`'s filter at line 648), so
-    // an ordinary
-    // `SetBlob`-referenced blob — nothing studio-specific about it, e.g. a
-    // plain avatar upload — is never added to the live set the new
-    // coordinator computes from, and gets reclaimed under `--gc-mode
-    // sweepsoft`/`sweephard` even though it's genuinely referenced by the
-    // room's DAG. The legacy `Rooms::sweep_blobs` path protects this fine
-    // (via `blob_hashes_referenced_by`); this coordinator does not.
+    // 0.3(b) — gated slice 1.2 (finding #2); RED (`#[ignore]`d) until 1.2
+    // shipped. `collect_studio_live_hashes` only ever looks at
+    // `studio/`-prefixed engine-map keys (`resolve_room_studio_map`'s
+    // filter), so an ordinary `SetBlob`-referenced blob — nothing
+    // studio-specific about it, e.g. a plain avatar upload — is never in
+    // the studio-domain live set, and a coordinator fed ONLY that source
+    // reclaimed it under `--gc-mode sweepsoft`/`sweephard` even though it's
+    // genuinely referenced by the room's DAG. The legacy
+    // `Rooms::sweep_blobs` path always protected it (via
+    // `blob_hashes_referenced_by`); since 1.2 the binaries inject
+    // `production_live`'s union, whose `RoomDagLiveHashCollector` member
+    // delegates to that same room-DAG computation — which is exactly what
+    // this test pins end-to-end.
     let dir = tmpdir("ordinary-setblob");
     let persistence: SharedPersistence = Arc::new(DirPersistence::open(&dir).unwrap());
     let sk = SigningKey::from_bytes(&[0xB6u8; 32]);
@@ -716,14 +750,18 @@ async fn ordinary_setblob_blob_must_survive_sweepsoft_then_sweephard() {
 
     let grace = Duration::from_millis(50);
     let cfg_soft = gc_cfg(GcMode::New(GcRunMode::SweepSoft), grace);
-    gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepSoft, &cfg_soft, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+    gc_service::run_new_coordinator_once(&production_live(&rooms), GcRunMode::SweepSoft, &cfg_soft, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
         .await
         .expect("sweepsoft must succeed");
+
+    // Never tombstoned in the first place — the room-DAG member of the
+    // union marks it live during the sweep-soft run itself.
+    assert_eq!(inventory.asset_state(&avatar.to_hex()), Some(AssetState::Active));
 
     tokio::time::sleep(Duration::from_millis(80)).await; // elapse grace
 
     let cfg_hard = gc_cfg(GcMode::New(GcRunMode::SweepHard), grace);
-    gc_service::run_new_coordinator_once(&studio_live(&rooms), GcRunMode::SweepHard, &cfg_hard, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
+    gc_service::run_new_coordinator_once(&production_live(&rooms), GcRunMode::SweepHard, &cfg_hard, Arc::clone(&inventory), Arc::clone(&pins), Arc::clone(&objects))
         .await
         .expect("sweephard must succeed");
 

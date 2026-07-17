@@ -202,12 +202,21 @@ async fn main() {
                     let pins = std::sync::Arc::new(gc_pin_store::StaticPinStore::from_env_and_args(&args));
                     let objects = std::sync::Arc::new(gc_blob_objects::LocalBlobObjectStore::new(path));
                     // Slice 7.5 — this binary is a studio composition, so
-                    // it injects the studio-domain live-set source here;
-                    // `gc_service` itself no longer knows any concrete one.
-                    let live = std::sync::Arc::new(studio_live_hashes::StudioLiveHashCollector::new(
-                        rooms.clone(),
-                        retain_intermediate_days,
-                    ));
+                    // it injects the live-set source here; `gc_service`
+                    // itself no longer knows any concrete one. Slice 1.2 —
+                    // the source is the UNION of the studio-domain
+                    // classifier and the room-DAG SetBlob references (the
+                    // protection the legacy sweep always had): either alone
+                    // under-reports, and an under-reported live set is a
+                    // delete list.
+                    let live = std::sync::Arc::new(gc_service::UnionLiveHashCollector::new(vec![
+                        std::sync::Arc::new(studio_live_hashes::StudioLiveHashCollector::new(
+                            rooms.clone(),
+                            retain_intermediate_days,
+                        ))
+                            as std::sync::Arc<dyn gc_service::LiveHashCollector>,
+                        std::sync::Arc::new(room::RoomDagLiveHashCollector::new(rooms.clone())),
+                    ]));
                     let _handle = gc_service::spawn_gc_sweeper(
                         rooms.clone(),
                         std::time::Duration::from_secs(blob_gc_interval),

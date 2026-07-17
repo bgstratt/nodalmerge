@@ -1088,11 +1088,21 @@ impl BlobPersistence for DirPersistence {
 /// canonical global layout, guarded by a `.layout-v2` marker so this scan
 /// runs at most once. See `docs/BLOB_STORAGE_LAYOUT.md` §6.
 ///
-/// Idempotent and crash-safe: the marker is written last, already-migrated
-/// files are found at their destination and skipped (that collision *is*
-/// the cross-room dedup), and anything that fails hash verification or
+/// Idempotent and crash-safe: the marker is written last — and, since
+/// slice 5.1, only after a fully clean pass. Any entry the scan cannot
+/// process (unreadable dir, non-Unicode name, mkdir/copy failure, blocked
+/// quarantine) is logged and *deferred*: the marker stays absent, so the
+/// next startup (`open()` runs once per process, from `main`) re-runs the
+/// whole scan and picks up the remainder. Writing the marker over a
+/// partial pass would permanently orphan the leftovers, because readers
+/// only consult `blobs/blake3/` once it exists. The re-run is safe over
+/// already-migrated entries: a file found at its destination is the
+/// cross-room dedup — verified before the legacy source is dropped, so a
+/// partial destination left by an interrupted copy is repaired from the
+/// source rather than adopted. Anything that fails hash verification or
 /// doesn't parse as a legacy blob filename is quarantined into
-/// `.migration-skipped/` rather than deleted.
+/// `.migration-skipped/` rather than deleted; a *successful* quarantine
+/// is a terminal disposition and does not defer the marker.
 fn migrate_legacy_blob_layout(blobs_root: &Path) {
     let marker = blobs_root.join(".layout-v2");
     if marker.exists() {
@@ -1103,84 +1113,169 @@ fn migrate_legacy_blob_layout(blobs_root: &Path) {
     let skipped_dir = blobs_root.join(".migration-skipped");
     let mut migrated = 0usize;
     let mut skipped = 0usize;
+    // Slice 5.1: entries/rooms this pass could not process. Any deferral
+    // leaves the marker absent so the next startup retries.
+    let mut deferred = 0usize;
 
-    if let Ok(rd) = std::fs::read_dir(blobs_root) {
-        for entry in rd.flatten() {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_dir() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            // Skip the canonical/reserved subtrees — everything else under
-            // blobs/ is presumed to be a legacy sanitized-room-id directory.
-            if name == "blake3" || name == ".tombstones" || name == ".migration-skipped" {
-                continue;
-            }
-
-            let Ok(room_rd) = std::fs::read_dir(&path) else {
-                continue;
-            };
-            for room_entry in room_rd.flatten() {
-                let room_path = room_entry.path();
-                if !room_path.is_file() {
-                    continue;
-                }
-                let Some(file_name) = room_path.file_name().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                if file_name.ends_with(".tmp") {
-                    continue;
-                }
-
-                let quarantine = |reason: &str| {
-                    tracing::warn!(?room_path, reason, "migrate_legacy_blob_layout: quarantining file");
-                    if std::fs::create_dir_all(&skipped_dir).is_ok() {
-                        let dest = skipped_dir.join(format!("{name}__{file_name}"));
-                        let _ = std::fs::rename(&room_path, &dest);
-                    }
-                };
-
-                let Some(hash) = hash_from_hex(file_name) else {
-                    quarantine("filename is not 64 lowercase hex chars");
-                    skipped += 1;
-                    continue;
-                };
-                let Ok(bytes) = std::fs::read(&room_path) else {
-                    quarantine("read failed");
-                    skipped += 1;
-                    continue;
-                };
-                if Hash::of(&bytes) != hash {
-                    quarantine("content hash mismatch");
-                    skipped += 1;
-                    continue;
-                }
-
-                if std::fs::create_dir_all(&blake3_dir).is_err() {
-                    continue;
-                }
-                let dest = blake3_dir.join(hash.to_hex());
-                if dest.exists() {
-                    // Already present — this collision IS the cross-room
-                    // dedup the v2 layout is for. Drop the duplicate.
-                    let _ = std::fs::remove_file(&room_path);
-                } else if std::fs::rename(&room_path, &dest).is_err() {
-                    // Cross-device rename can fail; fall back to copy+remove.
-                    if std::fs::write(&dest, &bytes).is_ok() {
-                        let _ = std::fs::remove_file(&room_path);
-                    } else {
+    match std::fs::read_dir(blobs_root) {
+        Err(e) => {
+            deferred += 1;
+            tracing::warn!(path = ?blobs_root, error = %e, "migrate_legacy_blob_layout: cannot enumerate blobs root; deferring migration");
+        }
+        Ok(rd) => {
+            for entry in rd {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        deferred += 1;
+                        tracing::warn!(path = ?blobs_root, error = %e, "migrate_legacy_blob_layout: unreadable blobs-root entry; deferring");
                         continue;
                     }
+                };
+                let path = entry.path();
+                let file_type = match entry.file_type() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        deferred += 1;
+                        tracing::warn!(?path, error = %e, "migrate_legacy_blob_layout: cannot stat entry; deferring");
+                        continue;
+                    }
+                };
+                if !file_type.is_dir() {
+                    continue;
                 }
-                migrated += 1;
+                let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                    // A non-Unicode dir name can't be processed (or even
+                    // encoded into the quarantine naming scheme) — defer
+                    // rather than silently orphan the room's blobs.
+                    deferred += 1;
+                    tracing::warn!(?path, "migrate_legacy_blob_layout: non-Unicode legacy room dir name; deferring");
+                    continue;
+                };
+                // Skip the canonical/reserved subtrees — everything else under
+                // blobs/ is presumed to be a legacy sanitized-room-id directory.
+                if name == "blake3" || name == ".tombstones" || name == ".migration-skipped" {
+                    continue;
+                }
+
+                let room_rd = match std::fs::read_dir(&path) {
+                    Ok(rd) => rd,
+                    Err(e) => {
+                        deferred += 1;
+                        tracing::warn!(?path, error = %e, "migrate_legacy_blob_layout: cannot enumerate legacy room dir; deferring");
+                        continue;
+                    }
+                };
+                for room_entry in room_rd {
+                    let room_entry = match room_entry {
+                        Ok(room_entry) => room_entry,
+                        Err(e) => {
+                            deferred += 1;
+                            tracing::warn!(?path, error = %e, "migrate_legacy_blob_layout: unreadable room dir entry; deferring");
+                            continue;
+                        }
+                    };
+                    let room_path = room_entry.path();
+                    if !room_path.is_file() {
+                        // Legacy rooms only ever held plain files; a nested
+                        // dir/symlink is foreign, and leaving it behind under
+                        // a written marker would strand whatever it holds —
+                        // defer until an operator clears it.
+                        deferred += 1;
+                        tracing::warn!(?room_path, "migrate_legacy_blob_layout: unexpected non-file entry in legacy room dir; deferring");
+                        continue;
+                    }
+                    let Some(file_name) = room_path.file_name().and_then(|s| s.to_str()) else {
+                        deferred += 1;
+                        tracing::warn!(?room_path, "migrate_legacy_blob_layout: non-Unicode blob file name; deferring");
+                        continue;
+                    };
+                    if file_name.ends_with(".tmp") {
+                        continue;
+                    }
+
+                    // Returns whether the file actually landed in quarantine:
+                    // a blocked quarantine (skipped-dir unmakeable, rename
+                    // failed) leaves the entry in the legacy dir, and that
+                    // must defer the marker like any other skip.
+                    let quarantine = |reason: &str| -> bool {
+                        tracing::warn!(?room_path, reason, "migrate_legacy_blob_layout: quarantining file");
+                        if std::fs::create_dir_all(&skipped_dir).is_err() {
+                            return false;
+                        }
+                        let dest = skipped_dir.join(format!("{name}__{file_name}"));
+                        std::fs::rename(&room_path, &dest).is_ok()
+                    };
+                    let quarantine_or_defer = |reason: &str, skipped: &mut usize, deferred: &mut usize| {
+                        if quarantine(reason) {
+                            *skipped += 1;
+                        } else {
+                            *deferred += 1;
+                            tracing::warn!(?room_path, "migrate_legacy_blob_layout: quarantine failed; deferring");
+                        }
+                    };
+
+                    let Some(hash) = hash_from_hex(file_name) else {
+                        quarantine_or_defer("filename is not 64 lowercase hex chars", &mut skipped, &mut deferred);
+                        continue;
+                    };
+                    let Ok(bytes) = std::fs::read(&room_path) else {
+                        quarantine_or_defer("read failed", &mut skipped, &mut deferred);
+                        continue;
+                    };
+                    if Hash::of(&bytes) != hash {
+                        quarantine_or_defer("content hash mismatch", &mut skipped, &mut deferred);
+                        continue;
+                    }
+
+                    if let Err(e) = std::fs::create_dir_all(&blake3_dir) {
+                        deferred += 1;
+                        tracing::warn!(path = ?blake3_dir, error = %e, "migrate_legacy_blob_layout: cannot create blake3 dir; deferring");
+                        continue;
+                    }
+                    let dest = blake3_dir.join(hash.to_hex());
+                    if dest.exists() {
+                        // Already present — this collision IS the cross-room
+                        // dedup the v2 layout is for — but verify the dest
+                        // really holds these bytes before dropping the
+                        // duplicate: an interrupted copy fallback on an
+                        // earlier marker-less pass leaves a partial file
+                        // here, and deleting the legacy source on the
+                        // strength of a partial copy would destroy the only
+                        // good copy. (Slice 5.1.)
+                        let dest_ok = std::fs::read(&dest)
+                            .map(|b| Hash::of(&b) == hash)
+                            .unwrap_or(false);
+                        if !dest_ok {
+                            if std::fs::write(&dest, &bytes).is_err() {
+                                deferred += 1;
+                                tracing::warn!(?dest, "migrate_legacy_blob_layout: cannot repair partial destination; deferring");
+                                // Don't leave a half-repaired dest for the
+                                // next pass to mistake for the real thing.
+                                let _ = std::fs::remove_file(&dest);
+                                continue;
+                            }
+                            tracing::warn!(?dest, "migrate_legacy_blob_layout: repaired partial/corrupt destination from legacy source");
+                        }
+                        let _ = std::fs::remove_file(&room_path);
+                    } else if std::fs::rename(&room_path, &dest).is_err() {
+                        // Cross-device rename can fail; fall back to copy+remove.
+                        if std::fs::write(&dest, &bytes).is_ok() {
+                            let _ = std::fs::remove_file(&room_path);
+                        } else {
+                            deferred += 1;
+                            tracing::warn!(?room_path, ?dest, "migrate_legacy_blob_layout: copy fallback failed; deferring");
+                            // A failed write can leave a partial dest —
+                            // remove it so no later pass adopts it.
+                            let _ = std::fs::remove_file(&dest);
+                            continue;
+                        }
+                    }
+                    migrated += 1;
+                }
+                // Best-effort cleanup of the now-empty legacy room directory.
+                let _ = std::fs::remove_dir(&path);
             }
-            // Best-effort cleanup of the now-empty legacy room directory.
-            let _ = std::fs::remove_dir(&path);
         }
     }
 
@@ -1192,8 +1287,12 @@ fn migrate_legacy_blob_layout(blobs_root: &Path) {
         let _ = std::fs::remove_dir_all(store_root.join("blob-tombstones"));
     }
 
-    if migrated > 0 || skipped > 0 {
-        tracing::info!(migrated, skipped, "migrated legacy blob layout to v2");
+    if migrated > 0 || skipped > 0 || deferred > 0 {
+        tracing::info!(migrated, skipped, deferred, "migrated legacy blob layout to v2");
+    }
+    if deferred > 0 {
+        tracing::warn!(deferred, "migrate_legacy_blob_layout: incomplete pass; leaving .layout-v2 absent so the next startup retries");
+        return;
     }
     let _ = std::fs::write(&marker, b"");
 }

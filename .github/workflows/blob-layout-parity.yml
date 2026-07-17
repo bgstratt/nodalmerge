@@ -386,6 +386,9 @@ on:
       # TcpListener — Docker-free by the same reasoning as bridge_timeouts.rs,
       # so it lives here rather than blob-s3-gc-minio.yml.
       - "server/server/tests/blob_put_durability.rs"
+      # slice 5.1 — migration-marker safety gate: .layout-v2 only on a fully
+      # clean pass; deferred entries retry on the next startup.
+      - "server/server/tests/blob_migration_marker.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -407,6 +410,9 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
+      # slice 5.2 — migration & write-path hygiene gate (stable quarantine
+      # names, no .tmp leak, reject-don't-sanitize).
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderHygieneTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs"
@@ -482,6 +488,9 @@ on:
       # TcpListener — Docker-free by the same reasoning as bridge_timeouts.rs,
       # so it lives here rather than blob-s3-gc-minio.yml.
       - "server/server/tests/blob_put_durability.rs"
+      # slice 5.1 — migration-marker safety gate: .layout-v2 only on a fully
+      # clean pass; deferred entries retry on the next startup.
+      - "server/server/tests/blob_migration_marker.rs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
@@ -503,6 +512,9 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
+      # slice 5.2 — migration & write-path hygiene gate (stable quarantine
+      # names, no .tmp leak, reject-don't-sanitize).
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderHygieneTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs"
@@ -574,6 +586,9 @@ jobs:
       - name: Run PUT durability-truthfulness gate (slice 4.2, finding #8 — a failed persist_blob must answer 5xx and leave no Active inventory row, never a 201 with nothing durably stored; Docker-free, the stalled bucket is an in-test TcpListener)
         run: cargo test -p nodalmerge-server --test blob_put_durability
 
+      - name: Run migration-marker safety gate (slice 5.1 — .layout-v2 only lands on a fully clean pass; any deferred entry leaves it absent so the next startup retries, and a partial destination left by an interrupted copy is repaired from the legacy source, never adopted)
+        run: cargo test -p nodalmerge-server --test blob_migration_marker
+
       - name: Run S3 key layout vectors + Delegate-mode hydrate/tree-walk unit gates (slice 2.2, finding #10)
         run: cargo test -p nodalmerge-s3-blobs --lib
 
@@ -609,6 +624,9 @@ jobs:
 
       - name: Run file store migration tests
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobStoreProviderMigrationTests"
+
+      - name: "Run FileBlobStoreProvider hygiene tests (slice 5.2 — crash-before-marker restarts keep quarantine names stable; a failed/cancelled put leaks no .tmp under blake3/; non-canonical hashes are rejected at the provider boundary, never sanitized into storable names)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobStoreProviderHygieneTests"
 
       - name: "Run cross-runtime zstd interop test (dotnet-as-consumer: decodes a rust-produced header-less frame; slice 3.1, finding #4)"
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ZstdInteropTests"

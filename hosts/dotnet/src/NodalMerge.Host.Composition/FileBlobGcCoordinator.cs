@@ -201,8 +201,21 @@ public sealed class FileBlobGcCoordinator
         return true;
     }
 
+    /// <summary>
+    /// Deliberately lenient where the provider's write path is strict
+    /// (slice 5.2 made <see cref="FileBlobStoreProvider"/> reject
+    /// non-canonical hashes): a live hash arriving in a non-canonical
+    /// spelling can only ever OVER-protect here — its folded form either
+    /// matches a real on-disk name or nothing at all — and over-protecting
+    /// is the safe failure mode for a GC live set, while dropping the
+    /// entry could sweep a blob a sloppy caller genuinely references.
+    /// </summary>
     private static string SanitizeHash(string hashHex)
     {
-        return FileBlobStoreProvider.SanitizeHash(hashHex);
+        return hashHex
+            .Replace(':', '_')
+            .Replace('/', '_')
+            .Replace('\\', '_')
+            .ToLowerInvariant();
     }
 }

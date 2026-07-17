@@ -29,6 +29,15 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
 
     public async ValueTask<BlobReadResult> TryGetBlobAsync(string hashHex, CancellationToken cancellationToken = default)
     {
+        // Slice 5.2: a non-canonical hash definitionally cannot exist in
+        // the store (writes reject it, see GetPath), so reads answer
+        // Missing rather than throw — matching Rust readers, which treat
+        // foreign names as absent (docs/BLOB_STORAGE_LAYOUT.md §3).
+        if (!IsCanonicalHash(hashHex))
+        {
+            return BlobReadResult.Missing;
+        }
+
         // Identity always wins when both encodings exist (contract:
         // writers never do this, but readers must prefer identity).
         var path = GetPath(hashHex);
@@ -107,6 +116,12 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
     /// </summary>
     public ValueTask<bool> ExistsAsync(string hashHex, CancellationToken cancellationToken = default)
     {
+        // Slice 5.2: non-canonical → false, same posture as TryGetBlobAsync.
+        if (!IsCanonicalHash(hashHex))
+        {
+            return ValueTask.FromResult(false);
+        }
+
         var exists = File.Exists(GetPath(hashHex)) || File.Exists(GetEncodedPath(hashHex));
         return ValueTask.FromResult(exists);
     }
@@ -119,6 +134,12 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
     /// </summary>
     public async ValueTask<EncodedBlobResult> TryGetEncodedBlobAsync(string hashHex, CancellationToken ct = default)
     {
+        // Slice 5.2: non-canonical → Missing, same posture as TryGetBlobAsync.
+        if (!IsCanonicalHash(hashHex))
+        {
+            return EncodedBlobResult.Missing;
+        }
+
         var path = GetPath(hashHex);
         if (File.Exists(path))
         {
@@ -168,16 +189,41 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
         // don't collide on the destination and readers never observe a
         // partially written file.
         var temp = Path.Combine(parent!, "." + Path.GetFileName(targetPath) + "." + Guid.NewGuid().ToString("N") + ".tmp");
-        await File.WriteAllBytesAsync(temp, payload, cancellationToken);
         try
         {
-            File.Move(temp, targetPath);
+            await File.WriteAllBytesAsync(temp, payload, cancellationToken);
+            try
+            {
+                File.Move(temp, targetPath);
+            }
+            catch (IOException) when (File.Exists(targetPath))
+            {
+                // Lost the race to an identical write — that collision IS
+                // the CAS dedup. The finally below drops our temp copy.
+            }
         }
-        catch (IOException) when (File.Exists(targetPath))
+        finally
         {
-            // Lost the race to an identical write — that collision IS the
-            // CAS dedup. Drop our temp copy.
-            File.Delete(temp);
+            // Slice 5.2: a cancelled or failed write must not leak its
+            // temp file under blake3/ — GC classifies foreign names as
+            // untouchable, so a leaked .tmp would sit there forever. Best
+            // effort only: the write error itself still propagates (4.2's
+            // truthful PUT); only the cleanup failure is swallowed.
+            if (File.Exists(temp))
+            {
+                try
+                {
+                    File.Delete(temp);
+                }
+                catch (Exception cleanupEx)
+                {
+                    _logger?.LogWarning(
+                        cleanupEx,
+                        "Failed to clean up temp blob file {TempPath} after an unsuccessful write",
+                        temp
+                    );
+                }
+            }
         }
     }
 
@@ -199,7 +245,22 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
 
     private string GetPath(string hashHex)
     {
-        return Path.Combine(_rootPath, "blake3", SanitizeHash(hashHex));
+        // Slice 5.2: reject-don't-sanitize. This used to mangle whatever it
+        // was handed into a storable filename (':'/'/'/'\\' → '_', then
+        // lowercase), which diverges from Rust's strict hash_from_hex
+        // (store.rs) and creates entries GC classifies as foreign and the
+        // Rust host can't read. The provider boundary now matches Rust:
+        // exactly 64 lowercase hex, uppercase deliberately rejected rather
+        // than normalized.
+        if (!IsCanonicalHash(hashHex))
+        {
+            throw new ArgumentException(
+                $"Blob hash must be exactly 64 lowercase hex characters, got '{hashHex}'.",
+                nameof(hashHex)
+            );
+        }
+
+        return Path.Combine(_rootPath, "blake3", hashHex);
     }
 
     /// <summary>The v3 zstd-encoded sibling of <see cref="GetPath"/> (docs/BLOB_STORAGE_LAYOUT.md §8).</summary>
@@ -208,13 +269,31 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
         return GetPath(hashHex) + ".zst";
     }
 
-    internal static string SanitizeHash(string hashHex)
+    /// <summary>
+    /// Canonical on-disk blob name shape (docs/BLOB_STORAGE_LAYOUT.md §3):
+    /// exactly 64 lowercase hex characters. The .NET twin of Rust's
+    /// <c>is_canonical_blob_name</c> (store.rs) — anything else is foreign,
+    /// to be rejected by writers and treated as absent by readers, never
+    /// adopted.
+    /// </summary>
+    internal static bool IsCanonicalHash(string hashHex)
     {
-        return hashHex
-            .Replace(':', '_')
-            .Replace('/', '_')
-            .Replace('\\', '_')
-            .ToLowerInvariant();
+        if (hashHex is not { Length: 64 })
+        {
+            return false;
+        }
+
+        foreach (var c in hashHex)
+        {
+            if (c is (>= '0' and <= '9') or (>= 'a' and <= 'f'))
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -238,7 +317,27 @@ internal sealed class FileBlobStoreProvider : IBlobStoreProvider, IBlobUrlResolv
         var blake3Dir = Path.Combine(rootPath, "blake3");
         var skippedDir = Path.Combine(rootPath, ".migration-skipped");
 
-        foreach (var legacyFile in Directory.EnumerateFiles(rootPath, "*.blob", SearchOption.AllDirectories))
+        // Slice 5.2: enumerate legacy shard files only — never the canonical
+        // blake3/ tree or any dot-directory (.migration-skipped,
+        // .tombstones). The old AllDirectories scan re-discovered files
+        // already parked under .migration-skipped on every
+        // crash-before-marker restart and re-quarantined them under
+        // ever-growing GUID names. Mirrors the Rust migration's
+        // reserved-subtree skip (store.rs, migrate_legacy_blob_layout).
+        var legacyFiles = Directory
+            .EnumerateFiles(rootPath, "*.blob", SearchOption.TopDirectoryOnly)
+            .Concat(
+                Directory
+                    .EnumerateDirectories(rootPath)
+                    .Where(dir =>
+                    {
+                        var name = Path.GetFileName(dir);
+                        return name != "blake3" && !name.StartsWith('.');
+                    })
+                    .SelectMany(dir => Directory.EnumerateFiles(dir, "*.blob", SearchOption.AllDirectories))
+            );
+
+        foreach (var legacyFile in legacyFiles)
         {
             var fileName = Path.GetFileNameWithoutExtension(legacyFile);
 

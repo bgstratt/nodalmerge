@@ -24,26 +24,20 @@ rust:server/server/tests/branch_fork_vectors.rs                      # PARITY:br
 dotnet:NodalMerge.DotNetHost.Tests.BranchForkVectorsTests            # PARITY:branch-fork C2:needs-nothing (known flake — BranchForkVectorsTests)
 rust:server/server/tests/query_materialization_vectors.rs            # PARITY:query-materialization — rust side already covered; pinned until .NET twin lands
 dotnet:NodalMerge.DotNetHost.Tests.QueryMaterializationVectorsTests  # PARITY:query-materialization C2:needs-nothing
-rust:server/server/tests/blob_layout_vectors_v3.rs                   # PARITY:blob-layout-v3 C2:needs-nothing
-dotnet:NodalMerge.DotNetHost.Tests.BlobLayoutParityTests            # PARITY:blob-layout-v3 — .NET side already covered; pinned until rust v3 twin lands
+# blob-layout-v3 pair CLOSED by C2: rust blob_layout_vectors_v3.rs wired in
+# server-core-suites.yml, .NET BlobLayoutParityTests already covered by
+# blob-layout-parity.yml — both left the baseline together.
 
 # ---------------------------------------------------------------------------
 # Rust server/core/engine integration targets running in no workflow.
 # ---------------------------------------------------------------------------
-rust:core/gc/tests/conformance.rs                                    # C2:needs-nothing (cargo test -p on the gc crate)
-rust:core/gc/tests/fault_injection.rs                                # C2:needs-nothing (cargo test -p on the gc crate)
-rust:engine/host-ffi/tests/abi.rs                                    # C2:needs-nothing (rust-side ABI shape; no external deps)
-rust:engine/host-ffi/tests/room_token_ffi.rs                         # C2:needs-nothing (rust-side token FFI)
-rust:server/server/tests/archive_portability_vectors.rs             # C2:needs-nothing
-rust:server/server/tests/backpressure_lagged.rs                      # C2:needs-nothing
+# C2 (server-core-suites.yml) wired 16 needs-nothing Rust targets — removed from this
+# baseline: nodalmerge-gc {conformance, fault_injection}, nodalmerge-host-ffi
+# {abi, room_token_ffi}, and nodalmerge-server {archive_portability_vectors,
+# backpressure_lagged, graph_query_routes, idle_eviction, lamport_ceiling,
+# metrics_endpoint, persistence, rate_limit, token_expiry} (+ the 3 parity rust sides
+# below). Only the Docker-gated one remains:
 rust:server/server/tests/blob_url_resolution_minio.rs                # C2:needs-docker (MinIO — blob-s3-gc-minio.yml pattern)
-rust:server/server/tests/graph_query_routes.rs                       # C2:needs-nothing
-rust:server/server/tests/idle_eviction.rs                            # C2:needs-nothing
-rust:server/server/tests/lamport_ceiling.rs                          # C2:needs-nothing
-rust:server/server/tests/metrics_endpoint.rs                         # C2:needs-nothing
-rust:server/server/tests/persistence.rs                              # C2:needs-nothing
-rust:server/server/tests/rate_limit.rs                               # C2:needs-nothing
-rust:server/server/tests/token_expiry.rs                             # C2:needs-nothing
 
 # ---------------------------------------------------------------------------
 # .NET DotNetHost.Tests classes running in no workflow (the blob-layout-parity

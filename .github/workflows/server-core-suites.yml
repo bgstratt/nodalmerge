@@ -1,0 +1,54 @@
+name: server-core-suites
+
+# C2 (plan: nodalmerge-studio/plans/dotnet-host-readiness.md) — wires the Rust
+# integration-test targets the CI-coverage audit found running in NO workflow:
+#   nodalmerge-server: archive_portability_vectors, backpressure_lagged,
+#     blob_layout_vectors_v3, branch_fork_vectors, graph_query_routes, idle_eviction,
+#     lamport_ceiling, metrics_endpoint, persistence, rate_limit, spec_auth_vectors,
+#     token_expiry  (blob_url_resolution_minio is Docker-gated → blob-s3-gc-minio.yml)
+#   nodalmerge-gc:      conformance, fault_injection  (whole crate, unfiltered)
+#   nodalmerge-host-ffi: abi, room_token_ffi          (whole crate, unfiltered)
+#
+# The server step names each target explicitly rather than running the package
+# unfiltered because `cargo test -p nodalmerge-server` also runs the --lib unit tests,
+# which include the known parallel-timing flake
+# archive_profile_002_object_manifest_parity_reports_p50_p95 (passes solo). gc and
+# host-ffi have no such flake, so they run unfiltered — anti-fragile: a future test
+# file added to either crate is covered automatically.
+#
+# No paths: filter on purpose. These suites are fast (< 15s total) and a paths: filter
+# is the exact gap class the meta-check exists to prevent — and the meta-check verifies
+# only that a step NAMES the suite, not that the trigger fires on the right source file.
+# Running on every push/PR closes that second hole for these suites.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  server-core-suites:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run nodalmerge-server audit-gap integration suites (Docker-free)
+        run: |
+          cargo test -p nodalmerge-server \
+            --test archive_portability_vectors \
+            --test backpressure_lagged \
+            --test blob_layout_vectors_v3 \
+            --test branch_fork_vectors \
+            --test graph_query_routes \
+            --test idle_eviction \
+            --test lamport_ceiling \
+            --test metrics_endpoint \
+            --test persistence \
+            --test rate_limit \
+            --test spec_auth_vectors \
+            --test token_expiry
+      - name: Run nodalmerge-gc integration suites (conformance, fault_injection)
+        run: cargo test -p nodalmerge-gc
+      - name: Run nodalmerge-host-ffi integration suites (abi, room_token_ffi)
+        run: cargo test -p nodalmerge-host-ffi

@@ -3,9 +3,10 @@
 # scripts/check-ci-coverage.ps1 (plan: nodalmerge-studio/plans/dotnet-host-readiness.md
 # phase C, executing the deferred Phase 8.1/8.3 of blob-cas-remediation.md).
 #
-# This is the ratchet's STARTING state: every entry here is a gap the audit surfaced.
-# C2 burns it down — each suite gets wired into a workflow and its line removed. The
-# check FAILS if a now-covered entry is left here, so the list can only shrink.
+# This is the ratchet's shrinking allow-list: every entry here is a gap the audit
+# surfaced that C2 has not yet closed. Each suite either gets wired into a workflow and
+# its line removed, or stays here with a filed reason. The check FAILS if a now-covered
+# or deleted entry is left here, so the list can only shrink.
 #
 # Format: one item id per line, then `# <reason>`. Reason tags for C2 triage:
 #   C2:needs-nothing    — pure logic/vectors; a plain dotnet/cargo step covers it
@@ -14,34 +15,31 @@
 #   PARITY:<pair>       — cross-runtime parity-pair member (C3). BOTH members of a pair
 #                         must be baselined together (even an already-covered side) until
 #                         the pair is fully covered, then both lines leave together.
+#
+# CLOSED by C2 so far (removed from this file, now covered):
+#   - Rust (server-core-suites.yml): nodalmerge-gc {conformance, fault_injection},
+#     nodalmerge-host-ffi {abi, room_token_ffi}, nodalmerge-server
+#     {archive_portability_vectors, backpressure_lagged, graph_query_routes,
+#     idle_eviction, lamport_ceiling, metrics_endpoint, persistence, rate_limit,
+#     token_expiry}.
+#   - .NET managed (dotnet-host-managed-suites.yml): FileBlobZstdEncodingTests,
+#     Runtime{DagPersistenceService, DispatchClosePolicy, ErrorEnvelopeBuilder,
+#     FrameProcessor, MessageProcessor, Protocol, TokenValidationService}Tests.
+#   - Parity pairs CLOSED (both sides now covered, left together): blob-layout-v3
+#     (rust blob_layout_vectors_v3.rs + .NET BlobLayoutParityTests), spec-auth
+#     (rust spec_auth_vectors.rs + .NET SpecAuthVectorsTests), branch-fork
+#     (rust branch_fork_vectors.rs + .NET BranchForkVectorsTests), query-materialization
+#     (rust query_materialization_vectors.rs + .NET QueryMaterializationVectorsTests).
 
 # ---------------------------------------------------------------------------
-# Parity pairs (C3) — one-sided today; both members pinned until the gap closes.
+# Rust — Docker-gated (MinIO); wire into blob-s3-gc-minio.yml (the 1.3 pattern).
 # ---------------------------------------------------------------------------
-rust:server/server/tests/spec_auth_vectors.rs                        # PARITY:spec-auth C2:needs-nothing
-dotnet:NodalMerge.DotNetHost.Tests.SpecAuthVectorsTests              # PARITY:spec-auth C2:needs-nothing (known flake — SpecAuthVectorsTests)
-rust:server/server/tests/branch_fork_vectors.rs                      # PARITY:branch-fork C2:needs-nothing
-dotnet:NodalMerge.DotNetHost.Tests.BranchForkVectorsTests            # PARITY:branch-fork C2:needs-nothing (known flake — BranchForkVectorsTests)
-rust:server/server/tests/query_materialization_vectors.rs            # PARITY:query-materialization — rust side already covered; pinned until .NET twin lands
-dotnet:NodalMerge.DotNetHost.Tests.QueryMaterializationVectorsTests  # PARITY:query-materialization C2:needs-nothing
-# blob-layout-v3 pair CLOSED by C2: rust blob_layout_vectors_v3.rs wired in
-# server-core-suites.yml, .NET BlobLayoutParityTests already covered by
-# blob-layout-parity.yml — both left the baseline together.
-
-# ---------------------------------------------------------------------------
-# Rust server/core/engine integration targets running in no workflow.
-# ---------------------------------------------------------------------------
-# C2 (server-core-suites.yml) wired 16 needs-nothing Rust targets — removed from this
-# baseline: nodalmerge-gc {conformance, fault_injection}, nodalmerge-host-ffi
-# {abi, room_token_ffi}, and nodalmerge-server {archive_portability_vectors,
-# backpressure_lagged, graph_query_routes, idle_eviction, lamport_ceiling,
-# metrics_endpoint, persistence, rate_limit, token_expiry} (+ the 3 parity rust sides
-# below). Only the Docker-gated one remains:
 rust:server/server/tests/blob_url_resolution_minio.rs                # C2:needs-docker (MinIO — blob-s3-gc-minio.yml pattern)
 
 # ---------------------------------------------------------------------------
-# .NET DotNetHost.Tests classes running in no workflow (the blob-layout-parity
-# dotnet job only --filters a handful of classes; the rest are unwired).
+# .NET DotNetHost.Tests — require the native host FFI (DLL/.so) on the runner.
+# Wire following the FFI gating pattern (category b): a job that builds the native
+# host + runtime-local FFI and places the DLL/.so alongside the test assembly.
 # ---------------------------------------------------------------------------
 dotnet:NodalMerge.DotNetHost.Tests.ChainedBlobStoreProviderHttpIntegrationTests   # C2:needs-ffi (HTTP origin over host FFI)
 dotnet:NodalMerge.DotNetHost.Tests.DemoReadinessSmokeTests                          # C2:needs-ffi
@@ -49,7 +47,6 @@ dotnet:NodalMerge.DotNetHost.Tests.FfiBindingTests                              
 dotnet:NodalMerge.DotNetHost.Tests.FfiHttpEndpointTests                             # C2:needs-ffi
 dotnet:NodalMerge.DotNetHost.Tests.FfiWebSocketEndpointTests                        # C2:needs-ffi
 dotnet:NodalMerge.DotNetHost.Tests.FfiWebSocketLoopRunnerTests                      # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.FileBlobZstdEncodingTests                        # C2:needs-nothing (pure zstd encode/decode)
 dotnet:NodalMerge.DotNetHost.Tests.ProviderCompositionTests                         # C2:needs-ffi
 dotnet:NodalMerge.DotNetHost.Tests.ProviderDurabilityTests                          # C2:needs-ffi
 dotnet:NodalMerge.DotNetHost.Tests.ProviderHostRestartDurabilityIntegrationTests    # C2:needs-ffi
@@ -57,13 +54,10 @@ dotnet:NodalMerge.DotNetHost.Tests.ProviderProfileRuntimeIntegrationTests       
 dotnet:NodalMerge.DotNetHost.Tests.ProviderProfileTokenEndpointIntegrationTests     # C2:needs-ffi
 dotnet:NodalMerge.DotNetHost.Tests.RoomTokenEmbeddedProviderTests                   # C2:needs-ffi (known flake — FFI DllNotFound load-order)
 dotnet:NodalMerge.DotNetHost.Tests.Row19AutomatedScenarioHarnessTests               # C2:needs-ffi
-dotnet:NodalMerge.DotNetHost.Tests.RuntimeDagPersistenceServiceTests                # C2:needs-nothing
-dotnet:NodalMerge.DotNetHost.Tests.RuntimeDispatchClosePolicyTests                  # C2:needs-nothing
-dotnet:NodalMerge.DotNetHost.Tests.RuntimeErrorEnvelopeBuilderTests                 # C2:needs-nothing
-dotnet:NodalMerge.DotNetHost.Tests.RuntimeFrameProcessorTests                       # C2:needs-nothing
-dotnet:NodalMerge.DotNetHost.Tests.RuntimeMessageProcessorTests                     # C2:needs-nothing (known flake — meter-capture dictionary race)
-dotnet:NodalMerge.DotNetHost.Tests.RuntimeProtocolTests                             # C2:needs-nothing
-dotnet:NodalMerge.DotNetHost.Tests.RuntimeTokenValidationServiceTests               # C2:needs-nothing
 dotnet:NodalMerge.DotNetHost.Tests.RuntimeWebSocketEndpointTests                    # C2:needs-ffi
 dotnet:NodalMerge.DotNetHost.Tests.S3DirectChainCompositionTests                    # C2:needs-ffi
+
+# ---------------------------------------------------------------------------
+# .NET DotNetHost.Tests — Docker-gated (MinIO).
+# ---------------------------------------------------------------------------
 dotnet:NodalMerge.DotNetHost.Tests.S3DirectMinioEndToEndTests                       # C2:needs-docker (MinIO)

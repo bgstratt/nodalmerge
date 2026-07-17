@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -14,6 +15,7 @@ public sealed class CapabilityProfileExpander
 
     private readonly CapabilityCompositionOptions _options;
     private readonly CapabilityProfileDocument? _profile;
+    private readonly CapabilityProfileLimits _limits = new();
 
     public CapabilityProfileExpander(CapabilityCompositionOptions options)
     {
@@ -46,6 +48,50 @@ public sealed class CapabilityProfileExpander
         {
             throw new InvalidOperationException("Capability profile requires at least one node");
         }
+
+        _limits = ResolveLimits(_profile.Limits);
+    }
+
+    /// <summary>
+    /// The <c>DefaultMax*</c> constants are hard ceilings, not just
+    /// fallbacks: a profile's <c>limits</c> block may lower a cap but never
+    /// raise it, otherwise a hostile or fat-fingered profile file would lift
+    /// the RoomToken mint/validate guard and unbound the expansion DFS. A
+    /// profile with no <c>limits</c> behaves exactly as the historical
+    /// constants did. Matches the Rust crate's <c>resolved_limits</c>;
+    /// resolved once here so the clamp warning fires once per load, not per
+    /// expansion.
+    /// </summary>
+    private static CapabilityProfileLimits ResolveLimits(CapabilityProfileLimits? parsed)
+    {
+        if (parsed is null)
+        {
+            return new CapabilityProfileLimits();
+        }
+
+        return new CapabilityProfileLimits
+        {
+            MaxCapabilityCount = ClampToCeiling(parsed.MaxCapabilityCount, DefaultMaxCapabilityCount, "max_capability_count"),
+            MaxCapabilityLength = ClampToCeiling(parsed.MaxCapabilityLength, DefaultMaxCapabilityLength, "max_capability_length"),
+            MaxFlattenedPayloadBytes = ClampToCeiling(parsed.MaxFlattenedPayloadBytes, DefaultMaxFlattenedPayloadBytes, "max_flattened_payload_bytes"),
+            MaxDagDepth = ClampToCeiling(parsed.MaxDagDepth, DefaultMaxDagDepth, "max_dag_depth"),
+            MaxEdgesPerNode = ClampToCeiling(parsed.MaxEdgesPerNode, DefaultMaxEdgesPerNode, "max_edges_per_node"),
+        };
+    }
+
+    private static int ClampToCeiling(int requested, int ceiling, string field)
+    {
+        if (requested <= ceiling)
+        {
+            return requested;
+        }
+
+        // This host has no logging abstraction; Trace is the ambient channel
+        // so an operator who requested 256 learns they got 128 from the log,
+        // not from silent behavior.
+        Trace.TraceWarning(
+            $"capability profile 'limits.{field}' requested {requested} exceeds the built-in hard ceiling {ceiling}; clamped to {ceiling}");
+        return ceiling;
     }
 
     public bool IsEnabled => _options.Enabled;
@@ -95,7 +141,7 @@ public sealed class CapabilityProfileExpander
         }
 
         var profile = _profile!;
-        var limits = profile.Limits ?? new CapabilityProfileLimits();
+        var limits = _limits;
 
         var requested = requestedProfileVersion?.Trim();
         if (string.IsNullOrWhiteSpace(requested))

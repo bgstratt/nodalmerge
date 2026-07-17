@@ -36,6 +36,13 @@ use tower::ServiceExt;
 const VECTORS_JSON: &str =
     include_str!("../../../engine/commands/blob-url-resolution-vectors.v1.json");
 
+/// Slice 7.4 — the frozen delegate room-id placeholder lives in the
+/// `delegate_room_id_placeholder` slot of the work-unit vectors file (the
+/// slot slice 0.4 reserved for exactly this decision). See
+/// `delegate_room_placeholder_matches_frozen_vector` below.
+const WORK_UNIT_VECTORS_JSON: &str =
+    include_str!("../../../engine/commands/work-unit-status-vectors.v1.json");
+
 #[derive(Debug, Deserialize)]
 struct VectorsFile {
     canonical_hash: String,
@@ -98,6 +105,63 @@ impl BlobPersistence for FakePresignBackend {
     }
 
     fn verify_uploaded(&self, _room_id: &str, _hash: &Hash) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn supports_presigned_urls(&self) -> bool {
+        true
+    }
+}
+
+/// Slice 7.4 — like `FakePresignBackend`, but records every `room_id` the
+/// room-agnostic blob HTTP routes pass into the delegate presign seam
+/// (`resolve_get_url`/`resolve_put_url`/`verify_uploaded`), so the frozen
+/// placeholder is pinned as ROUTE BEHAVIOR, not just a constant's value.
+#[derive(Debug, Default)]
+struct CapturingPresignBackend {
+    rooms_seen: std::sync::Mutex<Vec<String>>,
+}
+
+impl CapturingPresignBackend {
+    fn record(&self, room_id: &str) {
+        self.rooms_seen.lock().unwrap().push(room_id.to_string());
+    }
+}
+
+impl BlobPersistence for CapturingPresignBackend {
+    fn persist_blob(&self, _hash: &Hash, _bytes: &[u8]) -> Result<(), PersistBlobError> {
+        Ok(())
+    }
+
+    fn resolve_get_url(
+        &self,
+        room_id: &str,
+        _hash: &Hash,
+        _size_hint: Option<u64>,
+    ) -> Option<PresignedUrl> {
+        self.record(room_id);
+        Some(PresignedUrl::with_ttl(
+            "https://bucket.test/presigned".to_string(),
+            Duration::from_secs(900),
+        ))
+    }
+
+    fn resolve_put_url(
+        &self,
+        room_id: &str,
+        _hash: &Hash,
+        _size: u64,
+        _content_type: Option<&str>,
+    ) -> Option<PresignedUrl> {
+        self.record(room_id);
+        Some(PresignedUrl::with_ttl(
+            "https://bucket.test/presigned".to_string(),
+            Duration::from_secs(900),
+        ))
+    }
+
+    fn verify_uploaded(&self, room_id: &str, _hash: &Hash) -> Result<(), String> {
+        self.record(room_id);
         Ok(())
     }
 
@@ -256,4 +320,116 @@ async fn blob_url_resolution_vectors_conform() {
     }
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Slice 7.4 (blob-cas-remediation.md) — freeze the delegate room-id
+/// placeholder. `room` in the delegate presign protocol v1
+/// (`docs/BLOB_STORAGE_LAYOUT.md` §7) is metadata-only (never a key input),
+/// but a delegate that logs/quotas/audits per room previously saw DIFFERENT
+/// per-host values on the room-agnostic routes: this server sent
+/// `"_global"` while the .NET host sent `"default"`. The frozen winner
+/// lives in the `delegate_room_id_placeholder` slot of
+/// `engine/commands/work-unit-status-vectors.v1.json`; the .NET mirror is
+/// `DelegateRoomPlaceholderVectorTests.cs`.
+///
+/// Note on `namespace`: the vector slot also freezes `namespace: "blobs"`
+/// for hosts that send the protocol's OPTIONAL namespace field at all. This
+/// server's delegate client (`nodalmerge-s3-blobs::delegate_request`) has no
+/// namespace field in its request struct and omits it entirely, which stays
+/// conformant — so there is deliberately no namespace assertion here.
+#[tokio::test]
+async fn delegate_room_placeholder_matches_frozen_vector() {
+    let file: serde_json::Value = serde_json::from_str(WORK_UNIT_VECTORS_JSON)
+        .expect("engine/commands/work-unit-status-vectors.v1.json must parse");
+    let expected_room = file["delegate_room_id_placeholder"]["room"]
+        .as_str()
+        .expect("delegate_room_id_placeholder.room must be a decided (non-null) string — slice 7.4")
+        .to_string();
+
+    let vectors: VectorsFile = serde_json::from_str(VECTORS_JSON)
+        .expect("engine/commands/blob-url-resolution-vectors.v1.json must parse");
+
+    let backend = Arc::new(CapturingPresignBackend::default());
+    let router = {
+        let rooms = Rooms::new(
+            SigningKey::from_bytes(&[0x73; 32]),
+            Arc::new(Composite::new(NoPersistence, SharedBackend(backend.clone()))) as SharedPersistence,
+            512,
+            0,
+            0,
+        );
+        blob_http::blob_routes(BlobHttpConfig::default()).with_state(rooms)
+    };
+
+    let hash = &vectors.canonical_hash;
+    for (method, uri) in [
+        (Method::GET, format!("/blobs/{hash}/url?op=get")),
+        (Method::GET, format!("/blobs/{hash}/url?op=put&size=1024")),
+        (Method::POST, format!("/blobs/{hash}/uploaded")),
+    ] {
+        let req = Request::builder()
+            .method(method.clone())
+            .uri(&uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_success(),
+            "{method} {uri}: expected success, got {}",
+            resp.status()
+        );
+    }
+
+    let seen = backend.rooms_seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        3,
+        "expected all three room-agnostic routes to reach the presign seam, saw {seen:?}"
+    );
+    for room in &seen {
+        assert_eq!(
+            room, &expected_room,
+            "room-agnostic route passed room `{room}`; the frozen contract placeholder is `{expected_room}` \
+             (delegate_room_id_placeholder in work-unit-status-vectors.v1.json)"
+        );
+    }
+}
+
+/// `Arc<CapturingPresignBackend>` newtype so the capturing backend can be
+/// shared between the router and the test's assertions (`Composite` takes
+/// its halves by value).
+#[derive(Debug)]
+struct SharedBackend(Arc<CapturingPresignBackend>);
+
+impl BlobPersistence for SharedBackend {
+    fn persist_blob(&self, hash: &Hash, bytes: &[u8]) -> Result<(), PersistBlobError> {
+        self.0.persist_blob(hash, bytes)
+    }
+
+    fn resolve_get_url(
+        &self,
+        room_id: &str,
+        hash: &Hash,
+        size_hint: Option<u64>,
+    ) -> Option<PresignedUrl> {
+        self.0.resolve_get_url(room_id, hash, size_hint)
+    }
+
+    fn resolve_put_url(
+        &self,
+        room_id: &str,
+        hash: &Hash,
+        size: u64,
+        content_type: Option<&str>,
+    ) -> Option<PresignedUrl> {
+        self.0.resolve_put_url(room_id, hash, size, content_type)
+    }
+
+    fn verify_uploaded(&self, room_id: &str, hash: &Hash) -> Result<(), String> {
+        self.0.verify_uploaded(room_id, hash)
+    }
+
+    fn supports_presigned_urls(&self) -> bool {
+        self.0.supports_presigned_urls()
+    }
 }

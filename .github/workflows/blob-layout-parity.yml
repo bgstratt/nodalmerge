@@ -355,6 +355,30 @@ name: blob-layout-parity
 #                                                 (slice 4.3.3, new file — warns,
 #                                                 does not hard-fail, on stale
 #                                                 PutPath/GetPath config keys)
+#   hosts/dotnet/src/NodalMerge.Host.Composition/RetryCircuitBreakerPolicy.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RetryCircuitBreakerCharacterizationTests.cs
+#                                                 (slice 7.2 — the ONE
+#                                                 retry/circuit-breaker
+#                                                 component the three remote
+#                                                 blob providers previously
+#                                                 hand-copied; the suite pins
+#                                                 each provider's option set
+#                                                 incl. the preserved drift)
+#   server/server/tests/blob_url_resolution_vectors.rs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobUrlResolutionVectorTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/DelegateRoomPlaceholderVectorTests.cs
+#   engine/commands/work-unit-status-vectors.v1.json (delegate_room_id_placeholder
+#                                                 slot only — the rest of that
+#                                                 file is studio-live-hashes-parity.yml's)
+#   engine/commands/blob-url-resolution-vectors.v1.json
+#                                                 (slice 7.4 — frozen delegate
+#                                                 room-id placeholder
+#                                                 room="_global"/ns="blobs" on
+#                                                 the room-agnostic routes,
+#                                                 pinned cross-runtime; the
+#                                                 URL-resolution suites had
+#                                                 previously run in NO
+#                                                 workflow at all)
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobIdentityVerifyTests.cs
 #                                                 (slice 3.2, finding #13 — new
 #                                                 file, pins FileBlobStoreProvider's
@@ -550,6 +574,32 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpOptionsValidationTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobOriginBaseUrlPathPrefixTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DelegatedBlobOptionsStaleKeyGuardTests.cs"
+      # slice 7.2 — the ONE retry-classification/circuit-breaker component all
+      # three remote blob providers (HttpRemote, S3Direct, S3Delegated) now
+      # configure; previously three drifting copies inside those provider
+      # files. The characterization suite pins each provider's PRE-extraction
+      # contract, including the deliberately-preserved drift (throw-vs-null
+      # exhaustion, S3Direct's 501 capability carve-out, the delegated
+      # resolver's 4xx-as-breaker-failure posture).
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RetryCircuitBreakerPolicy.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RetryCircuitBreakerCharacterizationTests.cs"
+      # slice 7.4 — frozen delegate room-id placeholder (room="_global",
+      # optional namespace="blobs" on the room-agnostic /blobs/{hash}/url +
+      # /blobs/{hash}/uploaded routes). The cross-runtime pin lives in the
+      # delegate_room_id_placeholder slot of the work-unit vectors file
+      # (reserved by slice 0.4), the .NET constants in
+      # DelegatePresignProtocol.cs. NOTE: the blob URL-resolution suites
+      # (blob_url_resolution_vectors.rs / BlobUrlResolutionVectorTests.cs and
+      # their vector file) previously ran in NO workflow at all — another
+      # instance of the known steps-that-do-not-exist gap, wired in here by
+      # the slice that touches those routes rather than left for Phase 8.
+      - "engine/commands/work-unit-status-vectors.v1.json"
+      - "engine/commands/blob-url-resolution-vectors.v1.json"
+      - "server/server/tests/blob_url_resolution_vectors.rs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/DelegatePresignProtocol.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobUrlResolverProvider.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/DelegateRoomPlaceholderVectorTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobUrlResolutionVectorTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   pull_request:
     paths:
@@ -690,6 +740,32 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpOptionsValidationTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobOriginBaseUrlPathPrefixTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DelegatedBlobOptionsStaleKeyGuardTests.cs"
+      # slice 7.2 — the ONE retry-classification/circuit-breaker component all
+      # three remote blob providers (HttpRemote, S3Direct, S3Delegated) now
+      # configure; previously three drifting copies inside those provider
+      # files. The characterization suite pins each provider's PRE-extraction
+      # contract, including the deliberately-preserved drift (throw-vs-null
+      # exhaustion, S3Direct's 501 capability carve-out, the delegated
+      # resolver's 4xx-as-breaker-failure posture).
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RetryCircuitBreakerPolicy.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RetryCircuitBreakerCharacterizationTests.cs"
+      # slice 7.4 — frozen delegate room-id placeholder (room="_global",
+      # optional namespace="blobs" on the room-agnostic /blobs/{hash}/url +
+      # /blobs/{hash}/uploaded routes). The cross-runtime pin lives in the
+      # delegate_room_id_placeholder slot of the work-unit vectors file
+      # (reserved by slice 0.4), the .NET constants in
+      # DelegatePresignProtocol.cs. NOTE: the blob URL-resolution suites
+      # (blob_url_resolution_vectors.rs / BlobUrlResolutionVectorTests.cs and
+      # their vector file) previously ran in NO workflow at all — another
+      # instance of the known steps-that-do-not-exist gap, wired in here by
+      # the slice that touches those routes rather than left for Phase 8.
+      - "engine/commands/work-unit-status-vectors.v1.json"
+      - "engine/commands/blob-url-resolution-vectors.v1.json"
+      - "server/server/tests/blob_url_resolution_vectors.rs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/DelegatePresignProtocol.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobUrlResolverProvider.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/DelegateRoomPlaceholderVectorTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobUrlResolutionVectorTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   workflow_dispatch:
 
@@ -776,6 +852,9 @@ jobs:
       - name: Run stalled-endpoint bridge/timeout gate (slice 6.1, finding #11 — every S3/delegate op against a hung endpoint must fail within the configured bound and classify as a backend error, never as missing/absent; no Docker needed, the stalled endpoint is an in-test TcpListener)
         run: cargo test -p nodalmerge-s3-blobs --test bridge_timeouts
 
+      - name: "Run blob URL-resolution vectors + frozen delegate room placeholder pin (slices S4.2 + 7.4 — the room-agnostic /blobs/{hash}/url and /uploaded routes must pass room=\"_global\" into the delegate presign seam, pinned against the delegate_room_id_placeholder vector slot; this suite previously ran in NO workflow at all)"
+        run: cargo test -p nodalmerge-server --test blob_url_resolution_vectors
+
   dotnet-blob-layout:
     name: dotnet blob layout + delegate protocol + interop
     runs-on: ubuntu-latest
@@ -856,3 +935,12 @@ jobs:
 
       - name: "Run S3DelegatedBlobOptions stale-key guard tests (slice 4.3.3 — removed PutPath/GetPath config keys warn loudly, never hard-fail)"
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~S3DelegatedBlobOptionsStaleKeyGuardTests"
+
+      - name: "Run retry/circuit-breaker characterization suite (slice 7.2 — pins each remote blob provider's contract around the ONE extracted RetryCircuitBreakerPolicy, incl. the deliberately-preserved drift: HttpRemote throws on exhaustion while S3Direct/S3Delegated return null, only S3Direct carves 501 out as capability-declined, and only S3Delegated counts a non-transient 4xx — or a 200-with-null-JSON-body — as a breaker failure)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RetryCircuitBreakerCharacterizationTests"
+
+      - name: "Run blob URL-resolution vectors (slice S4.1 surface — previously ran in NO workflow at all; wired in by slice 7.4, whose production change is exactly on these routes)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobUrlResolutionVectorTests"
+
+      - name: "Run frozen delegate room placeholder pin (slice 7.4 — the room-agnostic /blobs/{hash}/url routes must send room=\"_global\"/namespace=\"blobs\" into the delegate presign protocol v1, asserted against the delegate_room_id_placeholder vector slot both as constants and as captured route behavior)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~DelegateRoomPlaceholderVectorTests"

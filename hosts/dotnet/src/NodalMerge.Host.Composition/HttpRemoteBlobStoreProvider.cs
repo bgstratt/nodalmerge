@@ -14,9 +14,11 @@ namespace NodalMerge.Host.Composition;
 /// consumer that decides whether a fetched payload may be trusted and cached.
 /// Any other caller of this provider gets the origin's bytes as-is.
 ///
-/// Retry + circuit breaker policy mirrors <see cref="S3DelegatedBlobUrlResolverProvider"/>:
+/// Retry + circuit breaker: the shared <see cref="RetryCircuitBreakerPolicy"/>
+/// (slice 7.2), configured with THIS provider's option set —
 /// 5xx/429/timeouts are retryable (up to <see cref="RemoteBlobOriginOptions.MaxRetries"/>
-/// extra attempts); 400/401/413/422 are not. A run of consecutive failures opens
+/// extra attempts); 400/401/413/422 are not (and count as breaker successes
+/// here, unlike the delegated resolver). A run of consecutive failures opens
 /// the breaker for <see cref="RemoteBlobOriginOptions.CircuitBreakerOpenSeconds"/>.
 ///
 /// Breaker-open behavior is intentionally asymmetric:
@@ -38,10 +40,7 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
     private readonly RemoteBlobOriginOptions _options;
     private readonly Uri _baseUri;
     private readonly ILogger<HttpRemoteBlobStoreProvider> _logger;
-    private readonly object _circuitLock = new();
-
-    private int _consecutiveFailures;
-    private DateTimeOffset? _circuitOpenedUntil;
+    private readonly RetryCircuitBreakerPolicy _retryPolicy;
 
     public HttpRemoteBlobStoreProvider(
         IHttpClientFactory httpClientFactory,
@@ -53,6 +52,18 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
         _options = options;
         _baseUri = options.ResolveBaseUri();
         _logger = logger;
+        // Slice 7.2: this provider's option set. No 501 carve-out (a 501 is
+        // any other 5xx here), any answered response is a breaker success —
+        // and exhaustion maps to a THROW below, unlike the two null-mapping
+        // siblings. See RetryCircuitBreakerPolicy's class doc for the
+        // deliberately-preserved drift between the three option sets.
+        _retryPolicy = new RetryCircuitBreakerPolicy(new RetryCircuitBreakerPolicyOptions(
+            MaxRetries: options.MaxRetries,
+            CircuitBreakerFailureThreshold: options.CircuitBreakerFailureThreshold,
+            CircuitBreakerOpenSeconds: options.CircuitBreakerOpenSeconds,
+            TreatNotImplementedAsCapabilityDeclined: false,
+            NonTransientResponseHandling: NonTransientResponseHandling.RecordBreakerSuccess
+        ));
     }
 
     public async ValueTask<BlobReadResult> TryGetBlobAsync(string hashHex, CancellationToken cancellationToken = default)
@@ -197,62 +208,39 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
     )
     {
         var client = _httpClientFactory.CreateClient(HttpClientName);
-        var maxAttempts = _options.MaxRetries + 1;
 
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            HttpResponseMessage response;
-            try
+        var outcome = await _retryPolicy.SendWithRetryAsync(
+            async (_, ct) =>
             {
                 using var request = requestFactory();
-                response = await client.SendAsync(request, cancellationToken);
-            }
-            catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                if (attempt == maxAttempts)
-                {
-                    RecordFailure();
-                    throw new InvalidOperationException(
-                        $"remote blob origin request timed out after {maxAttempts} attempt(s)",
-                        ex
-                    );
-                }
-                continue;
-            }
-            catch (HttpRequestException ex)
-            {
-                if (attempt == maxAttempts)
-                {
-                    RecordFailure();
-                    throw new InvalidOperationException(
-                        $"remote blob origin request failed after {maxAttempts} attempt(s)",
-                        ex
-                    );
-                }
-                continue;
-            }
+                return await client.SendAsync(request, ct);
+            },
+            cancellationToken
+        );
 
-            var statusCode = (int)response.StatusCode;
-            var isTransient = statusCode >= 500 || statusCode == 429;
-            if (!isTransient)
-            {
-                RecordSuccess();
-                return response;
-            }
-
-            response.Dispose();
-            if (attempt == maxAttempts)
-            {
-                RecordFailure();
-                throw new InvalidOperationException(
-                    $"remote blob origin returned transient status {statusCode} after {maxAttempts} attempt(s)"
-                );
-            }
+        if (outcome.Kind == RetrySendOutcomeKind.NonTransientResponse)
+        {
+            return outcome.Response!;
         }
 
-        // Unreachable: the loop above always returns or throws on its last
-        // iteration.
-        throw new InvalidOperationException("remote blob origin retry loop exited unexpectedly");
+        // Exhausted (breaker failure already recorded by the policy): this
+        // provider's exhaustion mapping is a THROW — silently swallowing a
+        // failed push means data loss the reconcile sweep can't detect, and
+        // TryGetBlobAsync's callers (the chain) catch and degrade.
+        throw outcome.LastFailureKind switch
+        {
+            RetryFailureKind.Timeout => new InvalidOperationException(
+                $"remote blob origin request timed out after {outcome.Attempts} attempt(s)",
+                outcome.LastException
+            ),
+            RetryFailureKind.ConnectionFailure => new InvalidOperationException(
+                $"remote blob origin request failed after {outcome.Attempts} attempt(s)",
+                outcome.LastException
+            ),
+            _ => new InvalidOperationException(
+                $"remote blob origin returned transient status {outcome.LastTransientStatus} after {outcome.Attempts} attempt(s)"
+            )
+        };
     }
 
     private HttpRequestMessage CreateRequest(HttpMethod method, string hashHex)
@@ -299,44 +287,5 @@ public sealed class HttpRemoteBlobStoreProvider : IBlobStoreProvider, IRemoteBlo
         }
     }
 
-    private bool IsCircuitOpen()
-    {
-        lock (_circuitLock)
-        {
-            if (_circuitOpenedUntil is null)
-            {
-                return false;
-            }
-
-            if (DateTimeOffset.UtcNow < _circuitOpenedUntil.Value)
-            {
-                return true;
-            }
-
-            _circuitOpenedUntil = null;
-            _consecutiveFailures = 0;
-            return false;
-        }
-    }
-
-    private void RecordSuccess()
-    {
-        lock (_circuitLock)
-        {
-            _consecutiveFailures = 0;
-            _circuitOpenedUntil = null;
-        }
-    }
-
-    private void RecordFailure()
-    {
-        lock (_circuitLock)
-        {
-            _consecutiveFailures++;
-            if (_consecutiveFailures >= _options.CircuitBreakerFailureThreshold)
-            {
-                _circuitOpenedUntil = DateTimeOffset.UtcNow.AddSeconds(_options.CircuitBreakerOpenSeconds);
-            }
-        }
-    }
+    private bool IsCircuitOpen() => _retryPolicy.IsCircuitOpen();
 }

@@ -82,6 +82,15 @@ use crate::store::{hash_from_hex, is_canonical_blob_name};
 /// existing placeholder `room.rs`'s `sweep_blobs` already uses for the same
 /// "this isn't really any one room" situation when calling
 /// `gc_adapter::run_mark_only_preflight`.
+///
+/// FROZEN since blob-cas-remediation slice 7.4: this value is now the
+/// cross-runtime contract placeholder (`docs/BLOB_STORAGE_LAYOUT.md` §7
+/// "The room-agnostic placeholder"; the .NET host's previous
+/// `"default"` was aligned to it). Pinned by the
+/// `delegate_room_id_placeholder` slot of
+/// `engine/commands/work-unit-status-vectors.v1.json` via
+/// `tests/blob_url_resolution_vectors.rs` — changing this string alone
+/// makes that test fail, deliberately.
 const GLOBAL_ROOM_PLACEHOLDER: &str = "_global";
 
 /// Runtime configuration for the blob HTTP origin routes.

@@ -146,6 +146,42 @@ The app-side key derivation is `<its own prefix><algorithm>/<hash>` — the
 `room`/`namespace` fields are metadata the app may log or authorize
 against, never key inputs.
 
+### The room-agnostic placeholder (frozen, slice 7.4)
+
+On the **room-agnostic** blob HTTP routes (`GET /blobs/{hash}/url`,
+`POST /blobs/{hash}/uploaded` — `BLOB_HTTP_SURFACE.md` "Blob URL
+resolution") there is no real room, so every host sends the frozen
+placeholder:
+
+```
+room      = "_global"
+namespace = "blobs"     (only for hosts that send the OPTIONAL namespace
+                         field at all — the Rust delegate client omits it
+                         entirely, which remains conformant)
+```
+
+`"_global"` reads as an intentional placeholder, matches the Rust server's
+pre-existing GC-preflight placeholder, and cannot collide with a plausible
+real room id the way `"default"` could. The values are pinned cross-runtime
+by the `delegate_room_id_placeholder` slot of
+`engine/commands/work-unit-status-vectors.v1.json` (reserved by
+blob-cas-remediation slice 0.4, decided by 7.4) and asserted by
+`server/server/tests/blob_url_resolution_vectors.rs` and
+`DelegateRoomPlaceholderVectorTests.cs`. Calls made on behalf of a real
+room (e.g. the WS blob flow's `resolve_get_url(room_id, ...)`) keep
+sending the real room id — the placeholder is only for routes where no
+room exists.
+
+> ⚠ **Change note (2026-07-17, blob-cas-remediation 7.4):** before this
+> freeze the .NET host sent `room="default", namespace="blobs"` on these
+> routes while the Rust server sent `room="_global"`. Since `room` is
+> metadata-only, stored bytes and key derivation were and are unaffected —
+> but a delegate that quotas, audits, or logs per `room` will observe the
+> .NET host's value change from `"default"` to `"_global"`. The .NET
+> host's **legacy** `/sync/blob-url` route is NOT affected: it still
+> forwards caller-supplied `room`/`namespace` (defaults
+> `"default"`/`"assets"`) per its frozen backward-compat contract.
+
 ## 8. At-rest content encoding (v3)
 
 A blob with hash `<hex>` exists as **exactly one** of:

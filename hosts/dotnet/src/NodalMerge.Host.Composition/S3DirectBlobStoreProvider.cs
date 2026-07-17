@@ -73,11 +73,9 @@ public sealed class S3DirectBlobStoreProvider : IBlobStoreProvider
     private readonly Uri _originBaseUri;
     private readonly S3DirectBlobOriginOptions _options;
     private readonly ILogger<S3DirectBlobStoreProvider> _logger;
-    private readonly object _circuitLock = new();
+    private readonly RetryCircuitBreakerPolicy _retryPolicy;
     private readonly object _capabilityLock = new();
 
-    private int _consecutiveFailures;
-    private DateTimeOffset? _circuitOpenedUntil;
     private DateTimeOffset? _getCapabilityUnavailableUntil;
 
     public S3DirectBlobStoreProvider(
@@ -92,6 +90,20 @@ public sealed class S3DirectBlobStoreProvider : IBlobStoreProvider
         _originBaseUri = originOptions.ResolveBaseUri();
         _options = options;
         _logger = logger;
+        // Slice 7.2: this provider's option set. It is the ONE copy with the
+        // 501 capability carve-out (declined = breaker success, surfaced as
+        // CapabilityDeclined so TryResolveUrlAsync can run its op=get-only
+        // cooldown), and its exhaustion mapping is null -> degraded miss
+        // (GET) / "declined to presign" throw (PUT), never a policy-level
+        // throw. See RetryCircuitBreakerPolicy's class doc for the
+        // deliberately-preserved drift between the three option sets.
+        _retryPolicy = new RetryCircuitBreakerPolicy(new RetryCircuitBreakerPolicyOptions(
+            MaxRetries: options.MaxRetries,
+            CircuitBreakerFailureThreshold: options.CircuitBreakerFailureThreshold,
+            CircuitBreakerOpenSeconds: options.CircuitBreakerOpenSeconds,
+            TreatNotImplementedAsCapabilityDeclined: true,
+            NonTransientResponseHandling: NonTransientResponseHandling.RecordBreakerSuccess
+        ));
     }
 
     public async ValueTask<BlobReadResult> TryGetBlobAsync(string hashHex, CancellationToken cancellationToken = default)
@@ -378,110 +390,89 @@ public sealed class S3DirectBlobStoreProvider : IBlobStoreProvider
     )
     {
         var client = _httpClientFactory.CreateClient(HttpRemoteBlobStoreProvider.HttpClientName);
-        var maxAttempts = _options.MaxRetries + 1;
 
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            HttpResponseMessage response;
-            try
+        var outcome = await _retryPolicy.SendWithRetryAsync(
+            async (_, ct) =>
             {
                 using var request = CreateUrlResolveRequest(hashHex, op, sizeBytes, contentType);
-                response = await client.SendAsync(request, cancellationToken);
-            }
-            catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                if (attempt == maxAttempts)
-                {
-                    RecordFailure();
-                    _logger.LogWarning(
-                        ex,
-                        "s3-direct URL resolution timed out after {Attempts} attempt(s) for {Op} {Hash}",
-                        maxAttempts,
-                        op,
-                        hashHex
-                    );
-                    return null;
-                }
-                continue;
-            }
-            catch (HttpRequestException ex)
-            {
-                if (attempt == maxAttempts)
-                {
-                    RecordFailure();
-                    _logger.LogWarning(
-                        ex,
-                        "s3-direct URL resolution failed after {Attempts} attempt(s) for {Op} {Hash}",
-                        maxAttempts,
-                        op,
-                        hashHex
-                    );
-                    return null;
-                }
-                continue;
-            }
+                return await client.SendAsync(request, ct);
+            },
+            cancellationToken
+        );
 
-            if (response.StatusCode == HttpStatusCode.NotImplemented)
-            {
-                response.Dispose();
-                // The origin answered (it's healthy) — it's just declining
-                // s3-direct capability for this op, which is not a breaker
-                // failure.
-                RecordSuccess();
+        switch (outcome.Kind)
+        {
+            case RetrySendOutcomeKind.CapabilityDeclined:
+                // 501: the origin answered (breaker success already recorded
+                // by the policy) — it's just declining s3-direct capability
+                // for this op. Only op=get's decline is cached (see the
+                // class doc).
                 if (string.Equals(op, "get", StringComparison.Ordinal))
                 {
                     SetGetCapabilityCooldown();
                 }
                 return null;
-            }
 
-            var statusCode = (int)response.StatusCode;
-            var isTransient = statusCode >= 500 || statusCode == 429;
-            if (isTransient)
-            {
-                response.Dispose();
-                if (attempt == maxAttempts)
+            case RetrySendOutcomeKind.Exhausted:
+                // Breaker failure already recorded by the policy; this
+                // provider's exhaustion mapping is a logged null ("this link
+                // isn't available right now"), never a throw.
+                switch (outcome.LastFailureKind)
                 {
-                    RecordFailure();
-                    _logger.LogWarning(
-                        "s3-direct URL resolution returned transient status {Status} after {Attempts} attempt(s) for {Op} {Hash}",
-                        statusCode,
-                        maxAttempts,
-                        op,
-                        hashHex
-                    );
-                    return null;
+                    case RetryFailureKind.Timeout:
+                        _logger.LogWarning(
+                            outcome.LastException,
+                            "s3-direct URL resolution timed out after {Attempts} attempt(s) for {Op} {Hash}",
+                            outcome.Attempts,
+                            op,
+                            hashHex
+                        );
+                        break;
+                    case RetryFailureKind.ConnectionFailure:
+                        _logger.LogWarning(
+                            outcome.LastException,
+                            "s3-direct URL resolution failed after {Attempts} attempt(s) for {Op} {Hash}",
+                            outcome.Attempts,
+                            op,
+                            hashHex
+                        );
+                        break;
+                    default:
+                        _logger.LogWarning(
+                            "s3-direct URL resolution returned transient status {Status} after {Attempts} attempt(s) for {Op} {Hash}",
+                            outcome.LastTransientStatus,
+                            outcome.Attempts,
+                            op,
+                            hashHex
+                        );
+                        break;
                 }
-                continue;
-            }
+                return null;
+        }
 
-            RecordSuccess();
+        var response = outcome.Response!;
 
-            if (response.StatusCode != HttpStatusCode.OK)
+        if (response.StatusCode != HttpStatusCode.OK)
+        {
+            var statusCode = (int)response.StatusCode;
+            response.Dispose();
+            throw new InvalidOperationException(
+                $"s3-direct URL resolution for {op} {hashHex} returned unexpected status {statusCode}"
+            );
+        }
+
+        using (response)
+        {
+            var body = await response.Content.ReadFromJsonAsync<BlobUrlResponse>(cancellationToken: cancellationToken);
+            if (body is null || string.IsNullOrWhiteSpace(body.Url))
             {
-                response.Dispose();
                 throw new InvalidOperationException(
-                    $"s3-direct URL resolution for {op} {hashHex} returned unexpected status {statusCode}"
+                    $"s3-direct URL resolution for {op} {hashHex} returned an empty body"
                 );
             }
 
-            using (response)
-            {
-                var body = await response.Content.ReadFromJsonAsync<BlobUrlResponse>(cancellationToken: cancellationToken);
-                if (body is null || string.IsNullOrWhiteSpace(body.Url))
-                {
-                    throw new InvalidOperationException(
-                        $"s3-direct URL resolution for {op} {hashHex} returned an empty body"
-                    );
-                }
-
-                return new PresignedUrlInfo(body.Url, TryParseExpiry(body.ExpiresAtUtc));
-            }
+            return new PresignedUrlInfo(body.Url, TryParseExpiry(body.ExpiresAtUtc));
         }
-
-        // Unreachable: the loop above always returns or throws on its last
-        // iteration.
-        throw new InvalidOperationException("s3-direct URL resolution retry loop exited unexpectedly");
     }
 
     private HttpRequestMessage CreateUrlResolveRequest(string hashHex, string op, int? sizeBytes, string? contentType)
@@ -607,46 +598,7 @@ public sealed class S3DirectBlobStoreProvider : IBlobStoreProvider
         }
     }
 
-    private bool IsCircuitOpen()
-    {
-        lock (_circuitLock)
-        {
-            if (_circuitOpenedUntil is null)
-            {
-                return false;
-            }
-
-            if (DateTimeOffset.UtcNow < _circuitOpenedUntil.Value)
-            {
-                return true;
-            }
-
-            _circuitOpenedUntil = null;
-            _consecutiveFailures = 0;
-            return false;
-        }
-    }
-
-    private void RecordSuccess()
-    {
-        lock (_circuitLock)
-        {
-            _consecutiveFailures = 0;
-            _circuitOpenedUntil = null;
-        }
-    }
-
-    private void RecordFailure()
-    {
-        lock (_circuitLock)
-        {
-            _consecutiveFailures++;
-            if (_consecutiveFailures >= _options.CircuitBreakerFailureThreshold)
-            {
-                _circuitOpenedUntil = DateTimeOffset.UtcNow.AddSeconds(_options.CircuitBreakerOpenSeconds);
-            }
-        }
-    }
+    private bool IsCircuitOpen() => _retryPolicy.IsCircuitOpen();
 
     private sealed record PresignedUrlInfo(string Url, DateTimeOffset? ExpiresAtUtc);
 

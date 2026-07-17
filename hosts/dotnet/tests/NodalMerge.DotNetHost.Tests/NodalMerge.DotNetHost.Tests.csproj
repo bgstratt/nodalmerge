@@ -80,6 +80,17 @@
     <None Include="..\..\..\..\engine\commands\zstd-interop-vectors.v1.json"
           Link="zstd-interop-vectors.v1.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- Work-unit status vectors ALSO carry the frozen
+         delegate_room_id_placeholder slot (reserved by slice 0.4, decided by
+         slice 7.4): DelegateRoomPlaceholderVectorTests asserts the room/
+         namespace metadata this host emits into the delegate presign
+         protocol v1 on the room-agnostic /blobs/{hash}/url routes against
+         the same source of truth the Rust mirror
+         (server/server/tests/blob_url_resolution_vectors.rs) is asserted
+         against. -->
+    <None Include="..\..\..\..\engine\commands\work-unit-status-vectors.v1.json"
+          Link="work-unit-status-vectors.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\..\..\engine\commands\fixtures\zstd-interop-v1\**">
       <Link>zstd-interop-fixture-v1\%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

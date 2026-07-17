@@ -141,9 +141,9 @@
     }
   ],
   "delegate_room_id_placeholder": {
-    "$comment": "Slot only, per slice 0.4's Note — the VALUE is deliberately undecided pending slice 7.4 (server/server/src/blob_http.rs:73 sends room=\"_global\" into the shared delegate presign protocol v1; the .NET host sends room=\"default\", ns=\"blobs\" for the same room-agnostic routes). This slice adds the slot so 7.4 has a frozen, pre-existing place in this shared file to assert its chosen winner into without a schema_version bump. Neither the Rust nor the .NET test for THIS slice reads or asserts against `room`/`namespace` below; they are null on purpose and must stay null until 7.4 lands.",
-    "room": null,
-    "namespace": null,
+    "$comment": "DECIDED by slice 7.4 (2026-07-17, blob-cas-remediation.md): on the room-agnostic blob HTTP routes (GET /blobs/{hash}/url, POST /blobs/{hash}/uploaded) every host passes room=\"_global\" into the delegate presign protocol v1 (docs/BLOB_STORAGE_LAYOUT.md §7 — room is metadata-only, never a key input). \"_global\" won over the .NET host's previous \"default\": it reads as an intentional placeholder, it already matched the Rust host AND room.rs's GC-preflight placeholder, and \"default\" collides with a plausible real room id. `namespace` is frozen at \"blobs\" for hosts that send the protocol's OPTIONAL namespace field at all (.NET does); the Rust delegate client's request struct has no namespace field and continues to omit it — omission remains conformant, but a host that sends the field on these routes MUST send \"blobs\". Asserted by server/server/tests/blob_url_resolution_vectors.rs (capturing-backend room pin) and hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/DelegateRoomPlaceholderVectorTests.cs (room + namespace pin). ⚠ This changed the .NET host's emitted metadata (room \"default\" -> \"_global\") — see the §7 note in docs/BLOB_STORAGE_LAYOUT.md.",
+    "room": "_global",
+    "namespace": "blobs",
     "decided_in_slice": "7.4"
   }
 }

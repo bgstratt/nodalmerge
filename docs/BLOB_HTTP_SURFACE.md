@@ -161,7 +161,11 @@ GET /blobs/{hash}/url?op=get|put[&size=<bytes>&contentType=<mime>]
   distinguish them (see below).
 - This endpoint carries no room/namespace semantics, same as the relay endpoints — the
   CAS is global and content-addressed. An implementation MAY require the same bearer
-  auth as the relay endpoints when a token is configured.
+  auth as the relay endpoints when a token is configured. When the server forwards this
+  request into the delegate presign protocol v1, it sends the FROZEN room-agnostic
+  placeholder (`room="_global"`, optional `namespace="blobs"`) — see
+  `BLOB_STORAGE_LAYOUT.md` §7 "The room-agnostic placeholder" (blob-cas-remediation
+  slice 7.4, incl. the ⚠ change note for delegates that audit per room).
 
 ### `POST /blobs/{hash}/uploaded`
 

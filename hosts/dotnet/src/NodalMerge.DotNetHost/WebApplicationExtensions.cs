@@ -348,10 +348,20 @@ public static class WebApplicationExtensions
         // GET /blobs/{hash}/url?op=get|put[&size=&contentType=] ->
         // 200 {"url":..., "expiresAtUtc":...} | 501 (no backend) | 400
         // (malformed hash).
+        // Slice 7.4 (blob-cas-remediation.md): these room-agnostic routes
+        // pass the FROZEN delegate-protocol placeholder pair — previously a
+        // literal "default"/"blobs" here while the Rust host sent "_global",
+        // so a delegate keying policy/quota/audit on the (metadata-only)
+        // room field saw different per-host values. Pinned cross-runtime by
+        // the delegate_room_id_placeholder slot of
+        // engine/commands/work-unit-status-vectors.v1.json
+        // (DelegateRoomPlaceholderVectorTests). The legacy /sync/blob-url
+        // route keeps its own caller-supplied values + "default"/"assets"
+        // defaults — see HandleLegacyBlobUrlAsync.
         app.MapGet("/blobs/{hash}/url", (HttpContext context, string hash, [AsParameters] BlobUrlOpQuery query, CancellationToken cancellationToken) =>
-            HandleBlobUrlResolveAsync(context, hash, query.Op, query.Size, query.ContentType, "default", "blobs", blobHttpOptions, cancellationToken));
+            HandleBlobUrlResolveAsync(context, hash, query.Op, query.Size, query.ContentType, DelegatePresignProtocol.GlobalRoomPlaceholder, DelegatePresignProtocol.GlobalRoomNamespace, blobHttpOptions, cancellationToken));
         app.MapGet("/api/blobs/{hash}/url", (HttpContext context, string hash, [AsParameters] BlobUrlOpQuery query, CancellationToken cancellationToken) =>
-            HandleBlobUrlResolveAsync(context, hash, query.Op, query.Size, query.ContentType, "default", "blobs", blobHttpOptions, cancellationToken));
+            HandleBlobUrlResolveAsync(context, hash, query.Op, query.Size, query.ContentType, DelegatePresignProtocol.GlobalRoomPlaceholder, DelegatePresignProtocol.GlobalRoomNamespace, blobHttpOptions, cancellationToken));
 
         // Upload confirmation (docs/BLOB_HTTP_SURFACE.md, same section).
         // The .NET host has no bucket visibility today, so it takes the

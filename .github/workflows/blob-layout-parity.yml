@@ -161,6 +161,11 @@ name: blob-layout-parity
 #                                                 default member)
 #   hosts/dotnet/src/NodalMerge.Host.Composition/HttpRemoteBlobStoreProvider.cs
 #   hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobStoreProvider.cs
+#   hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobOriginOptions.cs
+#                                                 (slice 3.3, finding #6 — the
+#                                                 Compression default flipped
+#                                                 Zstd -> Off; pinned by
+#                                                 S3DirectBlobOriginOptionsTests)
 #   hosts/dotnet/src/NodalMerge.Host.Composition/ChainedBlobStoreProvider.cs
 #   hosts/dotnet/src/NodalMerge.DotNetHost/WebApplicationExtensions.cs   (HEAD +
 #                                                 PUT-idempotency call sites
@@ -299,6 +304,7 @@ on:
       - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/HttpRemoteBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobOriginOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/ChainedBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobLinkAggregator.cs"
       - "hosts/dotnet/src/NodalMerge.DotNetHost/WebApplicationExtensions.cs"
@@ -315,6 +321,7 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpEncodingNegotiationTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/HttpRemoteBlobStoreProviderTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobOriginOptionsTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ChainedBlobStoreProviderTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RemoteBlobLinkAggregatorTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
@@ -373,6 +380,7 @@ on:
       - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/HttpRemoteBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobOriginOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/ChainedBlobStoreProvider.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobLinkAggregator.cs"
       - "hosts/dotnet/src/NodalMerge.DotNetHost/WebApplicationExtensions.cs"
@@ -389,6 +397,7 @@ on:
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpEncodingNegotiationTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/HttpRemoteBlobStoreProviderTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobOriginOptionsTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ChainedBlobStoreProviderTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RemoteBlobLinkAggregatorTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
@@ -497,6 +506,9 @@ jobs:
 
       - name: "Run S3DirectBlobStoreProvider tests, including its new ExistsAsync bucket-HEAD probe (slice 2.1)"
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~S3DirectBlobStoreProviderTests"
+
+      - name: "Run S3DirectBlobOriginOptions tests (slice 3.3, finding #6 — pins Compression default at Off; client-side zstd is explicit opt-in)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~S3DirectBlobOriginOptionsTests"
 
       - name: "Run ChainedBlobStoreProvider tests, including its new ExistsAsync composition (local-then-remote cheap probe — slice 2.1)"
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ChainedBlobStoreProviderTests"

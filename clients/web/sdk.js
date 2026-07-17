@@ -23,6 +23,7 @@ import init, {
   SyncStore,
   sign_room_token,
   room_pubkey_hex,
+  zstd_decompress,
 } from './pkg/nodalmerge_bridge.js';
 import { createPeerLocalIndexedDbPersistence } from '../sdk-js/persistence/peer-local-indexeddb.js';
 
@@ -56,6 +57,68 @@ function b64decode(s) {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+}
+
+// -----------------------------------------------------------------------------
+// Blob download decoding (blob-cas-remediation slice 3.3, finding #6)
+//
+// An s3-direct uploader may have stored the bucket object as a client-side
+// zstd frame with `Content-Encoding: zstd` object metadata. What `fetch`
+// hands us then depends on the runtime: Chrome 123+/FF 126+ transparently
+// decode zstd, Safari and Node/undici hand back the raw frame — and the
+// response headers CANNOT reliably tell us which happened (a decoding fetch
+// may or may not strip the header, and buckets echo object metadata rather
+// than negotiate). So headers are not the oracle; BLAKE3 verification is:
+// try the bytes as-is first, and only when the store rejects them AND they
+// start with the zstd frame magic, decode (via the wasm bridge — one
+// pure-Rust path that behaves the same in every runtime, instead of
+// feature-detecting DecompressionStream('zstd')/node:zlib) and verify again.
+//
+// This path must stay even though the .NET s3-direct default flipped to
+// compression-off in the same slice: buckets filled before the flip (or by
+// operators who opt back in) still hold zstd frames, and this reader must
+// keep working against them.
+// -----------------------------------------------------------------------------
+
+// The single standard zstd frame magic, little-endian on the wire:
+// 0x28 0xB5 0x2F 0xFD. The spec also reserves skippable-frame magics
+// (0x184D2A50–0x184D2A5F), but a skippable frame carries no content — a blob
+// payload that is *only* a skippable frame can never hash-verify anyway, so
+// matching the one standard magic is sufficient here.
+function hasZstdMagic(bytes) {
+  return bytes.length >= 4
+    && bytes[0] === 0x28 && bytes[1] === 0xb5 && bytes[2] === 0x2f && bytes[3] === 0xfd;
+}
+
+// Verify-raw-first store of fetched blob bytes. Returns the bytes that were
+// actually stored (raw, or decoded when the raw bytes were a zstd frame of
+// the blob). Throws when neither raw nor decoded bytes match `hash` — the
+// original integrity error when the payload isn't a decodable zstd frame,
+// so a plain corrupt download reports exactly as before.
+//
+// Exported so the Node test suite can drive the exact function
+// `fetchBlobViaUrl` uses — not a copy (clients/sdk-js/blob-zstd-decode.test.js).
+export function storeFetchedBlobBytes(store, hash, bytes) {
+  try {
+    store.store_blob_bytes(hash, bytes);
+    return bytes;
+  } catch (rawErr) {
+    if (!hasZstdMagic(bytes)) throw rawErr;
+    let decoded;
+    try {
+      decoded = zstd_decompress(bytes);
+    } catch (_) {
+      // Magic matched but the frame is corrupt — surface the original
+      // integrity failure, not the decoder's.
+      throw rawErr;
+    }
+    // Integrity oracle again: store_blob_bytes BLAKE3-verifies the decoded
+    // bytes and throws on mismatch. No output-size cap on the decode — the
+    // server's blob cap isn't visible client-side and uploads are already
+    // size-capped upstream, so an oversized decode just fails this check.
+    store.store_blob_bytes(hash, decoded);
+    return decoded;
+  }
 }
 
 function buildRuntimeSocketUrl(serverUrl, room) {
@@ -309,7 +372,8 @@ function makeTransport({ serverUrl, room, store, getToken, ensureFreshToken, get
     }
     const bytes = new Uint8Array(await resp.arrayBuffer());
     try {
-      store.store_blob_bytes(hash, bytes);
+      // Verify-raw-first, zstd fallback — see storeFetchedBlobBytes above.
+      storeFetchedBlobBytes(store, hash, bytes);
     } finally {
       pendingBlobFetches.delete(hash);
     }

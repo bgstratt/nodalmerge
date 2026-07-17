@@ -82,8 +82,16 @@ public sealed record S3DirectBlobOriginOptions(
             capabilityProbeCooldownSeconds = parsedCooldown;
         }
 
+        // Default OFF — compression is explicitly opt-in (blob-cas-remediation
+        // slice 3.3, finding #6). With Zstd on, the bucket object is a zstd
+        // frame the web SDK's presigned-GET reader could only use where the
+        // browser transparently decodes Content-Encoding: zstd (Chrome 123+/
+        // FF 126+ yes; Safari and Node/undici no) — correctness must not
+        // depend on which client fetches. The SDK readers can now decode zstd
+        // themselves (slice 3.3 step 2), but opting in stays a deliberate,
+        // per-deployment choice.
         var compression = section?["Compression"];
-        compression = string.IsNullOrWhiteSpace(compression) ? "Zstd" : compression;
+        compression = string.IsNullOrWhiteSpace(compression) ? "Off" : compression;
         if (!SupportedCompressionModes.Contains(compression))
         {
             throw new InvalidOperationException(

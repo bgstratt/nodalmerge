@@ -23,6 +23,10 @@ namespace NodalMerge.Host.Composition;
 ///
 /// ## Zstd at rest (client-side, since S3 won't compress for you)
 ///
+/// Opt-in only: <c>S3Direct:Compression</c> defaults to <c>Off</c> (slice 3.3
+/// of nodalmerge-studio/plans/blob-cas-remediation.md, finding #6 — a
+/// default-on zstd upload made presigned-GET correctness depend on the
+/// fetching client's transparent-decode support). When set to <c>Zstd</c>,
 /// <see cref="PutBlobAsync"/> reuses <see cref="BlobCompression"/>'s skip
 /// heuristic (shared with <see cref="FileBlobStoreProvider"/>, not
 /// duplicated) to decide whether to zstd-compress before uploading. The

@@ -185,7 +185,10 @@ A blob with hash `<hex>` exists as **exactly one** of:
   `video/*`, `audio/*`, `application/zip|gzip|zstd|x-7z*|wasm`); sample
   the first min(64 KiB, len) and store raw if the sampled ratio > 0.98;
   never compress blobs < 4096 bytes.
-- S3 stores: the client compresses before upload; key =
+- S3 stores: the client may compress before upload (discretionary, like any
+  writer above — the reference .NET s3-direct client ships compression
+  **off** by default, opt-in via `S3Direct:Compression = Zstd`, since
+  blob-cas-remediation slice 3.3 / finding #6); key =
   `<prefix>blake3/<hex>.zst` with a `contentEncoding` object metadata
   entry. (Seam only until Phase 4 builds it.)
   **Slice 4.3 clarification (2026-07-15):** the reference presign backend

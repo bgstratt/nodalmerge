@@ -388,3 +388,16 @@ export function attachServer(
 
 // Low-level re-exports.
 export { SyncStore, sign_room_token, room_pubkey_hex } from './pkg/nodalmerge_bridge.js';
+
+/**
+ * Verify-raw-first store of presigned-GET blob bytes (slice 3.3): tries the
+ * raw bytes against the store's BLAKE3 check, and on rejection decodes a
+ * zstd frame via the wasm bridge and verifies again. Returns whichever bytes
+ * were stored; throws when neither form matches `hash`. Shared by
+ * `fetchBlobViaUrl` and the Node test suite.
+ */
+export function storeFetchedBlobBytes(
+  store: import('./pkg/nodalmerge_bridge.js').SyncStore,
+  hash: string,
+  bytes: Uint8Array,
+): Uint8Array;

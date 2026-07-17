@@ -4,6 +4,28 @@ All notable changes to the NodalMerge .NET host packages (`NodalMerge.Host.Abstr
 `NodalMerge.Host.Composition`, `NodalMerge.DotNetHost`, `NodalMerge.DotNetHost.Native.win-x64`,
 `NodalMerge.DotNetHost.Native.linux-x64`) are documented here.
 
+## Unreleased
+
+- **Changed: `IInboundPackObserver` invocation moved off the WebSocket receive loop**
+  (slice 6.5, nodalmerge-studio/plans/blob-cas-remediation.md). Since 0.2.2 the hook was
+  awaited inline in `RuntimeWebSocketLoopRunner`'s receive loop — the per-observer try/catch
+  isolated exceptions but not latency, so a slow or hung observer stalled every further frame
+  (and relay) on that connection. Observers are now notified through a per-connection bounded
+  FIFO queue with its own worker: per-connection receive order and sequential (registration-
+  order) invocation are preserved; each call gets its own timeout (default 30s) independent of
+  connection teardown; a full queue (default capacity 512) drops the OLDEST notification with a
+  warning + `runtime_ws_inbound_pack_observer_dropped_total` counter (the newest notification
+  always survives — the hook is advisory and fires only after persistence has completed).
+  Behavioral note for observer implementations: `OnInboundPackAppliedAsync` no longer runs
+  before the next frame is processed, and its token is the dispatcher's per-call timeout, not
+  the connection's lifetime. The `IInboundPackObserver` interface itself is UNCHANGED.
+- **Additive: `RuntimeInboundPackObserverDispatchOptions`** (queue capacity / observer timeout /
+  teardown drain grace) via a new optional trailing constructor parameter on
+  `RuntimeWebSocketLoopRunner`. All existing constructors and `RunAsync` overloads are unchanged;
+  hosts that register nothing get the defaults above. New metrics:
+  `runtime_ws_inbound_pack_observer_dropped_total`,
+  `runtime_ws_inbound_pack_observer_timeout_total`.
+
 ## 0.2.3 — 2026-07-16
 
 - **Fixed: legacy `/sync/blob-url` (+ `/api/sync/blob-url`) compat regression, introduced

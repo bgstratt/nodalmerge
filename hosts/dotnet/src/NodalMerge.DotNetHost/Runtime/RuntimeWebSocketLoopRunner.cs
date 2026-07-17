@@ -26,6 +26,7 @@ public sealed class RuntimeWebSocketLoopRunner
 
     private readonly ILogger<RuntimeWebSocketLoopRunner> _logger;
     private readonly IReadOnlyList<IInboundPackObserver> _inboundPackObservers;
+    private readonly RuntimeInboundPackObserverDispatchOptions _inboundPackObserverDispatchOptions;
 
     public RuntimeWebSocketLoopRunner()
         : this(NullLogger<RuntimeWebSocketLoopRunner>.Instance)
@@ -43,13 +44,21 @@ public sealed class RuntimeWebSocketLoopRunner
     // empty sequence when no IInboundPackObserver is registered, so unregistered hosts and every
     // existing direct `new RuntimeWebSocketLoopRunner(...)` call site (both existing ctors are
     // untouched) get byte-identical behavior to before this slice.
+    //
+    // Slice 6.5 (nodalmerge-studio/plans/blob-cas-remediation.md): the trailing options parameter
+    // is additive again — optional with a default, so DI still selects this constructor whether or
+    // not a host registers RuntimeInboundPackObserverDispatchOptions (an unregistered optional
+    // parameter falls back to its default), and every pre-6.5 call site compiles unchanged.
     public RuntimeWebSocketLoopRunner(
         ILogger<RuntimeWebSocketLoopRunner> logger,
-        IEnumerable<IInboundPackObserver> inboundPackObservers)
+        IEnumerable<IInboundPackObserver> inboundPackObservers,
+        RuntimeInboundPackObserverDispatchOptions? inboundPackObserverDispatchOptions = null)
     {
         _logger = logger;
         _inboundPackObservers = inboundPackObservers as IReadOnlyList<IInboundPackObserver>
             ?? inboundPackObservers.ToArray();
+        _inboundPackObserverDispatchOptions =
+            inboundPackObserverDispatchOptions ?? new RuntimeInboundPackObserverDispatchOptions();
     }
 
     public const int MaxInboundMessageBytes = 64 * 1024;
@@ -94,6 +103,10 @@ public sealed class RuntimeWebSocketLoopRunner
             KeyValuePair.Create<string, object?>("trace", connectionTraceId)
         );
         var registeredInRoom = false;
+        // Slice 6.5: per-connection observer dispatcher, created lazily on the first genuinely
+        // inbound pack (connections that never carry a pack, or hosts with zero observers, pay
+        // nothing). Torn down in the finally below.
+        RuntimeInboundPackObserverDispatcher? inboundPackObserverDispatcher = null;
         try
         {
             var frameBuffer = new byte[32 * 1024];
@@ -267,10 +280,25 @@ public sealed class RuntimeWebSocketLoopRunner
                             // server-side WS path (the frame just received from state's socket, of
                             // type "pack", after engine import + persistence above) — not the
                             // broadcast fan-out further down (TryBuildPackRelay/roomBroker.BroadcastAsync),
-                            // which is this host's own echo to OTHER peers. Fire-and-forget-safe: each
-                            // observer is isolated by its own try/catch so a throwing observer can
-                            // never break the loop or undo the persistence that already succeeded.
-                            await NotifyInboundPackObserversAsync(state.RoomId!, nodesB64, cancellationToken);
+                            // which is this host's own echo to OTHER peers.
+                            //
+                            // Slice 6.5 (nodalmerge-studio/plans/blob-cas-remediation.md): observers
+                            // are no longer awaited inline here — the old per-observer try/catch
+                            // isolated exceptions but not latency, so a slow/hung observer stalled
+                            // every further frame on this connection. Post is a non-blocking enqueue
+                            // onto this connection's own FIFO worker (see
+                            // RuntimeInboundPackObserverDispatcher for the ordering/backpressure/
+                            // timeout contract); persistence above has already completed, so nothing
+                            // an observer does — or fails to do — can affect this frame or the next.
+                            if (_inboundPackObservers.Count > 0)
+                            {
+                                inboundPackObserverDispatcher ??= new RuntimeInboundPackObserverDispatcher(
+                                    _inboundPackObservers,
+                                    _inboundPackObserverDispatchOptions,
+                                    _logger
+                                );
+                                inboundPackObserverDispatcher.Post(state.RoomId!, nodesB64);
+                            }
 
                             // Also persist the room's current server-pack snapshot.
                             // In practice most client writes arrive as `pack` messages,
@@ -464,6 +492,13 @@ public sealed class RuntimeWebSocketLoopRunner
                     );
                 }
             }
+
+            // Slice 6.5: after the room bookkeeping above (peers should learn of the departure
+            // without waiting on observer drain). Bounded by DrainGrace; never throws.
+            if (inboundPackObserverDispatcher is not null)
+            {
+                await inboundPackObserverDispatcher.DisposeAsync();
+            }
         }
     }
 
@@ -626,35 +661,6 @@ public sealed class RuntimeWebSocketLoopRunner
         }
 
         return null;
-    }
-
-    private async ValueTask NotifyInboundPackObserversAsync(
-        string roomId,
-        string nodesB64,
-        CancellationToken cancellationToken
-    )
-    {
-        if (_inboundPackObservers.Count == 0)
-        {
-            return;
-        }
-
-        foreach (var observer in _inboundPackObservers)
-        {
-            try
-            {
-                await observer.OnInboundPackAppliedAsync(roomId, nodesB64, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(
-                    ex,
-                    "runtime ws inbound pack observer failed room={Room} observer={Observer}",
-                    roomId,
-                    observer.GetType().Name
-                );
-            }
-        }
     }
 
     private static bool ShouldPersistSnapshotForMutation(string? inboundType)

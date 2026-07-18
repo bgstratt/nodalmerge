@@ -305,7 +305,14 @@ public sealed class RuntimeWebSocketLoopRunner
                             // so relying only on non-pack mutation hooks can leave
                             // persistence with delta-only history that doesn't always
                             // hydrate deterministically on fresh reconnects.
-                            await dagPersistenceService.PersistRoomSnapshotAsync(state.RoomId!, cancellationToken);
+                            //
+                            // Debounced: the incremental pack was already persisted just
+                            // above (PersistInboundPackAsync), so this full-room snapshot is
+                            // only a hydrate checkpoint. Taking it every mutation re-serializes
+                            // the entire (growing) room — the O(n^2) snapshot-on-mutation storm.
+                            // Coalesce to at-most-once per window; a longer delta replay on the
+                            // next hydrate is the only cost, and disconnect/shutdown flushes.
+                            await dagPersistenceService.PersistRoomSnapshotDebouncedAsync(state.RoomId!, cancellationToken);
                         }
                     }
 
@@ -462,6 +469,14 @@ public sealed class RuntimeWebSocketLoopRunner
             if (registeredInRoom)
             {
                 var roomBecameEmpty = roomBroker.Unregister(state);
+
+                // Flush any mutations that accumulated inside the current debounce window so a
+                // peer that trailed off mid-window still leaves a fresh hydrate checkpoint behind.
+                // No-op when nothing is pending; a redundant snapshot is suppressed downstream.
+                if (dagPersistenceService is not null && !string.IsNullOrWhiteSpace(state.RoomId))
+                {
+                    await dagPersistenceService.FlushRoomSnapshotAsync(state.RoomId, CancellationToken.None);
+                }
 
                 if (roomBecameEmpty && dagPersistenceService is not null && !string.IsNullOrWhiteSpace(state.RoomId))
                 {

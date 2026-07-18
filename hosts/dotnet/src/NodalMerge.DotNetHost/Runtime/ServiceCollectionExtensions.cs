@@ -11,6 +11,7 @@ public static class ServiceCollectionExtensions
         IConfiguration? configuration = null)
     {
         var compactionOptions = BuildCompactionOptions(configuration);
+        var snapshotOptions = BuildSnapshotDebounceOptions(configuration);
         var peerLocalOptions = BuildPeerLocalOptions(configuration);
 
         services.AddSingleton(peerLocalOptions);
@@ -28,12 +29,15 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<RuntimeSessionIdAllocator>();
         services.AddSingleton<RuntimeRoomBroker>();
         services.AddSingleton(compactionOptions);
+        services.AddSingleton(snapshotOptions);
         services.AddSingleton<RuntimeDagPersistenceService>(sp =>
             new RuntimeDagPersistenceService(
                 sp.GetRequiredService<INodeStoreProvider>(),
                 sp.GetRequiredService<IRuntimeCommandBridge>(),
                 sp.GetRequiredService<ILogger<RuntimeDagPersistenceService>>(),
-                sp.GetRequiredService<RuntimeDagCompactionOptions>()
+                sp.GetRequiredService<RuntimeDagCompactionOptions>(),
+                sp.GetRequiredService<RuntimeSnapshotDebounceOptions>(),
+                TimeProvider.System
             ));
         services.AddSingleton<RuntimeTokenValidationService>();
         services.AddSingleton<RuntimeMessageProcessor>();
@@ -76,6 +80,25 @@ public static class ServiceCollectionExtensions
             MinEligibleNodes: section.GetValue<int?>("MinEligibleNodes") ?? defaults.MinEligibleNodes,
             EnablePruning: section.GetValue<bool?>("EnablePruning") ?? defaults.EnablePruning,
             RetentionWindow: retentionSeconds.HasValue ? TimeSpan.FromSeconds(retentionSeconds.Value) : defaults.RetentionWindow
+        );
+    }
+
+    private static RuntimeSnapshotDebounceOptions BuildSnapshotDebounceOptions(IConfiguration? configuration)
+    {
+        var defaults = RuntimeSnapshotDebounceOptions.Default;
+        var section = GetConfigSection(configuration, "NodalMerge:Runtime:Dag:Snapshot");
+
+        if (section is null || !section.Exists())
+        {
+            return defaults;
+        }
+
+        var intervalSeconds = section.GetValue<double?>("IntervalSeconds");
+
+        return new RuntimeSnapshotDebounceOptions(
+            Enabled: section.GetValue<bool?>("Enabled") ?? defaults.Enabled,
+            MaxPendingMutations: section.GetValue<int?>("MaxPendingMutations") ?? defaults.MaxPendingMutations,
+            MinInterval: intervalSeconds.HasValue ? TimeSpan.FromSeconds(intervalSeconds.Value) : defaults.MinInterval
         );
     }
 

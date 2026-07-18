@@ -37,9 +37,13 @@ public sealed class RuntimeDagPersistenceService
     private readonly IRuntimeCommandBridge _bridge;
     private readonly ILogger<RuntimeDagPersistenceService> _logger;
     private readonly RuntimeDagCompactionOptions _compactionOptions;
+    private readonly RuntimeSnapshotDebounceOptions _snapshotOptions;
+    private readonly TimeProvider _timeProvider;
     private readonly ConcurrentDictionary<string, Task> _hydrateByRoom =
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Task> _compactionByRoom =
+        new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, RoomSnapshotDebounceState> _snapshotDebounceByRoom =
         new(StringComparer.Ordinal);
 
     public RuntimeDagPersistenceService(
@@ -60,12 +64,32 @@ public sealed class RuntimeDagPersistenceService
         IRuntimeCommandBridge bridge,
         ILogger<RuntimeDagPersistenceService> logger,
         RuntimeDagCompactionOptions compactionOptions
+    ) : this(
+        nodeStore,
+        bridge,
+        logger,
+        compactionOptions,
+        RuntimeSnapshotDebounceOptions.Default,
+        TimeProvider.System
+    )
+    {
+    }
+
+    public RuntimeDagPersistenceService(
+        INodeStoreProvider nodeStore,
+        IRuntimeCommandBridge bridge,
+        ILogger<RuntimeDagPersistenceService> logger,
+        RuntimeDagCompactionOptions compactionOptions,
+        RuntimeSnapshotDebounceOptions snapshotOptions,
+        TimeProvider timeProvider
     )
     {
         _nodeStore = nodeStore;
         _bridge = bridge;
         _logger = logger;
         _compactionOptions = compactionOptions;
+        _snapshotOptions = snapshotOptions;
+        _timeProvider = timeProvider;
     }
 
     public Task HydrateRoomIfNeededAsync(string roomId, CancellationToken cancellationToken = default)
@@ -157,6 +181,92 @@ public sealed class RuntimeDagPersistenceService
         {
             _logger.LogWarning(ex, "runtime dag persist snapshot failed room={Room}", roomId);
         }
+    }
+
+    /// <summary>
+    /// Records a mutation against <paramref name="roomId"/> and persists a full server-pack snapshot
+    /// only when the debounce window trips (at-most-once per <see cref="RuntimeSnapshotDebounceOptions.MaxPendingMutations"/>
+    /// mutations or per <see cref="RuntimeSnapshotDebounceOptions.MinInterval"/> of wall-clock).
+    /// The full-room snapshot is a hydration <em>checkpoint</em>, not the durability log — every inbound
+    /// pack is already persisted incrementally via <see cref="PersistInboundPackAsync"/>, so coalescing
+    /// the checkpoint only lengthens the delta chain replayed on the next hydrate; it never loses data.
+    /// This is what keeps a growing room from being re-serialized on every single mutation (the O(n^2)
+    /// snapshot-on-mutation storm). When debounce is disabled the call snapshots every time (legacy behaviour).
+    /// </summary>
+    public async ValueTask PersistRoomSnapshotDebouncedAsync(
+        string roomId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (string.IsNullOrWhiteSpace(roomId))
+        {
+            return;
+        }
+
+        if (!_snapshotOptions.Enabled)
+        {
+            await PersistRoomSnapshotAsync(roomId, cancellationToken);
+            return;
+        }
+
+        var state = _snapshotDebounceByRoom.GetOrAdd(
+            roomId,
+            _ => new RoomSnapshotDebounceState { LastSnapshotUtc = _timeProvider.GetUtcNow() }
+        );
+
+        bool due;
+        lock (state)
+        {
+            state.PendingMutations += 1;
+            var elapsed = _timeProvider.GetUtcNow() - state.LastSnapshotUtc;
+            due = state.PendingMutations >= _snapshotOptions.MaxPendingMutations
+                || elapsed >= _snapshotOptions.MinInterval;
+            if (due)
+            {
+                state.PendingMutations = 0;
+                state.LastSnapshotUtc = _timeProvider.GetUtcNow();
+            }
+        }
+
+        if (due)
+        {
+            await PersistRoomSnapshotAsync(roomId, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Forces a checkpoint of any mutations accumulated since the last debounced snapshot and resets the
+    /// window. Called on peer disconnect / host shutdown so a room that trailed off mid-window still leaves
+    /// a fresh checkpoint behind for the next hydrate. No-op when nothing is pending. Duplicate server-pack
+    /// payloads are suppressed downstream, so an over-eager flush is cheap.
+    /// </summary>
+    public async ValueTask FlushRoomSnapshotAsync(
+        string roomId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (string.IsNullOrWhiteSpace(roomId))
+        {
+            return;
+        }
+
+        if (_snapshotOptions.Enabled && _snapshotDebounceByRoom.TryGetValue(roomId, out var state))
+        {
+            bool hasPending;
+            lock (state)
+            {
+                hasPending = state.PendingMutations > 0;
+                state.PendingMutations = 0;
+                state.LastSnapshotUtc = _timeProvider.GetUtcNow();
+            }
+
+            if (!hasPending)
+            {
+                return;
+            }
+        }
+
+        await PersistRoomSnapshotAsync(roomId, cancellationToken);
     }
 
     private static string BuildInspectPackEnvelope(string nodesB64)
@@ -882,6 +992,31 @@ public sealed record RuntimeDagCompactionOptions(
         EnablePruning: false,
         RetentionWindow: null
     );
+}
+
+/// <summary>
+/// Debounce policy for the per-room full server-pack checkpoint (<see cref="RuntimeDagPersistenceService.PersistRoomSnapshotDebouncedAsync"/>).
+/// The checkpoint re-serializes the entire room, so taking it on every mutation is O(n^2) as the room grows.
+/// Because every inbound pack is already persisted incrementally, the checkpoint is only a hydrate accelerator
+/// and is safe to coalesce. Snapshot is taken when EITHER threshold trips, then the window resets.
+/// </summary>
+public sealed record RuntimeSnapshotDebounceOptions(
+    bool Enabled,
+    int MaxPendingMutations,
+    TimeSpan MinInterval
+)
+{
+    public static RuntimeSnapshotDebounceOptions Default { get; } = new(
+        Enabled: true,
+        MaxPendingMutations: 200,
+        MinInterval: TimeSpan.FromSeconds(30)
+    );
+}
+
+internal sealed class RoomSnapshotDebounceState
+{
+    public int PendingMutations;
+    public DateTimeOffset LastSnapshotUtc;
 }
 
 internal sealed record ServerPackSnapshotPayload(byte[] Payload, string? RootHex);

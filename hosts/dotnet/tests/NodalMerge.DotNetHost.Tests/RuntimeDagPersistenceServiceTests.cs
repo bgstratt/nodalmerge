@@ -483,6 +483,149 @@ public class RuntimeDagPersistenceServiceTests
         Assert.Equal(1, metrics.GetTotal("room_duplicate_pack_replay_suppressed_total"));
     }
 
+    [Fact]
+    public async Task PersistRoomSnapshotDebouncedAsync_CoalescesMutations_UntilOpThresholdTrips()
+    {
+        var roomId = "room-debounce-ops";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            // Distinct payloads so each due snapshot actually persists (dup-suppression won't hide it).
+            ServerPackPayloadSequence = new Queue<byte[]>(
+                Enumerable.Range(1, 8).Select(i => new byte[] { (byte)i, (byte)(i + 1), (byte)(i + 2) })
+            )
+        };
+        var time = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var options = new RuntimeSnapshotDebounceOptions(
+            Enabled: true,
+            MaxPendingMutations: 5,
+            MinInterval: TimeSpan.FromHours(1)
+        );
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { Enabled = false }, options, time
+        );
+
+        // 12 mutations, interval never trips (fixed clock) → snapshot only on the 5th and 10th op.
+        for (var i = 0; i < 12; i += 1)
+        {
+            await service.PersistRoomSnapshotDebouncedAsync(roomId, CancellationToken.None);
+        }
+
+        Assert.Equal(2, store.PersistAcceptedCalls);
+    }
+
+    [Fact]
+    public async Task PersistRoomSnapshotDebouncedAsync_SnapshotsOnce_WhenIntervalElapses()
+    {
+        var roomId = "room-debounce-time";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            ServerPackPayloadSequence = new Queue<byte[]>(new[]
+            {
+                new byte[] { 1, 2, 3 },
+                new byte[] { 4, 5, 6 }
+            })
+        };
+        var start = DateTimeOffset.UtcNow;
+        var time = new MutableTimeProvider(start);
+        var options = new RuntimeSnapshotDebounceOptions(
+            Enabled: true,
+            MaxPendingMutations: 1000,
+            MinInterval: TimeSpan.FromSeconds(30)
+        );
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { Enabled = false }, options, time
+        );
+
+        await service.PersistRoomSnapshotDebouncedAsync(roomId, CancellationToken.None);
+        Assert.Equal(0, store.PersistAcceptedCalls); // within window, op threshold far away
+
+        time.Now = start.AddSeconds(31);
+        await service.PersistRoomSnapshotDebouncedAsync(roomId, CancellationToken.None);
+        Assert.Equal(1, store.PersistAcceptedCalls);
+    }
+
+    [Fact]
+    public async Task PersistRoomSnapshotDebouncedAsync_SnapshotsEveryMutation_WhenDisabled()
+    {
+        var roomId = "room-debounce-disabled";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            ServerPackPayloadSequence = new Queue<byte[]>(
+                Enumerable.Range(1, 3).Select(i => new byte[] { (byte)(i * 10), (byte)(i * 10 + 1) })
+            )
+        };
+        var time = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var options = RuntimeSnapshotDebounceOptions.Default with { Enabled = false };
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { Enabled = false }, options, time
+        );
+
+        for (var i = 0; i < 3; i += 1)
+        {
+            await service.PersistRoomSnapshotDebouncedAsync(roomId, CancellationToken.None);
+        }
+
+        Assert.Equal(3, store.PersistAcceptedCalls);
+    }
+
+    [Fact]
+    public async Task FlushRoomSnapshotAsync_CheckpointsPendingWindow_ThenNoOpsWhenClean()
+    {
+        var roomId = "room-flush";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            ServerPackPayloadSequence = new Queue<byte[]>(new[]
+            {
+                new byte[] { 1, 2, 3 },
+                new byte[] { 4, 5, 6 }
+            })
+        };
+        var time = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var options = new RuntimeSnapshotDebounceOptions(
+            Enabled: true,
+            MaxPendingMutations: 1000,
+            MinInterval: TimeSpan.FromHours(1)
+        );
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { Enabled = false }, options, time
+        );
+
+        // Three mutations accumulate without tripping either threshold.
+        for (var i = 0; i < 3; i += 1)
+        {
+            await service.PersistRoomSnapshotDebouncedAsync(roomId, CancellationToken.None);
+        }
+        Assert.Equal(0, store.PersistAcceptedCalls);
+
+        // Disconnect flush persists the pending window exactly once.
+        await service.FlushRoomSnapshotAsync(roomId, CancellationToken.None);
+        Assert.Equal(1, store.PersistAcceptedCalls);
+
+        // A second flush with nothing pending is a no-op.
+        await service.FlushRoomSnapshotAsync(roomId, CancellationToken.None);
+        Assert.Equal(1, store.PersistAcceptedCalls);
+    }
+
+    private sealed class MutableTimeProvider : TimeProvider
+    {
+        public MutableTimeProvider(DateTimeOffset now)
+        {
+            Now = now;
+        }
+
+        public DateTimeOffset Now { get; set; }
+
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
     private sealed class TestNodeStoreProvider : INodeStoreProvider
     {
         private readonly List<AcceptedNodeRecord> _nodes = new();

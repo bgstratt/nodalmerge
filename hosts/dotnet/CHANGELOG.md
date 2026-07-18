@@ -4,6 +4,34 @@ All notable changes to the NodalMerge .NET host packages (`NodalMerge.Host.Abstr
 `NodalMerge.Host.Composition`, `NodalMerge.DotNetHost`, `NodalMerge.DotNetHost.Native.win-x64`,
 `NodalMerge.DotNetHost.Native.linux-x64`) are documented here.
 
+## 0.2.4 — 2026-07-18
+
+- **Fixed: snapshot-on-mutation storm — the server-side WebSocket loop re-serialized the
+  entire room to a full hydrate snapshot on *every* applied peer mutation**
+  (`RuntimeWebSocketLoopRunner` → `RuntimeDagPersistenceService`). Because the incremental
+  pack was already persisted a step earlier (`PersistInboundPackAsync`), that per-mutation
+  full-room snapshot was only a hydrate checkpoint, yet its cost grew with the room — so
+  seeding or heavily mutating a large room degraded to O(n²) re-serialization (observed as a
+  flood of `snapshot-on-mutation` persists and stalled seeding on a large repo, plus a peer
+  `studio` room snapshot climbing ~100 KB/mutation in the two-machine test). The pack path now
+  calls the new **`PersistRoomSnapshotDebouncedAsync`**, which coalesces the checkpoint to
+  at-most-once per debounce window; the only cost is a slightly longer delta replay on the next
+  hydrate. On peer disconnect/shutdown the loop **flushes** any pending window
+  (`FlushRoomSnapshotAsync`) so a peer that trailed off mid-window still leaves a fresh
+  checkpoint. Correctness is preserved because the snapshot is a checkpoint and the incremental
+  packs are the authoritative log.
+- **Additive: `RuntimeSnapshotDebounceOptions`** (`Enabled`, `MaxPendingMutations`,
+  `MinInterval`) bound from `NodalMerge:Runtime:Dag:Snapshot`. Defaults: enabled, at-most-once
+  per **200** mutations **or 30 s** of wall-clock, whichever trips first. Hosts that configure
+  nothing get these defaults. `RuntimeDagPersistenceService` gained a trailing constructor
+  parameter for these options plus an injected `TimeProvider` (defaults to
+  `RuntimeSnapshotDebounceOptions.Default` / `TimeProvider.System`); existing constructor calls
+  are unaffected.
+- **Unchanged: the non-pack mutation path** (direct map/list/text/blob ops, used by JS-SDK
+  direct-op apps but never by Studio, which is all-packs) still snapshots per mutation on
+  purpose — it has no incremental persist, so its snapshot is the sole durability for those
+  callers.
+
 ## 0.2.3 — 2026-07-17
 
 - **Fixed: `FileBlobStoreProvider` legacy-layout migration parity with Rust's slice-5.1

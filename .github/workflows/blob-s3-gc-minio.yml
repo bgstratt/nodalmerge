@@ -1,0 +1,218 @@
+name: blob-s3-gc-minio
+
+# Runs server/s3-blobs/tests/minio_round_trip.rs against a real
+# minio/minio:latest container (testcontainers).
+#
+# Why this exists as its own workflow (blob-cas-remediation.md slice 1.3):
+#
+# 1. Before this file, `minio_round_trip.rs` ran in ZERO workflows. It is the
+#    only test anywhere that exercises `S3BlobStore` against an actual bucket
+#    — every other S3 gate runs against `NonHydratingBackend`
+#    (server/stores/blob-conformance), which is a *port* of the backend's
+#    logic and therefore can only ever gate a copy of it. Slice 1.3's whole
+#    correctness claim (a real two-phase blob GC grace on the S3 path) rests
+#    on the three GC tests in that file, so wiring it in is part of the slice,
+#    not a follow-up.
+#
+# 2. It is not a job in blob-layout-parity.yml, whose `rust-blob-layout` job
+#    is deliberately Docker-free and fast: `NODALMERGE_REQUIRE_DOCKER=1` (see
+#    below) is a *workflow*-level contract here, and the paths: filter this
+#    suite needs (the S3 backend, the sweep's callers, the GC ledger) is a
+#    different set from that workflow's (the cross-runtime layout vectors and
+#    their .NET mirrors). Folding it in would make every layout-vector PR pay
+#    for a container pull, and would leave this suite's real triggers buried
+#    in a 60-line list guarding something else. It is not a job in
+#    nodestore-adapter-conformance.yml either: that workflow is `NodePersistence`
+#    adapters (Postgres/Mongo/Dir); this is a `BlobPersistence` backend. Same
+#    shape, different contract — this file is modeled on it directly.
+#
+# 3. `NODALMERGE_REQUIRE_DOCKER: "1"`, set at workflow level, exactly as
+#    nodestore-adapter-conformance.yml does and for exactly the same reason.
+#    `minio_round_trip.rs` `eprintln!`s + `return`s when the container can't
+#    start, which the harness reports as a **PASS** — correct on a dev laptop
+#    without Docker, catastrophic in CI, where a broken Docker setup would go
+#    green while testing nothing and take the S3 GC coverage silently with it.
+#    The var converts that skip into a panic (see `start_minio`). Verified in
+#    both directions by pointing the image at a nonexistent tag: without the
+#    var the suite skips and passes; with it, every test panics with
+#    "NODALMERGE_REQUIRE_DOCKER=1 but Docker / MinIO container is unavailable".
+#
+# GitHub-hosted ubuntu-latest runners ship Docker Engine preinstalled, so
+# testcontainers works with no extra setup step (same basis as
+# nodestore-adapter-conformance.yml and docker.yml).
+#
+# ── What the paths: filters below guard, and why each file is listed ───────
+#   server/s3-blobs/**                     the backend under test, incl.
+#                                          blob_gc_sweep's two-phase grace and
+#                                          its tombstone key format
+#   server/server/src/store.rs             the BlobPersistence trait contract
+#                                          the two-phase semantics are defined
+#                                          by, DirPersistence (the reference
+#                                          implementation this backend mirrors),
+#                                          `parse_blob_entry_name` (which
+#                                          decides what the sweep may touch at
+#                                          all), and `Composite`, which
+#                                          `s3_min_physical_grace_floor_is_effective_end_to_end`
+#                                          drives the sweep through
+#   server/server/src/room.rs              `Rooms::sweep_blobs` — MIN_PHYSICAL_GRACE
+#                                          (slice 1.4, bug 2) is the caller-side
+#                                          half of the invariant that same test
+#                                          pins end-to-end, and it was a no-op
+#                                          on this backend until 1.3. Also the
+#                                          gc-inventory union
+#                                          (`collect_recent_upload_hashes`) and
+#                                          DEFAULT_BLOB_UPLOAD_GRACE
+#   server/server/src/gc_store.rs          the inventory rows that union reads
+#                                          (`iter_unmarked_candidates`'s
+#                                          semantics ARE the union's contract)
+#   server/server/src/blob_http.rs         the other end of the same wire: the
+#                                          PUT / upload-confirm paths that write
+#                                          those rows, incl. UPLOAD_MARK_SENTINEL
+#   server/server/src/gc_adapter.rs        `sweep_blobs`'s MarkOnly preflight runs
+#                                          on every legacy tick this suite drives
+#   server/server/src/archive_adapter.rs   slice 2.3 — the archive describe/export
+#   server/server/src/archive_export.rs    paths, whose blobs digest is computed
+#                                          over blob bytes hydrated out of the
+#                                          real bucket. Dir-vs-S3 digest parity
+#                                          (finding #7) is only genuinely proven
+#                                          here; the fake can only gate a copy
+#   server/stores/blob-conformance/**      the in-memory port of blob_gc_sweep;
+#                                          if it and S3BlobStore drift, these
+#                                          tests are the ones that say so
+#   core/crdt/src/**                       Hash / hex derivation the keys and
+#                                          tombstone names are built from
+#
+# ⚠ These filters enumerate implementation files BY HAND, so this suite's real
+# coverage depends on someone remembering every file it transitively
+# exercises. That root cause is Phase 8 (deferred) in blob-cas-remediation.md,
+# not something this file fixes.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/s3-blobs/**"
+      # slice 7.5 — the server-s3 binary's composition now injects the studio
+      # LiveHashCollector into the GC service (both backend arms). No workflow
+      # anywhere compiled this binary before (docker.yml's image builds only
+      # nodalmerge-server), so its wiring could break with CI green; the build
+      # step below is the 8.0-convention stub for that gap.
+      - "server/server-s3/**"
+      # slice 7.1 — server-s3/main.rs's GC-sweeper bootstrap (grace/gc_mode/
+      # studio-union collector/pin store) now calls through this shared
+      # module; a change here can break the compile gate below without
+      # touching anything under server/server-s3/**.
+      - "server/server/src/cli_args.rs"
+      - "server/server/src/store.rs"
+      - "server/server/src/room.rs"
+      - "server/server/src/gc_store.rs"
+      - "server/server/src/blob_http.rs"
+      # C2 — blob_url_resolution_minio.rs (this test file itself, so a change to it fires here)
+      - "server/server/tests/blob_url_resolution_minio.rs"
+      # slice 2.2 — minio_round_trip.rs now drives walk_tree against a real
+      # bucket (s3_direct_tree_walk_*), the only real gate for the S3 hydrating
+      # tree read. The fake in blob-conformance is a port and cannot gate it.
+      - "server/server/src/tree_walk.rs"
+      # slice 2.3 (finding #7) — minio_round_trip.rs now drives archive export
+      # against a real bucket (s3_direct_archive_export_digest_matches_a_dir_backed_export_of_the_same_room),
+      # the only real gate for the claim "Dir- and S3-backed exports of the same
+      # room agree". Both files below compute a blobs digest over hydrated blob
+      # bytes; the fake in blob-conformance is a port and cannot gate either.
+      - "server/server/src/archive_adapter.rs"
+      - "server/server/src/archive_export.rs"
+      - "server/server/src/gc_adapter.rs"
+      - "server/stores/blob-conformance/**"
+      - "core/crdt/src/**"
+      - ".github/workflows/blob-s3-gc-minio.yml"
+  pull_request:
+    paths:
+      - "server/s3-blobs/**"
+      # slice 7.5 — the server-s3 binary's composition now injects the studio
+      # LiveHashCollector into the GC service (both backend arms). No workflow
+      # anywhere compiled this binary before (docker.yml's image builds only
+      # nodalmerge-server), so its wiring could break with CI green; the build
+      # step below is the 8.0-convention stub for that gap.
+      - "server/server-s3/**"
+      # slice 7.1 — server-s3/main.rs's GC-sweeper bootstrap (grace/gc_mode/
+      # studio-union collector/pin store) now calls through this shared
+      # module; a change here can break the compile gate below without
+      # touching anything under server/server-s3/**.
+      - "server/server/src/cli_args.rs"
+      - "server/server/src/store.rs"
+      - "server/server/src/room.rs"
+      - "server/server/src/gc_store.rs"
+      - "server/server/src/blob_http.rs"
+      # C2 — blob_url_resolution_minio.rs (this test file itself, so a change to it fires here)
+      - "server/server/tests/blob_url_resolution_minio.rs"
+      # slice 2.2 — minio_round_trip.rs now drives walk_tree against a real
+      # bucket (s3_direct_tree_walk_*), the only real gate for the S3 hydrating
+      # tree read. The fake in blob-conformance is a port and cannot gate it.
+      - "server/server/src/tree_walk.rs"
+      # slice 2.3 (finding #7) — minio_round_trip.rs now drives archive export
+      # against a real bucket (s3_direct_archive_export_digest_matches_a_dir_backed_export_of_the_same_room),
+      # the only real gate for the claim "Dir- and S3-backed exports of the same
+      # room agree". Both files below compute a blobs digest over hydrated blob
+      # bytes; the fake in blob-conformance is a port and cannot gate either.
+      - "server/server/src/archive_adapter.rs"
+      - "server/server/src/archive_export.rs"
+      - "server/server/src/gc_adapter.rs"
+      - "server/stores/blob-conformance/**"
+      - "core/crdt/src/**"
+      - ".github/workflows/blob-s3-gc-minio.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # See note 3 above: converts the round-trip suite's graceful
+  # Docker-unavailable skip into a hard failure, so this job cannot go green
+  # without having actually talked to a bucket.
+  NODALMERGE_REQUIRE_DOCKER: "1"
+
+jobs:
+  blob-s3-gc-minio:
+    name: S3 blob backend — round-trip + two-phase GC grace (real MinIO)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Slice 7.5 (8.0 stub convention) — compile gate for the server-s3
+      # binary's composition (GC live-source injection lands there). This was
+      # the FIRST CI step anywhere to compile nodalmerge-server-s3; whether
+      # this workflow is its permanent home is a Phase 8 question — it lives
+      # here because this is the S3-backend workflow and the binary is the S3
+      # composition. (nodalmerge-dev-server still builds in NO workflow —
+      # filed, not fixed here.)
+      - name: Build the server-s3 binary (slice 7.5 — composition compile gate; needs Phase 8 follow-up for a permanent home)
+        run: cargo build -p nodalmerge-server-s3
+
+      # --test-threads=1: each test starts its own MinIO container against the
+      # same fixed bucket name, so they must not overlap.
+      - name: Run S3 blob round-trip + GC grace against real minio (testcontainers; NODALMERGE_REQUIRE_DOCKER=1 fails closed if Docker is unavailable)
+        run: cargo test -p nodalmerge-s3-blobs --test minio_round_trip -- --test-threads=1
+
+      # Slice 6.3 — the sweep now runs its per-object tombstone/delete action
+      # chains 16-at-a-time (buffer_unordered) inside the one bridge call; this
+      # smoke pins that concurrency changed wall time, never the two-phase
+      # protocol, over a mixed 50-object population. The same file's
+      # bench_sweep_delete_10k is #[ignore]d and deliberately NOT run in CI
+      # (timing bounds flake; run by hand with --ignored --nocapture).
+      # Covered by the existing server/s3-blobs/** paths: glob above.
+      - name: Run bulk-sweep behavior-equality smoke against real minio (slice 6.3)
+        run: cargo test -p nodalmerge-s3-blobs --test minio_sweep_scale -- --test-threads=1
+
+      # C2 (dotnet-host-readiness.md) — blob_url_resolution_minio.rs is the only test
+      # anywhere that drives the room-agnostic /blobs/{hash}/url + /uploaded routes
+      # through the real axum router against an actual bucket (vs the Docker-free
+      # blob_url_resolution_vectors.rs in blob-layout-parity.yml, which pins the delegate
+      # placeholder without a bucket). It ran in NO workflow. Its start_minio() returns
+      # None (graceful skip) rather than honoring NODALMERGE_REQUIRE_DOCKER — on
+      # ubuntu-latest Docker is preinstalled so it runs for real; hardening that skip into
+      # a fail-closed like minio_round_trip's is a filed follow-up, not done here.
+      - name: Run blob URL-resolution end-to-end against real minio (S4.2 — /url + /uploaded through the real router and bucket)
+        run: cargo test -p nodalmerge-server --test blob_url_resolution_minio -- --test-threads=1

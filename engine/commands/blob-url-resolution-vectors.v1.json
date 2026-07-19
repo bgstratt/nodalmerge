@@ -1,0 +1,103 @@
+{
+  "$comment": "Golden vectors for docs/BLOB_HTTP_SURFACE.md 'Blob URL resolution (optional capability)' section (slice S4.1): GET /blobs/{hash}/url and POST /blobs/{hash}/uploaded. Unlike the relay-surface vectors (blob-http-surface-vectors.v1.json), the expected response depends on whether the server has a presign-capable backend behind IBlobUrlResolverProvider / BlobPersistence's resolve_get_url/resolve_put_url hooks, not on stored bytes — so each vector carries a `backend_configured` flag instead of `seeded`. When backend_configured is true, harnesses wire in a fake resolver that returns `fake_presigned_url` with `fake_ttl_seconds`; when false, harnesses wire in one that always returns null (or omit registration entirely) to model 'no delegated backend'. Consumed by: hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobUrlResolutionVectorTests.cs (.NET, implemented in S4.1). The Rust server has no HTTP implementation of this section yet (that's slice 4.2, per docs/BLOB_STORAGE_LAYOUT.md's Phase 4 plan) — this file exists now so 4.2's harness can pick it up without a parallel vector-authoring pass. If you change the surface, this file, the .NET harness, the future Rust harness, and docs/BLOB_HTTP_SURFACE.md must move together.",
+  "schema_version": 1,
+  "canonical_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "fake_presigned_url": "https://bucket.example.test/blake3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef?X-Signature=test-vector",
+  "fake_ttl_seconds": 900,
+  "vectors": [
+    {
+      "id": "url-get-with-backend",
+      "description": "GET op=get against a server with a presign-capable backend -> 200 {url, expiresAtUtc}",
+      "route": "url",
+      "hash": "canonical",
+      "op": "get",
+      "backend_configured": true,
+      "expect_status": 200,
+      "expect_response_shape": ["url", "expiresAtUtc"]
+    },
+    {
+      "id": "url-put-with-size-and-content-type",
+      "description": "GET op=put with size/contentType against a server with a presign-capable backend -> 200 {url, expiresAtUtc}; size/contentType flow to the presign delegate as metadata (docs/BLOB_STORAGE_LAYOUT.md §7), not asserted here since they never affect key derivation or the response shape",
+      "route": "url",
+      "hash": "canonical",
+      "op": "put",
+      "size": 2048,
+      "content_type": "text/plain",
+      "backend_configured": true,
+      "expect_status": 200,
+      "expect_response_shape": ["url", "expiresAtUtc"]
+    },
+    {
+      "id": "url-501-no-backend-get",
+      "description": "GET op=get against a server with no presign-capable backend -> 501 (relay-only deployments stay conformant with zero change)",
+      "route": "url",
+      "hash": "canonical",
+      "op": "get",
+      "backend_configured": false,
+      "expect_status": 501
+    },
+    {
+      "id": "url-501-no-backend-put",
+      "description": "GET op=put against a server with no presign-capable backend -> 501",
+      "route": "url",
+      "hash": "canonical",
+      "op": "put",
+      "size": 1024,
+      "backend_configured": false,
+      "expect_status": 501
+    },
+    {
+      "id": "url-400-malformed-hash",
+      "description": "malformed hash -> 400, same rule as GET/HEAD/PUT /blobs/{hash}; checked before the backend/op is consulted",
+      "route": "url",
+      "hash": "malformed",
+      "op": "get",
+      "backend_configured": true,
+      "expect_status": 400,
+      "expect_error": "non-canonical hash"
+    },
+    {
+      "id": "url-400-invalid-op",
+      "description": "op must be 'get' or 'put'",
+      "route": "url",
+      "hash": "canonical",
+      "op": "delete",
+      "backend_configured": true,
+      "expect_status": 400
+    },
+    {
+      "id": "url-400-put-missing-size",
+      "description": "op=put without a positive size is malformed",
+      "route": "url",
+      "hash": "canonical",
+      "op": "put",
+      "backend_configured": true,
+      "expect_status": 400
+    },
+    {
+      "id": "uploaded-confirm-accepted",
+      "description": "upload confirmation with a resolver registered -> 200; the .NET host has no bucket visibility today so it MAY-accepts without verification (docs/delegated-storage-gc.md Uploading -> Active), mirroring the Rust delegate auth mode's verify_uploaded default of Ok(())",
+      "route": "uploaded",
+      "hash": "canonical",
+      "backend_configured": true,
+      "expect_status": 200
+    },
+    {
+      "id": "uploaded-confirm-501-no-backend",
+      "description": "upload confirmation with no resolver registered at all -> 501",
+      "route": "uploaded",
+      "hash": "canonical",
+      "backend_configured": false,
+      "expect_status": 501
+    },
+    {
+      "id": "uploaded-confirm-400-malformed-hash",
+      "description": "malformed hash -> 400, checked before the backend is consulted",
+      "route": "uploaded",
+      "hash": "malformed",
+      "backend_configured": true,
+      "expect_status": 400,
+      "expect_error": "non-canonical hash"
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+using Blake3;
 using NodalMerge.DotNetHost;
 using NodalMerge.DotNetHost.Ffi;
 using NodalMerge.DotNetHost.Runtime;
@@ -23,6 +24,11 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
         var dbPath = Path.Combine(tempRoot, "nodes.db");
         var blobRoot = Path.Combine(tempRoot, "blobs");
 
+        // Slice 3.2 added BLAKE3 verify-on-read to the identity path, so the
+        // key must be the real content hash, not a fabricated placeholder.
+        var blobBytes = new byte[] { 1, 3, 3, 7 };
+        var blobHash = Hasher.Hash(blobBytes).ToString();
+
         await using (var app = BuildTestApp(dbPath, blobRoot))
         {
             await app.StartAsync();
@@ -36,7 +42,7 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
                 CancellationToken.None
             );
 
-            await blobStore.PutBlobAsync("sha256:room-a-blob", [1, 3, 3, 7], "application/octet-stream", CancellationToken.None);
+            await blobStore.PutBlobAsync(blobHash, blobBytes, "application/octet-stream", CancellationToken.None);
         }
 
         await using (var app = BuildTestApp(dbPath, blobRoot))
@@ -52,9 +58,9 @@ public sealed class ProviderHostRestartDurabilityIntegrationTests
             Assert.Equal("node-a", snapshot.Nodes[0].NodeIdHex);
             Assert.Equal([10, 20, 30], snapshot.Nodes[0].Payload);
 
-            var blob = await blobStore.TryGetBlobAsync("sha256:room-a-blob", CancellationToken.None);
+            var blob = await blobStore.TryGetBlobAsync(blobHash, CancellationToken.None);
             Assert.True(blob.Found);
-            Assert.Equal([1, 3, 3, 7], blob.Bytes);
+            Assert.Equal(blobBytes, blob.Bytes);
         }
     }
 

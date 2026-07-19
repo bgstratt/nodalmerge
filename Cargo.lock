@@ -2968,12 +2968,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
 
 [[package]]
+name = "nodalmerge-blobstore-conformance"
+version = "0.2.0"
+dependencies = [
+ "ed25519-dalek",
+ "nodalmerge-core",
+ "nodalmerge-server",
+ "serde_json",
+]
+
+[[package]]
 name = "nodalmerge-bridge"
 version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "js-sys",
  "nodalmerge-core",
+ "ruzstd",
  "serde",
  "serde_json",
  "wasm-bindgen",
@@ -2985,6 +2996,7 @@ version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -3207,8 +3219,11 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-s3",
  "bytes",
+ "ed25519-dalek",
  "futures-util",
+ "nodalmerge-blobstore-conformance",
  "nodalmerge-core",
+ "nodalmerge-gc",
  "nodalmerge-server",
  "object_store",
  "reqwest",
@@ -3227,6 +3242,8 @@ dependencies = [
 name = "nodalmerge-server"
 version = "0.2.0"
 dependencies = [
+ "aws-credential-types",
+ "aws-sdk-s3",
  "axum",
  "base64 0.22.1",
  "ed25519-dalek",
@@ -3234,17 +3251,37 @@ dependencies = [
  "governor",
  "metrics 0.23.1",
  "metrics-exporter-prometheus 0.15.3",
+ "nodalmerge-blobstore-conformance",
  "nodalmerge-capability-profile",
  "nodalmerge-command-registry",
  "nodalmerge-core",
  "nodalmerge-gc",
  "nodalmerge-host-core",
+ "nodalmerge-s3-blobs",
  "rand_core 0.6.4",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "testcontainers",
  "tokio",
  "tokio-tungstenite",
+ "tower",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "zstd",
+]
+
+[[package]]
+name = "nodalmerge-server-s3"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "nodalmerge-gc",
+ "nodalmerge-s3-blobs",
+ "nodalmerge-server",
+ "tokio",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
@@ -4158,6 +4195,15 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "ruzstd"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3640bec8aad418d7d03c72ea2de10d5c646a598f9883c7babc160d91e3c1b26c"
+dependencies = [
+ "twox-hash",
+]
 
 [[package]]
 name = "ryu"
@@ -5286,6 +5332,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "twox-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
+
+[[package]]
 name = "typed-builder"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6140,3 +6192,31 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.0.16+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+dependencies = [
+ "cc",
+ "pkg-config",
+]

@@ -1,6 +1,7 @@
 using NodalMerge.Host.Abstractions.Providers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Json;
@@ -21,7 +22,7 @@ public static class ServiceCollectionExtensions
         ["InMemory", "Sqlite", "Mongo"];
 
     private static readonly HashSet<string> SupportedBlobProviders =
-        ["WsOnly", "File", "S3Direct", "S3Delegated"];
+        ["WsOnly", "File", "S3Direct", "S3Delegated", "ChainedRemote"];
 
     private static readonly HashSet<string> SupportedAuthProviders =
         ["Default", "JwtBridgeEmbedded", "JwtBridgeSidecar", "RoomTokenEmbedded"];
@@ -200,6 +201,10 @@ public static class ServiceCollectionExtensions
         {
             var delegatedOptions = S3DelegatedBlobOptions.FromConfiguration(configuration);
             delegatedOptions.Validate();
+            // Slice 4.3 (blob-cas-remediation.md): a loud, non-fatal warning
+            // when a deployment still sets the removed PutPath/GetPath keys —
+            // see S3DelegatedBlobOptions.WarnOnStaleKeys's doc.
+            S3DelegatedBlobOptions.WarnOnStaleKeys(configuration);
 
             services.AddSingleton(delegatedOptions);
             services.AddHttpClient("NodalMerge.S3DelegatedBlobResolver", (sp, httpClient) =>
@@ -218,6 +223,117 @@ public static class ServiceCollectionExtensions
             services.AddSingleton<WsOnlyBlobStoreProvider>();
             services.AddSingleton<IBlobStoreProvider>(sp => sp.GetRequiredService<WsOnlyBlobStoreProvider>());
             services.AddSingleton<IBlobUrlResolverProvider, S3DelegatedBlobUrlResolverProvider>();
+            return;
+        }
+
+        if (string.Equals(options.BlobStorageProvider, "ChainedRemote", StringComparison.Ordinal))
+        {
+            // Local FileBlobStoreProvider cache in front of a remote HTTP
+            // blob origin (docs/BLOB_HTTP_SURFACE.md), joined by
+            // ChainedBlobStoreProvider. The file provider still owns the
+            // IBlobUrlResolverProvider seam (Phase 4) — unchanged from the
+            // plain "File" branch.
+            var fileOptions = FileBlobStorageOptions.FromConfiguration(configuration);
+            fileOptions.Validate();
+
+            var remoteOptions = RemoteBlobOriginOptions.FromConfiguration(configuration);
+            remoteOptions.Validate();
+
+            services.AddSingleton(fileOptions);
+            services.AddSingleton(remoteOptions);
+
+            services.AddSingleton<FileBlobStoreProvider>();
+
+            services.AddHttpClient(HttpRemoteBlobStoreProvider.HttpClientName, (sp, httpClient) =>
+            {
+                var opts = sp.GetRequiredService<RemoteBlobOriginOptions>();
+                // BaseAddress is vestigial here (slice 4.3,
+                // blob-cas-remediation.md): HttpRemoteBlobStoreProvider and
+                // S3DirectBlobStoreProvider now build every request as an
+                // absolute Uri from RemoteBlobOriginOptions.ResolveBaseUri(),
+                // independent of this property, so a configured BaseUrl path
+                // prefix (reverse-proxy mount point) is never dropped. Still
+                // set for parity/diagnostics and in case any other consumer
+                // of this named client relies on it.
+                httpClient.BaseAddress = opts.ResolveBaseUri();
+                httpClient.Timeout = TimeSpan.FromSeconds(opts.TimeoutSeconds);
+            })
+            // Content encoding is negotiated explicitly via
+            // Accept-Encoding/Content-Encoding at the application layer
+            // (docs/BLOB_HTTP_SURFACE.md) — disable SocketsHttpHandler's own
+            // transparent gzip/deflate decompression so it never intercepts
+            // a "Content-Encoding: zstd" response (which it wouldn't
+            // understand anyway) or silently strips a header this code
+            // relies on inspecting.
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AutomaticDecompression = System.Net.DecompressionMethods.None
+            });
+            services.AddSingleton<HttpRemoteBlobStoreProvider>();
+            // The reconcile sweep's push target stays the relay link only —
+            // s3-direct's own PUT already confirms via /uploaded, and
+            // wiring it into IRemoteBlobPushTarget too (a multi-target
+            // sweep) is a follow-up, not required by slice 4.3's
+            // acceptance criteria (chain reads/writes + client-side zstd).
+            services.AddSingleton<IRemoteBlobPushTarget>(sp => sp.GetRequiredService<HttpRemoteBlobStoreProvider>());
+
+            // Slice 4.3: the s3-direct chain link
+            // (nodalmerge-studio/plans/cas-distribution-and-storage.md Phase
+            // 4). Off by default (S3Direct:Enabled=false) — that
+            // reproduces the pre-4.3 two-link chain exactly, byte for byte,
+            // with no extra services registered. Enabling it grows the
+            // chain to local -> server-relay -> s3-direct via
+            // RemoteBlobLinkAggregator, which — like HttpRemoteBlobStoreProvider
+            // alone before it — never verifies; ChainedBlobStoreProvider
+            // stays the one and only verification gate either way.
+            var s3DirectOptions = S3DirectBlobOriginOptions.FromConfiguration(configuration);
+            s3DirectOptions.Validate();
+            services.AddSingleton(s3DirectOptions);
+
+            if (s3DirectOptions.Enabled)
+            {
+                services.AddHttpClient(S3DirectBlobStoreProvider.BucketHttpClientName, httpClient =>
+                {
+                    // No BaseAddress: presigned bucket URLs are absolute and
+                    // point at whatever host the origin's presign backend
+                    // chose, not the origin itself. No default headers
+                    // either — see S3DirectBlobStoreProvider.SendToBucketAsync's
+                    // doc for why the origin's auth must never reach here.
+                    httpClient.Timeout = TimeSpan.FromSeconds(s3DirectOptions.TimeoutSeconds);
+                })
+                // Same rationale as the relay client above: this code
+                // inspects Content-Encoding itself and must see it
+                // untouched.
+                .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+                {
+                    AutomaticDecompression = System.Net.DecompressionMethods.None
+                });
+
+                services.AddSingleton<S3DirectBlobStoreProvider>();
+                services.AddSingleton<RemoteBlobLinkAggregator>(sp => new RemoteBlobLinkAggregator(
+                    [
+                        sp.GetRequiredService<HttpRemoteBlobStoreProvider>(),
+                        sp.GetRequiredService<S3DirectBlobStoreProvider>()
+                    ],
+                    sp.GetRequiredService<ILogger<RemoteBlobLinkAggregator>>()
+                ));
+
+                services.AddSingleton<IBlobStoreProvider>(sp => new ChainedBlobStoreProvider(
+                    sp.GetRequiredService<FileBlobStoreProvider>(),
+                    sp.GetRequiredService<RemoteBlobLinkAggregator>(),
+                    sp.GetRequiredService<ILogger<ChainedBlobStoreProvider>>()
+                ));
+            }
+            else
+            {
+                services.AddSingleton<IBlobStoreProvider>(sp => new ChainedBlobStoreProvider(
+                    sp.GetRequiredService<FileBlobStoreProvider>(),
+                    sp.GetRequiredService<HttpRemoteBlobStoreProvider>(),
+                    sp.GetRequiredService<ILogger<ChainedBlobStoreProvider>>()
+                ));
+            }
+
+            services.AddSingleton<IBlobUrlResolverProvider>(sp => sp.GetRequiredService<FileBlobStoreProvider>());
             return;
         }
 

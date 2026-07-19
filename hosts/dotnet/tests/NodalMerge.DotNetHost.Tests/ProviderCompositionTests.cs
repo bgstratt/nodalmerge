@@ -213,4 +213,141 @@ public sealed class ProviderCompositionTests
         var ex = Assert.Throws<InvalidOperationException>(() => services.AddNodalMergeHostProviders(config));
         Assert.Contains("NodalMerge:Storage:S3Delegated:BaseUrl", ex.Message);
     }
+
+    [Fact]
+    public void AddNodalMergeHostProviders_SelectsChainedRemoteProviders_WhenConfigured()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-provider-composition-chained", Guid.NewGuid().ToString("N"));
+
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["NodalMerge:Providers:BlobStorage"] = "ChainedRemote",
+                    ["NodalMerge:Storage:FileBlobs:RootPath"] = tempRoot,
+                    ["NodalMerge:Storage:RemoteOrigin:BaseUrl"] = "https://blob-origin.example"
+                }
+            )
+            .Build();
+
+        var services = new ServiceCollection();
+        services.AddNodalMergeHostProviders(config);
+        var serviceProvider = services.BuildServiceProvider();
+
+        var blobProvider = serviceProvider.GetRequiredService<IBlobStoreProvider>();
+        var pushTarget = serviceProvider.GetRequiredService<IRemoteBlobPushTarget>();
+        var urlResolver = serviceProvider.GetRequiredService<IBlobUrlResolverProvider>();
+
+        Assert.Equal("ChainedBlobStoreProvider", blobProvider.GetType().Name);
+        Assert.Equal("HttpRemoteBlobStoreProvider", pushTarget.GetType().Name);
+        Assert.Equal("FileBlobStoreProvider", urlResolver.GetType().Name);
+    }
+
+    [Fact]
+    public void AddNodalMergeHostProviders_ThrowsForMissingRemoteOriginBaseUrl_WhenChainedRemoteIsSelected()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["NodalMerge:Providers:BlobStorage"] = "ChainedRemote",
+                    ["NodalMerge:Storage:RemoteOrigin:BaseUrl"] = ""
+                }
+            )
+            .Build();
+
+        var services = new ServiceCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => services.AddNodalMergeHostProviders(config));
+        Assert.Contains("NodalMerge:Storage:RemoteOrigin:BaseUrl", ex.Message);
+    }
+
+    [Fact]
+    public void AddNodalMergeHostProviders_ChainedRemote_DefaultsS3DirectDisabled_AndPreservesTwoLinkChain()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-provider-composition-chained-s3off", Guid.NewGuid().ToString("N"));
+
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["NodalMerge:Providers:BlobStorage"] = "ChainedRemote",
+                    ["NodalMerge:Storage:FileBlobs:RootPath"] = tempRoot,
+                    ["NodalMerge:Storage:RemoteOrigin:BaseUrl"] = "https://blob-origin.example"
+                }
+            )
+            .Build();
+
+        var services = new ServiceCollection();
+        services.AddNodalMergeHostProviders(config);
+        var serviceProvider = services.BuildServiceProvider();
+
+        // Slice 4.3: S3Direct:Enabled defaults to false, which must
+        // reproduce the pre-4.3 two-link chain exactly — same registrations
+        // as AddNodalMergeHostProviders_SelectsChainedRemoteProviders_WhenConfigured,
+        // and no S3DirectBlobStoreProvider/RemoteBlobLinkAggregator
+        // registered at all.
+        var blobProvider = serviceProvider.GetRequiredService<IBlobStoreProvider>();
+        Assert.Equal("ChainedBlobStoreProvider", blobProvider.GetType().Name);
+        Assert.Null(services.LastOrDefault(d => d.ServiceType == typeof(S3DirectBlobStoreProvider)));
+        Assert.Null(services.LastOrDefault(d => d.ServiceType == typeof(RemoteBlobLinkAggregator)));
+    }
+
+    [Fact]
+    public void AddNodalMergeHostProviders_ChainedRemote_S3DirectEnabled_GrowsChainToThreeLinks()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nodalmerge-provider-composition-chained-s3on", Guid.NewGuid().ToString("N"));
+
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["NodalMerge:Providers:BlobStorage"] = "ChainedRemote",
+                    ["NodalMerge:Storage:FileBlobs:RootPath"] = tempRoot,
+                    ["NodalMerge:Storage:RemoteOrigin:BaseUrl"] = "https://blob-origin.example",
+                    ["NodalMerge:Storage:S3Direct:Enabled"] = "true"
+                }
+            )
+            .Build();
+
+        var services = new ServiceCollection();
+        services.AddNodalMergeHostProviders(config);
+        var serviceProvider = services.BuildServiceProvider();
+
+        // The composed IBlobStoreProvider is still ChainedBlobStoreProvider
+        // — the one and only verify gate — regardless of how many remote
+        // links are configured underneath it.
+        var blobProvider = serviceProvider.GetRequiredService<IBlobStoreProvider>();
+        Assert.Equal("ChainedBlobStoreProvider", blobProvider.GetType().Name);
+
+        Assert.NotNull(serviceProvider.GetService<S3DirectBlobStoreProvider>());
+        var aggregator = serviceProvider.GetService<RemoteBlobLinkAggregator>();
+        Assert.NotNull(aggregator);
+
+        // The reconcile-sweep push target is unchanged: still the relay
+        // link only (see ServiceCollectionExtensions' comment on why).
+        var pushTarget = serviceProvider.GetRequiredService<IRemoteBlobPushTarget>();
+        Assert.Equal("HttpRemoteBlobStoreProvider", pushTarget.GetType().Name);
+    }
+
+    [Fact]
+    public void AddNodalMergeHostProviders_ThrowsForInvalidS3DirectCompression_WhenChainedRemoteAndS3DirectEnabled()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["NodalMerge:Providers:BlobStorage"] = "ChainedRemote",
+                    ["NodalMerge:Storage:RemoteOrigin:BaseUrl"] = "https://blob-origin.example",
+                    ["NodalMerge:Storage:S3Direct:Enabled"] = "true",
+                    ["NodalMerge:Storage:S3Direct:Compression"] = "Gzip"
+                }
+            )
+            .Build();
+
+        var services = new ServiceCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => services.AddNodalMergeHostProviders(config));
+        Assert.Contains("NodalMerge:Storage:S3Direct:Compression", ex.Message);
+    }
 }

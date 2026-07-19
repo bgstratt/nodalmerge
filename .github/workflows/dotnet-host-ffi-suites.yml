@@ -1,0 +1,80 @@
+name: dotnet-host-ffi-suites
+
+# C2 (plan: nodalmerge-studio/plans/dotnet-host-readiness.md) — wires the
+# NodalMerge.DotNetHost.Tests classes the CI-coverage audit found in no workflow that
+# require the native host FFI. Follows the gating pattern established by
+# dotnet-peerlocal-smoke.yml: build the cdylib(s) in release, point the .NET native
+# resolver at them via the NODALMERGE_*_FFI_DLL env overrides, then run the suites.
+#
+# BOTH natives are built and BOTH env overrides set at job level — a class may bind the
+# host FFI (nodalmerge-host-ffi -> libnodalmerge_host_ffi.so, NODALMERGE_HOST_FFI_DLL) or
+# the peer-local runtime FFI (nodalmerge-runtime-local-ffi ->
+# libnodalmerge_runtime_local_ffi.so, NODALMERGE_LOCAL_FFI_DLL); setting both is harmless
+# and covers every class here. The explicit override also fixes the RoomTokenEmbedded
+# DllNotFound load-order flake: without it the resolver's default probe intermittently
+# fails to find nodalmerge_host_ffi; with the override it resolves deterministically
+# (verified locally — 5/5 fail without the env, 3/3 pass with it).
+#
+# One class per `dotnet test` step (the repo's dotnet convention) — one process per class,
+# no cross-class parallel races. All 15 verified green locally with the natives present.
+#
+# No paths: filter — the meta-check verifies a step NAMES each class, not that the trigger
+# fires on the right source. Run on every push/PR so a changed source can't silently skip.
+
+on:
+  push:
+  pull_request:
+
+env:
+  DOTNET_VERSION: 10.0.x
+
+jobs:
+  dotnet-host-ffi-suites:
+    runs-on: ubuntu-latest
+    env:
+      NODALMERGE_HOST_FFI_DLL: ${{ github.workspace }}/target/release/libnodalmerge_host_ffi.so
+      NODALMERGE_LOCAL_FFI_DLL: ${{ github.workspace }}/target/release/libnodalmerge_runtime_local_ffi.so
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build host FFI (release)
+        run: cargo build -p nodalmerge-host-ffi --release
+      - name: Build peer-local runtime FFI (release)
+        run: cargo build -p nodalmerge-runtime-local-ffi --release
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Run FfiBindingTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FfiBindingTests"
+      - name: Run FfiHttpEndpointTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FfiHttpEndpointTests"
+      - name: Run FfiWebSocketEndpointTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FfiWebSocketEndpointTests"
+      - name: Run FfiWebSocketLoopRunnerTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FfiWebSocketLoopRunnerTests"
+      - name: Run RuntimeWebSocketEndpointTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeWebSocketEndpointTests"
+      - name: Run ChainedBlobStoreProviderHttpIntegrationTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ChainedBlobStoreProviderHttpIntegrationTests"
+      - name: Run ProviderCompositionTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderCompositionTests"
+      - name: Run ProviderDurabilityTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderDurabilityTests"
+      - name: Run ProviderHostRestartDurabilityIntegrationTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderHostRestartDurabilityIntegrationTests"
+      - name: Run ProviderProfileRuntimeIntegrationTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderProfileRuntimeIntegrationTests"
+      - name: Run ProviderProfileTokenEndpointIntegrationTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderProfileTokenEndpointIntegrationTests"
+      - name: Run RoomTokenEmbeddedProviderTests (env override fixes the DllNotFound load-order flake)
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RoomTokenEmbeddedProviderTests"
+      - name: Run Row19AutomatedScenarioHarnessTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~Row19AutomatedScenarioHarnessTests"
+      - name: Run S3DirectChainCompositionTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~S3DirectChainCompositionTests"
+      - name: Run DemoReadinessSmokeTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~DemoReadinessSmokeTests"

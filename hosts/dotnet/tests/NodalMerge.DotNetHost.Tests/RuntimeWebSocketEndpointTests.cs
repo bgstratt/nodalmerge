@@ -1031,6 +1031,36 @@ public class RuntimeWebSocketEndpointTests
     }
 
     [Fact]
+    public async Task Runtime_endpoint_inbound_pack_notifies_registered_observer()
+    {
+        // S7.1: end-to-end proof of the DI/overload mechanism — an IInboundPackObserver
+        // registered the same way Studio's replication sink follow-up will (services.AddSingleton
+        // as an additional collaborator, no changes to AddNodalMergeRuntimeCore or the endpoint
+        // mapping) is picked up automatically by RuntimeWebSocketLoopRunner's new constructor
+        // overload and fires for a real inbound "pack" frame over an actual WebSocket connection.
+        var observer = new RecordingInboundPackObserver();
+        await using var app = BuildTestApp(services =>
+        {
+            services.AddSingleton<IRuntimeCommandBridge>(new NoopAckRuntimeCommandBridge());
+            services.AddSingleton<IInboundPackObserver>(observer);
+        });
+        await app.StartAsync();
+
+        using var ws = await ConnectRuntimeWebSocketAsync(app);
+        await SendTextAsync(ws, "{\"type\":\"hello\",\"room\":\"room-observer\",\"pubkey\":\"peer-a\",\"frontier\":[]}");
+        await SendTextAsync(ws, "{\"type\":\"pack\",\"nodes\":\"AQI=\"}");
+
+        for (var attempt = 0; attempt < 20 && observer.Calls.Count == 0; attempt++)
+        {
+            await Task.Delay(100);
+        }
+
+        var call = Assert.Single(observer.Calls);
+        Assert.Equal("room-observer", call.RoomId);
+        Assert.Equal("AQI=", call.NodesB64);
+    }
+
+    [Fact]
     public async Task Runtime_endpoint_same_room_disconnect_emits_peer_left()
     {
         await using var app = BuildTestApp(services =>

@@ -13,6 +13,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.1" />
   </ItemGroup>
 
   <ItemGroup>
@@ -43,6 +44,21 @@
     <None Include="..\..\..\..\engine\commands\blob-layout-vectors.v1.json"
           Link="blob-layout-vectors.v1.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- Canonical blob HTTP surface parity vectors; BlobHttpSurfaceTests derives
+         its cases from this so the .NET GET/HEAD/PUT /blobs/{hash} origin is
+         asserted against the same source of truth as the Rust
+         server/server/tests/blob_http_surface.rs mirror. -->
+    <None Include="..\..\..\..\engine\commands\blob-http-surface-vectors.v1.json"
+          Link="blob-http-surface-vectors.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <!-- Canonical blob URL-resolution parity vectors (slice S4.1);
+         BlobUrlResolutionVectorTests derives its cases from this so the
+         .NET GET /blobs/{hash}/url + POST /blobs/{hash}/uploaded surface is
+         asserted against the same source of truth the Rust server's slice
+         4.2 implementation will be checked against. -->
+    <None Include="..\..\..\..\engine\commands\blob-url-resolution-vectors.v1.json"
+          Link="blob-url-resolution-vectors.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
     <!-- Golden cross-runtime blob fixture; BlobLayoutInteropTests proves
          this host can read the same on-disk layout the Rust mirror
          (server/server/tests/blob_layout_interop.rs) reads. Glob is `**`,
@@ -50,6 +66,33 @@
          `.layout-v2`) have no conventional extension. -->
     <None Include="..\..\..\..\engine\commands\fixtures\blob-layout-v1\**">
       <Link>blob-layout-fixture-v1\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Cross-runtime zstd interop fixtures (slice 0.1 of
+         nodalmerge-studio/plans/blob-cas-remediation.md, finding #4);
+         ZstdInteropTests derives its cases from this manifest so this host
+         is asserted against real Rust zstd::stream::encode_all and .NET
+         ZstdSharp.Compressor.Wrap output, not just its own encoder. Binary
+         fixtures have no conventional extension-glob issue here (all
+         `.zst`), but need an explicit entry same as the blob-layout-v1
+         fixtures above — the `*.json` glob pattern used elsewhere in this
+         file would not pick up a `.zst` file. -->
+    <None Include="..\..\..\..\engine\commands\zstd-interop-vectors.v1.json"
+          Link="zstd-interop-vectors.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <!-- Work-unit status vectors ALSO carry the frozen
+         delegate_room_id_placeholder slot (reserved by slice 0.4, decided by
+         slice 7.4): DelegateRoomPlaceholderVectorTests asserts the room/
+         namespace metadata this host emits into the delegate presign
+         protocol v1 on the room-agnostic /blobs/{hash}/url routes against
+         the same source of truth the Rust mirror
+         (server/server/tests/blob_url_resolution_vectors.rs) is asserted
+         against. -->
+    <None Include="..\..\..\..\engine\commands\work-unit-status-vectors.v1.json"
+          Link="work-unit-status-vectors.v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\..\engine\commands\fixtures\zstd-interop-v1\**">
+      <Link>zstd-interop-fixture-v1\%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

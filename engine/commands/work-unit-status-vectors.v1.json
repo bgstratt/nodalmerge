@@ -1,0 +1,149 @@
+{
+  "$comment": "Freezes finding #14 (nodalmerge-studio/plans/blob-cas-remediation.md, Phase 0 slice 0.4): the studio C# WorkUnitStatus enum's ordinals and PascalCase JSON casing, previously hand-mirrored (unpinned by any vector) by nodalmerge's Rust GC live-hash classifier. Consumed by: server/server/src/studio_live_hashes.rs's own #[cfg(test)] mod tests (Rust — inline vector tests reusing the real WorkUnitPayloadRaw deserializer and is_terminal_status/TERMINAL_STATUSES logic directly, no external tests/ crate or pub test-only surface; mirrors the blob_layout_vectors_match_s3_key_derivation precedent in server/s3-blobs/src/lib.rs) and nodalmerge-studio/tests/NodalMerge.Studio.Contracts.Tests/WorkUnitStatusVectorTests.cs (.NET, against nodalmerge-studio/src/NodalMerge.Studio.Contracts/Domain/WorkUnit.cs's WorkUnitStatus enum and WorkUnit record, serialized with bare JsonSerializer.Serialize(entity) as IStudioNodeStore's real write path does — no naming policy, no JsonStringEnumConverter). If you reorder/rename/insert a WorkUnitStatus value, this file and BOTH harnesses must move together: a silent drift here means nodalmerge's GC coordinator (server/server/src/studio_live_hashes.rs) misclassifies live work-unit-seeded snapshots as garbage and deletes them in production, instead of failing a test.",
+  "schema_version": 1,
+  "status_ordinals": [
+    { "name": "Created", "ordinal": 0 },
+    { "name": "Active", "ordinal": 1 },
+    { "name": "Waiting", "ordinal": 2 },
+    { "name": "Completed", "ordinal": 3 },
+    { "name": "Failed", "ordinal": 4 },
+    { "name": "Cancelled", "ordinal": 5 },
+    { "name": "Queued", "ordinal": 6 },
+    { "name": "Executing", "ordinal": 7 },
+    { "name": "Proposed", "ordinal": 8 },
+    { "name": "Reviewing", "ordinal": 9 },
+    { "name": "Merged", "ordinal": 10 },
+    { "name": "DeadLettered", "ordinal": 11 },
+    { "name": "Retrying", "ordinal": 12 }
+  ],
+  "terminal_status_names_comment": "Per studio_live_hashes.rs's STATUS_COMPLETED/STATUS_MERGED consts and its doc comment: Cancelled/DeadLettered have live revival edges (WorkUnitTransitions.CanTransition) and are deliberately NOT terminal here, unlike a narrower cache-eviction terminal set elsewhere in studio. `Failed` was removed from this list by slice 1.6 (finding #30, blob-cas-remediation.md): it also has a live revival edge (`Failed -> Cancelled -> Queued`/`Executing` via WorkUnit.cs's `(_, Cancelled) when from is not Completed and not Merged` rule), so a Failed work unit's seed must not be retention-aged either. This list is the GC-relevant terminal set only.",
+  "terminal_status_names": ["Completed", "Merged"],
+  "work_unit_envelope_vectors": [
+    {
+      "id": "created-minimal",
+      "description": "the smallest real envelope the Rust classifier receives for a fresh work unit: optional fields absent (null), non-terminal status",
+      "envelope": {
+        "v": 1,
+        "kind": "studio/work-unit/v1",
+        "payload": {
+          "WorkUnitId": "WU-1",
+          "Status": 0,
+          "CreatedAt": "2026-01-01T00:00:00.0000000+00:00",
+          "UpdatedAt": "2026-01-01T00:00:00.0000000+00:00",
+          "RepositoryId": null,
+          "Metadata": null
+        }
+      },
+      "expected": {
+        "work_unit_id": "WU-1",
+        "status_name": "Created",
+        "status_ordinal": 0,
+        "is_terminal": false,
+        "repository_id": null,
+        "metadata": null
+      }
+    },
+    {
+      "id": "queued-with-repository",
+      "description": "queue-driven pipeline status (Phase 4 slice 11a) with RepositoryId populated, no Metadata",
+      "envelope": {
+        "v": 1,
+        "kind": "studio/work-unit/v1",
+        "payload": {
+          "WorkUnitId": "WU-2",
+          "Status": 6,
+          "CreatedAt": "2026-02-01T00:00:00.0000000+00:00",
+          "UpdatedAt": "2026-02-02T00:00:00.0000000+00:00",
+          "RepositoryId": "repo-a",
+          "Metadata": null
+        }
+      },
+      "expected": {
+        "work_unit_id": "WU-2",
+        "status_name": "Queued",
+        "status_ordinal": 6,
+        "is_terminal": false,
+        "repository_id": "repo-a",
+        "metadata": null
+      }
+    },
+    {
+      "id": "completed-terminal-with-metadata",
+      "description": "a terminal status (protects the retention classifier's Pinned/Active/Intermediate rules) with a populated Metadata map",
+      "envelope": {
+        "v": 1,
+        "kind": "studio/work-unit/v1",
+        "payload": {
+          "WorkUnitId": "WU-3",
+          "Status": 3,
+          "CreatedAt": "2026-03-01T00:00:00.0000000+00:00",
+          "UpdatedAt": "2026-03-05T00:00:00.0000000+00:00",
+          "RepositoryId": "repo-b",
+          "Metadata": { "reviewedBy": "alice" }
+        }
+      },
+      "expected": {
+        "work_unit_id": "WU-3",
+        "status_name": "Completed",
+        "status_ordinal": 3,
+        "is_terminal": true,
+        "repository_id": "repo-b",
+        "metadata": { "reviewedBy": "alice" }
+      }
+    },
+    {
+      "id": "failed-is-not-terminal",
+      "description": "regression pin for slice 1.6 (finding #30, blob-cas-remediation.md): Failed has a live revival edge (Failed -> Cancelled -> Queued/Executing via WorkUnit.cs's `(_, Cancelled) when from is not Completed and not Merged` rule), so the GC classifier must NOT treat it as terminal — a Failed work unit's seed snapshot must not be retention-aged out, since a human may return to steer or hand-fix it",
+      "envelope": {
+        "v": 1,
+        "kind": "studio/work-unit/v1",
+        "payload": {
+          "WorkUnitId": "WU-5",
+          "Status": 4,
+          "CreatedAt": "2026-05-01T00:00:00.0000000+00:00",
+          "UpdatedAt": "2026-05-01T01:00:00.0000000+00:00",
+          "RepositoryId": null,
+          "Metadata": null
+        }
+      },
+      "expected": {
+        "work_unit_id": "WU-5",
+        "status_name": "Failed",
+        "status_ordinal": 4,
+        "is_terminal": false,
+        "repository_id": null,
+        "metadata": null
+      }
+    },
+    {
+      "id": "dead-lettered-is-not-terminal",
+      "description": "regression pin for the deliberately-non-terminal DeadLettered case (studio_live_hashes.rs doc comment): despite sounding like an end state, DeadLettered has a live revival edge back to Retrying/Proposed/Merged/Queued/Executing, so the GC classifier must NOT treat it as terminal",
+      "envelope": {
+        "v": 1,
+        "kind": "studio/work-unit/v1",
+        "payload": {
+          "WorkUnitId": "WU-4",
+          "Status": 11,
+          "CreatedAt": "2026-04-01T00:00:00.0000000+00:00",
+          "UpdatedAt": "2026-04-01T01:00:00.0000000+00:00",
+          "RepositoryId": null,
+          "Metadata": null
+        }
+      },
+      "expected": {
+        "work_unit_id": "WU-4",
+        "status_name": "DeadLettered",
+        "status_ordinal": 11,
+        "is_terminal": false,
+        "repository_id": null,
+        "metadata": null
+      }
+    }
+  ],
+  "delegate_room_id_placeholder": {
+    "$comment": "DECIDED by slice 7.4 (2026-07-17, blob-cas-remediation.md): on the room-agnostic blob HTTP routes (GET /blobs/{hash}/url, POST /blobs/{hash}/uploaded) every host passes room=\"_global\" into the delegate presign protocol v1 (docs/BLOB_STORAGE_LAYOUT.md §7 — room is metadata-only, never a key input). \"_global\" won over the .NET host's previous \"default\": it reads as an intentional placeholder, it already matched the Rust host AND room.rs's GC-preflight placeholder, and \"default\" collides with a plausible real room id. `namespace` is frozen at \"blobs\" for hosts that send the protocol's OPTIONAL namespace field at all (.NET does); the Rust delegate client's request struct has no namespace field and continues to omit it — omission remains conformant, but a host that sends the field on these routes MUST send \"blobs\". Asserted by server/server/tests/blob_url_resolution_vectors.rs (capturing-backend room pin) and hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/DelegateRoomPlaceholderVectorTests.cs (room + namespace pin). ⚠ This changed the .NET host's emitted metadata (room \"default\" -> \"_global\") — see the §7 note in docs/BLOB_STORAGE_LAYOUT.md.",
+    "room": "_global",
+    "namespace": "blobs",
+    "decided_in_slice": "7.4"
+  }
+}

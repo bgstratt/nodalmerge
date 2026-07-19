@@ -51,6 +51,10 @@ pub struct CapabilityNode {
 /// `CapabilityProfileLimits` properties each carry their own default. A
 /// `limits` object may therefore specify any subset of fields; unspecified
 /// ones fall back individually rather than requiring the whole object.
+///
+/// These are the values *as parsed*: the file format accepts anything, but
+/// resolution clamps each field to its `DEFAULT_MAX_*` ceiling — see
+/// [`resolved_limits`]. A profile may lower a limit, never raise one.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CapabilityProfileLimits {
     #[serde(default = "default_max_capability_count")]
@@ -384,8 +388,50 @@ fn validate_profile_shape(profile: &CapabilityProfile) -> Result<(), CapabilityP
     Ok(())
 }
 
+/// Resolve a profile's effective limits. The `DEFAULT_MAX_*` constants are
+/// hard ceilings, not just fallbacks: a `limits` block may lower a cap but
+/// never raise it, otherwise a hostile or fat-fingered profile file would
+/// lift the RoomToken mint/validate guard and unbound the expansion DFS
+/// (which on `main` were unconditional constants). A profile with no
+/// `limits` therefore behaves exactly as the historical constants did.
+/// Clamping warns per field so an operator who requested 256 learns they
+/// got 128 from the log, not from silent behavior.
 fn resolved_limits(profile: &CapabilityProfile) -> CapabilityProfileLimits {
-    profile.limits.clone().unwrap_or_default()
+    let mut limits = profile.limits.clone().unwrap_or_default();
+    clamp_to_ceiling(
+        &mut limits.max_capability_count,
+        DEFAULT_MAX_CAPABILITY_COUNT,
+        "max_capability_count",
+    );
+    clamp_to_ceiling(
+        &mut limits.max_capability_length,
+        DEFAULT_MAX_CAPABILITY_LENGTH,
+        "max_capability_length",
+    );
+    clamp_to_ceiling(
+        &mut limits.max_flattened_payload_bytes,
+        DEFAULT_MAX_FLATTENED_PAYLOAD_BYTES,
+        "max_flattened_payload_bytes",
+    );
+    clamp_to_ceiling(&mut limits.max_dag_depth, DEFAULT_MAX_DAG_DEPTH, "max_dag_depth");
+    clamp_to_ceiling(
+        &mut limits.max_edges_per_node,
+        DEFAULT_MAX_EDGES_PER_NODE,
+        "max_edges_per_node",
+    );
+    limits
+}
+
+fn clamp_to_ceiling(value: &mut usize, ceiling: usize, field: &'static str) {
+    if *value > ceiling {
+        tracing::warn!(
+            field,
+            requested = *value,
+            ceiling,
+            "capability profile `limits` value exceeds the built-in hard ceiling; clamped"
+        );
+        *value = ceiling;
+    }
 }
 
 /// Canonicalize a capability token: Unicode-trim, then fold only ASCII
@@ -551,6 +597,111 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.class(), "profile_version_mismatch");
+    }
+
+    /// Minimal capturing subscriber so the clamp-warn tests can live here
+    /// without a `tracing-subscriber` dev-dependency. `with_default` is
+    /// thread-local, so parallel tests cannot cross-contaminate captures.
+    mod warn_capture {
+        use std::fmt::Write as _;
+        use std::sync::{Arc, Mutex};
+
+        pub(super) struct Capture(pub(super) Arc<Mutex<Vec<String>>>);
+
+        struct Visitor(String);
+
+        impl tracing::field::Visit for Visitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                let _ = write!(self.0, "{}={:?} ", field.name(), value);
+            }
+        }
+
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut visitor = Visitor(format!("{} ", event.metadata().level()));
+                event.record(&mut visitor);
+                self.0.lock().unwrap().push(visitor.0);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        pub(super) fn captured(f: impl FnOnce()) -> Vec<String> {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            tracing::subscriber::with_default(Capture(Arc::clone(&events)), f);
+            let captured = events.lock().unwrap().clone();
+            captured
+        }
+    }
+
+    #[test]
+    fn clamp_warns_with_field_requested_and_ceiling() {
+        let profile = CapabilityProfile {
+            profile_version: "capprof-v1".to_string(),
+            supported_profile_versions: vec![],
+            nodes: vec![CapabilityNode {
+                capability: "room.member".to_string(),
+                inherits: vec![],
+            }],
+            limits: Some(CapabilityProfileLimits {
+                max_dag_depth: 64,
+                ..CapabilityProfileLimits::default()
+            }),
+        };
+
+        let events = warn_capture::captured(|| {
+            flatten_capabilities(&profile, &["room.member".to_string()]).unwrap();
+        });
+
+        let warn = events
+            .iter()
+            .find(|e| e.contains("max_dag_depth"))
+            .expect("clamping an oversized limit must emit a warn naming the field");
+        assert!(warn.starts_with("WARN"), "clamp log must be warn-level: {warn}");
+        assert!(warn.contains("requested=64"), "warn must carry the requested value: {warn}");
+        assert!(
+            warn.contains(&format!("ceiling={DEFAULT_MAX_DAG_DEPTH}")),
+            "warn must carry the ceiling: {warn}"
+        );
+    }
+
+    #[test]
+    fn clamp_warn_does_not_fire_for_lowered_or_absent_limits() {
+        let node = CapabilityNode {
+            capability: "room.member".to_string(),
+            inherits: vec![],
+        };
+        let no_limits = CapabilityProfile {
+            profile_version: "capprof-v1".to_string(),
+            supported_profile_versions: vec![],
+            nodes: vec![node.clone()],
+            limits: None,
+        };
+        let lowered = CapabilityProfile {
+            limits: Some(CapabilityProfileLimits {
+                max_dag_depth: 2,
+                ..CapabilityProfileLimits::default()
+            }),
+            ..no_limits.clone()
+        };
+
+        let events = warn_capture::captured(|| {
+            flatten_capabilities(&no_limits, &["room.member".to_string()]).unwrap();
+            flatten_capabilities(&lowered, &["room.member".to_string()]).unwrap();
+        });
+
+        assert!(
+            events.is_empty(),
+            "no clamp engaged, so no warn may fire: {events:?}"
+        );
     }
 
     #[test]

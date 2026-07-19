@@ -7,3 +7,4 @@ description = "Shared capability-composition (CAPCOMP) profile loading and DAG e
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+tracing = "0.1"

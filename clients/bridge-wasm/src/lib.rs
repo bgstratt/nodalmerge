@@ -1622,6 +1622,48 @@ pub fn derive_e2ee_key(room_seed: &[u8]) -> Result<js_sys::Uint8Array, JsValue> 
 }
 
 // ---------------------------------------------------------------------------
+// Slice 3.3 (blob-cas-remediation, finding #6): zstd decode for presigned GETs
+// ---------------------------------------------------------------------------
+
+/// Decode a single zstd frame. Exposed for the web SDK's presigned-GET
+/// reader (`fetchBlobViaUrl` in clients/web/sdk.js): an s3-direct uploader
+/// may have stored the bucket object as a client-side zstd frame
+/// (`Content-Encoding: zstd` object metadata), and only some runtimes decode
+/// that transparently on fetch (Chrome 123+/FF 126+ yes; Safari and
+/// Node/undici no). Living on the wasm bridge — pure-Rust `ruzstd`, no C —
+/// gives every JS runtime ONE decode path instead of feature-detecting
+/// `DecompressionStream('zstd')`/`node:zlib`, which are not portable enough.
+///
+/// The SDK calls this only after BLAKE3 verification of the raw bytes
+/// failed AND the payload starts with the zstd magic; the decoded bytes go
+/// back through `store_blob_bytes`, so integrity is still enforced by the
+/// content hash, never by this decoder.
+///
+/// Decodes the whole frame in memory with no explicit output cap: the
+/// server's blob size limit is not visible client-side, and blobs are
+/// already size-capped upstream by the origin's PUT/presign limits, so a
+/// frame that decodes to something huge will simply fail the hash check.
+#[wasm_bindgen]
+pub fn zstd_decompress(data: &[u8]) -> Result<js_sys::Uint8Array, JsValue> {
+    zstd_decompress_impl(data)
+        .map(|out| js_sys::Uint8Array::from(out.as_slice()))
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Plain-Rust core of [`zstd_decompress`] so native `cargo test` can cover
+/// it without a wasm runtime.
+fn zstd_decompress_impl(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(data)
+        .map_err(|e| format!("invalid zstd frame: {e}"))?;
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| format!("zstd decode failed: {e}"))?;
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // D1: internal node decryption helper
 // ---------------------------------------------------------------------------
 
@@ -1644,4 +1686,65 @@ fn decrypt_node_if_needed(
     let decrypted_ops = decrypt_ops(room_key, &payload)?;
     node.transaction.ops = decrypted_ops;
     Ok(node)
+}
+
+// ---------------------------------------------------------------------------
+// Native unit tests (slice 3.3). Run with `cargo test -p nodalmerge-bridge`.
+// The fixtures are the shared cross-runtime zstd interop goldens from Phase 0
+// slice 0.1 (engine/commands/zstd-interop-vectors.v1.json): real frames from
+// BOTH production encoders — .NET ZstdSharp.Compressor.Wrap (what the
+// s3-direct uploader actually writes to the bucket) and Rust
+// zstd::stream::encode_all (the at-rest server encoder, whose frames carry no
+// content-size header) — NOT frames synthesized by ruzstd itself, so the
+// decoder is pinned against foreign encoder output.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::zstd_decompress_impl;
+
+    /// Encoded by .NET ZstdSharp.Port 0.8.1 `new Compressor(3).Wrap(payload)`
+    /// — see the fixture's `provenance` in zstd-interop-vectors.v1.json.
+    const DOTNET_FRAME: &[u8] = include_bytes!(
+        "../../../engine/commands/fixtures/zstd-interop-v1/dotnet-compressor-wrap-with-size-header.zst"
+    );
+    /// Encoded by Rust `zstd::stream::encode_all(payload, 3)` (zstd crate
+    /// 0.13) — a frame with NO content-size header, the shape finding #4
+    /// proved can trip lazy decoders.
+    const RUST_FRAME: &[u8] = include_bytes!(
+        "../../../engine/commands/fixtures/zstd-interop-v1/rust-encode-all-no-size-header.zst"
+    );
+
+    // Expected plaintext identities, from zstd-interop-vectors.v1.json.
+    const DOTNET_PLAINTEXT_LEN: usize = 927;
+    const DOTNET_PLAINTEXT_BLAKE3: &str =
+        "5ca399529c5ef74a8b4d7a4aa7e332b13a8621bd1bd8f59f6299ceecba17293e";
+    const RUST_PLAINTEXT_LEN: usize = 1158;
+    const RUST_PLAINTEXT_BLAKE3: &str =
+        "ed2d2e60d78b55bd4dd709946a24d814553f33c76d698082db2dd166094f0cdd";
+
+    #[test]
+    fn decompress_dotnet_zstdsharp_frame_round_trips() {
+        let out = zstd_decompress_impl(DOTNET_FRAME).expect("decode .NET frame");
+        assert_eq!(out.len(), DOTNET_PLAINTEXT_LEN);
+        assert_eq!(nodalmerge_core::Hash::of(&out).to_hex(), DOTNET_PLAINTEXT_BLAKE3);
+    }
+
+    #[test]
+    fn decompress_rust_no_size_header_frame_round_trips() {
+        let out = zstd_decompress_impl(RUST_FRAME).expect("decode Rust frame");
+        assert_eq!(out.len(), RUST_PLAINTEXT_LEN);
+        assert_eq!(nodalmerge_core::Hash::of(&out).to_hex(), RUST_PLAINTEXT_BLAKE3);
+    }
+
+    #[test]
+    fn decompress_rejects_garbage() {
+        assert!(zstd_decompress_impl(b"definitely not a zstd frame").is_err());
+        assert!(zstd_decompress_impl(&[]).is_err());
+    }
+
+    #[test]
+    fn decompress_rejects_truncated_frame() {
+        let truncated = &DOTNET_FRAME[..DOTNET_FRAME.len() / 2];
+        assert!(zstd_decompress_impl(truncated).is_err());
+    }
 }

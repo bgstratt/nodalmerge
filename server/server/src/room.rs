@@ -12,10 +12,10 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::AtomicUsize,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, RwLock, Semaphore};
 
@@ -99,6 +99,17 @@ pub struct Room {
     pub(crate) projection_build_semaphore: Mutex<Option<(usize, Arc<Semaphore>)>>,
     /// Waiters blocked on `projection_build_semaphore` (bounded by env max queue).
     pub(crate) projection_build_waiting: AtomicUsize,
+    /// blob-cas-remediation.md slice 1.4 (finding #5) — set once the
+    /// background persistence hydration spawned by [`Rooms::get_or_create`]
+    /// has finished loading nodes/blobs into this room's in-memory graph
+    /// (or immediately, on a non-durable backend, where there is nothing to
+    /// hydrate). `false` from construction until then. `Rooms::sweep_blobs`
+    /// consults this: a resident-but-still-hydrating room's in-memory graph
+    /// is empty (or partial), so treating residency alone as "this room's
+    /// live set is covered" would skip the persisted-node scan for a room
+    /// whose blobs aren't visible yet — losing them. Only a fully-hydrated
+    /// resident room may skip that fallback scan.
+    pub hydrated: AtomicBool,
 }
 
 impl Room {
@@ -139,6 +150,7 @@ impl Room {
             projections: RwLock::new(HashMap::new()),
             projection_build_semaphore: Mutex::new(None),
             projection_build_waiting: AtomicUsize::new(0),
+            hydrated: AtomicBool::new(false),
         })
     }
 
@@ -326,6 +338,205 @@ impl Room {
     }
 }
 
+/// blob-cas-remediation.md slice 1.4 (finding #5), bug 2 — the smallest
+/// grace [`Rooms::sweep_blobs`] will ever hand to
+/// `ServerPersistence::blob_gc_sweep`, regardless of the operator's
+/// configured `--blob-gc-grace`. A literal zero collapses the backend's
+/// two-phase tombstone into a same-call delete on first sight of an
+/// unreferenced blob, which reopens the write-through race this slice
+/// closes (see `sweep_blobs`'s doc comment). One millisecond is enough to
+/// push physical deletion to a later, separate sweep call without making
+/// `grace == 0` mean anything materially different in practice (a
+/// subsequent sweep tick is still ordinarily seconds away).
+const MIN_PHYSICAL_GRACE: Duration = Duration::from_millis(1);
+
+/// blob-cas-remediation.md slice 1.3 (finding #3) — how long a
+/// **confirmed-but-not-yet-referenced** upload is protected from the blob
+/// GC sweep. Default 1 hour.
+///
+/// ## What this window actually covers (the obvious guess is wrong)
+///
+/// This is **not** the presign TTL. It bounds
+/// *bytes-exist → referenced-by-a-CRDT-op*, which is **client-side
+/// latency**: the interval between the moment a client's bytes are provably
+/// in the store and the moment its `SetBlob` op lands in a room DAG, where
+/// the ordinary live set takes over. Both upload paths stamp the inventory
+/// row's `last_seen_at = now` at the moment the bytes exist
+/// (`blob_http.rs`'s `put_blob`, after the hash check; and
+/// `confirm_blob_uploaded`, after `verify_uploaded`), so
+/// `S3BlobStoreConfig::presign_put_ttl` (15 min) bounds the interval that
+/// *ends before this one starts*. Tying this default to the PUT TTL would
+/// conflate two different intervals and reclaim legitimate slow uploads.
+///
+/// One hour coincidentally equals `S3BlobStoreConfig::presign_get_ttl`,
+/// which gives a coherent operator story — "the longest URL we'd hand out"
+/// — but the number is chosen on its own merits.
+///
+/// ## Why it must be bounded at all
+///
+/// Liveness is decided per-run by *marking*, not by the inventory's `state`
+/// column: `gc_store.rs`'s `iter_unmarked_candidates` selects
+/// `state != 'Deleted' AND (last_marked_run_id IS NULL OR
+/// last_marked_run_id != ?1)`. The upload paths stamp
+/// `last_marked_run_id = "upload"` (`blob_http.rs`'s `UPLOAD_MARK_SENTINEL`),
+/// a value no real run id ever equals, so an unreferenced upload is unmarked
+/// on the next run and correctly reclaimed. **`state = 'Active'` is
+/// inventory bookkeeping, not protection.** Unioning *every* `Active` row
+/// into the live set would convert that sentinel into permanent protection:
+/// every anonymous `PUT /blobs/{hash}` would become live forever —
+/// unbounded disk growth from an endpoint that is anonymous by default
+/// (blob-PUT auth is deliberately optional; see slice 1.5's note, which is
+/// valid *only while this union stays time-bounded*). So only rows whose
+/// `last_seen_at` falls inside this window are protected, and an upload
+/// nobody references within it becomes reclaimable again — pinned by
+/// `blob_gc_reclaims_unreferenced_upload_once_upload_window_elapses`
+/// (`server/server/tests/blob_gc.rs`).
+///
+/// ⚠ **Config-struct-only today.** There is no `--blob-upload-grace` CLI
+/// flag: a config surface across the three server binaries belongs to slice
+/// 7.1's shared bootstrap module, which owns that plumbing. Override
+/// programmatically via [`Rooms::with_blob_upload_grace`].
+pub const DEFAULT_BLOB_UPLOAD_GRACE: Duration = Duration::from_secs(60 * 60);
+
+/// blob-cas-remediation.md slice 6.4 — per-room GC scan caches, shared by
+/// [`Rooms::sweep_blobs`]'s cold-room live-set scan and
+/// [`crate::studio_live_hashes`]'s cold-room studio-map replay.
+///
+/// ## What is cached, and why it is safe
+///
+/// Both caches hold a **pure projection of a room's persisted node
+/// history** — the extracted `SetBlob` hash set here, the resolved
+/// `studio/`-prefixed engine map there — keyed by
+/// [`crate::store::NodePersistence::room_nodes_version`], a monotonic
+/// version that advances on every persisted node. Nothing time- or
+/// config-dependent is ever cached: retention classification
+/// (`retain_intermediate_days`, "now"), the upload-grace union, and admin
+/// pins are all recomputed from scratch every run *on top of* the cached
+/// projections, so changing any of them changes the live set immediately,
+/// cache or no cache.
+///
+/// ## Invalidation
+///
+/// * **Version mismatch in either direction** (advance, regression, or a
+///   backend that answers `None`) → the entry is ignored and the room is
+///   rescanned. `None` additionally means the fresh result is *not*
+///   cached — a backend that can't version its rooms gets the exact
+///   pre-6.4 always-rescan behavior.
+/// * **Room disappears from enumeration** (`known_room_ids` +
+///   residents) → entry evicted on the next sweep, so a deleted store
+///   directory can't resurrect a phantom room's live set.
+/// * **Residency**: resident, fully-hydrated rooms never consult these
+///   caches at all — their in-memory graph is the source of truth
+///   (`StateGraph::referenced_blob_hashes` is already incremental). A room
+///   evicted after accepting nodes re-enters the cold path with an
+///   advanced version (every accepted node is written through
+///   `persist_node(s)` before it could matter), so the stale entry loses
+///   the version comparison and is replaced.
+#[derive(Debug, Default)]
+pub struct GcScanCaches {
+    /// room id → (room_nodes_version, extracted `SetBlob` hash set).
+    cold_live: Mutex<HashMap<String, (u64, HashSet<nodalmerge_core::Hash>)>>,
+    /// room id → (room_nodes_version, resolved `studio/` engine-map
+    /// projection). `Arc` so a cache hit hands the map out without cloning
+    /// potentially-large payload bytes.
+    studio_maps: Mutex<HashMap<String, (u64, Arc<HashMap<String, (Vec<u8>, bool)>>)>>,
+    /// Full cold-room scans performed (cache miss / uncacheable) — the
+    /// deterministic "did the second tick actually skip the work" signal
+    /// the 6.4 tests assert on, instead of wall time.
+    cold_scans: AtomicUsize,
+    cold_hits: AtomicUsize,
+    studio_scans: AtomicUsize,
+    studio_hits: AtomicUsize,
+}
+
+/// Snapshot of [`GcScanCaches`]' counters, for tests/observability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcScanCacheStats {
+    pub cold_scans: usize,
+    pub cold_hits: usize,
+    pub studio_scans: usize,
+    pub studio_hits: usize,
+}
+
+impl GcScanCaches {
+    /// Look up the cold-room live-set cache. `None` unless the entry exists
+    /// AND matches `version` exactly.
+    fn cold_live_get(&self, room_id: &str, version: u64) -> Option<HashSet<nodalmerge_core::Hash>> {
+        let map = self.cold_live.lock().expect("cold_live poisoned");
+        match map.get(room_id) {
+            Some((v, hashes)) if *v == version => Some(hashes.clone()),
+            _ => None,
+        }
+    }
+
+    fn cold_live_put(&self, room_id: &str, version: u64, hashes: HashSet<nodalmerge_core::Hash>) {
+        self.cold_live
+            .lock()
+            .expect("cold_live poisoned")
+            .insert(room_id.to_string(), (version, hashes));
+    }
+
+    /// Evict entries (both caches) for rooms no longer known to the store.
+    fn retain_rooms(&self, known: &std::collections::HashSet<String>) {
+        self.cold_live
+            .lock()
+            .expect("cold_live poisoned")
+            .retain(|id, _| known.contains(id));
+        self.studio_maps
+            .lock()
+            .expect("studio_maps poisoned")
+            .retain(|id, _| known.contains(id));
+    }
+
+    /// See [`Self::cold_live_get`] — same version-exact contract.
+    pub(crate) fn studio_map_get(
+        &self,
+        room_id: &str,
+        version: u64,
+    ) -> Option<Arc<HashMap<String, (Vec<u8>, bool)>>> {
+        let map = self.studio_maps.lock().expect("studio_maps poisoned");
+        match map.get(room_id) {
+            Some((v, resolved)) if *v == version => Some(Arc::clone(resolved)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn studio_map_put(
+        &self,
+        room_id: &str,
+        version: u64,
+        resolved: Arc<HashMap<String, (Vec<u8>, bool)>>,
+    ) {
+        self.studio_maps
+            .lock()
+            .expect("studio_maps poisoned")
+            .insert(room_id.to_string(), (version, resolved));
+    }
+
+    /// Evict studio-map entries for rooms outside `known` — called by
+    /// `collect_studio_live_hashes`, whose enumeration (persisted ∪
+    /// resident) is broader than `sweep_blobs`'s.
+    pub(crate) fn retain_studio_rooms(&self, known: &std::collections::HashSet<String>) {
+        self.studio_maps
+            .lock()
+            .expect("studio_maps poisoned")
+            .retain(|id, _| known.contains(id));
+    }
+
+    pub(crate) fn count_cold_scan(&self) {
+        self.cold_scans.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn count_cold_hit(&self) {
+        self.cold_hits.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn count_studio_scan(&self) {
+        self.studio_scans.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn count_studio_hit(&self) {
+        self.studio_hits.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Global registry of rooms, lazily created on first connection.
 ///
 /// Also carries the server's persistent Ed25519 keypair (E1) so every
@@ -362,6 +573,25 @@ pub struct Rooms {
     /// G3: per-peer rate limit on accepted bytes per second (raw decoded
     /// pack bytes, not wire JSON). `0` disables byte-rate limiting.
     pub peer_rate_bytes: u32,
+    /// blob-cas-remediation.md slice 1.3 (finding #3) — the GC asset
+    /// inventory, when the deployment has one (`--store`; see
+    /// `main.rs`/`server-s3/main.rs`). [`Rooms::sweep_blobs`] unions
+    /// recently-`Active` rows into its live set so a confirmed upload that
+    /// has not yet been referenced by a `SetBlob` op is not swept out from
+    /// under the client that just uploaded it. `None` (the default) is the
+    /// pre-1.3 behavior exactly — the union contributes nothing.
+    ///
+    /// Same handle `blob_http::BlobHttpConfig::gc_inventory` writes those
+    /// rows through; the two must be wired to the same store or the union
+    /// protects nothing. Set via [`Rooms::with_gc_inventory`].
+    pub(crate) gc_inventory: Option<Arc<dyn nodalmerge_gc::contracts::AssetInventoryStore>>,
+    /// blob-cas-remediation.md slice 1.3 — how recently an inventory row
+    /// must have been seen for the union above to protect it. See
+    /// [`DEFAULT_BLOB_UPLOAD_GRACE`], which documents why this is bounded
+    /// and why it is not the presign TTL.
+    pub(crate) blob_upload_grace: Duration,
+    /// blob-cas-remediation.md slice 6.4 — see [`GcScanCaches`].
+    pub(crate) gc_scan_caches: Arc<GcScanCaches>,
 }
 
 impl Rooms {
@@ -421,7 +651,31 @@ impl Rooms {
             broadcast_capacity,
             peer_rate_nodes,
             peer_rate_bytes,
+            gc_inventory: None,
+            blob_upload_grace: DEFAULT_BLOB_UPLOAD_GRACE,
+            gc_scan_caches: Arc::new(GcScanCaches::default()),
         }
+    }
+
+    /// blob-cas-remediation.md slice 1.3 — wire the GC asset inventory into
+    /// the legacy sweep's live set. Pass the *same* handle given to
+    /// `blob_http::BlobHttpConfig::gc_inventory`. See [`Rooms::gc_inventory`].
+    pub fn with_gc_inventory(
+        mut self,
+        inventory: Arc<dyn nodalmerge_gc::contracts::AssetInventoryStore>,
+    ) -> Self {
+        self.gc_inventory = Some(inventory);
+        self
+    }
+
+    /// blob-cas-remediation.md slice 1.3 — override
+    /// [`DEFAULT_BLOB_UPLOAD_GRACE`]. Read that constant's doc before
+    /// changing it: shortening it below real client latency reclaims
+    /// legitimate slow uploads; lengthening it grows the window in which an
+    /// anonymous PUT holds bytes nobody references.
+    pub fn with_blob_upload_grace(mut self, grace: Duration) -> Self {
+        self.blob_upload_grace = grace;
+        self
     }
 
     pub async fn get_or_create(&self, id: &str) -> Arc<Room> {
@@ -493,15 +747,63 @@ impl Rooms {
                     // Load this room's referenced blobs (point lookups
                     // against the global pool) and insert into the
                     // in-memory blob store.
+                    //
+                    // blob-cas-remediation.md slice 2.3 (finding #7) — this
+                    // is the **third** `filter_map(get_blob)` site the finding
+                    // names, and it is the one that must NOT be "fixed" like
+                    // the other two. Room open is not an export: hydrating
+                    // here would pull every file payload the room references
+                    // into server memory on **every room open**, which is
+                    // exactly the cost offloading to object storage exists to
+                    // avoid, and which `BlobPersistence::hydrate_blob`'s own
+                    // contract tells file-byte callers not to do. The correct
+                    // behavior on a non-hydrating backend is to load nothing
+                    // and let clients pull via presigned/origin URLs — which
+                    // is what already happened, silently and by accident, via
+                    // `get_blob` returning `None` for every hash.
+                    //
+                    // So 2.3 changes no behavior here; it removes the
+                    // *silence* (an operator reading `loaded_blobs = 0` had no
+                    // way to tell "correct offloading" from "the blobs are
+                    // gone") and makes the skip a decision the code states
+                    // rather than an accident of a `None` return. Asking
+                    // `get_blob_hydrates()` — a declaration, not an inference
+                    // — is the only sound way to tell those apart: on
+                    // `DirPersistence` a `None` from `get_blob` with `has_blob
+                    // == true` means a *corrupt* blob, not a non-hydrating
+                    // backend. Pinned by
+                    // `blob_nonhydrating_conformance.rs`'s
+                    // `room_hydrate_does_not_pull_file_payloads_through_a_non_hydrating_backend`.
+                    //
+                    // See slice 2.4 for serving these blobs to a peer that has
+                    // no direct blob IO; that gap is unchanged by this slice.
                     let load_blobs_start = Instant::now();
-                    let blobs: Vec<Vec<u8>> = referenced_hashes
-                        .iter()
-                        .filter_map(|h| persistence.get_blob(h))
-                        .collect();
+                    let hydrates = persistence.get_blob_hydrates();
+                    let blobs: Vec<Vec<u8>> = if hydrates {
+                        referenced_hashes
+                            .iter()
+                            .filter_map(|h| persistence.get_blob(h))
+                            .collect()
+                    } else {
+                        tracing::info!(
+                            room = %room_clone.room_id,
+                            referenced_blobs = referenced_hashes.len(),
+                            "async persistence hydrate stage: load_room_blobs skipped — \
+                             this blob backend does not hydrate bytes into the server \
+                             process (S3's offloading policy). The room's in-memory blob \
+                             store stays empty by design and clients fetch blobs via \
+                             presigned/origin URLs. This is NOT data loss, and it is NOT \
+                             finding #7: unlike archive export, room open has no need of \
+                             the bytes"
+                        );
+                        Vec::new()
+                    };
                     let load_blobs_elapsed = load_blobs_start.elapsed();
                     tracing::info!(
                         room = %room_clone.room_id,
+                        referenced_blobs = referenced_hashes.len(),
                         loaded_blobs = blobs.len(),
+                        backend_hydrates = hydrates,
                         elapsed_ms = load_blobs_elapsed.as_millis(),
                         "async persistence hydrate stage: load_room_blobs"
                     );
@@ -536,6 +838,15 @@ impl Rooms {
                         "async persistence hydrate completed"
                     );
                 }
+                // blob-cas-remediation.md slice 1.4 (finding #5) — mark
+                // hydration complete unconditionally (durable or not: a
+                // non-durable backend has nothing to load, so it's
+                // trivially "hydrated"). Must be set only *after* every
+                // stage above has published its writes (graph/blobs/
+                // lineage), since `Rooms::sweep_blobs` treats this flag as
+                // its signal that the room's in-memory graph is a complete
+                // substitute for scanning persisted nodes directly.
+                room_clone.hydrated.store(true, Ordering::SeqCst);
             });
         }
         room
@@ -621,32 +932,47 @@ impl Rooms {
     /// actively dangerous under the flat layout. So this collects live
     /// hashes from resident rooms via their in-memory graphs, then unions
     /// in every other known room id via a fresh `load_room_nodes` scan.
+    ///
+    /// blob-cas-remediation.md slice 1.1 — **fails closed** when the
+    /// backing store can't prove that union is complete. If
+    /// `self.persistence.can_enumerate_rooms()` is `false`, the entire
+    /// delete pass is skipped (logged, zero deletions) instead of trusting
+    /// an empty `known_room_ids()` as proof no cold room needs protecting.
+    ///
+    /// blob-cas-remediation.md slice 1.4 (finding #5) — two more races in
+    /// the same shape, both fail-closed:
+    /// - **Hydration race.** `Rooms::get_or_create` inserts a room into
+    ///   `self.rooms` (making it "resident") *before* its background
+    ///   persistence hydration has populated its in-memory graph. Treating
+    ///   residency alone as "covered by the resident-graph scan above"
+    ///   would skip the persisted-node fallback for a room whose live set
+    ///   is (partially or wholly) empty only because hydration hasn't run
+    ///   yet — not because it has no blobs. Only a room whose
+    ///   [`Room::hydrated`] flag is set may be excluded from the fallback
+    ///   scan below.
+    /// - **Write-through window.** Even for a fully-hydrated room, this
+    ///   function's own live-set snapshot can go stale: several `.await`
+    ///   points separate collecting `live` from the physical
+    ///   `blob_gc_sweep` call, and a blob whose bytes + referencing node
+    ///   land during that window isn't in `live`. With a literal
+    ///   `grace == ZERO`, the backend's "no tombstone yet" branch deletes
+    ///   on the very same call that creates the tombstone — a genuine
+    ///   same-tick delete with no window at all. `MIN_PHYSICAL_GRACE`
+    ///   floors what we hand the backend so first-sighting an unreferenced
+    ///   blob only ever tombstones; physical deletion always waits for a
+    ///   later, separate sweep call, by which time the write-through has
+    ///   ordinarily caught up. This does not change two-phase *aging*
+    ///   semantics once a tombstone exists — see below.
     pub async fn sweep_blobs(&self, grace: Duration) -> usize {
         if !self.persistence.is_durable() {
             return 0;
         }
-        // Snapshot the room list so we don't hold the outer lock while
-        // reading per-room graphs.
-        let resident: Vec<(String, Arc<Room>)> = {
-            let map = self.rooms.read().await;
-            map.iter()
-                .map(|(k, v)| (k.clone(), Arc::clone(v)))
-                .collect()
+        let Some(live) = self.collect_global_live_blob_hashes().await else {
+            // `None` means the union above could not be proven complete —
+            // either the backend can't enumerate rooms (slice 1.1) or the
+            // cold-room scan task was lost. Either way: no delete pass.
+            return 0;
         };
-        let resident_ids: std::collections::HashSet<&str> =
-            resident.iter().map(|(id, _)| id.as_str()).collect();
-
-        let mut live = std::collections::HashSet::new();
-        for (_, room) in &resident {
-            live.extend(collect_live_blob_hashes(room).await);
-        }
-        for id in self.persistence.known_room_ids() {
-            if resident_ids.contains(id.as_str()) {
-                continue; // already covered via the resident graph above
-            }
-            let nodes = self.persistence.load_room_nodes(&id);
-            live.extend(blob_hashes_referenced_by(nodes.iter()));
-        }
 
         // PR-05 compatibility bridge: run the shared GC coordinator in
         // MarkOnly mode once, globally, to exercise host-neutral contracts
@@ -666,12 +992,319 @@ impl Rooms {
             }
         }
 
-        let deleted = self.persistence.blob_gc_sweep(&live, grace);
+        // blob-cas-remediation.md slice 1.4 (finding #5), bug 2 — never
+        // hand the backend a literal zero. `DirPersistence::blob_gc_sweep`
+        // (and the S3 conformance port) delete same-call when there's no
+        // existing tombstone and `grace.is_zero()`. Flooring here forces
+        // every first-sighting to only tombstone, regardless of the
+        // operator's configured `--blob-gc-grace`; a later, separate sweep
+        // call still deletes as soon as the tombstone is `grace` old
+        // (immediately, for a configured zero) — this closes only the
+        // same-tick write-through race, not the two-phase aging window.
+        let physical_grace = grace.max(MIN_PHYSICAL_GRACE);
+        // Slice 1.3: this is now honored by **every** durable backend. It
+        // used to be a no-op on the S3 path, which bound `grace` and never
+        // read it (see `S3BlobStore::blob_gc_sweep`'s doc for the
+        // bucket-versioning premise that made it so, and why that premise
+        // was wrong).
+        //
+        // Slice 6.4 (same family as 6.2's `off_worker`): the physical sweep
+        // is blocking work — filesystem I/O on Dir, and on S3 one bridge
+        // call that parks the calling thread for up to `sweep_timeout`
+        // (15 min). This runs inside the GC sweeper task, which is spawned
+        // onto the *shared* server runtime (`spawn_blob_gc_sweeper` /
+        // `gc_service::spawn_gc_sweeper` — plain `tokio::spawn`), so
+        // leaving it inline would park a worker every tick. A lost blocking
+        // task reads as "swept nothing" — the conservative outcome, same as
+        // the S3 backend's own timeout posture.
+        let sweep_persistence = Arc::clone(&self.persistence);
+        let deleted = match tokio::task::spawn_blocking(move || {
+            sweep_persistence.blob_gc_sweep(&live, physical_grace)
+        })
+        .await
+        {
+            Ok(deleted) => deleted,
+            Err(e) => {
+                tracing::error!(%e, "blob GC sweep: blocking sweep task failed; no deletions reported");
+                0
+            }
+        };
         if deleted > 0 {
             metrics::counter!("nodalmerge_blob_gc_deleted_total").increment(deleted as u64);
             tracing::info!(deleted, "blob GC reclaimed blobs");
         }
         deleted
+    }
+
+    /// The global live blob-hash union `sweep_blobs` feeds the physical
+    /// sweep: resident-hydrated rooms via their (incrementally cached)
+    /// in-memory graphs, every other known room via its persisted nodes,
+    /// plus the slice-1.3 recent-upload union. Public so the 6.4
+    /// cache-equivalence tests can compare this exact computation between a
+    /// warm-cache `Rooms` and a fresh one without mutating any store.
+    ///
+    /// Returns `None` when the union cannot be proven complete — the
+    /// backend can't enumerate rooms (slice 1.1's fail-closed rule) or the
+    /// cold-scan blocking task was lost — in which case the caller must not
+    /// delete anything.
+    pub async fn collect_global_live_blob_hashes(
+        &self,
+    ) -> Option<std::collections::HashSet<nodalmerge_core::Hash>> {
+        // Snapshot the room list so we don't hold the outer lock while
+        // reading per-room graphs.
+        let resident: Vec<(String, Arc<Room>)> = {
+            let map = self.rooms.read().await;
+            map.iter()
+                .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                .collect()
+        };
+        // Only a *fully hydrated* resident room's in-memory graph is a
+        // trustworthy substitute for the persisted-node fallback scan
+        // below (slice 1.4, bug 1). A room still replaying its background
+        // hydration is resident but its graph may be empty/partial, so it
+        // must fall through to `load_room_nodes` like a cold room would.
+        let resident_ids: std::collections::HashSet<String> = resident
+            .iter()
+            .filter(|(_, room)| room.hydrated.load(Ordering::SeqCst))
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut live = std::collections::HashSet::new();
+        for (_, room) in &resident {
+            live.extend(collect_live_blob_hashes(room).await);
+        }
+
+        // blob-cas-remediation.md slice 1.1 (finding #1) — the altitude
+        // fix. `known_room_ids()` returning empty is ambiguous: it means
+        // both "there are genuinely no cold rooms" and "this backend never
+        // implemented enumeration" (the trait default — true of every
+        // `Composite`/Postgres/Mongo wiring before this slice). Treating
+        // the latter as the former is exactly how a cold room's blobs got
+        // permanently deleted. Fail closed: refuse to run the delete pass
+        // at all unless the backend can prove its enumeration is complete.
+        if !self.persistence.can_enumerate_rooms() {
+            tracing::warn!(
+                "blob GC sweep: persistence backend cannot enumerate known_room_ids() \
+                 (NodePersistence::can_enumerate_rooms() == false); refusing to run the \
+                 delete pass so blobs owned only by a cold/non-resident room are not \
+                 destroyed"
+            );
+            metrics::counter!(
+                "nodalmerge_blob_gc_skipped_total",
+                "reason" => "cannot_enumerate_rooms"
+            )
+            .increment(1);
+            return None;
+        }
+
+        // Slice 6.4 — the cold-room scan, off-worker and cached. Blocking
+        // for the same reason as the physical sweep (SQLite reads +
+        // postcard unpacking, on the shared runtime's sweeper task), so the
+        // whole loop runs in one `spawn_blocking` closure. Per room:
+        //
+        //   version = room_nodes_version(id)   (monotonic; None = uncacheable)
+        //   cache hit at exactly that version  → reuse the extracted set
+        //   miss / mismatch / None             → full load_room_nodes scan,
+        //                                        re-cached only when versioned
+        //
+        // The extracted set is a pure function of the room's persisted
+        // node history — nothing time- or config-dependent is cached, so
+        // version advance is the ONLY invalidation this layer needs (see
+        // `GcScanCaches`' doc for the full trigger inventory). Entries for
+        // rooms no longer enumerated are evicted here too.
+        let persistence = Arc::clone(&self.persistence);
+        let caches = Arc::clone(&self.gc_scan_caches);
+        let cold_ids: Vec<String> = self
+            .persistence
+            .known_room_ids()
+            .into_iter()
+            .filter(|id| !resident_ids.contains(id.as_str()))
+            .collect();
+        let known_for_retention: std::collections::HashSet<String> = cold_ids
+            .iter()
+            .cloned()
+            .chain(resident_ids.iter().cloned())
+            .collect();
+        let cold_live = tokio::task::spawn_blocking(move || {
+            let mut out = std::collections::HashSet::new();
+            for id in &cold_ids {
+                let version = persistence.room_nodes_version(id);
+                if let Some(v) = version {
+                    if let Some(cached) = caches.cold_live_get(id, v) {
+                        caches.count_cold_hit();
+                        out.extend(cached);
+                        continue;
+                    }
+                }
+                caches.count_cold_scan();
+                let nodes = persistence.load_room_nodes(id);
+                let hashes = blob_hashes_referenced_by(nodes.iter());
+                if let Some(v) = version {
+                    caches.cold_live_put(id, v, hashes.clone());
+                }
+                out.extend(hashes);
+            }
+            caches.retain_rooms(&known_for_retention);
+            out
+        })
+        .await;
+        match cold_live {
+            Ok(cold) => live.extend(cold),
+            Err(e) => {
+                // A lost cold scan means the union is incomplete — the same
+                // fail-closed posture as a non-enumerable backend.
+                tracing::error!(%e, "blob GC sweep: cold-room scan task failed; refusing the delete pass");
+                metrics::counter!(
+                    "nodalmerge_blob_gc_skipped_total",
+                    "reason" => "cold_scan_failed"
+                )
+                .increment(1);
+                return None;
+            }
+        }
+
+        // blob-cas-remediation.md slice 1.3 (finding #3) — union in uploads
+        // the gc inventory has seen recently. See
+        // `collect_recent_upload_hashes`. Recomputed every call, never
+        // cached: it is a function of *now* and of inventory rows no room
+        // seq ever advances for.
+        live.extend(self.collect_recent_upload_hashes(SystemTime::now()));
+        Some(live)
+    }
+
+    /// Slice 6.4 test seam — counter snapshot for the deterministic
+    /// "second tick does near-zero re-scan work" assertions.
+    pub fn gc_scan_cache_stats(&self) -> GcScanCacheStats {
+        GcScanCacheStats {
+            cold_scans: self.gc_scan_caches.cold_scans.load(Ordering::Relaxed),
+            cold_hits: self.gc_scan_caches.cold_hits.load(Ordering::Relaxed),
+            studio_scans: self.gc_scan_caches.studio_scans.load(Ordering::Relaxed),
+            studio_hits: self.gc_scan_caches.studio_hits.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Slice 6.4 **sabotage seam, tests only** — plant a cold-room cache
+    /// entry that claims the room's *current* version while holding
+    /// `hashes` that may be arbitrarily wrong. This simulates exactly the
+    /// bug the version keying prevents ("a mutation happened but the cache
+    /// was not invalidated") so the cache-equivalence test can prove it
+    /// would detect that bug — see `tests/gc_recompute_cache.rs`. Returns
+    /// `false` (and plants nothing) when the backend can't version the
+    /// room, since such rooms are never served from cache at all.
+    #[doc(hidden)]
+    pub fn debug_gc_plant_stale_cold_cache_entry(
+        &self,
+        room_id: &str,
+        hashes: std::collections::HashSet<nodalmerge_core::Hash>,
+    ) -> bool {
+        match self.persistence.room_nodes_version(room_id) {
+            Some(v) => {
+                self.gc_scan_caches.cold_live_put(room_id, v, hashes);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Slice 6.4 sabotage seam for the studio-map cache — same contract as
+    /// [`Self::debug_gc_plant_stale_cold_cache_entry`].
+    #[doc(hidden)]
+    pub fn debug_gc_plant_stale_studio_map_entry(
+        &self,
+        room_id: &str,
+        resolved: HashMap<String, (Vec<u8>, bool)>,
+    ) -> bool {
+        match self.persistence.room_nodes_version(room_id) {
+            Some(v) => {
+                self.gc_scan_caches
+                    .studio_map_put(room_id, v, Arc::new(resolved));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// blob-cas-remediation.md slice 1.3 (finding #3) — hashes the GC asset
+    /// inventory says were uploaded **recently enough** to still be waiting
+    /// for the `SetBlob` op that will reference them.
+    ///
+    /// A client's bytes and the CRDT op that references them arrive on two
+    /// different round-trips: `PUT /blobs/{hash}` (or presign + `POST
+    /// /blobs/{hash}/uploaded`) lands first and upserts an `Active`
+    /// inventory row (`blob_http.rs`); the `SetBlob` op reaches a room DAG
+    /// afterwards. Until it does, [`Rooms::sweep_blobs`]'s room-DAG-derived
+    /// live set cannot tell that upload apart from an orphan — so without
+    /// this union, a sweep landing in that gap tombstones and then reclaims
+    /// bytes the server has already told the client it accepted.
+    ///
+    /// **Only `Active` rows inside [`Rooms::blob_upload_grace`] are
+    /// protected, and that bound is the whole design** — see
+    /// [`DEFAULT_BLOB_UPLOAD_GRACE`] for why an unbounded union of `Active`
+    /// rows would make every anonymous PUT live forever, and which test
+    /// pins it.
+    ///
+    /// Returns empty when no inventory is wired (the pre-1.3 behavior,
+    /// exactly) and — deliberately — when the inventory query *fails*:
+    /// `sweep_blobs`'s protections are additive unions, so a failure here
+    /// can only ever un-protect. That is the wrong direction for a P0
+    /// data-loss path, and it is invisible in the return type. The `warn!`
+    /// is the only signal; a sweep that cannot read the inventory should
+    /// arguably refuse to delete at all, the way slice 1.1 made a
+    /// non-enumerable node store refuse. Filed as a follow-up rather than
+    /// widened here: the same "a failed query is indistinguishable from an
+    /// empty result" shape is already tracked against
+    /// `known_room_ids()`'s `warn!`-and-return-empty on both the Postgres
+    /// and Mongo stores, and it wants one fix, not three.
+    fn collect_recent_upload_hashes(
+        &self,
+        now: SystemTime,
+    ) -> std::collections::HashSet<nodalmerge_core::Hash> {
+        let mut out = std::collections::HashSet::new();
+        let Some(inventory) = &self.gc_inventory else {
+            return out;
+        };
+        // `iter_unmarked_candidates(run_id)` returns every non-`Deleted` row
+        // whose `last_marked_run_id != run_id`. There is no "iterate all
+        // rows" method on the trait, and this is the query the coordinator
+        // itself uses; a sentinel that no real run id and no upload mark can
+        // equal (real ids are `gc-<millis>-<n>`; the upload mark is
+        // `"upload"` — `blob_http.rs`'s `UPLOAD_MARK_SENTINEL`) makes it
+        // exactly that. This reads the ledger and writes nothing.
+        const UPLOAD_WINDOW_SCAN_SENTINEL: &str = "_blob-upload-window-scan";
+        let rows = match inventory.iter_unmarked_candidates(UPLOAD_WINDOW_SCAN_SENTINEL) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    "blob GC sweep: could not read the gc inventory; a very recent upload \
+                     that has no SetBlob op yet is unprotected this tick"
+                );
+                return out;
+            }
+        };
+        let cutoff = now.checked_sub(self.blob_upload_grace).unwrap_or(UNIX_EPOCH);
+        let mut protected = 0usize;
+        for row in rows {
+            // `Active` alone is NOT protection — see the constant's doc.
+            if row.state != nodalmerge_gc::types::AssetState::Active {
+                continue;
+            }
+            if row.last_seen_at < cutoff {
+                continue; // upload window elapsed — reclaimable again
+            }
+            if let Some(hash) = crate::store::hash_from_hex(&row.hash) {
+                out.insert(hash);
+                protected += 1;
+            }
+        }
+        if protected > 0 {
+            tracing::debug!(
+                protected,
+                grace_secs = self.blob_upload_grace.as_secs(),
+                "blob GC sweep: protecting recently-confirmed uploads awaiting their SetBlob op"
+            );
+        }
+        out
     }
 }
 
@@ -718,6 +1351,76 @@ async fn collect_live_blob_hashes(
     room.graph.read().await.referenced_blob_hashes()
 }
 
+/// blob-cas-remediation.md slice 1.2 (finding #2) —
+/// [`Rooms::collect_global_live_blob_hashes`] packaged as the
+/// [`crate::gc_service::LiveHashCollector`] the GC service takes by
+/// injection, mirroring `studio_live_hashes.rs`'s `StudioLiveHashCollector`.
+///
+/// The new coordinator's studio-domain source only ever classifies
+/// `studio/`-prefixed engine-map entries, so an ordinary
+/// `SetBlob`-referenced blob (a plain avatar upload, say — nothing
+/// studio-shaped about it) was invisible to its live set and got reclaimed
+/// under `--gc-mode sweepsoft`/`sweephard`, even though the legacy
+/// `Rooms::sweep_blobs` protected it fine. The binaries now inject
+/// `UnionLiveHashCollector::new([studio, room-DAG])` so the coordinator's
+/// live set is a superset of what the legacy sweep would refuse to delete.
+///
+/// **This is a delegation, not a second scan.** The room-DAG live set the
+/// legacy sweep computes — every `SetBlob.blob_hash` across every room's
+/// full DAG, resident (hydrated, via the incrementally-cached in-memory
+/// graph) and cold (via `load_room_nodes` + the slice-6.4 version-keyed
+/// cold cache) alike, unioned with slice 1.3's recent-upload window — is
+/// exactly the protection this collector exists to add, so it calls the
+/// same function and inherits 6.4's caching and every fail-closed rule for
+/// free.
+///
+/// Fail-closed: `collect_global_live_blob_hashes` answers `None` when its
+/// union cannot be proven complete (the backend can't enumerate rooms —
+/// slice 1.1 — or the cold-scan blocking task was lost). Here `None`
+/// becomes `Err`, which fails the whole coordinator run (and, through
+/// `UnionLiveHashCollector`, poisons any union this collector is a member
+/// of): the coordinator equivalent of the legacy sweep's "no delete pass".
+/// Mapping `None` to an empty set instead would tell sweephard that
+/// nothing is live — the exact data-loss shape 1.1 closed.
+pub struct RoomDagLiveHashCollector {
+    rooms: Rooms,
+}
+
+impl RoomDagLiveHashCollector {
+    pub fn new(rooms: Rooms) -> Self {
+        Self { rooms }
+    }
+}
+
+impl crate::gc_service::LiveHashCollector for RoomDagLiveHashCollector {
+    fn collect_live_hashes(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = nodalmerge_gc::GcResult<std::collections::HashSet<String>>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            match self.rooms.collect_global_live_blob_hashes().await {
+                // The inventory keys assets by bare blake3 hex (see
+                // `gc_store::local_key_scheme` and the S3 variant), the same
+                // encoding the studio collector emits — `to_hex` is the whole
+                // translation.
+                Some(live) => Ok(live.iter().map(nodalmerge_core::Hash::to_hex).collect()),
+                None => Err(nodalmerge_gc::GcError::Backend(
+                    "room-DAG live set could not be proven complete (backend cannot \
+                     enumerate rooms, or the cold-room scan task was lost — see the \
+                     preceding blob GC warning); failing the run rather than treating \
+                     the gap as an empty live set"
+                        .to_string(),
+                )),
+            }
+        })
+    }
+}
+
 /// Spawn the background idle-eviction sweeper.
 ///
 /// Wakes every `interval` and calls [`Rooms::sweep_idle`]. `timeout == 0`
@@ -752,8 +1455,16 @@ pub fn spawn_idle_sweeper(
 ///
 /// Wakes every `interval` and calls [`Rooms::sweep_blobs`] with the
 /// configured `grace` window. `interval.is_zero()` disables GC (this
-/// function returns `None`); `grace == ZERO` collapses the two-phase
-/// tombstone protocol into a single-pass delete.
+/// function returns `None`).
+///
+/// **Updated by blob-cas-remediation.md slice 1.4 (finding #5):**
+/// `grace == ZERO` no longer collapses the two-phase tombstone protocol
+/// into a same-call delete — `sweep_blobs` floors what it hands the
+/// backend to [`MIN_PHYSICAL_GRACE`] so a blob's first sighting as
+/// unreferenced always just tombstones. With `grace == ZERO` a tombstone
+/// is still eligible for deletion on the *next* separate sweep call
+/// (effectively immediately, since `MIN_PHYSICAL_GRACE` is sub-millisecond
+/// relative to any real `interval`) — only the same-tick delete is gone.
 ///
 /// Callers can drop the returned `JoinHandle` — aborting the tokio
 /// runtime drops the task.

@@ -19,7 +19,13 @@ name: control-plane-capability-parity
 #                                                 nodalmerge-server and
 #                                                 nodalmerge-jwt-bridge)
 #   server/capability-profile/tests/capcomp_vectors.rs
+#   server/capability-profile/tests/limits_clamp.rs   (hard-ceiling clamp on
+#                                                 profile-supplied limits —
+#                                                 plans/blob-cas-remediation.md
+#                                                 §4.4; runs via the crate-wide
+#                                                 cargo test step below)
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/CapcompParityTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/CapabilityProfileLimitsClampTests.cs
 #   docs/CAPCOMP_PARITY_PLAN.md
 
 on:
@@ -35,6 +41,8 @@ on:
       - "hosts/dotnet/src/NodalMerge.Host.Composition/CapabilityProfileExpander.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/CapcompParityTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/CapabilityProfileLimitsClampTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/CapabilityProfileExpanderTests.cs"
       - ".github/workflows/control-plane-capability-parity.yml"
   pull_request:
     paths:
@@ -47,6 +55,8 @@ on:
       - "hosts/dotnet/src/NodalMerge.Host.Composition/CapabilityProfileExpander.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ControlPlaneCapabilityParityTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/CapcompParityTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/CapabilityProfileLimitsClampTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/CapabilityProfileExpanderTests.cs"
       - ".github/workflows/control-plane-capability-parity.yml"
   workflow_dispatch:
 
@@ -96,3 +106,12 @@ jobs:
 
       - name: Run CAPCOMP vectors against CapabilityProfileExpander
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~CapcompParityTests"
+
+      - name: Run capability-profile limits hard-ceiling clamp tests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~CapabilityProfileLimitsClampTests"
+
+      # Gap found while wiring 4.4 (Phase 8 shape): this pre-existing suite
+      # guards CapabilityProfileExpander (a paths: trigger of this workflow)
+      # but ran in no workflow at all.
+      - name: Run CapabilityProfileExpander unit tests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~CapabilityProfileExpanderTests"

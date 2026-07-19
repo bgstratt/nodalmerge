@@ -86,10 +86,14 @@ where
         let mut delta = GcRunDelta::default();
 
         let live = self.live_hashes.collect_live_hashes()?;
-        for hash in &live {
-            self.inventory.upsert_active_seen(run_id, hash, now)?;
-            delta.marked_count += 1;
-        }
+        // Slice 6.3: one batched call instead of one upsert per hash — a
+        // 100k-hash live set used to mean 100k autocommit transactions on
+        // the SQLite store. Counting semantics unchanged: on success every
+        // hash is marked; on Err the run fails before any sweep phase, same
+        // as a failed per-row upsert did.
+        let hash_refs: Vec<&str> = live.iter().map(String::as_str).collect();
+        self.inventory.upsert_active_seen_batch(run_id, &hash_refs, now)?;
+        delta.marked_count += hash_refs.len() as u64;
 
         if matches!(mode, GcRunMode::DryRun | GcRunMode::MarkOnly) {
             self.runs.apply_delta(run_id, delta.clone())?;

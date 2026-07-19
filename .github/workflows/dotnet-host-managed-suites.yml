@@ -1,0 +1,63 @@
+name: dotnet-host-managed-suites
+
+# C2 (plan: nodalmerge-studio/plans/dotnet-host-readiness.md) — wires the managed
+# (native-FFI-free) NodalMerge.DotNetHost.Tests classes the CI-coverage audit found
+# running in no workflow. Same native-free setup as the dotnet job in
+# blob-layout-parity.yml (setup-dotnet only; these classes never P/Invoke the host FFI —
+# verified locally: the assembly loads and every class here runs green with no native
+# present, exactly as BlobLayoutParityTests/ZstdInteropTests already do in CI).
+#
+# ONE class per `dotnet test` step on purpose — matching the blob-layout-parity dotnet
+# job's convention. It is not cosmetic: several of these classes share process-static
+# state (meter capture; the vector fixtures' auth state) and flake ONLY when multiple
+# classes run parallel in a single test process (e.g. BranchFork006UnauthorizedRejected,
+# RuntimeMessageProcessor's meter-capture dictionary race). One class per process = no
+# cross-class parallelism = reliably green. Each ran 8x solo clean locally.
+#
+# The three *Vectors classes are the .NET sides of the spec-auth, branch-fork and
+# query-materialization parity pairs (C3). Their rust twins are covered by
+# server-core-suites.yml; wiring these closes all three pairs.
+#
+# No paths: filter — the meta-check verifies a step NAMES each class but not that the
+# trigger fires on the right source, so run on every push/PR (suites total < 5s).
+
+on:
+  push:
+  pull_request:
+
+env:
+  DOTNET_VERSION: 10.0.x
+
+jobs:
+  dotnet-host-managed-suites:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Run FileBlobZstdEncodingTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobZstdEncodingTests"
+      - name: Run RuntimeDagPersistenceServiceTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeDagPersistenceServiceTests"
+      - name: Run RuntimeDispatchClosePolicyTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeDispatchClosePolicyTests"
+      - name: Run RuntimeErrorEnvelopeBuilderTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeErrorEnvelopeBuilderTests"
+      - name: Run RuntimeFrameProcessorTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeFrameProcessorTests"
+      - name: Run RuntimeMessageProcessorTests (isolated — meter-capture race flakes only under cross-class parallelism)
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeMessageProcessorTests"
+      - name: Run RuntimeProtocolTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeProtocolTests"
+      - name: Run RuntimeTokenValidationServiceTests
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RuntimeTokenValidationServiceTests"
+      - name: "Run SpecAuthVectorsTests (parity: spec-auth .NET side)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~SpecAuthVectorsTests"
+      - name: "Run BranchForkVectorsTests (parity: branch-fork .NET side; isolated — BranchFork006 flakes only under cross-class parallelism)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BranchForkVectorsTests"
+      - name: "Run QueryMaterializationVectorsTests (parity: query-materialization .NET side)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~QueryMaterializationVectorsTests"

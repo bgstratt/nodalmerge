@@ -1,0 +1,49 @@
+# ci-coverage-baseline.txt — the reviewed allow-list of test suites that are known
+# to run in NO workflow (or are deliberately excluded), consumed by
+# scripts/check-ci-coverage.ps1 (plan: nodalmerge-studio/plans/dotnet-host-readiness.md
+# phase C, executing the deferred Phase 8.1/8.3 of blob-cas-remediation.md).
+#
+# This is the ratchet's shrinking allow-list: every entry here is a gap the audit
+# surfaced that C2 has not yet closed. Each suite either gets wired into a workflow and
+# its line removed, or stays here with a filed reason. The check FAILS if a now-covered
+# or deleted entry is left here, so the list can only shrink.
+#
+# Format: one item id per line, then `# <reason>`. Reason tags:
+#   C2:needs-nothing / C2:needs-ffi / C2:needs-docker — setup class (all now wired
+#   except the entry below); PARITY:<pair> — cross-runtime pair member (all 7 pairs
+#   now fully covered on both runtimes, none remain here).
+#
+# CLOSED by C2 (removed from this file, now covered):
+#   - Rust (server-core-suites.yml): nodalmerge-gc {conformance, fault_injection},
+#     nodalmerge-host-ffi {abi, room_token_ffi}, nodalmerge-server
+#     {archive_portability_vectors, backpressure_lagged, blob_layout_vectors_v3,
+#     branch_fork_vectors, graph_query_routes, idle_eviction, lamport_ceiling,
+#     metrics_endpoint, persistence, rate_limit, spec_auth_vectors, token_expiry}.
+#   - Rust (blob-s3-gc-minio.yml): server blob_url_resolution_minio (real MinIO).
+#   - .NET managed (dotnet-host-managed-suites.yml): FileBlobZstdEncodingTests,
+#     Runtime{DagPersistenceService, DispatchClosePolicy, ErrorEnvelopeBuilder,
+#     FrameProcessor, MessageProcessor, Protocol, TokenValidationService}Tests,
+#     SpecAuthVectorsTests, BranchForkVectorsTests, QueryMaterializationVectorsTests.
+#   - .NET FFI (dotnet-host-ffi-suites.yml): Ffi{Binding, HttpEndpoint, WebSocketEndpoint,
+#     WebSocketLoopRunner}Tests, RuntimeWebSocketEndpointTests,
+#     ChainedBlobStoreProviderHttpIntegrationTests, Provider{Composition, Durability,
+#     HostRestartDurabilityIntegration, ProfileRuntimeIntegration,
+#     ProfileTokenEndpointIntegration}Tests, RoomTokenEmbeddedProviderTests,
+#     Row19AutomatedScenarioHarnessTests, S3DirectChainCompositionTests,
+#     DemoReadinessSmokeTests.
+#   - All 7 parity pairs (C3) now fully covered on both runtimes.
+
+# ---------------------------------------------------------------------------
+# DEFERRED — needs multi-process orchestration, not just a container. Filed follow-up.
+# ---------------------------------------------------------------------------
+# S3DirectMinioEndToEndTests is not a self-contained testcontainers test: it requires a
+# SEPARATELY-LAUNCHED dotnet S3-direct origin host (bound to :7979 with the full
+# NODALMERGE_S3_* config) AND a MinIO bucket, then reads NODALMERGE_TEST_S3DIRECT_ORIGIN_BASEURL
+# to find that origin. With the env unset it prints a message and returns — a vacuous pass
+# (verified: 11ms, no container). Wiring it honestly needs a workflow that stands up MinIO,
+# builds+launches the S3-direct host as a background process, exports the base URL, runs the
+# test, and tears both down. That orchestration can't be validated locally with confidence and
+# is deferred as its own slice (follow-up filed). Until then it stays baselined rather than
+# wired-then-vacuously-green. The rust blob_url_resolution_minio.rs above already gives real
+# MinIO coverage of the same /url + /uploaded routes through the axum router.
+dotnet:NodalMerge.DotNetHost.Tests.S3DirectMinioEndToEndTests                       # C2:needs-docker+host-process (deferred — multi-process orchestration; see note above)

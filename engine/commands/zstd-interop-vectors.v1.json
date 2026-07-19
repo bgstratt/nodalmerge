@@ -1,0 +1,45 @@
+{
+  "$comment": "Cross-runtime zstd interop fixtures (Phase 0 slice 0.1 of nodalmerge-studio/plans/blob-cas-remediation.md, finding #4). Every prior `.zst` fixture/test was same-runtime, which is exactly why finding #4 shipped: .NET's BlobCompression.TryDecompress rejects Rust-encoded frames because they carry no zstd content-size header, and Decompressor.GetDecompressedSize returns only an upper bound (the default window size) for those, not the exact size. These fixtures pin real encoder output from BOTH runtimes so each side's decoder is exercised against the other's actual frames, not its own. Consumed by: server/server/tests/zstd_interop.rs (Rust) and hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs (.NET). Binary fixtures live under fixtures/zstd-interop-v1/, paths below are relative to engine/commands/. If you regenerate a fixture, update decoded_plaintext_len/decoded_plaintext_blake3 here to match — see each fixture's `provenance` for how to reproduce it byte-for-byte.",
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "id": "rust-encode-all-no-size-header",
+      "description": "A normal-size text payload encoded by Rust's zstd::stream::encode_all — the production at-rest encoder used by DirPersistence::persist_blob (store.rs). This is the case that breaks .NET today: the frame has no content-size header, so Decompressor.GetDecompressedSize returns an upper bound (observed: 131072, the default zstd window size) instead of the true 1158-byte size, Unwrap's `written` byte count never equals `buffer.Length`, and BlobCompression.TryDecompress returns null (treated as a corrupt/missing blob).",
+      "producer_runtime": "rust",
+      "producer_encoder": "zstd::stream::encode_all(payload, level=3) — zstd crate 0.13, streams from an io::Read source so no pledged content size is ever recorded in the frame header",
+      "consumer_runtime": "dotnet",
+      "fixture_path": "fixtures/zstd-interop-v1/rust-encode-all-no-size-header.zst",
+      "has_content_size_header": false,
+      "decoded_plaintext_len": 1158,
+      "decoded_plaintext_blake3": "ed2d2e60d78b55bd4dd709946a24d814553f33c76d698082db2dd166094f0cdd",
+      "known_defect": "finding #4 / slice 3.1 (BlobCompression.cs TryDecompress ~:111): sizing the output buffer from GetDecompressedSize's upper bound instead of accepting written <= buffer.Length (or streaming) makes every Rust-produced frame decode as corrupt in .NET today. This fixture is the RED case for the 0.1 .NET test, gated with [Fact(Skip=...)] until 3.1 fixes TryDecompress.",
+      "provenance": "Generated once via a throwaway `#[test]` in server/server/tests/ (deleted after use) that called zstd::stream::encode_all(payload, 3) on the UTF-8 payload 'cross-runtime zstd interop fixture (S0.1): this frame is produced by Rust's zstd::stream::encode_all, which streams from an io::Read source and therefore never writes a pledged content-size header into the frame. A .NET reader that trusts Decompressor.GetDecompressedSize as an exact size (rather than an upper bound) will size its output buffer wrong and reject this frame as corrupt.\\n' repeated 3 times, then wrote the compressed bytes to disk. Re-run the same encode_all call with the same payload/level to regenerate bit-identical output (zstd's encoder is deterministic for a given level/input)."
+    },
+    {
+      "id": "dotnet-compressor-wrap-with-size-header",
+      "description": "A normal-size text payload encoded by .NET's ZstdSharp.Compressor.Wrap — the production at-rest encoder used by FileBlobStoreProvider.PutBlobAsync (and S3DirectBlobStoreProvider's client-side compression). Wrap compresses a full in-memory buffer, so the frame DOES carry an exact content-size header (verified: Decompressor.GetDecompressedSize on this fixture returns exactly 927, the true plaintext length). Rust's zstd::stream::decode_all handles both header shapes today, so this direction is expected to pass without any production change.",
+      "producer_runtime": "dotnet",
+      "producer_encoder": "ZstdSharp.Compressor(level: 3).Wrap(ReadOnlySpan<byte>) — ZstdSharp.Port 0.8.1",
+      "consumer_runtime": "rust",
+      "fixture_path": "fixtures/zstd-interop-v1/dotnet-compressor-wrap-with-size-header.zst",
+      "has_content_size_header": true,
+      "decoded_plaintext_len": 927,
+      "decoded_plaintext_blake3": "5ca399529c5ef74a8b4d7a4aa7e332b13a8621bd1bd8f59f6299ceecba17293e",
+      "known_defect": null,
+      "provenance": "Generated once via a throwaway .NET console app (ZstdSharp.Port 0.8.1 + Blake3 2.2.1 package refs, not committed) that called new Compressor(3).Wrap(payload) on the UTF-8 payload 'cross-runtime zstd interop fixture (S0.1): this frame is produced by .NET's ZstdSharp.Compressor.Wrap, which compresses a full in-memory buffer and therefore DOES write a pledged content-size header into the frame. Rust's zstd::stream::decode_all must decode this the same as any other conformant zstd frame.\\n' repeated 3 times, then wrote the compressed bytes to disk. Re-run the same Wrap call with the same payload/level to regenerate bit-identical output."
+    },
+    {
+      "id": "rust-encode-all-empty-payload",
+      "description": "A zero-length payload encoded by Rust's zstd::stream::encode_all — still a valid, header-less zstd frame (a minimal frame with no data blocks). Included as a distinct edge case: unlike the non-empty no-size-header fixture above, this one happens to decode correctly in .NET TODAY even with the finding #4 bug, because GetDecompressedSize's upper-bound guess for an empty/near-empty frame coincidentally equals the true size (0), so written == buffer.Length holds by accident. This fixture pins that this edge is NOT currently RED, distinguishing 'no content-size header' from 'the .NET bug reproduces' — they are not the same condition.",
+      "producer_runtime": "rust",
+      "producer_encoder": "zstd::stream::encode_all(&[], level=3) — zstd crate 0.13",
+      "consumer_runtime": "dotnet",
+      "fixture_path": "fixtures/zstd-interop-v1/rust-encode-all-empty-payload.zst",
+      "has_content_size_header": false,
+      "decoded_plaintext_len": 0,
+      "decoded_plaintext_blake3": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+      "known_defect": null,
+      "provenance": "Generated in the same throwaway Rust #[test] as rust-encode-all-no-size-header, calling zstd::stream::encode_all(b\"\", 3). Re-run the same call to regenerate bit-identical output."
+    }
+  ]
+}

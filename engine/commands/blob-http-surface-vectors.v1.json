@@ -1,0 +1,170 @@
+{
+  "$comment": "Golden vectors for docs/BLOB_HTTP_SURFACE.md — the GET/HEAD/PUT /blobs/{hash} origin surface. Each vector describes a request against a server whose store is seeded per 'seed' and the response every conformant implementation must produce. body_kind: 'seeded' = the seeded blob's bytes, 'wrong-bytes' = bytes whose BLAKE3 differs from the path hash, 'oversize' = any body exceeding the configured max (harnesses use max_blob_bytes_for_tests), 'none' = empty. Consumed by: hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs (.NET) and server/server/tests/blob_http_surface.rs (Rust). If you change the surface, this file, both harnesses, and docs/BLOB_HTTP_SURFACE.md must move together.",
+  "schema_version": 1,
+  "seed_blob": {
+    "$comment": "Harnesses seed the store with these bytes before running vectors marked seeded:true. Hash is BLAKE3 of the ASCII bytes of seed_content.",
+    "seed_content": "nodalmerge blob http surface vector seed v1",
+    "hash": "computed-by-harness"
+  },
+  "max_blob_bytes_for_tests": 1024,
+  "auth_token_for_tests": "test-blob-token",
+  "vectors": [
+    {
+      "id": "get-found",
+      "method": "GET",
+      "seeded": true,
+      "hash": "seed",
+      "auth": "none",
+      "server_token_configured": false,
+      "expect_status": 200,
+      "expect_headers": {
+        "Content-Type": "application/octet-stream",
+        "ETag": "\"<seed-hash>\""
+      },
+      "expect_body": "seed-bytes"
+    },
+    {
+      "id": "get-missing",
+      "method": "GET",
+      "seeded": false,
+      "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "auth": "none",
+      "server_token_configured": false,
+      "expect_status": 404
+    },
+    {
+      "id": "head-found",
+      "method": "HEAD",
+      "seeded": true,
+      "hash": "seed",
+      "auth": "none",
+      "server_token_configured": false,
+      "expect_status": 200,
+      "expect_body": "empty"
+    },
+    {
+      "id": "head-missing",
+      "method": "HEAD",
+      "seeded": false,
+      "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "auth": "none",
+      "server_token_configured": false,
+      "expect_status": 404,
+      "expect_body": "empty"
+    },
+    {
+      "id": "put-new",
+      "method": "PUT",
+      "seeded": false,
+      "hash": "computed-from-body",
+      "body_kind": "new-content",
+      "body_content": "nodalmerge blob http surface vector put v1",
+      "auth": "none",
+      "server_token_configured": false,
+      "expect_status": 201,
+      "expect_stored": true
+    },
+    {
+      "id": "put-existing-noop",
+      "method": "PUT",
+      "seeded": true,
+      "hash": "seed",
+      "body_kind": "seeded",
+      "auth": "none",
+      "server_token_configured": false,
+      "expect_status": 200,
+      "expect_stored": true
+    },
+    {
+      "id": "put-hash-mismatch",
+      "method": "PUT",
+      "seeded": false,
+      "hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "body_kind": "wrong-bytes",
+      "body_content": "these bytes do not hash to the path hash",
+      "auth": "none",
+      "server_token_configured": false,
+      "expect_status": 422,
+      "expect_stored": false
+    },
+    {
+      "id": "put-oversize",
+      "method": "PUT",
+      "seeded": false,
+      "hash": "computed-from-body",
+      "body_kind": "oversize",
+      "auth": "none",
+      "server_token_configured": false,
+      "expect_status": 413,
+      "expect_stored": false
+    },
+    {
+      "id": "rejects-uppercase-hash",
+      "method": "GET",
+      "seeded": false,
+      "hash": "A123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+      "auth": "none",
+      "server_token_configured": false,
+      "expect_status": 400
+    },
+    {
+      "id": "rejects-short-hash",
+      "method": "GET",
+      "seeded": false,
+      "hash": "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "auth": "none",
+      "server_token_configured": false,
+      "expect_status": 400
+    },
+    {
+      "id": "rejects-suffixed-hash",
+      "method": "GET",
+      "seeded": false,
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.blob",
+      "auth": "none",
+      "server_token_configured": false,
+      "expect_status": 400
+    },
+    {
+      "id": "put-rejects-non-canonical-before-auth-or-body",
+      "$comment": "Non-canonical name is 400 even on PUT with a token configured and no credentials — canonicality is checked first; nothing is stored.",
+      "method": "PUT",
+      "seeded": false,
+      "hash": "not-a-hash",
+      "body_kind": "new-content",
+      "body_content": "irrelevant",
+      "auth": "none",
+      "server_token_configured": true,
+      "expect_status": 400,
+      "expect_stored": false
+    },
+    {
+      "id": "unauthorized-missing-token",
+      "method": "GET",
+      "seeded": true,
+      "hash": "seed",
+      "auth": "none",
+      "server_token_configured": true,
+      "expect_status": 401
+    },
+    {
+      "id": "unauthorized-wrong-token",
+      "method": "GET",
+      "seeded": true,
+      "hash": "seed",
+      "auth": "bearer-wrong",
+      "server_token_configured": true,
+      "expect_status": 401
+    },
+    {
+      "id": "authorized-bearer",
+      "method": "GET",
+      "seeded": true,
+      "hash": "seed",
+      "auth": "bearer-correct",
+      "server_token_configured": true,
+      "expect_status": 200,
+      "expect_body": "seed-bytes"
+    }
+  ]
+}

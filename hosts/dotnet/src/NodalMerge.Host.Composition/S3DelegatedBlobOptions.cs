@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Configuration;
 
 namespace NodalMerge.Host.Composition;
@@ -135,5 +136,52 @@ public sealed record S3DelegatedBlobOptions(
                 $"{SectionName}:DefaultTtlSeconds must be between 1 and 3600"
             );
         }
+    }
+
+    /// <summary>Keys the pre-0.2.0 two-path delegate presign protocol used, removed by this record's migration.</summary>
+    private static readonly string[] RemovedKeys = ["PutPath", "GetPath"];
+
+    /// <summary>
+    /// Slice 4.3 (blob-cas-remediation.md): <c>PutPath</c>/<c>GetPath</c> were
+    /// removed by the presign-protocol-v1 migration this record's own doc
+    /// comment describes — but the options binder
+    /// (<see cref="FromConfiguration"/>) silently drops unknown keys, so old
+    /// config still setting them was ignored with no signal beyond
+    /// <see cref="PresignPath"/> quietly defaulting to
+    /// <c>/v1/blobs/presign</c>, degrading a mis-migrated deployment to the WS
+    /// blob fallback. Warns LOUDLY — names every stale key found and the
+    /// migration to make — rather than hard-failing: plan principle 3 (don't
+    /// brick a running upgrade over stale-but-harmless config). Must read the
+    /// raw <see cref="IConfiguration"/> section directly, past the binder:
+    /// by the time <see cref="Validate"/> runs on the bound
+    /// <see cref="S3DelegatedBlobOptions"/>, these keys are already gone.
+    /// </summary>
+    public static void WarnOnStaleKeys(IConfiguration? configuration)
+    {
+        var section = configuration?.GetSection(SectionName);
+        if (section is null)
+        {
+            return;
+        }
+
+        var stale = RemovedKeys.Where(key => !string.IsNullOrEmpty(section[key])).ToList();
+        if (stale.Count == 0)
+        {
+            return;
+        }
+
+        // This host has no logging abstraction at composition time; Trace is
+        // the ambient channel (matches CapabilityProfileExpander.ClampToCeiling's
+        // precedent) so an operator who never migrated learns it from the log,
+        // not from a silently-degraded deployment.
+        Trace.TraceWarning(
+            $"{SectionName} still sets removed key(s) [{string.Join(", ", stale)}] from the pre-0.2.0 " +
+            "two-path delegate presign protocol; they are silently ignored by the options binder. " +
+            $"Migrate to a single {SectionName}:PresignPath endpoint speaking the v1 presign protocol " +
+            "(one endpoint, `op` in the request body, response `{\"url\": ...}` only — see this " +
+            $"file's doc comment). Until migrated, {SectionName}:PresignPath defaults to " +
+            "/v1/blobs/presign, and a deployment still pointed at the old two-path backend silently " +
+            "degrades to the WS blob fallback."
+        );
     }
 }

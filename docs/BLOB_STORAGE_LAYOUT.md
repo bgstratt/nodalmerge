@@ -1,4 +1,4 @@
-# Blob Storage Layout Contract (v2)
+# Blob Storage Layout Contract (v3)
 
 Canonical, cross-runtime specification for how NodalMerge stores
 content-addressed blobs. Both the Rust server (`DirPersistence`,
@@ -6,6 +6,10 @@ content-addressed blobs. Both the Rust server (`DirPersistence`,
 `S3DelegatedBlobUrlResolverProvider`) implement this contract; the vectors
 in `engine/commands/blob-layout-vectors.v1.json` pin it against drift.
 Rationale and history live in `docs/BLOB_LAYOUT_CONVERGENCE_PLAN.md`.
+
+v3 = v2 + §8 (optional zstd at-rest encoding). A v2 store is a valid v3
+store; a v3 store containing no `.zst` entries is byte-identical to a v2
+store. No migration or marker is required.
 
 ## 1. Content address
 
@@ -142,7 +146,126 @@ The app-side key derivation is `<its own prefix><algorithm>/<hash>` — the
 `room`/`namespace` fields are metadata the app may log or authorize
 against, never key inputs.
 
-## 8. Non-goals of this contract
+### The room-agnostic placeholder (frozen, slice 7.4)
+
+On the **room-agnostic** blob HTTP routes (`GET /blobs/{hash}/url`,
+`POST /blobs/{hash}/uploaded` — `BLOB_HTTP_SURFACE.md` "Blob URL
+resolution") there is no real room, so every host sends the frozen
+placeholder:
+
+```
+room      = "_global"
+namespace = "blobs"     (only for hosts that send the OPTIONAL namespace
+                         field at all — the Rust delegate client omits it
+                         entirely, which remains conformant)
+```
+
+`"_global"` reads as an intentional placeholder, matches the Rust server's
+pre-existing GC-preflight placeholder, and cannot collide with a plausible
+real room id the way `"default"` could. The values are pinned cross-runtime
+by the `delegate_room_id_placeholder` slot of
+`engine/commands/work-unit-status-vectors.v1.json` (reserved by
+blob-cas-remediation slice 0.4, decided by 7.4) and asserted by
+`server/server/tests/blob_url_resolution_vectors.rs` and
+`DelegateRoomPlaceholderVectorTests.cs`. Calls made on behalf of a real
+room (e.g. the WS blob flow's `resolve_get_url(room_id, ...)`) keep
+sending the real room id — the placeholder is only for routes where no
+room exists.
+
+> ⚠ **Change note (2026-07-17, blob-cas-remediation 7.4):** before this
+> freeze the .NET host sent `room="default", namespace="blobs"` on these
+> routes while the Rust server sent `room="_global"`. Since `room` is
+> metadata-only, stored bytes and key derivation were and are unaffected —
+> but a delegate that quotas, audits, or logs per `room` will observe the
+> .NET host's value change from `"default"` to `"_global"`. The .NET
+> host's **legacy** `/sync/blob-url` route is NOT affected: it still
+> forwards caller-supplied `room`/`namespace` (defaults
+> `"default"`/`"assets"`) per its frozen backward-compat contract.
+
+## 8. At-rest content encoding (v3)
+
+A blob with hash `<hex>` exists as **exactly one** of:
+
+```
+<blob_root>/blake3/<hex>          identity encoding: raw bytes; Blake3(these bytes) = <hex>
+<blob_root>/blake3/<hex>.zst      zstd encoding: a single zstd frame; Blake3(DECOMPRESSED bytes) = <hex>
+```
+
+- **Invariant (normative): the hash is always Blake3 of the uncompressed
+  bytes.** Compression is a storage/transport encoding, never an identity
+  change. This is the same rule that keeps any future chunk/delta encoding
+  honest (§1 still holds: the hash is the sole identity).
+- The `.zst` suffix is the only encoding signal. No sidecar metadata files
+  (they break single-file temp+rename atomicity), no `zstd/` subdirectory
+  (breaks one-place-to-look and GC enumeration), and **no content
+  sniffing** (a user's *content* can itself legitimately be a zstd file).
+- Naming rules (§3) amendment: `<64-lowercase-hex>.zst` is **canonical in
+  v3**. Everything else under `blake3/` remains foreign-skip. A v2 reader
+  treats `.zst` entries as foreign and skips them — degraded (the blob
+  appears missing to that reader) but never corrupt and never deleted.
+- If both files exist for one hash (writers never do this), readers prefer
+  the identity file; GC may delete the `.zst` duplicate.
+- Tombstones are keyed by **bare hex** exactly as in §4
+  (`.tombstones/blake3/<hex>`), covering whichever encoding exists. GC
+  strips a `.zst` suffix before parsing an entry name as a hash; the
+  live-set check uses the bare hash.
+- Readers that verify on read verify the **decompressed** bytes. A corrupt
+  frame or a decompressed-hash mismatch is treated as a missing blob
+  (plus a warning), never served.
+  **Contractual exemption (decided 2026-07-16, blob-cas-remediation 3.2,
+  both runtimes):** the HTTP origin's zstd **pass-through** response
+  (`Accept-Encoding: zstd` → the stored frame byte-for-byte, no
+  decode-then-recode) does not — cannot, structurally — verify before
+  serving: the hash is of the plaintext, and checking the frame means the
+  full decompress the pass-through exists to avoid. On that path the
+  fetching client completes the check after decompress (all reference
+  readers do, as of blob-cas-remediation 3.3), so "never served" is an
+  end-to-end property there, not a server-side one. See
+  `BLOB_HTTP_SURFACE.md` "Content encoding" for the normative statement.
+- Writers compress at their discretion; parity does **not** require two
+  stores to hold the same blob under the same encoding. Recommended
+  defaults: compression **on** for server-side durable stores (zstd level
+  3), **off** for peer-local caches (local disk is cheaper than
+  per-materialize CPU). Recommended skip heuristic (guidance, not
+  contract): skip declared compressed-media content types (`image/*`,
+  `video/*`, `audio/*`, `application/zip|gzip|zstd|x-7z*|wasm`); sample
+  the first min(64 KiB, len) and store raw if the sampled ratio > 0.98;
+  never compress blobs < 4096 bytes.
+- S3 stores: the client may compress before upload (discretionary, like any
+  writer above — the reference .NET s3-direct client ships compression
+  **off** by default, opt-in via `S3Direct:Compression = Zstd`, since
+  blob-cas-remediation slice 3.3 / finding #6); key =
+  `<prefix>blake3/<hex>.zst` with a `contentEncoding` object metadata
+  entry. (Seam only until Phase 4 builds it.)
+  **Slice 4.3 clarification (2026-07-15):** the reference presign backend
+  (`nodalmerge-s3-blobs::S3BlobStore::key_for`) always signs
+  `<prefix>blake3/<hex>` — the bare hex key, never a `.zst` variant — for
+  both GET and PUT, regardless of client-side compression; there is no
+  key-selection step. The `.zst`-suffixed-key half of this bullet therefore
+  remains an unbuilt seam. What slice 4.3's client
+  (`S3DirectBlobStoreProvider`) actually does, and what makes the
+  `contentEncoding object metadata entry` half true today: it PUTs to the
+  one bare-hex key with a standard HTTP `Content-Encoding: zstd` request
+  header when it compressed, and reads that same header back verbatim on a
+  later presigned GET — S3-compatible object stores persist and return
+  `Content-Encoding` as object metadata unconditionally (they don't
+  negotiate the way an app server does), so this is sufficient to convey
+  the encoding without any key-suffix scheme. A future change that has the
+  presign backend itself choose between `<hex>` and `<hex>.zst` keys (e.g.
+  to let an operator distinguish encodings by listing the bucket) is still
+  open, and would need presign-time knowledge of whether the upcoming PUT
+  will be compressed.
+- HTTP surface: see `docs/BLOB_HTTP_SURFACE.md` §content-encoding — a
+  server MAY serve stored `.zst` bytes with `Content-Encoding: zstd` when
+  the client advertises `Accept-Encoding: zstd`; the client decompresses
+  **before** hash verification and caching.
+
+Vectors: the `encoding_vectors_v3` and `name_conformance_vectors_v3`
+arrays in `engine/commands/blob-layout-vectors.v1.json` pin the encoded
+path derivation, v3 name-conformance, tombstone keying, and the
+both-files-exist preference. Pre-v3 harnesses ignore those arrays.
+
+## 9. Non-goals of this contract
 
 - It does not require every runtime to support every storage mode (file,
   S3-direct, S3-delegated) — see the convergence plan §2.4 for the current

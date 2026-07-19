@@ -37,9 +37,13 @@ public sealed class RuntimeDagPersistenceService
     private readonly IRuntimeCommandBridge _bridge;
     private readonly ILogger<RuntimeDagPersistenceService> _logger;
     private readonly RuntimeDagCompactionOptions _compactionOptions;
+    private readonly RuntimeSnapshotDebounceOptions _snapshotOptions;
+    private readonly TimeProvider _timeProvider;
     private readonly ConcurrentDictionary<string, Task> _hydrateByRoom =
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Task> _compactionByRoom =
+        new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, RoomSnapshotDebounceState> _snapshotDebounceByRoom =
         new(StringComparer.Ordinal);
 
     public RuntimeDagPersistenceService(
@@ -60,12 +64,32 @@ public sealed class RuntimeDagPersistenceService
         IRuntimeCommandBridge bridge,
         ILogger<RuntimeDagPersistenceService> logger,
         RuntimeDagCompactionOptions compactionOptions
+    ) : this(
+        nodeStore,
+        bridge,
+        logger,
+        compactionOptions,
+        RuntimeSnapshotDebounceOptions.Default,
+        TimeProvider.System
+    )
+    {
+    }
+
+    public RuntimeDagPersistenceService(
+        INodeStoreProvider nodeStore,
+        IRuntimeCommandBridge bridge,
+        ILogger<RuntimeDagPersistenceService> logger,
+        RuntimeDagCompactionOptions compactionOptions,
+        RuntimeSnapshotDebounceOptions snapshotOptions,
+        TimeProvider timeProvider
     )
     {
         _nodeStore = nodeStore;
         _bridge = bridge;
         _logger = logger;
         _compactionOptions = compactionOptions;
+        _snapshotOptions = snapshotOptions;
+        _timeProvider = timeProvider;
     }
 
     public Task HydrateRoomIfNeededAsync(string roomId, CancellationToken cancellationToken = default)
@@ -129,6 +153,118 @@ public sealed class RuntimeDagPersistenceService
         }
     }
 
+    /// <summary>
+    /// Persists a single promoted local-write node as an incremental delta pack — the same
+    /// self-applying single-node pack (<c>HostCommand::MstDone{ids}</c>) the outbound replication
+    /// path already sends to peers — instead of re-serializing the entire room. This is the per-write
+    /// durability primitive under the integration-checkpoint model
+    /// (nodalmerge-studio/plans/room-snapshot-checkpoint-redesign.md): hydration replays these deltas
+    /// on top of the last full checkpoint, and a full-room snapshot is minted only at integration
+    /// points (goal complete / merge to main), never per write. Symmetric to
+    /// <see cref="PersistInboundPackAsync"/>, which persists the identical single-node pack a peer
+    /// receives for the same write.
+    /// </summary>
+    public async ValueTask PersistPromotedNodeDeltaAsync(
+        string roomId,
+        string nodeIdHex,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (string.IsNullOrWhiteSpace(roomId) || string.IsNullOrWhiteSpace(nodeIdHex))
+        {
+            return;
+        }
+
+        try
+        {
+            var nodesB64 = TryExportNodePackB64(roomId, nodeIdHex);
+            if (string.IsNullOrWhiteSpace(nodesB64))
+            {
+                _logger.LogWarning(
+                    "runtime dag delta persist skipped room={Room} node={Node} reason=empty-export",
+                    roomId,
+                    nodeIdHex
+                );
+                return;
+            }
+
+            var payload = Convert.FromBase64String(nodesB64);
+            if (payload.Length == 0)
+            {
+                return;
+            }
+
+            await PersistPackPayloadAsync(roomId, payload, "local-write-delta", cancellationToken);
+        }
+        catch (FormatException)
+        {
+            _logger.LogWarning(
+                "runtime dag delta persist skipped room={Room} node={Node} reason=invalid-base64",
+                roomId,
+                nodeIdHex
+            );
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "runtime dag delta persist failed room={Room} node={Node}", roomId, nodeIdHex);
+        }
+    }
+
+    // Exports exactly the requested node as a self-applying pack (HostCommand::MstDone{ids} =>
+    // graph.get_nodes(&requested)) — the same minimal-delta envelope the outbound replication path
+    // builds for a local write (see RoomPeerClient.BuildPackEnvelopeForIds). Returns the base64 node
+    // bytes, or null on any failure.
+    private string? TryExportNodePackB64(string roomId, string nodeIdHex)
+    {
+        var response = _bridge.ProcessJsonCommand(JsonSerializer.Serialize(new
+        {
+            room_id = roomId,
+            command = new
+            {
+                MstDone = new { ids = new[] { nodeIdHex } }
+            }
+        }));
+        if (response.Status != AsStatus.Ok)
+        {
+            return null;
+        }
+
+        return TryExtractServerPackNodesB64(response.EventsJson);
+    }
+
+    // Pulls the base64 node bytes out of a ServerPackPrepared event (emitted by both
+    // RequestServerPack and MstDone). Shared by the delta-export path above.
+    private static string? TryExtractServerPackNodesB64(string eventsJson)
+    {
+        using var eventsDoc = JsonDocument.Parse(eventsJson);
+        if (eventsDoc.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var eventElement in eventsDoc.RootElement.EnumerateArray())
+        {
+            if (eventElement.ValueKind != JsonValueKind.Object
+                || !eventElement.TryGetProperty("ServerPackPrepared", out var serverPack)
+                || serverPack.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            if (serverPack.TryGetProperty("nodes_b64", out var nodesB64Node)
+                && nodesB64Node.ValueKind == JsonValueKind.String)
+            {
+                var value = nodesB64Node.GetString();
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+        }
+
+        return null;
+    }
+
     public async ValueTask PersistRoomSnapshotAsync(
         string roomId,
         CancellationToken cancellationToken = default
@@ -157,6 +293,92 @@ public sealed class RuntimeDagPersistenceService
         {
             _logger.LogWarning(ex, "runtime dag persist snapshot failed room={Room}", roomId);
         }
+    }
+
+    /// <summary>
+    /// Records a mutation against <paramref name="roomId"/> and persists a full server-pack snapshot
+    /// only when the debounce window trips (at-most-once per <see cref="RuntimeSnapshotDebounceOptions.MaxPendingMutations"/>
+    /// mutations or per <see cref="RuntimeSnapshotDebounceOptions.MinInterval"/> of wall-clock).
+    /// The full-room snapshot is a hydration <em>checkpoint</em>, not the durability log — every inbound
+    /// pack is already persisted incrementally via <see cref="PersistInboundPackAsync"/>, so coalescing
+    /// the checkpoint only lengthens the delta chain replayed on the next hydrate; it never loses data.
+    /// This is what keeps a growing room from being re-serialized on every single mutation (the O(n^2)
+    /// snapshot-on-mutation storm). When debounce is disabled the call snapshots every time (legacy behaviour).
+    /// </summary>
+    public async ValueTask PersistRoomSnapshotDebouncedAsync(
+        string roomId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (string.IsNullOrWhiteSpace(roomId))
+        {
+            return;
+        }
+
+        if (!_snapshotOptions.Enabled)
+        {
+            await PersistRoomSnapshotAsync(roomId, cancellationToken);
+            return;
+        }
+
+        var state = _snapshotDebounceByRoom.GetOrAdd(
+            roomId,
+            _ => new RoomSnapshotDebounceState { LastSnapshotUtc = _timeProvider.GetUtcNow() }
+        );
+
+        bool due;
+        lock (state)
+        {
+            state.PendingMutations += 1;
+            var elapsed = _timeProvider.GetUtcNow() - state.LastSnapshotUtc;
+            due = state.PendingMutations >= _snapshotOptions.MaxPendingMutations
+                || elapsed >= _snapshotOptions.MinInterval;
+            if (due)
+            {
+                state.PendingMutations = 0;
+                state.LastSnapshotUtc = _timeProvider.GetUtcNow();
+            }
+        }
+
+        if (due)
+        {
+            await PersistRoomSnapshotAsync(roomId, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Forces a checkpoint of any mutations accumulated since the last debounced snapshot and resets the
+    /// window. Called on peer disconnect / host shutdown so a room that trailed off mid-window still leaves
+    /// a fresh checkpoint behind for the next hydrate. No-op when nothing is pending. Duplicate server-pack
+    /// payloads are suppressed downstream, so an over-eager flush is cheap.
+    /// </summary>
+    public async ValueTask FlushRoomSnapshotAsync(
+        string roomId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (string.IsNullOrWhiteSpace(roomId))
+        {
+            return;
+        }
+
+        if (_snapshotOptions.Enabled && _snapshotDebounceByRoom.TryGetValue(roomId, out var state))
+        {
+            bool hasPending;
+            lock (state)
+            {
+                hasPending = state.PendingMutations > 0;
+                state.PendingMutations = 0;
+                state.LastSnapshotUtc = _timeProvider.GetUtcNow();
+            }
+
+            if (!hasPending)
+            {
+                return;
+            }
+        }
+
+        await PersistRoomSnapshotAsync(roomId, cancellationToken);
     }
 
     private static string BuildInspectPackEnvelope(string nodesB64)
@@ -876,12 +1098,46 @@ public sealed record RuntimeDagCompactionOptions(
     TimeSpan? RetentionWindow = null
 )
 {
+    // Pruning ON with a 30-minute retention (was: pruning OFF + 7-day window, which meant
+    // compaction created a boundary checkpoint but never deleted the superseded packs, and nothing
+    // was even eligible for a week — so a busy room accumulated every full-room snapshot forever;
+    // see nodalmerge-studio/plans/room-snapshot-checkpoint-redesign.md). Compaction folds packs
+    // older than the window into one boundary checkpoint (the full current server pack, lossless)
+    // and prunes the rest, bounding the persisted delta chain. Retention keeps the recent window so
+    // an in-flight local restart replays only recent deltas. Peer catch-up is unaffected — it reads
+    // the live engine graph, not these persisted packs. Restart-durability is covered by
+    // ProviderHostRestartDurabilityIntegrationTests' prune-then-restart cases.
     public static RuntimeDagCompactionOptions Default { get; } = new(
         Enabled: true,
         MinEligibleNodes: 32,
-        EnablePruning: false,
-        RetentionWindow: null
+        EnablePruning: true,
+        RetentionWindow: TimeSpan.FromMinutes(30)
     );
+}
+
+/// <summary>
+/// Debounce policy for the per-room full server-pack checkpoint (<see cref="RuntimeDagPersistenceService.PersistRoomSnapshotDebouncedAsync"/>).
+/// The checkpoint re-serializes the entire room, so taking it on every mutation is O(n^2) as the room grows.
+/// Because every inbound pack is already persisted incrementally, the checkpoint is only a hydrate accelerator
+/// and is safe to coalesce. Snapshot is taken when EITHER threshold trips, then the window resets.
+/// </summary>
+public sealed record RuntimeSnapshotDebounceOptions(
+    bool Enabled,
+    int MaxPendingMutations,
+    TimeSpan MinInterval
+)
+{
+    public static RuntimeSnapshotDebounceOptions Default { get; } = new(
+        Enabled: true,
+        MaxPendingMutations: 200,
+        MinInterval: TimeSpan.FromSeconds(30)
+    );
+}
+
+internal sealed class RoomSnapshotDebounceState
+{
+    public int PendingMutations;
+    public DateTimeOffset LastSnapshotUtc;
 }
 
 internal sealed record ServerPackSnapshotPayload(byte[] Payload, string? RootHex);

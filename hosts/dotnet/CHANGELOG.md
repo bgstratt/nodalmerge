@@ -4,6 +4,142 @@ All notable changes to the NodalMerge .NET host packages (`NodalMerge.Host.Abstr
 `NodalMerge.Host.Composition`, `NodalMerge.DotNetHost`, `NodalMerge.DotNetHost.Native.win-x64`,
 `NodalMerge.DotNetHost.Native.linux-x64`) are documented here.
 
+## 0.2.5 — 2026-07-18
+
+- **Fixed (root cause): the replicated-room DB grew without bound — a 5 KB repo + one goal
+  produced a 205 MB store.** Measured as 191 retained full-room snapshots (0 → 5 MB each) in one
+  repo room; every studio entity write and every inbound pack re-serialized the whole growing room
+  to a full snapshot. 0.2.4's debounce reduced the *frequency* of one of these triggers but not the
+  fundamental shape. 0.2.5 makes a full-room snapshot an **integration checkpoint**, not a
+  per-write event. See `nodalmerge-studio/plans/room-snapshot-checkpoint-redesign.md`.
+- **Additive: `PersistPromotedNodeDeltaAsync`** — persists a single promoted local-write node as an
+  incremental delta (the same self-applying `MstDone{ids}` single-node pack the outbound replication
+  path already sends peers). This is the per-write durability primitive that replaces re-serializing
+  the whole room on every write; symmetric to `PersistInboundPackAsync` for inbound peer deltas.
+- **Changed: `RuntimeWebSocketLoopRunner` no longer takes a full-room snapshot per inbound pack.**
+  The incremental pack is already persisted one step earlier (`PersistInboundPackAsync`) — that
+  delta is the durability record. Full-room snapshots now come only from integration checkpoints
+  (minted by the studio domain layer on merge-to-main / goal completion) and the disconnect/shutdown
+  flush, which bound the delta chain replayed on the next hydrate. The non-pack mutation path
+  (JS-SDK direct-op apps, never Studio) still snapshots per mutation — it has no incremental persist.
+- **Changed: `RuntimeDagCompactionOptions.Default` now prunes** — `EnablePruning: true` and retention
+  `7 days → 30 min` (was: pruning off + a 7-day window, so compaction created a boundary checkpoint
+  but never deleted the superseded packs and nothing was even eligible for a week). Compaction folds
+  packs older than the window into one lossless boundary checkpoint and prunes the rest. Peer
+  catch-up is unaffected (it reads the live engine graph, not these persisted packs); prune-then-
+  restart durability is covered by `ProviderHostRestartDurabilityIntegrationTests`.
+- **Supersedes** 0.2.4's `PersistRoomSnapshotDebouncedAsync` per-pack call (the method remains but is
+  no longer invoked by the pack path).
+
+## 0.2.4 — 2026-07-18
+
+- **Fixed: snapshot-on-mutation storm — the server-side WebSocket loop re-serialized the
+  entire room to a full hydrate snapshot on *every* applied peer mutation**
+  (`RuntimeWebSocketLoopRunner` → `RuntimeDagPersistenceService`). Because the incremental
+  pack was already persisted a step earlier (`PersistInboundPackAsync`), that per-mutation
+  full-room snapshot was only a hydrate checkpoint, yet its cost grew with the room — so
+  seeding or heavily mutating a large room degraded to O(n²) re-serialization (observed as a
+  flood of `snapshot-on-mutation` persists and stalled seeding on a large repo, plus a peer
+  `studio` room snapshot climbing ~100 KB/mutation in the two-machine test). The pack path now
+  calls the new **`PersistRoomSnapshotDebouncedAsync`**, which coalesces the checkpoint to
+  at-most-once per debounce window; the only cost is a slightly longer delta replay on the next
+  hydrate. On peer disconnect/shutdown the loop **flushes** any pending window
+  (`FlushRoomSnapshotAsync`) so a peer that trailed off mid-window still leaves a fresh
+  checkpoint. Correctness is preserved because the snapshot is a checkpoint and the incremental
+  packs are the authoritative log.
+- **Additive: `RuntimeSnapshotDebounceOptions`** (`Enabled`, `MaxPendingMutations`,
+  `MinInterval`) bound from `NodalMerge:Runtime:Dag:Snapshot`. Defaults: enabled, at-most-once
+  per **200** mutations **or 30 s** of wall-clock, whichever trips first. Hosts that configure
+  nothing get these defaults. `RuntimeDagPersistenceService` gained a trailing constructor
+  parameter for these options plus an injected `TimeProvider` (defaults to
+  `RuntimeSnapshotDebounceOptions.Default` / `TimeProvider.System`); existing constructor calls
+  are unaffected.
+- **Unchanged: the non-pack mutation path** (direct map/list/text/blob ops, used by JS-SDK
+  direct-op apps but never by Studio, which is all-packs) still snapshots per mutation on
+  purpose — it has no incremental persist, so its snapshot is the sole durability for those
+  callers.
+
+## 0.2.3 — 2026-07-17
+
+- **Fixed: `FileBlobStoreProvider` legacy-layout migration parity with Rust's slice-5.1
+  semantics** (`NodalMerge.Host.Composition`). The dedupe branch now BLAKE3-verifies the
+  destination before dropping a legacy duplicate: a corrupt or partial destination is repaired
+  from the already-verified legacy bytes (write-temp-then-atomic-replace, never leaving a window
+  with no good copy on disk) instead of deleting the only good copy. The `.layout-v2` completion
+  marker is written only on a fully clean pass — a transient read failure leaves the file in
+  place to be retried on the next construction, and a genuinely corrupt entry is quarantined
+  with the marker deferred so the next boot re-scans. Previously the dedupe branch deleted the
+  legacy copy without checking the destination, and the marker was written unconditionally, so a
+  transient failure could strand a file's migration permanently.
+- **Changed: `IInboundPackObserver` invocation moved off the WebSocket receive loop**
+  (slice 6.5, nodalmerge-studio/plans/blob-cas-remediation.md). Since 0.2.2 the hook was
+  awaited inline in `RuntimeWebSocketLoopRunner`'s receive loop — the per-observer try/catch
+  isolated exceptions but not latency, so a slow or hung observer stalled every further frame
+  (and relay) on that connection. Observers are now notified through a per-connection bounded
+  FIFO queue with its own worker: per-connection receive order and sequential (registration-
+  order) invocation are preserved; each call gets its own timeout (default 30s) independent of
+  connection teardown; a full queue (default capacity 512) drops the OLDEST notification with a
+  warning + `runtime_ws_inbound_pack_observer_dropped_total` counter (the newest notification
+  always survives — the hook is advisory and fires only after persistence has completed).
+  Behavioral note for observer implementations: `OnInboundPackAppliedAsync` no longer runs
+  before the next frame is processed, and its token is the dispatcher's per-call timeout, not
+  the connection's lifetime. The `IInboundPackObserver` interface itself is UNCHANGED.
+- **Additive: `RuntimeInboundPackObserverDispatchOptions`** (queue capacity / observer timeout /
+  teardown drain grace) via a new optional trailing constructor parameter on
+  `RuntimeWebSocketLoopRunner`. All existing constructors and `RunAsync` overloads are unchanged;
+  hosts that register nothing get the defaults above. New metrics:
+  `runtime_ws_inbound_pack_observer_dropped_total`,
+  `runtime_ws_inbound_pack_observer_timeout_total`.
+- **Fixed: legacy `/sync/blob-url` (+ `/api/sync/blob-url`) compat regression, introduced
+  during the 0.2.0 blob-layout-convergence work and never disclosed here.** Between the
+  0.2.0 entry below and this release, an internal refactor (slice S4.1, adding the new
+  frozen `GET /blobs/{hash}/url` contract) silently turned this pre-existing route — which
+  shipped on `main` and predates 0.2.0 — into a thin alias of the new route, changing its
+  response shape and status codes without a corresponding disclosure here. Concretely, the
+  legacy route had started: emitting `expiresAtUtc` (ISO-8601) instead of its original
+  `expiresAt` (unix seconds); answering `501` instead of `404` when no presign-capable
+  backend is configured; and rejecting non-canonical/malformed hashes with `400`, which the
+  original route never did (it accepts any non-empty hash, anonymously, and always did).
+  This release restores the route's original, pre-0.2.0 behavior exactly (see
+  `docs/BLOB_HTTP_SURFACE.md`'s "Status and what's deferred" section for the full
+  before/after) — no config or client change required for existing pre-S4.1 callers.
+  The new `GET /blobs/{hash}/url` contract (introduced by S4.1, unaffected by this fix)
+  keeps its frozen shape.
+- **Additive: `BlobHttpOptions.Validate()`.** A non-positive `MaxBlobBytes` now fails fast
+  at startup with a clear `InvalidOperationException` instead of throwing an unhandled
+  `ArgumentOutOfRangeException` on the first chunked PUT (negative) or silently rejecting
+  every PUT with 413 (zero).
+- **Fixed: a reverse-proxy path prefix in `RemoteBlobOriginOptions:BaseUrl` (e.g.
+  `https://host/nodalmerge`) was silently dropped from every request
+  `HttpRemoteBlobStoreProvider`/`S3DirectBlobStoreProvider` sent** (they always hit
+  `/blobs/{hash}` at the bare host instead of `/nodalmerge/blobs/{hash}`). Deployments
+  behind a path-prefixed reverse proxy for the `ChainedRemote` blob provider were affected;
+  an unprefixed `BaseUrl` is unaffected.
+- **Additive: a startup warning (not a hard failure) when `S3DelegatedBlobOptions` config
+  still sets the removed `PutPath`/`GetPath` keys** from the pre-0.2.0 two-path delegate
+  presign protocol. These keys have been silently ignored by the options binder since the
+  0.2.0 presign-protocol-v1 migration below; a deployment that never migrated its config
+  degraded to the WS blob fallback with only a generic warning. Now names the exact stale
+  keys and the migration to make.
+
+## 0.2.2 — 2026-07-16
+
+- **Additive: `IInboundPackObserver` hook** (`NodalMerge.Host.Abstractions.Providers`). Invoked
+  after engine import + persistence succeed for a genuinely peer-authored inbound `"pack"`
+  message on the server-side WebSocket path (`RuntimeWebSocketLoopRunner`, a peer connected to
+  this host's `/ws/{room}` endpoint) — never for this host's own outbound/rebroadcast pack
+  traffic. Resolved via DI as `IEnumerable<IInboundPackObserver>` through a new
+  `RuntimeWebSocketLoopRunner` constructor overload; zero registered observers (today's default)
+  reproduces prior behavior exactly. A throwing observer is caught and logged per-observer and
+  never breaks the WS loop or the pack's already-completed persistence. No breaking changes: all
+  existing public constructors and `RunAsync` overload signatures are unchanged.
+
+## 0.2.1
+
+- Local package bump carried the new host surface plus real win-x64/linux-x64 native runtimes
+  (see 0.2.0 below for the blob-storage-layout convergence it built on). No `NodalMerge.DotNetHost`
+  public API changes recorded against 0.2.0 at this revision.
+
 ## 0.2.0 — 2026-07-06
 
 - **Breaking: blob storage layout convergence.** File and S3 blob stores on

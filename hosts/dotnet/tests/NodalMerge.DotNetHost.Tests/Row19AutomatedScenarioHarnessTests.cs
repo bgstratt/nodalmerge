@@ -1,3 +1,4 @@
+using Blake3;
 using NodalMerge.DotNetHost.Ffi;
 using NodalMerge.DotNetHost.Runtime;
 using NodalMerge.Host.Abstractions.Providers;
@@ -270,8 +271,10 @@ public sealed class Row19AutomatedScenarioHarnessTests
         Directory.CreateDirectory(tempRoot);
 
         var configuration = BuildSqliteFileConfiguration(dbPath, blobRoot);
-        var blobHash = "sha256:row19-asset-9804";
+        // Slice 3.2 added BLAKE3 verify-on-read to the identity path, so the
+        // key must be the real content hash, not a fabricated placeholder.
         var payload = System.Text.Encoding.UTF8.GetBytes($"asset::{trace.TraceId}::v1");
+        var blobHash = Hasher.Hash(payload).ToString();
 
         await using (var provider = BuildProvider(configuration))
         {

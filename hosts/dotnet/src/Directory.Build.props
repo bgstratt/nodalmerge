@@ -1,0 +1,16 @@
+<Project>
+
+  <!-- Packaging metadata shared by all five NodalMerge .NET host packages
+       (Abstractions, Composition, DotNetHost, Native.win-x64, Native.linux-x64).
+       Kept version-agnostic on purpose so it never goes stale between releases:
+       per-version detail lives in CHANGELOG.md, which is shipped inside each
+       package and linked from the release notes. -->
+  <PropertyGroup>
+    <PackageReleaseNotes>Changelog (all versions) is included in this package as CHANGELOG.md and published at https://github.com/bgstratt/nodalmerge/blob/main/hosts/dotnet/CHANGELOG.md</PackageReleaseNotes>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <None Include="$(MSBuildThisFileDirectory)..\CHANGELOG.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+</Project>

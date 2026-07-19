@@ -1,11 +1,16 @@
+using Blake3;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NodalMerge.DotNetHost.Ffi;
 using NodalMerge.DotNetHost.Runtime;
+using NodalMerge.Host.Abstractions;
 using NodalMerge.Host.Abstractions.Providers;
 using NodalMerge.Host.Composition;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Serialization;
 
 namespace NodalMerge.DotNetHost;
@@ -35,6 +40,21 @@ public static class WebApplicationExtensions
         public string? Op { get; init; }
         public string? Room { get; init; }
         public string? Namespace { get; init; }
+        [JsonPropertyName("contentType")]
+        public string? ContentType { get; init; }
+        public long? Size { get; init; }
+    }
+
+    /// <summary>
+    /// Query-string shape for the frozen <c>GET /blobs/{hash}/url</c> contract
+    /// (docs/BLOB_HTTP_SURFACE.md "Blob URL resolution"): <c>op</c>, and
+    /// <c>size</c>/<c>contentType</c> for <c>op=put</c>. No room/namespace —
+    /// this surface is the global CAS, not the legacy per-room
+    /// <c>/sync/blob-url</c> query shape.
+    /// </summary>
+    private sealed class BlobUrlOpQuery
+    {
+        public string? Op { get; init; }
         [JsonPropertyName("contentType")]
         public string? ContentType { get; init; }
         public long? Size { get; init; }
@@ -243,6 +263,16 @@ public static class WebApplicationExtensions
 
         EmitAuthReadinessChecks(app.Services, providerOptions, startupLogger);
 
+        // Blob origin surface (docs/BLOB_HTTP_SURFACE.md, slice S2.1a): bound once
+        // here and closed over by the handlers below, per that doc's guidance that
+        // this doesn't need to be a DI service. Declared before first use since
+        // the URL-resolution routes (slice S4.1) close over it too. The legacy
+        // /sync/blob-url alias does NOT — slice 4.1 (blob-cas-remediation.md,
+        // finding #12) restored its pre-existing `main` behavior, which never
+        // consulted this options object at all (no hash-shape check, no auth).
+        var blobHttpOptions = BlobHttpOptions.FromConfiguration(app.Configuration);
+        blobHttpOptions.Validate();
+
         app.MapGet("/", () => Results.Ok(new
         {
             service = "nodalmerge-dotnet-host",
@@ -284,8 +314,63 @@ public static class WebApplicationExtensions
         app.MapPost("/api/sync/token", HandleTokenMintAsync);
         app.MapPost("/sync/token/validate", HandleTokenValidateAsync);
         app.MapPost("/api/sync/token/validate", HandleTokenValidateAsync);
-        app.MapGet("/sync/blob-url", HandleBlobUrlAsync);
-        app.MapGet("/api/sync/blob-url", HandleBlobUrlAsync);
+
+        // Legacy blob-url resolver — shipped on `main` in 0.2.0, BEFORE the
+        // frozen GET /blobs/{hash}/url contract (slice S4.1) existed. Slice
+        // 4.1 (blob-cas-remediation.md, finding #12) restored `main`'s exact
+        // behavior here after it silently regressed: `main` returned
+        // `expiresAt` as unix seconds (not `expiresAtUtc` ISO-8601), answered
+        // 404 for "no backend" (not 501), and never validated the hash shape
+        // or checked auth at all (any non-empty hash, anonymous, always — see
+        // HandleLegacyBlobUrlAsync). This is now a DELIBERATELY DIFFERENT
+        // response shape/status/auth posture from the new route below, not an
+        // alias of it — do not "fix" it to match /blobs/{hash}/url again.
+        app.MapGet("/sync/blob-url", HandleLegacyBlobUrlAsync);
+        app.MapGet("/api/sync/blob-url", HandleLegacyBlobUrlAsync);
+
+        app.MapGet("/blobs/{hash}", (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobGetAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+        app.MapGet("/api/blobs/{hash}", (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobGetAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+
+        app.MapMethods("/blobs/{hash}", ["HEAD"], (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobHeadAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+        app.MapMethods("/api/blobs/{hash}", ["HEAD"], (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobHeadAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+
+        app.MapPut("/blobs/{hash}", (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobPutAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+        app.MapPut("/api/blobs/{hash}", (HttpContext context, string hash, IBlobStoreProvider blobStore, CancellationToken cancellationToken) =>
+            HandleBlobPutAsync(context, hash, blobStore, blobHttpOptions, cancellationToken));
+
+        // Blob URL resolution (docs/BLOB_HTTP_SURFACE.md "Blob URL
+        // resolution (optional capability)", slice S4.1). Frozen shape:
+        // GET /blobs/{hash}/url?op=get|put[&size=&contentType=] ->
+        // 200 {"url":..., "expiresAtUtc":...} | 501 (no backend) | 400
+        // (malformed hash).
+        // Slice 7.4 (blob-cas-remediation.md): these room-agnostic routes
+        // pass the FROZEN delegate-protocol placeholder pair — previously a
+        // literal "default"/"blobs" here while the Rust host sent "_global",
+        // so a delegate keying policy/quota/audit on the (metadata-only)
+        // room field saw different per-host values. Pinned cross-runtime by
+        // the delegate_room_id_placeholder slot of
+        // engine/commands/work-unit-status-vectors.v1.json
+        // (DelegateRoomPlaceholderVectorTests). The legacy /sync/blob-url
+        // route keeps its own caller-supplied values + "default"/"assets"
+        // defaults — see HandleLegacyBlobUrlAsync.
+        app.MapGet("/blobs/{hash}/url", (HttpContext context, string hash, [AsParameters] BlobUrlOpQuery query, CancellationToken cancellationToken) =>
+            HandleBlobUrlResolveAsync(context, hash, query.Op, query.Size, query.ContentType, DelegatePresignProtocol.GlobalRoomPlaceholder, DelegatePresignProtocol.GlobalRoomNamespace, blobHttpOptions, cancellationToken));
+        app.MapGet("/api/blobs/{hash}/url", (HttpContext context, string hash, [AsParameters] BlobUrlOpQuery query, CancellationToken cancellationToken) =>
+            HandleBlobUrlResolveAsync(context, hash, query.Op, query.Size, query.ContentType, DelegatePresignProtocol.GlobalRoomPlaceholder, DelegatePresignProtocol.GlobalRoomNamespace, blobHttpOptions, cancellationToken));
+
+        // Upload confirmation (docs/BLOB_HTTP_SURFACE.md, same section).
+        // The .NET host has no bucket visibility today, so it takes the
+        // MAY-accept branch: 200 once a resolver is registered, 501
+        // otherwise, 400 on malformed hash.
+        app.MapPost("/blobs/{hash}/uploaded", (HttpContext context, string hash) =>
+            HandleBlobUploadedConfirmAsync(context, hash, blobHttpOptions));
+        app.MapPost("/api/blobs/{hash}/uploaded", (HttpContext context, string hash) =>
+            HandleBlobUploadedConfirmAsync(context, hash, blobHttpOptions));
 
         app.MapPost("/ffi/submit", async (HttpRequest request, IFfiHttpBridge ffi) =>
         {
@@ -482,15 +567,61 @@ public static class WebApplicationExtensions
         }
     }
 
-    private static async Task<IResult> HandleBlobUrlAsync(
+    /// <summary>
+    /// <c>GET /sync/blob-url</c> + <c>GET /api/sync/blob-url</c> — the legacy
+    /// blob URL resolver that shipped on <c>main</c> in 0.2.0, restored to
+    /// `main`'s exact behavior by slice 4.1 (blob-cas-remediation.md, finding
+    /// #12) after a later refactor (S4.1's frozen-contract slice) silently
+    /// turned it into a thin alias of <see cref="HandleBlobUrlResolveAsync"/>
+    /// with a different response shape, different status codes, and new
+    /// validation `main` never had. Ground truth is `main`'s own
+    /// <c>HandleBlobUrlAsync</c> (git history, pre-blobExpansion
+    /// WebApplicationExtensions.cs), reproduced verbatim here:
+    /// <list type="bullet">
+    /// <item>NO hash-shape validation and NO auth check — any non-empty hash
+    /// is accepted from anyone. This route never consults
+    /// <see cref="BlobHttpOptions"/> at all.</item>
+    /// <item><c>hash</c> empty/whitespace -&gt; 400 <c>{"error":"hash is
+    /// required"}</c> (distinct wording from the new route's "non-canonical
+    /// hash").</item>
+    /// <item><c>op=put</c> with a missing/non-positive <c>size</c> -&gt; 400
+    /// <c>{"error":"size must be a positive integer for op=put"}</c>.</item>
+    /// <item>anything other than <c>op=get</c>/<c>op=put</c> -&gt; 400
+    /// <c>{"error":"op must be 'get' or 'put'"}</c>.</item>
+    /// <item>the resolver answering "no presign-capable backend" (a
+    /// registered resolver returning <c>null</c>, e.g. the WsOnly/File
+    /// compositions) -&gt; <b>404</b>, NOT 501.</item>
+    /// <item>success -&gt; 200 <c>{"url":..., "expiresAt": &lt;unix
+    /// seconds&gt;}</c> — NOT <c>expiresAtUtc</c> ISO-8601.</item>
+    /// </list>
+    /// <c>room</c>/<c>namespace</c> query parameters (defaulting to
+    /// <c>"default"</c>/<c>"assets"</c>) are the one part of this surface that
+    /// predates and differs from the new route, kept for backward
+    /// compatibility with pre-S4.1 callers.
+    ///
+    /// Resolves <see cref="IBlobUrlResolverProvider"/> via
+    /// <c>context.RequestServices.GetRequiredService</c> rather than taking it
+    /// as a direct route-handler parameter (which is what `main` did): a
+    /// complex-typed parameter minimal API can't prove is a registered
+    /// service at endpoint-metadata-build time gets inferred as [FromBody],
+    /// which then throws for a GET route the moment ANY endpoint in the app
+    /// is first matched — including in test hosts that (legitimately) don't
+    /// register this service for an unrelated scenario. Runtime behavior is
+    /// unchanged: still throws (surfacing as an unhandled-exception 500) when
+    /// no resolver is registered, exactly like `main`'s direct injection did.
+    /// </summary>
+    private static async Task<IResult> HandleLegacyBlobUrlAsync(
+        HttpContext context,
         [AsParameters] BlobUrlQuery query,
-        IBlobUrlResolverProvider resolver,
         CancellationToken cancellationToken
     )
     {
         if (string.IsNullOrWhiteSpace(query.Hash))
+        {
             return Results.BadRequest(new { error = "hash is required" });
+        }
 
+        var resolver = context.RequestServices.GetRequiredService<IBlobUrlResolverProvider>();
         var room = string.IsNullOrWhiteSpace(query.Room) ? "default" : query.Room;
         var scope = string.IsNullOrWhiteSpace(query.Namespace) ? "assets" : query.Namespace;
         var op = (query.Op ?? string.Empty).Trim().ToLowerInvariant();
@@ -498,39 +629,493 @@ public static class WebApplicationExtensions
         if (op == "put")
         {
             if (query.Size is null || query.Size <= 0)
+            {
                 return Results.BadRequest(new { error = "size must be a positive integer for op=put" });
+            }
 
-            var url = await resolver.ResolvePutUrlAsync(
+            var putUrl = await resolver.ResolvePutUrlAsync(
                 new BlobPutUrlRequest(room, scope, query.Hash, query.Size.Value, query.ContentType),
                 cancellationToken
             );
 
-            if (url is null) return Results.StatusCode(StatusCodes.Status404NotFound);
+            if (putUrl is null)
+            {
+                return Results.StatusCode(StatusCodes.Status404NotFound);
+            }
 
             return Results.Ok(new
             {
-                url = url.Url,
-                expiresAt = url.ExpiresAtUtc.ToUnixTimeSeconds()
+                url = putUrl.Url,
+                expiresAt = putUrl.ExpiresAtUtc.ToUnixTimeSeconds()
             });
         }
 
         if (op == "get")
         {
-            var url = await resolver.ResolveGetUrlAsync(
+            var getUrl = await resolver.ResolveGetUrlAsync(
                 new BlobGetUrlRequest(room, scope, query.Hash),
                 cancellationToken
             );
 
-            if (url is null) return Results.StatusCode(StatusCodes.Status404NotFound);
+            if (getUrl is null)
+            {
+                return Results.StatusCode(StatusCodes.Status404NotFound);
+            }
 
             return Results.Ok(new
             {
-                url = url.Url,
-                expiresAt = url.ExpiresAtUtc.ToUnixTimeSeconds()
+                url = getUrl.Url,
+                expiresAt = getUrl.ExpiresAtUtc.ToUnixTimeSeconds()
             });
         }
 
         return Results.BadRequest(new { error = "op must be 'get' or 'put'" });
+    }
+
+    /// <summary>
+    /// <c>GET /blobs/{hash}/url?op=get|put[&amp;size=&amp;contentType=]</c> —
+    /// the frozen URL-resolution contract (docs/BLOB_HTTP_SURFACE.md "Blob URL
+    /// resolution (optional capability)", slice S4.1). NOT shared with the
+    /// legacy <c>/sync/blob-url</c> route as of slice 4.1
+    /// (blob-cas-remediation.md, finding #12) — that route was restored to
+    /// `main`'s pre-existing, differently-shaped behavior
+    /// (<see cref="HandleLegacyBlobUrlAsync"/>) and must not be routed through
+    /// here again.
+    /// </summary>
+    private static async Task<IResult> HandleBlobUrlResolveAsync(
+        HttpContext context,
+        string hash,
+        string? opRaw,
+        long? size,
+        string? contentType,
+        string room,
+        string ns,
+        BlobHttpOptions options,
+        CancellationToken cancellationToken)
+    {
+        var (validationStatus, validationError) = ValidateBlobRequest(context, hash, options);
+        if (validationStatus != StatusCodes.Status200OK)
+        {
+            return Results.Json(new { error = validationError }, statusCode: validationStatus);
+        }
+
+        var op = (opRaw ?? string.Empty).Trim().ToLowerInvariant();
+        if (op != "get" && op != "put")
+        {
+            return Results.Json(new { error = "op must be 'get' or 'put'" }, statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (op == "put" && (size is null || size <= 0))
+        {
+            return Results.Json(
+                new { error = "size must be a positive integer for op=put" },
+                statusCode: StatusCodes.Status400BadRequest
+            );
+        }
+
+        // A missing resolver and a resolver that returns null (no
+        // presign-capable backend behind it — e.g. the WsOnly/File
+        // compositions' always-null stub) are both "no delegated backend
+        // configured" and both surface as 501; the frozen contract doesn't
+        // require distinguishing them (docs/BLOB_HTTP_SURFACE.md).
+        var resolver = context.RequestServices.GetService<IBlobUrlResolverProvider>();
+        if (resolver is null)
+        {
+            return Results.StatusCode(StatusCodes.Status501NotImplemented);
+        }
+
+        var url = op == "put"
+            ? await resolver.ResolvePutUrlAsync(
+                new BlobPutUrlRequest(room, ns, hash, size ?? 0, contentType),
+                cancellationToken)
+            : await resolver.ResolveGetUrlAsync(
+                new BlobGetUrlRequest(room, ns, hash),
+                cancellationToken);
+
+        if (url is null)
+        {
+            return Results.StatusCode(StatusCodes.Status501NotImplemented);
+        }
+
+        return Results.Ok(new
+        {
+            url = url.Url,
+            expiresAtUtc = url.ExpiresAtUtc.UtcDateTime.ToString("o")
+        });
+    }
+
+    /// <summary>
+    /// <c>POST /blobs/{hash}/uploaded</c> — upload confirmation
+    /// (docs/BLOB_HTTP_SURFACE.md "Blob URL resolution (optional
+    /// capability)", slice S4.1). The .NET host has no bucket visibility
+    /// today (<see cref="IBlobUrlResolverProvider"/> has no HEAD/verify
+    /// hook), so it takes the contract's MAY-accept branch: accept without
+    /// verification once a resolver is registered, mirroring the Rust
+    /// delegate auth mode's <c>verify_uploaded</c> default of <c>Ok(())</c>
+    /// (see docs/delegated-storage-gc.md's Uploading -&gt; Active lifecycle).
+    /// </summary>
+    private static IResult HandleBlobUploadedConfirmAsync(
+        HttpContext context,
+        string hash,
+        BlobHttpOptions options)
+    {
+        var (validationStatus, validationError) = ValidateBlobRequest(context, hash, options);
+        if (validationStatus != StatusCodes.Status200OK)
+        {
+            return Results.Json(new { error = validationError }, statusCode: validationStatus);
+        }
+
+        var resolver = context.RequestServices.GetService<IBlobUrlResolverProvider>();
+        if (resolver is null)
+        {
+            return Results.StatusCode(StatusCodes.Status501NotImplemented);
+        }
+
+        return Results.Ok(new { accepted = true });
+    }
+
+    // -- Blob origin surface (docs/BLOB_HTTP_SURFACE.md) ---------------------
+
+    private static async Task<IResult> HandleBlobGetAsync(
+        HttpContext context,
+        string hash,
+        IBlobStoreProvider blobStore,
+        BlobHttpOptions options,
+        CancellationToken cancellationToken)
+    {
+        var (validationStatus, validationError) = ValidateBlobRequest(context, hash, options);
+        if (validationStatus != StatusCodes.Status200OK)
+        {
+            return Results.Json(new { error = validationError }, statusCode: validationStatus);
+        }
+
+        // Content encoding (reserved v1.1, docs/BLOB_HTTP_SURFACE.md): serve
+        // the stored zstd frame as-is — no recompress-on-serve — when the
+        // client asked for it and the store can produce it directly.
+        if (AcceptsZstdEncoding(context) && blobStore is IEncodedBlobSource encodedSource)
+        {
+            var encoded = await encodedSource.TryGetEncodedBlobAsync(hash, cancellationToken);
+            if (encoded.Found && string.Equals(encoded.ContentEncoding, "zstd", StringComparison.Ordinal))
+            {
+                context.Response.Headers["ETag"] = $"\"{hash}\"";
+                context.Response.Headers["Content-Encoding"] = "zstd";
+                return Results.File(encoded.Bytes!, "application/octet-stream");
+            }
+        }
+
+        var (status, bytes, error) = await ResolveBlobReadAsync(context, hash, blobStore, options, cancellationToken);
+        if (status != StatusCodes.Status200OK)
+        {
+            return Results.Json(new { error }, statusCode: status);
+        }
+
+        context.Response.Headers["ETag"] = $"\"{hash}\"";
+        return Results.File(bytes!, "application/octet-stream");
+    }
+
+    /// <summary>
+    /// True when the request's <c>Accept-Encoding</c> header lists
+    /// <c>zstd</c> as one of its comma-separated codings AND that coding is
+    /// not refused by its own <c>q=0</c> parameter (slice 3.4,
+    /// blob-cas-remediation.md: "Accept-Encoding: zstd;q=0 treated as
+    /// accept (both hosts)"). Mirrors the Rust reference's
+    /// <c>accepts_zstd</c>/<c>coding_accepts_zstd</c> (<c>blob_http.rs</c>).
+    /// Only the <c>q=0</c> refusal is honored — a nonzero <c>q</c> or no
+    /// <c>q</c> at all keeps the pre-3.4 accept-if-mentioned behavior; this
+    /// is a MAY-serve optimization, not full qvalue-preference ordering.
+    /// </summary>
+    private static bool AcceptsZstdEncoding(HttpContext context)
+    {
+        var header = context.Request.Headers.AcceptEncoding.ToString();
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return false;
+        }
+
+        foreach (var rawToken in header.Split(','))
+        {
+            if (CodingAcceptsZstd(rawToken))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether one <c>Accept-Encoding</c> list element (e.g. <c>"zstd;q=0"</c>,
+    /// <c>" gzip "</c>) names <c>zstd</c> and is not refused by that same
+    /// element's own <c>q=0</c> parameter. Parameters are per-coding —
+    /// <c>"gzip;q=0, zstd"</c> must still accept zstd; <c>gzip</c>'s
+    /// <c>q=0</c> must not leak onto the next token.
+    /// </summary>
+    private static bool CodingAcceptsZstd(string rawToken)
+    {
+        var token = rawToken.AsSpan();
+        var semicolon = token.IndexOf(';');
+        var name = (semicolon >= 0 ? token[..semicolon] : token).Trim();
+        if (!name.Equals("zstd", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        if (semicolon < 0)
+        {
+            return true;
+        }
+
+        foreach (var rawParam in token[(semicolon + 1)..].ToString().Split(';'))
+        {
+            var param = rawParam.AsSpan().Trim();
+            var eq = param.IndexOf('=');
+            if (eq < 0)
+            {
+                continue;
+            }
+            var key = param[..eq].Trim();
+            var value = param[(eq + 1)..].Trim();
+            if (key.Equals("q", StringComparison.OrdinalIgnoreCase) && IsQValueZero(value))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// RFC 9110 qvalue syntax is <c>( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )</c>.
+    /// Recognizes every all-zero spelling of the zero branch — <c>0</c>,
+    /// <c>0.</c>, <c>0.0</c>, <c>0.00</c>, <c>0.000</c> — and nothing else (a
+    /// malformed or &gt;3-decimal value is treated as "not q=0", i.e.
+    /// accepted; this only needs to catch refusal, not validate the header).
+    /// </summary>
+    private static bool IsQValueZero(ReadOnlySpan<char> value)
+    {
+        if (value.SequenceEqual("0"))
+        {
+            return true;
+        }
+        if (value.Length >= 2 && value[0] == '0' && value[1] == '.')
+        {
+            var rest = value[2..];
+            if (rest.Length > 3)
+            {
+                return false;
+            }
+            foreach (var c in rest)
+            {
+                if (c != '0')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// HEAD /blobs/{hash} (docs/BLOB_HTTP_SURFACE.md: "Exists for cheap
+    /// existence checks"). Slice 2.1 — deliberately NOT a thin wrapper around
+    /// <see cref="ResolveBlobReadAsync"/>/<c>TryGetBlobAsync</c> anymore: that
+    /// forced a full remote download + BLAKE3 verify + local write-back under
+    /// ChainedRemote/S3Direct just to answer "does this exist?". Answers via
+    /// <see cref="IBlobStoreProvider.ExistsAsync"/> instead, mirroring the
+    /// Rust reference's <c>head_blob</c> (<c>blob_http.rs:256</c>), which
+    /// answers via <c>has_blob</c> rather than <c>get_blob</c> for the same
+    /// reason.
+    ///
+    /// Also matches Rust in NOT setting <c>Content-Length</c>: <c>head_blob</c>
+    /// only ever sets <c>Content-Type</c> + <c>ETag</c> on 200 (never
+    /// Content-Length), and the frozen golden vector <c>head-found</c>
+    /// (engine/commands/blob-http-surface-vectors.v1.json) doesn't require
+    /// one either. Reporting an accurate Content-Length would require reading
+    /// (and, for a zstd-encoded blob, decompressing) the bytes — exactly the
+    /// cost this method exists to avoid.
+    /// </summary>
+    private static async Task<IResult> HandleBlobHeadAsync(
+        HttpContext context,
+        string hash,
+        IBlobStoreProvider blobStore,
+        BlobHttpOptions options,
+        CancellationToken cancellationToken)
+    {
+        var (validationStatus, _) = ValidateBlobRequest(context, hash, options);
+        if (validationStatus != StatusCodes.Status200OK)
+        {
+            // HEAD never carries a body, so error responses are status-only.
+            return Results.StatusCode(validationStatus);
+        }
+
+        var exists = await blobStore.ExistsAsync(hash, cancellationToken);
+        if (!exists)
+        {
+            return Results.StatusCode(StatusCodes.Status404NotFound);
+        }
+
+        context.Response.Headers["ETag"] = $"\"{hash}\"";
+        context.Response.ContentType = "application/octet-stream";
+        return Results.Empty;
+    }
+
+    private static (int Status, string? Error) ValidateBlobRequest(HttpContext context, string hash, BlobHttpOptions options)
+    {
+        if (!BlobHash.IsCanonical(hash))
+        {
+            return (StatusCodes.Status400BadRequest, "non-canonical hash");
+        }
+
+        if (!IsAuthorizedBlobRequest(context, options))
+        {
+            return (StatusCodes.Status401Unauthorized, "unauthorized");
+        }
+
+        return (StatusCodes.Status200OK, null);
+    }
+
+    private static async Task<(int Status, byte[]? Bytes, string? Error)> ResolveBlobReadAsync(
+        HttpContext context,
+        string hash,
+        IBlobStoreProvider blobStore,
+        BlobHttpOptions options,
+        CancellationToken cancellationToken)
+    {
+        var (validationStatus, validationError) = ValidateBlobRequest(context, hash, options);
+        if (validationStatus != StatusCodes.Status200OK)
+        {
+            return (validationStatus, null, validationError);
+        }
+
+        var result = await blobStore.TryGetBlobAsync(hash, cancellationToken);
+        if (!result.Found)
+        {
+            return (StatusCodes.Status404NotFound, null, "not found");
+        }
+
+        return (StatusCodes.Status200OK, result.Bytes, null);
+    }
+
+    private static async Task<IResult> HandleBlobPutAsync(
+        HttpContext context,
+        string hash,
+        IBlobStoreProvider blobStore,
+        BlobHttpOptions options,
+        CancellationToken cancellationToken)
+    {
+        if (!BlobHash.IsCanonical(hash))
+        {
+            return Results.Json(new { error = "non-canonical hash" }, statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (!IsAuthorizedBlobRequest(context, options))
+        {
+            return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        // Slice 3.4 (blob-cas-remediation.md), parity with Rust's put_blob
+        // (blob_http.rs: "Content-Encoding on PUT is reserved ... reject
+        // with 415 until pre-compressed uploads are implemented"). Rust
+        // rejects on header PRESENCE alone (any value, including
+        // "identity") — before touching the body — so a compressed-body PUT
+        // never reaches the hash check and silently 422s (if the wire bytes
+        // don't hash to the plaintext path hash) or, worse, gets accepted
+        // and stored as identity bytes (if they happen to). Match exactly:
+        // any Content-Encoding header value 415s here, before body/hash work.
+        if (context.Request.Headers.ContainsKey("Content-Encoding"))
+        {
+            return Results.Json(
+                new { error = "Content-Encoding not supported on PUT" },
+                statusCode: StatusCodes.Status415UnsupportedMediaType
+            );
+        }
+
+        var request = context.Request;
+        if (request.ContentLength is { } contentLength && contentLength > options.MaxBlobBytes)
+        {
+            return Results.Json(new { error = "payload too large" }, statusCode: StatusCodes.Status413PayloadTooLarge);
+        }
+
+        // Raise Kestrel's default per-request body size cap (~30 MB) so bodies up
+        // to MaxBlobBytes aren't rejected by the transport before our own cap
+        // (ReadBlobBodyWithCapAsync, below) gets a chance to apply.
+        var maxRequestBodySizeFeature = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
+        if (maxRequestBodySizeFeature is { IsReadOnly: false })
+        {
+            maxRequestBodySizeFeature.MaxRequestBodySize = options.MaxBlobBytes;
+        }
+
+        var (bytes, tooLarge) = await ReadBlobBodyWithCapAsync(request.Body, options.MaxBlobBytes, cancellationToken);
+        if (tooLarge)
+        {
+            return Results.Json(new { error = "payload too large" }, statusCode: StatusCodes.Status413PayloadTooLarge);
+        }
+
+        var actualHash = Hasher.Hash(bytes!).ToString();
+        if (!string.Equals(actualHash, hash, StringComparison.Ordinal))
+        {
+            return Results.Json(new { error = "hash mismatch" }, statusCode: StatusCodes.Status422UnprocessableEntity);
+        }
+
+        // Slice 2.1: idempotency's already-present check goes through the
+        // cheap ExistsAsync probe, not a full TryGetBlobAsync read — matches
+        // the Rust reference (blob_http.rs:515 uses has_blob, not get_blob).
+        var alreadyExists = await blobStore.ExistsAsync(hash, cancellationToken);
+        if (alreadyExists)
+        {
+            // Content-addressed: identical bytes are already stored — idempotent no-op.
+            return Results.StatusCode(StatusCodes.Status200OK);
+        }
+
+        await blobStore.PutBlobAsync(hash, bytes!, request.ContentType, cancellationToken);
+        return Results.StatusCode(StatusCodes.Status201Created);
+    }
+
+    /// <summary>
+    /// Buffers a request body up to (and one byte past) <paramref name="maxBytes"/>.
+    /// Chunked bodies carry no <c>Content-Length</c>, so this is the only
+    /// enforcement point for them; bodies with a declared length are also caught
+    /// earlier by the immediate <c>Content-Length</c> check in the caller.
+    /// </summary>
+    private static async Task<(byte[]? Bytes, bool TooLarge)> ReadBlobBodyWithCapAsync(
+        Stream body,
+        long maxBytes,
+        CancellationToken cancellationToken)
+    {
+        using var buffer = new MemoryStream();
+        var readBuffer = new byte[81920];
+        long total = 0;
+        int read;
+        while ((read = await body.ReadAsync(readBuffer, cancellationToken)) > 0)
+        {
+            total += read;
+            if (total > maxBytes)
+            {
+                return (null, true);
+            }
+            buffer.Write(readBuffer, 0, read);
+        }
+
+        return (buffer.ToArray(), false);
+    }
+
+    private static bool IsAuthorizedBlobRequest(HttpContext context, BlobHttpOptions options)
+    {
+        if (string.IsNullOrEmpty(options.AuthToken))
+        {
+            return true;
+        }
+
+        const string bearerPrefix = "Bearer ";
+        var authHeader = context.Request.Headers.Authorization.ToString();
+        if (!authHeader.StartsWith(bearerPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var providedBytes = Encoding.UTF8.GetBytes(authHeader[bearerPrefix.Length..]);
+        var expectedBytes = Encoding.UTF8.GetBytes(options.AuthToken);
+        return CryptographicOperations.FixedTimeEquals(providedBytes, expectedBytes);
     }
 
     private static void EmitAuthReadinessChecks(

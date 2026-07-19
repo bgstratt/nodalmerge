@@ -50,3 +50,19 @@ jobs:
         run: |
           dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj \
             --filter "FullyQualifiedName~LocalPersistFfi|FullyQualifiedName~RuntimePeerLocal"
+
+      # Slice 6.5 (nodalmerge-studio/plans/blob-cas-remediation.md), per the 8.0 stub convention:
+      # RuntimeWebSocketLoopRunner previously had ZERO CI coverage — RuntimeWebSocketLoopRunnerTests
+      # (S7.1's observer hook pins included) was named by no workflow step anywhere, the .NET twin
+      # of the Rust ws_handler gap filed in 4.2. This workflow is the closest existing home (it
+      # already triggers on hosts/dotnet/** and sets up .NET); both suites below are pure-fake
+      # (FakeWebSocket/FakeRuntimeCommandBridge, no native FFI needed). Phase 8 may relocate.
+      - name: Test runtime WS loop runner
+        run: |
+          dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj \
+            --filter "FullyQualifiedName~RuntimeWebSocketLoopRunnerTests"
+
+      - name: Test runtime WS inbound-pack observer dispatch (6.5)
+        run: |
+          dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj \
+            --filter "FullyQualifiedName~RuntimeWebSocketLoopRunnerObserverDispatchTests"

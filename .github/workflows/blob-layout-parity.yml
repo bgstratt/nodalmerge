@@ -1,59 +1,771 @@
 name: blob-layout-parity
 
-# Asserts the Rust and .NET blob storage implementations against one
-# canonical layout contract:
+# Asserts the Rust and .NET blob storage implementations against two
+# canonical contracts:
 #   docs/BLOB_STORAGE_LAYOUT.md                  (contract: file/S3 layout,
 #                                                 delegate protocol v1)
 #   docs/BLOB_LAYOUT_CONVERGENCE_PLAN.md         (rationale/history)
+#   docs/BLOB_HTTP_SURFACE.md                    (contract: GET/HEAD/PUT
+#                                                 /blobs/{hash} origin, S2.1b)
 #   engine/commands/blob-layout-vectors.v1.json  (path/key/name/delegate
 #                                                 vectors, source of truth)
+#   engine/commands/blob-http-surface-vectors.v1.json (HTTP origin vectors,
+#                                                 source of truth)
 #   engine/commands/fixtures/blob-layout-v1/     (golden cross-runtime
 #                                                 fixture tree)
+#   engine/commands/zstd-interop-vectors.v1.json (cross-runtime zstd fixture
+#                                                 manifest, slice 0.1 of
+#                                                 blob-cas-remediation.md)
+#   engine/commands/fixtures/zstd-interop-v1/    (golden cross-runtime zstd
+#                                                 frame fixtures)
 #   server/server/tests/blob_layout_vectors.rs
 #   server/server/tests/blob_layout_interop.rs
-#   server/s3-blobs/src/lib.rs (blob_layout_vectors_match_s3_key_derivation)
+#   server/server/tests/blob_http_surface.rs
+#   server/server/tests/zstd_interop.rs           (rust-as-consumer only: Rust
+#                                                 decoding a .NET-produced
+#                                                 frame was already green
+#                                                 pre-3.1, since Rust's
+#                                                 decode_all handles both
+#                                                 content-size-header shapes.
+#                                                 The other, previously-broken
+#                                                 direction — .NET decoding a
+#                                                 *Rust*-produced frame — is
+#                                                 pinned by ZstdInteropTests.cs
+#                                                 below, not here)
+#   server/server/tests/tree_walk_depth.rs       (slice 1.5 / finding #9 — a
+#                                                 deep single-entry tree-blob
+#                                                 chain must fail closed with
+#                                                 TreeWalkError::TooDeep rather
+#                                                 than overflowing the worker
+#                                                 stack and aborting the
+#                                                 process. NOTE: tree_walk.rs
+#                                                 itself was absent from the
+#                                                 paths: filters below until
+#                                                 1.5 — a step alone does not
+#                                                 make a suite run; the trigger
+#                                                 must list the source file the
+#                                                 suite guards, or the workflow
+#                                                 never fires on the PR that
+#                                                 breaks it)
+#   server/server/src/gc_store.rs                (the GC asset inventory whose
+#                                                 `Active` rows blob_gc.rs's
+#                                                 slice-1.3 union tests drive
+#                                                 through `Rooms::sweep_blobs`
+#                                                 via a real `SqliteGcStore`;
+#                                                 `iter_unmarked_candidates`'s
+#                                                 semantics ARE that union's
+#                                                 contract. Added by slice 1.3 —
+#                                                 blob_gc.rs had a step here but
+#                                                 this file could not trigger it)
+#   server/s3-blobs/src/lib.rs (blob_layout_vectors_match_s3_key_derivation;
+#                                                 its blob_gc_sweep two-phase
+#                                                 grace is gated for real by
+#                                                 .github/workflows/blob-s3-gc-minio.yml
+#                                                 — the NonHydratingBackend port
+#                                                 this workflow's blob_gc step
+#                                                 uses is a copy, not the backend)
+#   server/s3-blobs/tests/bridge_timeouts.rs (slice 6.1, finding #11 — every
+#                                                 sync→async bridge op against
+#                                                 a stalled endpoint must fail
+#                                                 bounded and classify as a
+#                                                 backend error, never missing.
+#                                                 Docker-free: the stalled
+#                                                 endpoint is an in-test
+#                                                 TcpListener, so it lives here
+#                                                 rather than blob-s3-gc-minio.yml)
+#   server/server/tests/blob_http_offload.rs (slice 6.2 — the blob HTTP
+#                                                 handlers must run their
+#                                                 blocking work (store I/O,
+#                                                 BLAKE3, zstd, the 6.1 S3
+#                                                 bridge) on the blocking
+#                                                 pool, never in-line on the
+#                                                 async workers; deterministic
+#                                                 starvation probes + the
+#                                                 panic-in-blocking-op→500
+#                                                 pin. Docker-free: the slow
+#                                                 store is an in-test fake)
+#   server/server/tests/blob_put_durability.rs (slice 4.2, finding #8 — PUT
+#                                                 must not lie about durability:
+#                                                 a failed persist_blob answers
+#                                                 503 (backend unavailable) or
+#                                                 500 (write failed), leaves NO
+#                                                 Active GC-inventory row, and a
+#                                                 later GET/HEAD agrees. Real
+#                                                 DirPersistence fs failure +
+#                                                 injectable fake + S3BlobStore
+#                                                 vs a stalled TcpListener —
+#                                                 Docker-free, so it lives here)
+#   server/server/tests/blob_relay_nonhydrating_backend.rs (S4.2 relay
+#                                                 contract; previously shipped
+#                                                 without a CI step — added
+#                                                 alongside slice 0.2 of
+#                                                 blob-cas-remediation.md
+#                                                 while its fake was promoted
+#                                                 to nodalmerge-blobstore-conformance)
+#   server/server/tests/blob_request_persistence_fallback.rs (slice 2.4,
+#                                                 latent finding — the WS
+#                                                 `blob-request` fallthrough
+#                                                 (bytes-over-WS, past the F6
+#                                                 redirect split) served ONLY
+#                                                 the room's in-memory
+#                                                 `blob_store` with no
+#                                                 `persistence.get_blob`
+#                                                 fallback, so a peer without
+#                                                 direct blob IO asking for a
+#                                                 hash that's durable but was
+#                                                 never relayed into THIS room
+#                                                 process (restart, sibling
+#                                                 room, out-of-band upload)
+#                                                 got nothing. Fixed by
+#                                                 falling back to
+#                                                 `persistence.get_blob` on an
+#                                                 in-memory miss, served in
+#                                                 the same `BlobPackEntry`
+#                                                 shape as a hit; the
+#                                                 in-memory store is
+#                                                 deliberately NOT warmed with
+#                                                 fallback bytes (it's an
+#                                                 unbounded HashMap with no
+#                                                 eviction — see
+#                                                 `MemoryBlobStore`,
+#                                                 `core/crdt/src/storage.rs`).
+#                                                 A non-hydrating (S3-shaped)
+#                                                 backend's fallback is
+#                                                 pinned as a structural
+#                                                 no-op, unchanged by this
+#                                                 slice (slice 2.2's "S3
+#                                                 never hydrates" contract).
+#                                                 `ws_handler.rs` previously
+#                                                 ran in NO blob workflow at
+#                                                 all (filed by slice 4.2);
+#                                                 both it and this new test
+#                                                 file are added to the
+#                                                 paths: filters below,
+#                                                 closing part of that gap.
+#   server/server/src/ws_handler.rs (the file slice 2.4 fixed, guarded by
+#                                                 blob_request_persistence_fallback.rs
+#                                                 above; was previously absent
+#                                                 from every paths: filter in
+#                                                 this workflow — see that
+#                                                 file's header note)
+#   server/server/tests/blob_nonhydrating_conformance.rs (slice 0.2's
+#                                                 non-hydrating-backend
+#                                                 conformance harness — GC
+#                                                 live-set / tree-walk /
+#                                                 archive-export scenarios
+#                                                 against S3BlobStore's real
+#                                                 shape; the RED scenarios
+#                                                 that gate Phase 2 are
+#                                                 `#[ignore]`d and skipped by
+#                                                 this step until their slice
+#                                                 ships)
+#   hosts/dotnet/…/BlobCompression.cs             (slice 3.1's fix — see the
+#                                                 ZstdInteropTests.cs entry
+#                                                 below. Was missing from the
+#                                                 paths: filters until the CI
+#                                                 follow-up for 3.1: the file
+#                                                 that was actually fixed
+#                                                 could not trigger this
+#                                                 workflow)
+#   hosts/dotnet/…/ServiceCollectionExtensions.cs (the DI composition root —
+#                                                 every .NET test below reaches
+#                                                 File/S3Delegated provider
+#                                                 wiring through
+#                                                 AddNodalMergeHostProviders.
+#                                                 Added by the 3.1 CI
+#                                                 follow-up audit: a wiring
+#                                                 regression here (e.g. which
+#                                                 provider "File" resolves to)
+#                                                 could break every test below
+#                                                 with no trigger)
+#   hosts/dotnet/…/NodalMergeHostProviderOptions.cs (parses which provider
+#                                                 each test's config selects;
+#                                                 same audit, same reasoning)
+#   hosts/dotnet/…/FileBlobStorageOptions.cs      (binds Compression/
+#                                                 CompressionLevel/
+#                                                 CompressionMinBytes — the
+#                                                 config surface that decides
+#                                                 whether BlobCompression is
+#                                                 even invoked; same audit)
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs
 #   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs (slice
+#                                                 3.1, finding #4 — pins the
+#                                                 direction that was actually
+#                                                 broken: .NET decoding a
+#                                                 header-less zstd frame
+#                                                 produced by Rust's
+#                                                 zstd::stream::encode_all.
+#                                                 BlobCompression.TryDecompress
+#                                                 used to require
+#                                                 written == buffer.Length
+#                                                 after sizing the output
+#                                                 buffer from
+#                                                 Decompressor.GetDecompressedSize,
+#                                                 which returns only an upper
+#                                                 bound (the zstd default
+#                                                 window size) for frames
+#                                                 without a content-size
+#                                                 header — every frame Rust's
+#                                                 at-rest encoder produces — so
+#                                                 every cross-runtime
+#                                                 compressed fetch was
+#                                                 rejected as "corrupt zstd
+#                                                 frame." Fixed by accepting
+#                                                 written <= buffer.Length.
+#                                                 A Rust-only interop test
+#                                                 (zstd_interop.rs above)
+#                                                 cannot catch a regression
+#                                                 here: it only proves Rust
+#                                                 can still read a .NET frame,
+#                                                 never that .NET can read a
+#                                                 Rust one — hence this
+#                                                 dedicated dotnet CI step,
+#                                                 added alongside the CI
+#                                                 follow-up for slice 3.1)
+#   hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobStoreProvider.cs
+#                                                 (slice 2.1's new ExistsAsync
+#                                                 default member)
+#   hosts/dotnet/src/NodalMerge.Host.Composition/HttpRemoteBlobStoreProvider.cs
+#   hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobStoreProvider.cs
+#   hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobOriginOptions.cs
+#                                                 (slice 3.3, finding #6 — the
+#                                                 Compression default flipped
+#                                                 Zstd -> Off; pinned by
+#                                                 S3DirectBlobOriginOptionsTests)
+#   hosts/dotnet/src/NodalMerge.Host.Composition/ChainedBlobStoreProvider.cs
+#   hosts/dotnet/src/NodalMerge.DotNetHost/WebApplicationExtensions.cs   (HEAD +
+#                                                 PUT-idempotency call sites
+#                                                 slice 2.1 routes through
+#                                                 ExistsAsync instead of a full
+#                                                 TryGetBlobAsync read)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs
+#                                                 (slice 0.2's .NET half — both
+#                                                 tests were RED/Skip-gated
+#                                                 until slice 2.1 un-gated them;
+#                                                 now green and run below)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobStoreProviderExistsAsyncDefaultTests.cs
+#                                                 (slice 2.1's ⚠ compat pin: a
+#                                                 provider implementing ONLY
+#                                                 the two original
+#                                                 IBlobStoreProvider members
+#                                                 still compiles and still
+#                                                 answers ExistsAsync correctly
+#                                                 via the default)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderExistsAsyncTests.cs
+#                                                 (slice 2.1 — FileBlobStoreProvider's
+#                                                 cheap File.Exists override)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpEncodingNegotiationTests.cs
+#                                                 (slice 2.1 changed
+#                                                 Head_ignores_accept_encoding_and_behaves_as_before's
+#                                                 expectation: HEAD no longer
+#                                                 sets Content-Length, matching
+#                                                 the Rust reference and the
+#                                                 frozen head-found vector.
+#                                                 This file previously ran in
+#                                                 NO workflow at all — added
+#                                                 below alongside the fix that
+#                                                 depends on it)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/HttpRemoteBlobStoreProviderTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobStoreProviderTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ChainedBlobStoreProviderTests.cs
+#                                                 (these three previously ran
+#                                                 in NO workflow either — slice
+#                                                 2.1 added ExistsAsync
+#                                                 overrides/composition to all
+#                                                 three providers, so their
+#                                                 suites are wired in below.
+#                                                 RemoteBlobLinkAggregatorTests.cs
+#                                                 joined them: the aggregator IS
+#                                                 the single "remote" the chain
+#                                                 sees once >1 remote link is
+#                                                 configured, so it needed its
+#                                                 own ExistsAsync override or
+#                                                 2.1's benefit silently
+#                                                 vanished for the three-link
+#                                                 deployment.
+#                                                 Sibling files this same audit
+#                                                 found equally uncovered —
+#                                                 ChainedBlobStoreProviderHttpIntegrationTests.cs,
+#                                                 S3DirectChainCompositionTests.cs
+#                                                 — are NOT touched by slice
+#                                                 2.1's production changes and
+#                                                 are left for the broader CI
+#                                                 follow-up, now tracked as
+#                                                 Phase 8 (deferred) in
+#                                                 blob-cas-remediation.md.
+#                                                 ProviderS3DelegatedBlobResolverIntegrationTests.cs
+#                                                 was ALSO on that uncovered
+#                                                 list until slice 4.1 pulled it
+#                                                 forward — see below, same
+#                                                 reasoning 1.3 used for
+#                                                 minio_round_trip.rs: a slice
+#                                                 whose production change this
+#                                                 suite actually exercises
+#                                                 shouldn't wait for Phase 8.)
+#   hosts/dotnet/src/NodalMerge.DotNetHost/BlobHttpOptions.cs (slice 4.3.1 —
+#                                                 Validate() rejects
+#                                                 non-positive MaxBlobBytes at
+#                                                 startup instead of 500ing the
+#                                                 first chunked PUT or silently
+#                                                 413ing everything)
+#   hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobOriginOptions.cs
+#                                                 (slice 4.3.2 — ResolveBaseUri()
+#                                                 guarantees a trailing "/" so a
+#                                                 reverse-proxy path prefix in
+#                                                 BaseUrl survives into every
+#                                                 request HttpRemoteBlobStoreProvider
+#                                                 / S3DirectBlobStoreProvider send)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/LegacySyncBlobUrlCompatTests.cs
+#                                                 (slice 4.1, finding #12 — new
+#                                                 file, golden tests for legacy
+#                                                 /sync/blob-url restored to
+#                                                 `main`'s pre-existing
+#                                                 behavior: unix-seconds
+#                                                 expiresAt, 404 not 501 for no
+#                                                 backend, loose/anonymous hash
+#                                                 handling — deliberately
+#                                                 different from the new frozen
+#                                                 /blobs/{hash}/url route)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderHttpEndpointTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderS3DelegatedBlobResolverIntegrationTests.cs
+#                                                 (slice 4.1 — both pre-existing
+#                                                 files exercised /sync/blob-url
+#                                                 under the WRONG (S4.1-alias)
+#                                                 assumptions the finding #12
+#                                                 fix corrects (expiresAtUtc,
+#                                                 501, canonical-hash
+#                                                 rejection); fixed in place to
+#                                                 assert `main`'s restored
+#                                                 shape. ProviderS3DelegatedBlobResolverIntegrationTests.cs
+#                                                 pulled forward from the Phase
+#                                                 8 backlog noted above, since
+#                                                 this slice's change is exactly
+#                                                 what it exercises.
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpOptionsValidationTests.cs
+#                                                 (slice 4.3.1, new file)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobOriginBaseUrlPathPrefixTests.cs
+#                                                 (slice 4.3.2, new file — both
+#                                                 HttpRemoteBlobStoreProvider and
+#                                                 S3DirectBlobStoreProvider,
+#                                                 both trailing-slash BaseUrl
+#                                                 spellings)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DelegatedBlobOptionsStaleKeyGuardTests.cs
+#                                                 (slice 4.3.3, new file — warns,
+#                                                 does not hard-fail, on stale
+#                                                 PutPath/GetPath config keys)
+#   hosts/dotnet/src/NodalMerge.Host.Composition/RetryCircuitBreakerPolicy.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RetryCircuitBreakerCharacterizationTests.cs
+#                                                 (slice 7.2 — the ONE
+#                                                 retry/circuit-breaker
+#                                                 component the three remote
+#                                                 blob providers previously
+#                                                 hand-copied; the suite pins
+#                                                 each provider's option set
+#                                                 incl. the preserved drift)
+#   server/server/tests/blob_url_resolution_vectors.rs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobUrlResolutionVectorTests.cs
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/DelegateRoomPlaceholderVectorTests.cs
+#   engine/commands/work-unit-status-vectors.v1.json (delegate_room_id_placeholder
+#                                                 slot only — the rest of that
+#                                                 file is studio-live-hashes-parity.yml's)
+#   engine/commands/blob-url-resolution-vectors.v1.json
+#                                                 (slice 7.4 — frozen delegate
+#                                                 room-id placeholder
+#                                                 room="_global"/ns="blobs" on
+#                                                 the room-agnostic routes,
+#                                                 pinned cross-runtime; the
+#                                                 URL-resolution suites had
+#                                                 previously run in NO
+#                                                 workflow at all)
+#   hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobIdentityVerifyTests.cs
+#                                                 (slice 3.2, finding #13 — new
+#                                                 file, pins FileBlobStoreProvider's
+#                                                 identity-path BLAKE3 verify-on-read:
+#                                                 a tampered identity blob file must
+#                                                 read as Missing, matching the zstd
+#                                                 path and Rust's DirPersistence::get_blob,
+#                                                 never served as a hit)
+#   server/server/tests/gc_io_batching.rs (slice 6.3 — the coordinator's
+#                                                 mark pass runs as ONE batched
+#                                                 SQLite transaction; these
+#                                                 smokes pin row-for-row
+#                                                 equality with the per-row
+#                                                 path and unchanged
+#                                                 mark/candidate semantics
+#                                                 across runs. The file also
+#                                                 holds an #[ignore]d bench
+#                                                 (100k-hash timing, loose 3x
+#                                                 bound) which CI deliberately
+#                                                 does NOT run — timing bounds
+#                                                 flake; run by hand with
+#                                                 --ignored --nocapture)
+#   server/server/tests/gc_recompute_cache.rs (slice 6.4 — GC scan caches:
+#                                                 cold-room live-set + studio-map
+#                                                 projections cached keyed by
+#                                                 NodePersistence::room_nodes_version.
+#                                                 Cache-equivalence oracle vs a
+#                                                 from-scratch Rooms under
+#                                                 mutations, sabotage-seam
+#                                                 divergence proof (a planted
+#                                                 stale entry MUST fail the
+#                                                 oracle), deterministic
+#                                                 scan-counter assertions, the
+#                                                 Composite room_nodes_version
+#                                                 forwarding pin. Also holds an
+#                                                 #[ignore]d many-cold-room
+#                                                 bench CI does not run — same
+#                                                 reasoning as above)
+#   core/gc/src/** (slice 6.3 — the coordinator's mark pass and the
+#                                                 AssetInventoryStore batch
+#                                                 method live here; gc_io_batching.rs
+#                                                 drives the real GcCoordinator,
+#                                                 so a change here must fire it)
+#   NOTE: slice 3.2's fix exposed that several pre-existing tests keyed blob
+#   fixtures by fabricated placeholder hashes (e.g. "sha256:abc") rather than
+#   the real BLAKE3 hash of the bytes they stored — silently relying on the
+#   identity path's prior lack of verification. Fixed alongside 3.2 in
+#   ProviderDurabilityTests.cs, Row19AutomatedScenarioHarnessTests.cs, and
+#   ProviderHostRestartDurabilityIntegrationTests.cs (now keyed by
+#   Hasher.Hash(bytes)). None of those three files run in any CI workflow
+#   today — a pre-existing gap this slice did not introduce, already tracked
+#   under the Phase 8 CI follow-up above; not added here since the fixes are
+#   fixture-shape corrections, not new coverage for this workflow's contract.
 
 on:
   push:
     branches: [main]
     paths:
       - "engine/commands/blob-layout-vectors.v1.json"
+      - "engine/commands/blob-http-surface-vectors.v1.json"
       - "engine/commands/fixtures/blob-layout-v1/**"
+      - "engine/commands/zstd-interop-vectors.v1.json"
+      - "engine/commands/fixtures/zstd-interop-v1/**"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
+      - "server/server/src/tree_walk.rs"
+      - "server/server/src/blob_http.rs"
+      # slice 7.1 — shared CLI-flag/GC-bootstrap module both main.rs and
+      # server-s3/main.rs now call through; previously two independently
+      # duplicated (drift-prone) copies inside each main.rs.
+      - "server/server/src/cli_args.rs"
+      # slice 7.3 — shared proleptic-Gregorian date module
+      # (civil_from_days/days_from_civil), previously one direction each,
+      # duplicated, inside blob_http.rs and studio_live_hashes.rs.
+      - "server/server/src/date_util.rs"
+      - "server/server/src/gc_store.rs"
+      # slice 2.4, latent finding — the WS blob-request bytes-over-WS
+      # fallthrough must fall back to persistence.get_blob on an in-memory
+      # miss. ws_handler.rs previously ran in NO blob workflow at all
+      # (filed by slice 4.2); added here alongside its new test file.
+      - "server/server/src/ws_handler.rs"
+      - "server/server/src/main.rs"
+      - "server/dev-server/src/main.rs"
+      - "server/axum-embed/src/lib.rs"
       - "server/server/tests/blob_layout_vectors.rs"
       - "server/server/tests/blob_layout_interop.rs"
       - "server/server/tests/blob_gc.rs"
+      - "server/server/tests/tree_walk_depth.rs"
+      - "server/server/tests/blob_http_surface.rs"
+      - "server/server/tests/zstd_interop.rs"
+      - "server/server/tests/blob_relay_nonhydrating_backend.rs"
+      - "server/server/tests/blob_nonhydrating_conformance.rs"
+      # slice 2.4 — the fallback + non-hydrating structural-no-op pin above.
+      - "server/server/tests/blob_request_persistence_fallback.rs"
+      # slice 2.2 — blob_nonhydrating_conformance.rs drives the studio GC entry
+      # point (collect_studio_live_hashes), the ONLY place walk_tree is reachable
+      # from GC. Without this line a change to the live-set walk could break that
+      # suite's whole reason for existing without ever firing it.
+      - "server/server/src/studio_live_hashes.rs"
+      # slice 2.3 (finding #7) — blob_nonhydrating_conformance.rs drives archive
+      # describe AND the manifest-document export path (two SEPARATE functions,
+      # each with its own blob-resolution site). Without these lines a change to
+      # either could silently reintroduce the empty-set blobs digest without the
+      # suite that guards it ever firing.
+      - "server/server/src/archive_adapter.rs"
+      - "server/server/src/archive_export.rs"
+      - "server/stores/blob-conformance/**"
       - "server/s3-blobs/src/lib.rs"
+      # slice 2.2 — Delegate-mode fail-loud gate. Docker-free (Delegate opens no
+      # connection), so it lives in this workflow rather than blob-s3-gc-minio.yml.
+      - "server/s3-blobs/tests/delegate_gc.rs"
+      # slice 6.1 (finding #11) — stalled-endpoint bridge/timeout gate. Docker-free
+      # (the stalled endpoint is an in-test TcpListener), so it lives in this
+      # workflow rather than blob-s3-gc-minio.yml.
+      - "server/s3-blobs/tests/bridge_timeouts.rs"
+      # slice 6.2 — blob HTTP off-worker scheduling gate: blocking store work
+      # (I/O, BLAKE3, zstd, the 6.1 S3 bridge) must run on the blocking pool,
+      # never park the async workers; a panic in the offloaded op maps to 500.
+      # Docker-free (the slow store is an in-test fake), so it lives here.
+      - "server/server/tests/blob_http_offload.rs"
+      # slice 4.2 (finding #8) — PUT durability truthfulness gate: a failed
+      # persist must answer 5xx (503 unavailable / 500 write-failed) and leave
+      # NO Active inventory row; GET/HEAD stay consistent. Covers Dir (real fs
+      # failure), an injectable failing fake, and S3BlobStore against a stalled
+      # TcpListener — Docker-free by the same reasoning as bridge_timeouts.rs,
+      # so it lives here rather than blob-s3-gc-minio.yml.
+      - "server/server/tests/blob_put_durability.rs"
+      # slice 5.1 — migration-marker safety gate: .layout-v2 only on a fully
+      # clean pass; deferred entries retry on the next startup.
+      - "server/server/tests/blob_migration_marker.rs"
+      # slice 6.3 — batched GC mark pass (behavior-equality smokes; the
+      # #[ignore]d 100k bench is deliberately NOT run in CI). core/gc holds
+      # the coordinator + the AssetInventoryStore batch method the suite
+      # drives — without that glob a coordinator change could break the mark
+      # pass with this workflow never firing (the known paths:-filter bite).
+      - "server/server/tests/gc_io_batching.rs"
+      - "core/gc/src/**"
+      # slice 6.4 — GC scan caches: equivalence oracle + sabotage-seam
+      # divergence proof + deterministic scan counters + the Composite
+      # room_nodes_version forwarding pin. Its #[ignore]d bench is not run.
+      - "server/server/tests/gc_recompute_cache.rs"
+      # slice 7.5 — pluggable LiveHashCollector seam: gc_service.rs ran five GC
+      # suites in this workflow without being a paths trigger itself (a
+      # gc_service change could break every one of them with this workflow
+      # never firing — the known paths:-filter bite). Added together with the
+      # seam pin: the generic service must run a NON-studio live source
+      # end-to-end, fail closed on a failing source, and compose unions.
+      - "server/server/src/gc_service.rs"
+      - "server/server/tests/gc_live_source_seam.rs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
+      - "hosts/dotnet/src/NodalMerge.DotNetHost/BlobHttpOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobOriginOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/ServiceCollectionExtensions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/NodalMergeHostProviderOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/HttpRemoteBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobOriginOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/ChainedBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobLinkAggregator.cs"
+      - "hosts/dotnet/src/NodalMerge.DotNetHost/WebApplicationExtensions.cs"
+      # slice 7.3 — shared canonical-blob-hash predicate, previously
+      # duplicated three times (WebApplicationExtensions, FileBlobGcCoordinator,
+      # FileBlobStoreProvider).
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/BlobHash.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
+      # slice 5.2 — migration & write-path hygiene gate (stable quarantine
+      # names, no .tmp leak, reject-don't-sanitize).
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderHygieneTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobStoreProviderExistsAsyncDefaultTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderExistsAsyncTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobIdentityVerifyTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpEncodingNegotiationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/HttpRemoteBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobOriginOptionsTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ChainedBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RemoteBlobLinkAggregatorTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/LegacySyncBlobUrlCompatTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderHttpEndpointTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderS3DelegatedBlobResolverIntegrationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpOptionsValidationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobOriginBaseUrlPathPrefixTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DelegatedBlobOptionsStaleKeyGuardTests.cs"
+      # slice 7.2 — the ONE retry-classification/circuit-breaker component all
+      # three remote blob providers (HttpRemote, S3Direct, S3Delegated) now
+      # configure; previously three drifting copies inside those provider
+      # files. The characterization suite pins each provider's PRE-extraction
+      # contract, including the deliberately-preserved drift (throw-vs-null
+      # exhaustion, S3Direct's 501 capability carve-out, the delegated
+      # resolver's 4xx-as-breaker-failure posture).
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RetryCircuitBreakerPolicy.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RetryCircuitBreakerCharacterizationTests.cs"
+      # slice 7.4 — frozen delegate room-id placeholder (room="_global",
+      # optional namespace="blobs" on the room-agnostic /blobs/{hash}/url +
+      # /blobs/{hash}/uploaded routes). The cross-runtime pin lives in the
+      # delegate_room_id_placeholder slot of the work-unit vectors file
+      # (reserved by slice 0.4), the .NET constants in
+      # DelegatePresignProtocol.cs. NOTE: the blob URL-resolution suites
+      # (blob_url_resolution_vectors.rs / BlobUrlResolutionVectorTests.cs and
+      # their vector file) previously ran in NO workflow at all — another
+      # instance of the known steps-that-do-not-exist gap, wired in here by
+      # the slice that touches those routes rather than left for Phase 8.
+      - "engine/commands/work-unit-status-vectors.v1.json"
+      - "engine/commands/blob-url-resolution-vectors.v1.json"
+      - "server/server/tests/blob_url_resolution_vectors.rs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/DelegatePresignProtocol.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobUrlResolverProvider.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/DelegateRoomPlaceholderVectorTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobUrlResolutionVectorTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   pull_request:
     paths:
       - "engine/commands/blob-layout-vectors.v1.json"
+      - "engine/commands/blob-http-surface-vectors.v1.json"
       - "engine/commands/fixtures/blob-layout-v1/**"
+      - "engine/commands/zstd-interop-vectors.v1.json"
+      - "engine/commands/fixtures/zstd-interop-v1/**"
       - "server/server/src/store.rs"
       - "server/server/src/room.rs"
+      - "server/server/src/tree_walk.rs"
+      - "server/server/src/blob_http.rs"
+      # slice 7.1 — shared CLI-flag/GC-bootstrap module both main.rs and
+      # server-s3/main.rs now call through; previously two independently
+      # duplicated (drift-prone) copies inside each main.rs.
+      - "server/server/src/cli_args.rs"
+      # slice 7.3 — shared proleptic-Gregorian date module
+      # (civil_from_days/days_from_civil), previously one direction each,
+      # duplicated, inside blob_http.rs and studio_live_hashes.rs.
+      - "server/server/src/date_util.rs"
+      - "server/server/src/gc_store.rs"
+      # slice 2.4, latent finding — the WS blob-request bytes-over-WS
+      # fallthrough must fall back to persistence.get_blob on an in-memory
+      # miss. ws_handler.rs previously ran in NO blob workflow at all
+      # (filed by slice 4.2); added here alongside its new test file.
+      - "server/server/src/ws_handler.rs"
+      - "server/server/src/main.rs"
+      - "server/dev-server/src/main.rs"
+      - "server/axum-embed/src/lib.rs"
       - "server/server/tests/blob_layout_vectors.rs"
       - "server/server/tests/blob_layout_interop.rs"
       - "server/server/tests/blob_gc.rs"
+      - "server/server/tests/tree_walk_depth.rs"
+      - "server/server/tests/blob_http_surface.rs"
+      - "server/server/tests/zstd_interop.rs"
+      - "server/server/tests/blob_relay_nonhydrating_backend.rs"
+      - "server/server/tests/blob_nonhydrating_conformance.rs"
+      # slice 2.4 — the fallback + non-hydrating structural-no-op pin above.
+      - "server/server/tests/blob_request_persistence_fallback.rs"
+      # slice 2.2 — blob_nonhydrating_conformance.rs drives the studio GC entry
+      # point (collect_studio_live_hashes), the ONLY place walk_tree is reachable
+      # from GC. Without this line a change to the live-set walk could break that
+      # suite's whole reason for existing without ever firing it.
+      - "server/server/src/studio_live_hashes.rs"
+      # slice 2.3 (finding #7) — blob_nonhydrating_conformance.rs drives archive
+      # describe AND the manifest-document export path (two SEPARATE functions,
+      # each with its own blob-resolution site). Without these lines a change to
+      # either could silently reintroduce the empty-set blobs digest without the
+      # suite that guards it ever firing.
+      - "server/server/src/archive_adapter.rs"
+      - "server/server/src/archive_export.rs"
+      - "server/stores/blob-conformance/**"
       - "server/s3-blobs/src/lib.rs"
+      # slice 2.2 — Delegate-mode fail-loud gate. Docker-free (Delegate opens no
+      # connection), so it lives in this workflow rather than blob-s3-gc-minio.yml.
+      - "server/s3-blobs/tests/delegate_gc.rs"
+      # slice 6.1 (finding #11) — stalled-endpoint bridge/timeout gate. Docker-free
+      # (the stalled endpoint is an in-test TcpListener), so it lives in this
+      # workflow rather than blob-s3-gc-minio.yml.
+      - "server/s3-blobs/tests/bridge_timeouts.rs"
+      # slice 6.2 — blob HTTP off-worker scheduling gate: blocking store work
+      # (I/O, BLAKE3, zstd, the 6.1 S3 bridge) must run on the blocking pool,
+      # never park the async workers; a panic in the offloaded op maps to 500.
+      # Docker-free (the slow store is an in-test fake), so it lives here.
+      - "server/server/tests/blob_http_offload.rs"
+      # slice 4.2 (finding #8) — PUT durability truthfulness gate: a failed
+      # persist must answer 5xx (503 unavailable / 500 write-failed) and leave
+      # NO Active inventory row; GET/HEAD stay consistent. Covers Dir (real fs
+      # failure), an injectable failing fake, and S3BlobStore against a stalled
+      # TcpListener — Docker-free by the same reasoning as bridge_timeouts.rs,
+      # so it lives here rather than blob-s3-gc-minio.yml.
+      - "server/server/tests/blob_put_durability.rs"
+      # slice 5.1 — migration-marker safety gate: .layout-v2 only on a fully
+      # clean pass; deferred entries retry on the next startup.
+      - "server/server/tests/blob_migration_marker.rs"
+      # slice 6.3 — batched GC mark pass (behavior-equality smokes; the
+      # #[ignore]d 100k bench is deliberately NOT run in CI). core/gc holds
+      # the coordinator + the AssetInventoryStore batch method the suite
+      # drives — without that glob a coordinator change could break the mark
+      # pass with this workflow never firing (the known paths:-filter bite).
+      - "server/server/tests/gc_io_batching.rs"
+      - "core/gc/src/**"
+      # slice 6.4 — GC scan caches: equivalence oracle + sabotage-seam
+      # divergence proof + deterministic scan counters + the Composite
+      # room_nodes_version forwarding pin. Its #[ignore]d bench is not run.
+      - "server/server/tests/gc_recompute_cache.rs"
+      # slice 7.5 — pluggable LiveHashCollector seam: gc_service.rs ran five GC
+      # suites in this workflow without being a paths trigger itself (a
+      # gc_service change could break every one of them with this workflow
+      # never firing — the known paths:-filter bite). Added together with the
+      # seam pin: the generic service must run a NON-studio live source
+      # end-to-end, fail closed on a failing source, and compose unions.
+      - "server/server/src/gc_service.rs"
+      - "server/server/tests/gc_live_source_seam.rs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/BlobCompression.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobStorageOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/FileBlobGcCoordinator.cs"
+      - "hosts/dotnet/src/NodalMerge.DotNetHost/BlobHttpOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobOriginOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobOptions.cs"
       - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DelegatedBlobUrlResolverProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/ServiceCollectionExtensions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/NodalMergeHostProviderOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/HttpRemoteBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/S3DirectBlobOriginOptions.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/ChainedBlobStoreProvider.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RemoteBlobLinkAggregator.cs"
+      - "hosts/dotnet/src/NodalMerge.DotNetHost/WebApplicationExtensions.cs"
+      # slice 7.3 — shared canonical-blob-hash predicate, previously
+      # duplicated three times (WebApplicationExtensions, FileBlobGcCoordinator,
+      # FileBlobStoreProvider).
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/BlobHash.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutParityTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobLayoutInteropTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobGcCoordinatorTests.cs"
       - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderMigrationTests.cs"
+      # slice 5.2 — migration & write-path hygiene gate (stable quarantine
+      # names, no .tmp leak, reject-don't-sanitize).
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderHygieneTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpSurfaceTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ZstdInteropTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NonHydratingBlobBackendConformanceTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobStoreProviderExistsAsyncDefaultTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobStoreProviderExistsAsyncTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/FileBlobIdentityVerifyTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpEncodingNegotiationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/HttpRemoteBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DirectBlobOriginOptionsTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ChainedBlobStoreProviderTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RemoteBlobLinkAggregatorTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/LegacySyncBlobUrlCompatTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderHttpEndpointTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/ProviderS3DelegatedBlobResolverIntegrationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobHttpOptionsValidationTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobOriginBaseUrlPathPrefixTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/S3DelegatedBlobOptionsStaleKeyGuardTests.cs"
+      # slice 7.2 — the ONE retry-classification/circuit-breaker component all
+      # three remote blob providers (HttpRemote, S3Direct, S3Delegated) now
+      # configure; previously three drifting copies inside those provider
+      # files. The characterization suite pins each provider's PRE-extraction
+      # contract, including the deliberately-preserved drift (throw-vs-null
+      # exhaustion, S3Direct's 501 capability carve-out, the delegated
+      # resolver's 4xx-as-breaker-failure posture).
+      - "hosts/dotnet/src/NodalMerge.Host.Composition/RetryCircuitBreakerPolicy.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/RetryCircuitBreakerCharacterizationTests.cs"
+      # slice 7.4 — frozen delegate room-id placeholder (room="_global",
+      # optional namespace="blobs" on the room-agnostic /blobs/{hash}/url +
+      # /blobs/{hash}/uploaded routes). The cross-runtime pin lives in the
+      # delegate_room_id_placeholder slot of the work-unit vectors file
+      # (reserved by slice 0.4), the .NET constants in
+      # DelegatePresignProtocol.cs. NOTE: the blob URL-resolution suites
+      # (blob_url_resolution_vectors.rs / BlobUrlResolutionVectorTests.cs and
+      # their vector file) previously ran in NO workflow at all — another
+      # instance of the known steps-that-do-not-exist gap, wired in here by
+      # the slice that touches those routes rather than left for Phase 8.
+      - "engine/commands/work-unit-status-vectors.v1.json"
+      - "engine/commands/blob-url-resolution-vectors.v1.json"
+      - "server/server/tests/blob_url_resolution_vectors.rs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/DelegatePresignProtocol.cs"
+      - "hosts/dotnet/src/NodalMerge.Host.Abstractions/Providers/IBlobUrlResolverProvider.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/DelegateRoomPlaceholderVectorTests.cs"
+      - "hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/BlobUrlResolutionVectorTests.cs"
       - ".github/workflows/blob-layout-parity.yml"
   workflow_dispatch:
 
@@ -86,8 +798,62 @@ jobs:
       - name: Run cross-runtime golden fixture interop test
         run: cargo test -p nodalmerge-server --test blob_layout_interop
 
-      - name: Run S3 key layout vectors
+      - name: Run non-hydrating-backend relay contract (S4.2)
+        run: cargo test -p nodalmerge-server --test blob_relay_nonhydrating_backend
+
+      - name: Run WS blob-request persistence fallback gate (slice 2.4, latent finding — an in-memory blob_store miss on the bytes-over-WS fallthrough must fall back to persistence.get_blob; Dir serves real BLAKE3-verified-on-read bytes in the same envelope shape as an in-memory hit and the in-memory store is not warmed, while a non-hydrating (S3-shaped) backend's fallback is pinned as a structural no-op per slice 2.2's "S3 never hydrates" contract)
+        run: cargo test -p nodalmerge-server --test blob_request_persistence_fallback
+
+      - name: Run non-hydrating-backend conformance harness (slice 0.2 harness, fully ungated as of slice 2.3 — GC-live-set/tree-walk went green in 2.2, archive describe/export digest parity + fail-loud in 2.3)
+        run: cargo test -p nodalmerge-server --test blob_nonhydrating_conformance
+
+      - name: Run tree-walk depth-bound regression test (slice 1.5, finding #9 — deep chain must fail closed, not abort the process)
+        run: cargo test -p nodalmerge-server --test tree_walk_depth
+
+      - name: Run cross-runtime zstd interop test (dotnet-produced frame)
+        run: cargo test -p nodalmerge-server --test zstd_interop
+
+      - name: Run blob HTTP surface vectors (GET/HEAD/PUT /blobs/{hash})
+        run: cargo test -p nodalmerge-server --test blob_http_surface
+
+      - name: Run blob HTTP off-worker scheduling gate (slice 6.2 — blocking store work (I/O, BLAKE3, zstd, the 6.1 S3 bridge) must run on the blocking pool, never park the async workers; a panic in the offloaded op must map to a logged 500, not a hang or silent success)
+        run: cargo test -p nodalmerge-server --test blob_http_offload
+
+      - name: Run PUT durability-truthfulness gate (slice 4.2, finding #8 — a failed persist_blob must answer 5xx and leave no Active inventory row, never a 201 with nothing durably stored; Docker-free, the stalled bucket is an in-test TcpListener)
+        run: cargo test -p nodalmerge-server --test blob_put_durability
+
+      - name: Run migration-marker safety gate (slice 5.1 — .layout-v2 only lands on a fully clean pass; any deferred entry leaves it absent so the next startup retries, and a partial destination left by an interrupted copy is repaired from the legacy source, never adopted)
+        run: cargo test -p nodalmerge-server --test blob_migration_marker
+
+      - name: Run GC mark-pass batching smokes (slice 6.3 — the coordinator's mark pass is one batched SQLite txn; rows must be identical to the per-row path and mark/candidate semantics unchanged. The 100k timing bench in the same file is #[ignore]d and NOT run here — timing bounds flake in CI)
+        run: cargo test -p nodalmerge-server --test gc_io_batching
+
+      - name: Run GC recomputation-cache gates (slice 6.4 — cold-room live-set + studio-map caches keyed by room_nodes_version; cache-equivalence vs from-scratch under mutations, planted-stale-entry divergence proof, deterministic scan counters, Composite forwarding pin. The many-cold-room bench is #[ignore]d and NOT run here)
+        run: cargo test -p nodalmerge-server --test gc_recompute_cache
+
+      - name: Run pluggable live-source seam gates (slice 7.5 — gc_service runs a full staged GC against an injected NON-studio LiveHashCollector, fails closed when the source errors, and UnionLiveHashCollector composes sources through the service; the studio source is composition-supplied only)
+        run: cargo test -p nodalmerge-server --test gc_live_source_seam
+
+      - name: Run gc_service unit suite (GcMode parsing + slice 7.5 UnionLiveHashCollector semantics — set union of members, fail-closed on any member error, refusal of the empty union; previously these ran in no workflow, the --lib filter above only covers store::)
+        run: "cargo test -p nodalmerge-server --lib gc_service::"
+
+      - name: "Run cli_args unit suite (slice 7.1 -- the golden flag-to-config matrix for every parser both main.rs and server-s3/main.rs now share, incl. the GcSweepCommon bootstrap; previously these ran in no workflow, same --lib-filter blind spot the step above was added for)"
+        run: "cargo test -p nodalmerge-server --lib cli_args::"
+
+      - name: "Run date_util unit suite (slice 7.3 -- the civil_from_days/days_from_civil round-trip property test the two pre-extraction copies lacked, incl. the 2024-02-29 pin and century-boundary spot checks; previously these ran in no workflow, same --lib-filter blind spot)"
+        run: "cargo test -p nodalmerge-server --lib date_util::"
+
+      - name: Run S3 key layout vectors + Delegate-mode hydrate/tree-walk unit gates (slice 2.2, finding #10)
         run: cargo test -p nodalmerge-s3-blobs --lib
+
+      - name: Run Delegate-mode studio-GC fail-loud gate (slice 2.2, finding #10 — an S3-Delegate server must report "cannot resolve tree object" as a distinct, actionable config error, never a generic missing-blob; no Docker needed, Delegate mode opens no connection)
+        run: cargo test -p nodalmerge-s3-blobs --test delegate_gc
+
+      - name: Run stalled-endpoint bridge/timeout gate (slice 6.1, finding #11 — every S3/delegate op against a hung endpoint must fail within the configured bound and classify as a backend error, never as missing/absent; no Docker needed, the stalled endpoint is an in-test TcpListener)
+        run: cargo test -p nodalmerge-s3-blobs --test bridge_timeouts
+
+      - name: "Run blob URL-resolution vectors + frozen delegate room placeholder pin (slices S4.2 + 7.4 — the room-agnostic /blobs/{hash}/url and /uploaded routes must pass room=\"_global\" into the delegate presign seam, pinned against the delegate_room_id_placeholder vector slot; this suite previously ran in NO workflow at all)"
+        run: cargo test -p nodalmerge-server --test blob_url_resolution_vectors
 
   dotnet-blob-layout:
     name: dotnet blob layout + delegate protocol + interop
@@ -107,8 +873,74 @@ jobs:
       - name: Run cross-runtime golden fixture interop test
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobLayoutInteropTests"
 
+      - name: Run blob HTTP surface vectors (GET/HEAD/PUT /blobs/{hash})
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobHttpSurfaceTests"
+
       - name: Run file GC coordinator tests
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobGcCoordinatorTests"
 
       - name: Run file store migration tests
         run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobStoreProviderMigrationTests"
+
+      - name: "Run FileBlobStoreProvider hygiene tests (slice 5.2 — crash-before-marker restarts keep quarantine names stable; a failed/cancelled put leaks no .tmp under blake3/; non-canonical hashes are rejected at the provider boundary, never sanitized into storable names)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobStoreProviderHygieneTests"
+
+      - name: "Run cross-runtime zstd interop test (dotnet-as-consumer: decodes a rust-produced header-less frame; slice 3.1, finding #4)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ZstdInteropTests"
+
+      - name: "Run non-hydrating-backend conformance harness, .NET half (slice 2.1 — HEAD/PUT-idempotency must route through ExistsAsync, never a full TryGetBlobAsync read)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~NonHydratingBlobBackendConformanceTests"
+
+      - name: "Run IBlobStoreProvider.ExistsAsync additive-compat pin (slice 2.1 — a two-member-only provider must still compile and answer correctly via the default)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobStoreProviderExistsAsyncDefaultTests"
+
+      - name: "Run FileBlobStoreProvider.ExistsAsync cheap-probe tests (slice 2.1)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobStoreProviderExistsAsyncTests"
+
+      - name: "Run FileBlobStoreProvider identity-path BLAKE3 verify-on-read tests (slice 3.2, finding #13 — a tampered identity blob must read as Missing, never wrong bytes)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~FileBlobIdentityVerifyTests"
+
+      - name: "Run blob HTTP encoding negotiation tests (HEAD no longer sets Content-Length — slice 2.1 parity fix)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobHttpEncodingNegotiationTests"
+
+      - name: "Run HttpRemoteBlobStoreProvider tests (ExistsAsync now doubles as IBlobStoreProvider's cheap probe — slice 2.1)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~HttpRemoteBlobStoreProviderTests"
+
+      - name: "Run S3DirectBlobStoreProvider tests, including its new ExistsAsync bucket-HEAD probe (slice 2.1)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~S3DirectBlobStoreProviderTests"
+
+      - name: "Run S3DirectBlobOriginOptions tests (slice 3.3, finding #6 — pins Compression default at Off; client-side zstd is explicit opt-in)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~S3DirectBlobOriginOptionsTests"
+
+      - name: "Run ChainedBlobStoreProvider tests, including its new ExistsAsync composition (local-then-remote cheap probe — slice 2.1)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ChainedBlobStoreProviderTests"
+
+      - name: "Run RemoteBlobLinkAggregator tests, including its ExistsAsync ordered-fallback probe (the chain sees this, not the individual links, once >1 remote link is configured — slice 2.1)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RemoteBlobLinkAggregatorTests"
+
+      - name: "Run legacy /sync/blob-url golden tests (slice 4.1, finding #12 — restored to main's pre-existing behavior: unix-seconds expiresAt, 404 not 501 for no backend, loose/anonymous hash handling)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~LegacySyncBlobUrlCompatTests"
+
+      - name: "Run provider HTTP endpoint tests, including /sync/blob-url under the WsOnly/File compositions (fixed in place by slice 4.1 to match main's restored shape)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderHttpEndpointTests"
+
+      - name: "Run S3-delegated /sync/blob-url integration tests (pulled forward from the Phase 8 backlog by slice 4.1, since this slice's fix is exactly what these exercise)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~ProviderS3DelegatedBlobResolverIntegrationTests"
+
+      - name: "Run BlobHttpOptions startup-validation tests (slice 4.3.1 — non-positive MaxBlobBytes rejected at startup, not 500/413 at request time)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobHttpOptionsValidationTests"
+
+      - name: "Run BaseUrl path-prefix resolution tests (slice 4.3.2 — a reverse-proxy path prefix in RemoteBlobOriginOptions.BaseUrl must survive into every HttpRemoteBlobStoreProvider/S3DirectBlobStoreProvider request, both trailing-slash spellings)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobOriginBaseUrlPathPrefixTests"
+
+      - name: "Run S3DelegatedBlobOptions stale-key guard tests (slice 4.3.3 — removed PutPath/GetPath config keys warn loudly, never hard-fail)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~S3DelegatedBlobOptionsStaleKeyGuardTests"
+
+      - name: "Run retry/circuit-breaker characterization suite (slice 7.2 — pins each remote blob provider's contract around the ONE extracted RetryCircuitBreakerPolicy, incl. the deliberately-preserved drift: HttpRemote throws on exhaustion while S3Direct/S3Delegated return null, only S3Direct carves 501 out as capability-declined, and only S3Delegated counts a non-transient 4xx — or a 200-with-null-JSON-body — as a breaker failure)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~RetryCircuitBreakerCharacterizationTests"
+
+      - name: "Run blob URL-resolution vectors (slice S4.1 surface — previously ran in NO workflow at all; wired in by slice 7.4, whose production change is exactly on these routes)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~BlobUrlResolutionVectorTests"
+
+      - name: "Run frozen delegate room placeholder pin (slice 7.4 — the room-agnostic /blobs/{hash}/url routes must send room=\"_global\"/namespace=\"blobs\" into the delegate presign protocol v1, asserted against the delegate_room_id_placeholder vector slot both as constants and as captured route behavior)"
+        run: dotnet test hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/NodalMerge.DotNetHost.Tests.csproj --filter "FullyQualifiedName~DelegateRoomPlaceholderVectorTests"

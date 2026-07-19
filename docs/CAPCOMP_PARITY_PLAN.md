@@ -117,7 +117,17 @@ Expansion, given profile + assigned caps + claimed profile version:
 6. Output: lexicographically (ordinal) sorted, deduplicated list.
 
 Limits default to `{count:128, length:128, payload:8192, depth:16,
-edges:64}` and are overridable per-profile via the `limits` object.
+edges:64}` and are overridable per-profile via the `limits` object —
+**downward only**. The defaults are hard ceilings (the pre-convergence
+unconditional constants): a `limits` value above its default is clamped
+back at resolution, with a runtime warning naming the field, the requested
+value, and the ceiling. The file format is unchanged (any value parses);
+only resolution clamps. Otherwise a profile file could lift the RoomToken
+mint/validate guard and unbound the DFS
+(plans/blob-cas-remediation.md §4.4). Locked by the
+`limits-above-ceiling-*` vectors plus per-runtime suites
+(`server/capability-profile/tests/limits_clamp.rs`,
+`CapabilityProfileLimitsClampTests.cs`).
 
 **Passthrough**: when composition is not configured (no env var / options
 disabled), assigned caps are returned **unchanged and unnormalized**. Pin

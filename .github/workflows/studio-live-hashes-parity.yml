@@ -1,0 +1,125 @@
+name: studio-live-hashes-parity
+
+# Asserts the Rust studio-domain GC live-hash classifier
+# (server/server/src/studio_live_hashes.rs) against its canonical contract:
+#   engine/commands/work-unit-status-vectors.v1.json  (source of truth for
+#                                                      WorkUnitStatus ordinals
+#                                                      + PascalCase casing,
+#                                                      finding #14 /
+#                                                      Phase 0 slice 0.4 of
+#                                                      nodalmerge-studio's
+#                                                      plans/blob-cas-remediation.md)
+#   server/server/src/studio_live_hashes.rs           (parser + its own
+#                                                      #[cfg(test)] unit
+#                                                      suite — including the
+#                                                      inline vector tests,
+#                                                      previously uncovered
+#                                                      by any workflow)
+#   server/server/tests/studio_gc.rs                  (studio-domain GC
+#                                                      retention integration
+#                                                      suite. Shipped with NO
+#                                                      CI step at all — the
+#                                                      file never ran here or
+#                                                      in any other workflow,
+#                                                      so its Phase 0 RED gates
+#                                                      for slices 1.2/1.6 were
+#                                                      invisible rather than
+#                                                      merely skipped. Step
+#                                                      added alongside slice
+#                                                      1.6 of nodalmerge-studio's
+#                                                      plans/blob-cas-remediation.md;
+#                                                      RED scenarios are
+#                                                      `#[ignore]`d and skipped
+#                                                      until their slice ships)
+#
+# The vector assertions live inline in studio_live_hashes.rs's own
+# #[cfg(test)] mod tests (mirroring the established
+# blob_layout_vectors_match_s3_key_derivation precedent in
+# server/s3-blobs/src/lib.rs), not in a separate external tests/ crate — so
+# running the module's lib-test suite is sufficient; there is no separate
+# `--test` binary to invoke.
+#
+# The .NET mirror
+# (nodalmerge-studio/tests/NodalMerge.Studio.Contracts.Tests/WorkUnitStatusVectorTests.cs)
+# lives in the sibling nodalmerge-studio repo and is wired into ITS OWN CI
+# (nodalmerge-studio/.github/workflows/ci.yml), not this workflow — this repo
+# cannot see a change to nodalmerge-studio's WorkUnitStatus enum, so a studio-side
+# reorder can only be caught by studio's CI checking out this repo's vector
+# file (see that workflow's added checkout step). This asymmetry is a known,
+# reported limitation of the cross-repo contract (see slice 0.4's report).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "engine/commands/work-unit-status-vectors.v1.json"
+      - "server/server/src/studio_live_hashes.rs"
+      # slice 7.3 — studio_live_hashes.rs's timestamp parsing now calls the
+      # shared days_from_civil in date_util.rs (previously a local copy); a
+      # change there can break parse_timestamp_nanos without touching this
+      # file at all.
+      - "server/server/src/date_util.rs"
+      # slice 2.2 — studio_live_hashes.rs resolves cas-tree snapshots through
+      # tree_walk::walk_tree, which reads blobs through the BlobPersistence
+      # trait in store.rs. Both suites below transitively exercise them, so a
+      # change there must fire this workflow. (Same class of gap slice 1.5
+      # fixed in blob-layout-parity.yml: these filters enumerate implementation
+      # files by hand — root cause tracked as Phase 8.)
+      - "server/server/src/tree_walk.rs"
+      - "server/server/src/store.rs"
+      - "server/server/tests/studio_gc.rs"
+      - "server/server/src/gc_service.rs"
+      - "server/server/src/gc_store.rs"
+      # slice 6.4 — studio_live_hashes.rs now reads Rooms' GC scan caches
+      # (GcScanCaches lives in room.rs, keyed by room_nodes_version from
+      # store.rs above). A room.rs change can therefore break the studio GC
+      # collection; without this line the suites here would never fire on it.
+      - "server/server/src/room.rs"
+      - ".github/workflows/studio-live-hashes-parity.yml"
+  pull_request:
+    paths:
+      - "engine/commands/work-unit-status-vectors.v1.json"
+      - "server/server/src/studio_live_hashes.rs"
+      # slice 7.3 — studio_live_hashes.rs's timestamp parsing now calls the
+      # shared days_from_civil in date_util.rs (previously a local copy); a
+      # change there can break parse_timestamp_nanos without touching this
+      # file at all.
+      - "server/server/src/date_util.rs"
+      # slice 2.2 — studio_live_hashes.rs resolves cas-tree snapshots through
+      # tree_walk::walk_tree, which reads blobs through the BlobPersistence
+      # trait in store.rs. Both suites below transitively exercise them, so a
+      # change there must fire this workflow. (Same class of gap slice 1.5
+      # fixed in blob-layout-parity.yml: these filters enumerate implementation
+      # files by hand — root cause tracked as Phase 8.)
+      - "server/server/src/tree_walk.rs"
+      - "server/server/src/store.rs"
+      - "server/server/tests/studio_gc.rs"
+      - "server/server/src/gc_service.rs"
+      - "server/server/src/gc_store.rs"
+      # slice 6.4 — studio_live_hashes.rs now reads Rooms' GC scan caches
+      # (GcScanCaches lives in room.rs, keyed by room_nodes_version from
+      # store.rs above). A room.rs change can therefore break the studio GC
+      # collection; without this line the suites here would never fire on it.
+      - "server/server/src/room.rs"
+      - ".github/workflows/studio-live-hashes-parity.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-studio-live-hashes:
+    name: rust studio live-hash classifier + WorkUnitStatus vectors
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run studio_live_hashes unit suite (classification, timestamp parsing, PascalCase payload shapes, WorkUnitStatus vectors)
+        run: "cargo test -p nodalmerge-server --lib studio_live_hashes::"
+
+      - name: Run studio-domain GC retention integration suite (slice 1.2 shipped — the 0.3(b) ordinary-SetBlob RED is un-ignored and the production-shaped tests run the studio ∪ room-DAG UnionLiveHashCollector the binaries inject; no #[ignore]d REDs remain here)
+        run: cargo test -p nodalmerge-server --test studio_gc

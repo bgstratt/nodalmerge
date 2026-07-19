@@ -1,0 +1,107 @@
+name: nodestore-adapter-conformance
+
+# Runs the F7 shared conformance suite (server/stores/conformance) against
+# every real `NodePersistence` adapter, including the two that were
+# previously never exercised by any CI workflow at all:
+#   server/stores/postgres/tests/postgres_round_trip.rs  (real postgres:16
+#                                                         via testcontainers)
+#   server/stores/mongo/tests/mongo_round_trip.rs        (real mongo:7 via
+#                                                         testcontainers)
+#   server/stores/conformance/tests/dir_persistence.rs   (in-process
+#                                                         DirPersistence —
+#                                                         proves the suite
+#                                                         itself is correct,
+#                                                         no Docker needed)
+#
+# Background (blob-cas-remediation.md slice 1.1, finding #1, and its CI
+# follow-up): the global blob GC sweep (`Rooms::sweep_blobs`) now TRUSTS
+# `NodePersistence::known_room_ids()` completely whenever
+# `can_enumerate_rooms() == true` — which `PostgresNodeStore` and
+# `MongoNodeStore` both assert. The fail-closed guard added in 1.1 only
+# defends against *absent* enumeration (`can_enumerate_rooms() == false`);
+# it does nothing if a store claims it can enumerate but the query is wrong
+# (e.g. a `SELECT DISTINCT room_id` / `distinct("room_id")` regression
+# silently returns an empty or partial set). A regression there
+# reintroduces finding #1's permanent blob deletion, with the guard vouching
+# for it. Before this workflow, that path had zero CI coverage — only local
+# Docker runs ever exercised it.
+#
+# Two things this workflow adds beyond "wire in the existing tests":
+#
+# 1. `known_room_ids_is_superset_of_written_rooms` — a new conformance
+#    scenario in server/stores/conformance/src/lib.rs. `known_room_ids()` is
+#    store-global (not scoped to the caller's room_id), so the scenario
+#    writes into two freshly-namespaced rooms and asserts both come back —
+#    a superset check, never an exact-set check, since a persistent DB or a
+#    concurrent run will have other rooms present. Verified (locally,
+#    against real postgres:16/mongo:7 containers) to actually catch both an
+#    empty-enumeration regression (Postgres) and a partial/wrong-enumeration
+#    regression (Mongo, dropping one written room) — sabotage-and-revert on
+#    each store's `known_room_ids()`, suite goes red, revert, suite goes
+#    green again.
+#
+# 2. `NODALMERGE_REQUIRE_DOCKER=1` (set below). Both round-trip tests
+#    `eprintln!` + `return` when Docker/testcontainers is unavailable, which
+#    the test harness reports as a PASS — correct behavior for a dev laptop
+#    that may not have Docker running, but catastrophic in CI: if the
+#    Docker setup on the runner ever breaks, this job would go green while
+#    testing nothing, silently losing all coverage of the two
+#    safety-critical adapters. Setting this env var converts that graceful
+#    skip into an explicit panic here, so a broken Docker setup fails the
+#    job instead of passing it. Local/dev runs without the var keep skipping
+#    gracefully — see the comment at each test's skip site.
+#
+# GitHub-hosted ubuntu-latest runners ship Docker Engine + Buildx +
+# Compose preinstalled (verified against actions/runner-images'
+# Ubuntu 24.04 software list, and against this repo's own docker.yml, which
+# already runs bare `docker` commands on ubuntu-latest with no `services:`
+# block) — so testcontainers works here with no extra setup step.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/stores/postgres/**"
+      - "server/stores/mongo/**"
+      - "server/stores/conformance/**"
+      - "server/server/src/store.rs"
+      - "core/crdt/src/**"
+      - ".github/workflows/nodestore-adapter-conformance.yml"
+  pull_request:
+    paths:
+      - "server/stores/postgres/**"
+      - "server/stores/mongo/**"
+      - "server/stores/conformance/**"
+      - "server/server/src/store.rs"
+      - "core/crdt/src/**"
+      - ".github/workflows/nodestore-adapter-conformance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # See the "2." note above: converts both round-trip tests' graceful
+  # Docker-unavailable skip into a hard failure, so this job cannot go
+  # green without actually having exercised Postgres/Mongo.
+  NODALMERGE_REQUIRE_DOCKER: "1"
+
+jobs:
+  nodestore-adapter-conformance:
+    name: F7 conformance — Dir / Postgres / Mongo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run conformance suite against DirPersistence (proves the suite itself is correct; no Docker needed)
+        run: cargo test -p nodalmerge-nodestore-conformance --test dir_persistence
+
+      - name: Run conformance suite against real postgres:16 (testcontainers; NODALMERGE_REQUIRE_DOCKER=1 fails closed if Docker is unavailable)
+        run: cargo test -p nodalmerge-postgres-store --test postgres_round_trip
+
+      - name: Run conformance suite against real mongo:7 (testcontainers; NODALMERGE_REQUIRE_DOCKER=1 fails closed if Docker is unavailable)
+        run: cargo test -p nodalmerge-mongo-store --test mongo_round_trip

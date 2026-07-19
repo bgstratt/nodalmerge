@@ -1051,6 +1051,7 @@ async fn handle_client_message(
                 None => return true,
             };
             let mut stored = 0usize;
+            let mut stored_hashes: Vec<String> = Vec::new();
             let mut blob_store = room.blobs.write().await;
             for entry in &blobs {
                 let hash_hex = extract_blob_upload_entry_hash_text(entry);
@@ -1061,24 +1062,48 @@ async fn handle_client_message(
                     let actual = nodalmerge_core::Hash::of(&bytes);
                     if actual == expected {
                         // F4: write-through persistence for accepted blobs.
-                        room.persistence
-                            .persist_blob(&actual, &bytes);
-                        blob_store.put(bytes);
-                        stored += 1;
+                        //
+                        // S4.2b (finding #8): a failed persist means the blob
+                        // is NOT accepted — same treatment as a hash-mismatch
+                        // entry (skipped: not put in the in-memory store, not
+                        // counted, not broadcast as available), because the
+                        // blob-upload protocol has no per-entry ack/error
+                        // message to say more (frozen contract; the success
+                        // path's only "ack" is the room-wide blob-available
+                        // broadcast below). The uploader still holds its copy
+                        // and can re-send; advertising or serving bytes the
+                        // durable store rejected would vanish on restart
+                        // while peers were told they exist. `error!` is the
+                        // operator-facing half.
+                        match room.persistence.persist_blob(&actual, &bytes) {
+                            Ok(()) => {
+                                blob_store.put(bytes);
+                                stored += 1;
+                                stored_hashes.push(hash_hex.clone());
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    %e,
+                                    hash = %hash_hex,
+                                    room = %room.room_id,
+                                    "ws blob-upload persist failed; entry NOT stored or broadcast"
+                                );
+                            }
+                        }
                     }
                 }
             }
             // Blobs are served on-demand via blob-request.
             // Broadcast a lightweight notification so peers know new blobs are
             // available and can request them without waiting for the next delta.
+            // S4.2b: the list is the entries actually stored above — never the
+            // raw request's hash list, which would advertise entries whose
+            // persist failed (and, pre-4.2, even entries rejected by the hash
+            // check) as available.
             if plan_blob_store_mutation(stored) == BlobStoreMutationAction::BroadcastBlobAvailable {
-                let available: Vec<String> = blobs
-                    .iter()
-                    .filter_map(|e| e["hash"].as_str())
-                    .map(str::to_string)
-                    .collect();
-                let bcast = serde_json::to_string(&assemble_blob_available_envelope(available))
-                    .expect("blob-available envelope should always serialize");
+                let bcast =
+                    serde_json::to_string(&assemble_blob_available_envelope(stored_hashes))
+                        .expect("blob-available envelope should always serialize");
                 emit_room_broadcast(room, bcast);
             }
         }
@@ -1121,16 +1146,71 @@ async fn handle_client_message(
             }
 
             // For everything not redirected, fall through to bytes-over-WS.
+            //
+            // S2.4 (blob-cas-remediation.md, latent finding): the room's
+            // in-memory `blob_store` is a hot relay cache, not the source of
+            // truth — it only holds what THIS room process has itself seen
+            // via `BlobUpload` or its own referenced-blob hydrate-on-open
+            // (see `room.rs`'s "async persistence hydrate stage"). A peer
+            // that didn't negotiate `supports_direct_blob_io` (or whose
+            // backend had no presigned URL for this hash — the `redirects`
+            // split above) asking for a hash that's durable but was never
+            // relayed through this process (a restart, a sibling room, an
+            // out-of-band upload) used to get nothing: an in-memory miss
+            // fell straight through to an empty entry with no
+            // `persistence.get_blob` fallback. Try the durable store before
+            // giving up.
             let blob_store = room.blobs.read().await;
             let entries: Vec<BlobPackEntry> = fallthrough
                 .iter()
                 .filter_map(|h| {
                     let hash = parse_hex_hash(h)?;
-                    let data = blob_store.get(&hash)?;
+                    // In-memory hit: trusted, not re-verified. `MemoryBlobStore::put`
+                    // computes the key itself as `Hash::of(&data)` (`core/crdt/src/storage.rs`),
+                    // so an entry can only ever be found under its own correct
+                    // hash — there is nothing here a mismatch could hide.
+                    if let Some(data) = blob_store.get(&hash) {
+                        return Some(BlobPackEntry {
+                            hash: h.clone(),
+                            data: base64_encode(&data),
+                        });
+                    }
+                    // Persistence fallback. Two contracts, both already
+                    // pinned elsewhere — this site adds no new policy:
+                    //
+                    // * `DirPersistence` / `Composite`-with-Dir: `get_blob`
+                    //   verifies BLAKE3 on read (slice 3.2) and returns real
+                    //   bytes, or `None` for a genuinely missing/corrupt
+                    //   blob. A hit is served in the exact same
+                    //   `BlobPackEntry` shape as an in-memory hit — the wire
+                    //   contract doesn't distinguish "relayed" from
+                    //   "fetched from disk just now."
+                    //
+                    // * `S3BlobStore` (Direct or Delegate): `get_blob` is
+                    //   `None` BY CONTRACT (slice 2.2 pinned "S3 never
+                    //   hydrates" — keeping large file payloads out of the
+                    //   server process is the entire point of offloading
+                    //   them). This call is therefore a structural no-op on
+                    //   that backend, same as today: no hydrate-through, no
+                    //   presign-and-redirect-after-the-fact. A capable
+                    //   client already got a `blob-redirect` above (F6); a
+                    //   non-capable client against an S3 backend simply has
+                    //   no bytes-over-WS path for this hash, unchanged by
+                    //   this fallback.
+                    let data = room.persistence.get_blob(&hash)?;
                     Some(BlobPackEntry {
                         hash: h.clone(),
                         data: base64_encode(&data),
                     })
+                    // Deliberately NOT warming `blob_store` with these
+                    // bytes: `MemoryBlobStore` is an unbounded `HashMap`
+                    // with no eviction or size cap (`core/crdt/src/storage.rs`).
+                    // Warming it on every fallback hit would let a busy
+                    // relay room's peers slowly pull the entire durable CAS
+                    // into this process's RAM one blob-request at a time.
+                    // Only genuine uploads (`BlobUpload`, above) and this
+                    // room's own referenced-blob hydrate-on-open are
+                    // allowed to populate it.
                 })
                 .collect();
             // Always reply including the originally requested hashes so the

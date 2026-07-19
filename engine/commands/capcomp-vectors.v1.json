@@ -1,5 +1,5 @@
 {
-  "$comment": "Canonical CAPCOMP (capability composition) parity vectors. Each vector pins one behavior of the profile-version gate + capability DAG expansion algorithm specified in docs/CAPCOMP_PARITY_PLAN.md §3. Consumed by: server/capability-profile/tests/capcomp_vectors.rs (Rust: nodalmerge-capability-profile, via expand_with_version_gate + CapabilityProfileError::class()), hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/CapcompParityTests.cs (.NET: CapabilityProfileExpander.TryExpand with the errorClass overload). 'mode':'expand' vectors supply a profile, assigned capabilities, and a claimed_profile_version, and expect either the flattened+sorted capability list ('expect.ok') or a stable error class ('expect.error'). 'mode':'passthrough' vectors have no profile and assert that a disabled/unconfigured expander returns assigned capabilities completely unchanged (no trim, no case-fold, no validation). Error classes are the parity contract; the human-readable message text is NOT shared and may differ per runtime. If you change the algorithm, this file, both harnesses, and docs/CAPCOMP_PARITY_PLAN.md must move together. Each field of a profile's 'limits' object may be omitted independently; both runtimes substitute that field's own default (128/128/8192/16/64) rather than requiring the whole object.",
+  "$comment": "Canonical CAPCOMP (capability composition) parity vectors. Each vector pins one behavior of the profile-version gate + capability DAG expansion algorithm specified in docs/CAPCOMP_PARITY_PLAN.md §3. Consumed by: server/capability-profile/tests/capcomp_vectors.rs (Rust: nodalmerge-capability-profile, via expand_with_version_gate + CapabilityProfileError::class()), hosts/dotnet/tests/NodalMerge.DotNetHost.Tests/CapcompParityTests.cs (.NET: CapabilityProfileExpander.TryExpand with the errorClass overload). 'mode':'expand' vectors supply a profile, assigned capabilities, and a claimed_profile_version, and expect either the flattened+sorted capability list ('expect.ok') or a stable error class ('expect.error'). 'mode':'passthrough' vectors have no profile and assert that a disabled/unconfigured expander returns assigned capabilities completely unchanged (no trim, no case-fold, no validation). Error classes are the parity contract; the human-readable message text is NOT shared and may differ per runtime. If you change the algorithm, this file, both harnesses, and docs/CAPCOMP_PARITY_PLAN.md must move together. Each field of a profile's 'limits' object may be omitted independently; both runtimes substitute that field's own default (128/128/8192/16/64) rather than requiring the whole object. Those defaults are also hard ceilings: a 'limits' field may lower a cap but never raise it — values above the defaults are clamped back (with a runtime warning), so a profile file cannot lift the mint/validate guard. Vectors 'limits-above-ceiling-*' lock this.",
   "schema_version": 1,
   "vectors": [
     {
@@ -478,6 +478,60 @@
       "assigned": ["root"],
       "claimed_profile_version": "v1",
       "expect": { "ok": ["a", "b", "root", "shared"] }
+    },
+    {
+      "id": "limits-above-ceiling-are-clamped-depth",
+      "description": "the built-in defaults are hard ceilings: a limits block claiming max_dag_depth 64 is clamped back to 16, so an 18-node chain (deepest edge at depth 17) is still rejected exactly as a no-limits profile would reject it",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "limits": {
+          "max_dag_depth": 64
+        },
+        "nodes": [
+          { "capability": "c00", "inherits": ["c01"] },
+          { "capability": "c01", "inherits": ["c02"] },
+          { "capability": "c02", "inherits": ["c03"] },
+          { "capability": "c03", "inherits": ["c04"] },
+          { "capability": "c04", "inherits": ["c05"] },
+          { "capability": "c05", "inherits": ["c06"] },
+          { "capability": "c06", "inherits": ["c07"] },
+          { "capability": "c07", "inherits": ["c08"] },
+          { "capability": "c08", "inherits": ["c09"] },
+          { "capability": "c09", "inherits": ["c10"] },
+          { "capability": "c10", "inherits": ["c11"] },
+          { "capability": "c11", "inherits": ["c12"] },
+          { "capability": "c12", "inherits": ["c13"] },
+          { "capability": "c13", "inherits": ["c14"] },
+          { "capability": "c14", "inherits": ["c15"] },
+          { "capability": "c15", "inherits": ["c16"] },
+          { "capability": "c16", "inherits": ["c17"] },
+          { "capability": "c17", "inherits": [] }
+        ]
+      },
+      "assigned": ["c00"],
+      "claimed_profile_version": "v1",
+      "expect": { "error": "depth_exceeded" }
+    },
+    {
+      "id": "limits-above-ceiling-still-expands-small-graphs",
+      "description": "clamping is not rejection: a profile whose limits block raises caps past the ceilings still expands a graph that fits inside the built-in defaults",
+      "mode": "expand",
+      "profile": {
+        "profile_version": "v1",
+        "limits": {
+          "max_capability_count": 1024,
+          "max_dag_depth": 64
+        },
+        "nodes": [
+          { "capability": "root", "inherits": ["a", "b"] },
+          { "capability": "a", "inherits": [] },
+          { "capability": "b", "inherits": [] }
+        ]
+      },
+      "assigned": ["root"],
+      "claimed_profile_version": "v1",
+      "expect": { "ok": ["a", "b", "root"] }
     },
     {
       "id": "passthrough-disabled-returns-verbatim",

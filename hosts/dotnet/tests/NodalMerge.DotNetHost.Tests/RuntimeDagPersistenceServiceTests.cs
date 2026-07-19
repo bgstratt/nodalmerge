@@ -273,7 +273,13 @@ public class RuntimeDagPersistenceServiceTests
         var roomId = "room-c";
         var store = new TestNodeStoreProvider();
         var bridge = new RecordingRuntimeCommandBridge();
-        var service = new RuntimeDagPersistenceService(store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance);
+        // Pin pruning off to isolate this test on compaction-SNAPSHOT creation at the threshold —
+        // pruning-enabled behaviour is asserted separately by
+        // PersistInboundPackAsync_PrunesEligibleNodes_WhenPruningEnabled. (The shipped default now
+        // prunes; see RuntimeDagCompactionOptions.Default.)
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { EnablePruning = false });
 
         for (var i = 0; i < 32; i += 1)
         {
@@ -287,7 +293,7 @@ public class RuntimeDagPersistenceServiceTests
         Assert.Equal(2, store.CompactionSnapshot.SchemaVersion);
         Assert.False(string.IsNullOrWhiteSpace(store.CompactionSnapshot.BoundaryNodeIdHex));
 
-        // Conservative Slice C default: prune disabled until full native snapshot materialization is in place.
+        // Pruning is pinned off above, so the eligible packs stay put.
         Assert.Empty(store.DeletedNodeIds);
     }
 
@@ -445,6 +451,53 @@ public class RuntimeDagPersistenceServiceTests
     }
 
     [Fact]
+    public async Task PersistPromotedNodeDeltaAsync_PersistsSingleNodePackAsDelta()
+    {
+        var roomId = "room-delta";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            // The single-node export the MstDone path returns for the promoted node.
+            MstDonePayload = new byte[] { 9, 8, 7, 6 }
+        };
+        var service = new RuntimeDagPersistenceService(store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance);
+
+        await service.PersistPromotedNodeDeltaAsync(roomId, "node-abc", CancellationToken.None);
+
+        Assert.Equal(1, store.PersistAcceptedCalls);
+        var snapshot = await store.LoadRoomSnapshotAsync(roomId, CancellationToken.None);
+        Assert.NotNull(snapshot);
+        var node = Assert.Single(snapshot!.Nodes);
+        Assert.Equal(AcceptedNodeKinds.Pack, node.PayloadKind);
+        Assert.Equal(new byte[] { 9, 8, 7, 6 }, node.Payload);
+    }
+
+    [Fact]
+    public async Task PersistPromotedNodeDeltaAsync_IsNoOp_WhenNodeIdBlank()
+    {
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge { MstDonePayload = new byte[] { 1, 2 } };
+        var service = new RuntimeDagPersistenceService(store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance);
+
+        await service.PersistPromotedNodeDeltaAsync("room-x", "   ", CancellationToken.None);
+
+        Assert.Equal(0, store.PersistAcceptedCalls);
+    }
+
+    [Fact]
+    public async Task PersistPromotedNodeDeltaAsync_IsNoOp_WhenExportEmpty()
+    {
+        var store = new TestNodeStoreProvider();
+        // MstDonePayload unset → the export returns "[]" (no ServerPackPrepared) → nothing to persist.
+        var bridge = new RecordingRuntimeCommandBridge();
+        var service = new RuntimeDagPersistenceService(store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance);
+
+        await service.PersistPromotedNodeDeltaAsync("room-y", "node-1", CancellationToken.None);
+
+        Assert.Equal(0, store.PersistAcceptedCalls);
+    }
+
+    [Fact]
     public async Task PersistRoomSnapshotAsync_PersistsServerPackPayload()
     {
         var roomId = "room-snapshot";
@@ -481,6 +534,149 @@ public class RuntimeDagPersistenceServiceTests
 
         Assert.Equal(1, store.PersistAcceptedCalls);
         Assert.Equal(1, metrics.GetTotal("room_duplicate_pack_replay_suppressed_total"));
+    }
+
+    [Fact]
+    public async Task PersistRoomSnapshotDebouncedAsync_CoalescesMutations_UntilOpThresholdTrips()
+    {
+        var roomId = "room-debounce-ops";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            // Distinct payloads so each due snapshot actually persists (dup-suppression won't hide it).
+            ServerPackPayloadSequence = new Queue<byte[]>(
+                Enumerable.Range(1, 8).Select(i => new byte[] { (byte)i, (byte)(i + 1), (byte)(i + 2) })
+            )
+        };
+        var time = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var options = new RuntimeSnapshotDebounceOptions(
+            Enabled: true,
+            MaxPendingMutations: 5,
+            MinInterval: TimeSpan.FromHours(1)
+        );
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { Enabled = false }, options, time
+        );
+
+        // 12 mutations, interval never trips (fixed clock) → snapshot only on the 5th and 10th op.
+        for (var i = 0; i < 12; i += 1)
+        {
+            await service.PersistRoomSnapshotDebouncedAsync(roomId, CancellationToken.None);
+        }
+
+        Assert.Equal(2, store.PersistAcceptedCalls);
+    }
+
+    [Fact]
+    public async Task PersistRoomSnapshotDebouncedAsync_SnapshotsOnce_WhenIntervalElapses()
+    {
+        var roomId = "room-debounce-time";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            ServerPackPayloadSequence = new Queue<byte[]>(new[]
+            {
+                new byte[] { 1, 2, 3 },
+                new byte[] { 4, 5, 6 }
+            })
+        };
+        var start = DateTimeOffset.UtcNow;
+        var time = new MutableTimeProvider(start);
+        var options = new RuntimeSnapshotDebounceOptions(
+            Enabled: true,
+            MaxPendingMutations: 1000,
+            MinInterval: TimeSpan.FromSeconds(30)
+        );
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { Enabled = false }, options, time
+        );
+
+        await service.PersistRoomSnapshotDebouncedAsync(roomId, CancellationToken.None);
+        Assert.Equal(0, store.PersistAcceptedCalls); // within window, op threshold far away
+
+        time.Now = start.AddSeconds(31);
+        await service.PersistRoomSnapshotDebouncedAsync(roomId, CancellationToken.None);
+        Assert.Equal(1, store.PersistAcceptedCalls);
+    }
+
+    [Fact]
+    public async Task PersistRoomSnapshotDebouncedAsync_SnapshotsEveryMutation_WhenDisabled()
+    {
+        var roomId = "room-debounce-disabled";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            ServerPackPayloadSequence = new Queue<byte[]>(
+                Enumerable.Range(1, 3).Select(i => new byte[] { (byte)(i * 10), (byte)(i * 10 + 1) })
+            )
+        };
+        var time = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var options = RuntimeSnapshotDebounceOptions.Default with { Enabled = false };
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { Enabled = false }, options, time
+        );
+
+        for (var i = 0; i < 3; i += 1)
+        {
+            await service.PersistRoomSnapshotDebouncedAsync(roomId, CancellationToken.None);
+        }
+
+        Assert.Equal(3, store.PersistAcceptedCalls);
+    }
+
+    [Fact]
+    public async Task FlushRoomSnapshotAsync_CheckpointsPendingWindow_ThenNoOpsWhenClean()
+    {
+        var roomId = "room-flush";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            ServerPackPayloadSequence = new Queue<byte[]>(new[]
+            {
+                new byte[] { 1, 2, 3 },
+                new byte[] { 4, 5, 6 }
+            })
+        };
+        var time = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var options = new RuntimeSnapshotDebounceOptions(
+            Enabled: true,
+            MaxPendingMutations: 1000,
+            MinInterval: TimeSpan.FromHours(1)
+        );
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { Enabled = false }, options, time
+        );
+
+        // Three mutations accumulate without tripping either threshold.
+        for (var i = 0; i < 3; i += 1)
+        {
+            await service.PersistRoomSnapshotDebouncedAsync(roomId, CancellationToken.None);
+        }
+        Assert.Equal(0, store.PersistAcceptedCalls);
+
+        // Disconnect flush persists the pending window exactly once.
+        await service.FlushRoomSnapshotAsync(roomId, CancellationToken.None);
+        Assert.Equal(1, store.PersistAcceptedCalls);
+
+        // A second flush with nothing pending is a no-op.
+        await service.FlushRoomSnapshotAsync(roomId, CancellationToken.None);
+        Assert.Equal(1, store.PersistAcceptedCalls);
+    }
+
+    private sealed class MutableTimeProvider : TimeProvider
+    {
+        public MutableTimeProvider(DateTimeOffset now)
+        {
+            Now = now;
+        }
+
+        public DateTimeOffset Now { get; set; }
+
+        public override DateTimeOffset GetUtcNow() => Now;
     }
 
     private sealed class TestNodeStoreProvider : INodeStoreProvider
@@ -609,6 +805,13 @@ public class RuntimeDagPersistenceServiceTests
         public Queue<byte[]>? ServerPackPayloadSequence { get; set; }
 
         /// <summary>
+        /// When set, <see cref="ProcessJsonCommand"/> answers <c>MstDone{ids}</c> (the single-node
+        /// export used by <see cref="RuntimeDagPersistenceService.PersistPromotedNodeDeltaAsync"/>)
+        /// with a synthetic <c>ServerPackPrepared</c> carrying these bytes.
+        /// </summary>
+        public byte[]? MstDonePayload { get; set; }
+
+        /// <summary>
         /// When set, <see cref="ProcessJsonCommand"/> will answer <c>InspectPack</c> commands
         /// with a synthetic <c>PackInspected</c> event using these values.
         /// </summary>
@@ -653,6 +856,21 @@ public class RuntimeDagPersistenceServiceTests
                     + nodesB64
                     + "\",\"root_hex\":\""
                     + (rootHex ?? ServerPackRootHex ?? "")
+                    + "\"}}]";
+                return FfiJsonBridgeResult.Success(eventsJson);
+            }
+
+            if (IsMstDone(doc.RootElement))
+            {
+                if (MstDonePayload is null)
+                {
+                    return FfiJsonBridgeResult.Success("[]");
+                }
+
+                var nodesB64 = Convert.ToBase64String(MstDonePayload);
+                var eventsJson =
+                    "[{\"ServerPackPrepared\":{\"room_id\":\"room-test\",\"nodes_b64\":\""
+                    + nodesB64
                     + "\"}}]";
                 return FfiJsonBridgeResult.Success(eventsJson);
             }
@@ -706,6 +924,14 @@ public class RuntimeDagPersistenceServiceTests
                 && command.ValueKind == JsonValueKind.Object
                 && command.TryGetProperty("InspectPack", out var inspect)
                 && inspect.ValueKind == JsonValueKind.Object;
+        }
+
+        private static bool IsMstDone(JsonElement root)
+        {
+            return root.TryGetProperty("command", out var command)
+                && command.ValueKind == JsonValueKind.Object
+                && command.TryGetProperty("MstDone", out var mstDone)
+                && mstDone.ValueKind == JsonValueKind.Object;
         }
 
         private static byte[]? ReadImportPayload(JsonElement root)

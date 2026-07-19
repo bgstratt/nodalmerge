@@ -12,10 +12,7 @@ internal sealed class S3DelegatedBlobUrlResolverProvider : IBlobUrlResolverProvi
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly S3DelegatedBlobOptions _options;
     private readonly ILogger<S3DelegatedBlobUrlResolverProvider> _logger;
-    private readonly object _circuitLock = new();
-
-    private int _consecutiveFailures;
-    private DateTimeOffset? _circuitOpenedUntil;
+    private readonly RetryCircuitBreakerPolicy _retryPolicy;
 
     public S3DelegatedBlobUrlResolverProvider(
         IHttpClientFactory httpClientFactory,
@@ -26,6 +23,21 @@ internal sealed class S3DelegatedBlobUrlResolverProvider : IBlobUrlResolverProvi
         _httpClientFactory = httpClientFactory;
         _options = options;
         _logger = logger;
+        // Slice 7.2: this provider's option set. No 501 carve-out (a 501 is
+        // any other 5xx here), and — unlike its two siblings — the breaker
+        // verdict for a NON-transient response is CallerDecides: a 4xx (and
+        // even a 2xx whose JSON body parses to null) counts as a breaker
+        // FAILURE here, because the verdict depends on the body, not just
+        // the status. Exhaustion maps to null (WS fallback), never a throw.
+        // See RetryCircuitBreakerPolicy's class doc for the deliberately-
+        // preserved drift between the three option sets.
+        _retryPolicy = new RetryCircuitBreakerPolicy(new RetryCircuitBreakerPolicyOptions(
+            MaxRetries: options.MaxRetries,
+            CircuitBreakerFailureThreshold: options.CircuitBreakerFailureThreshold,
+            CircuitBreakerOpenSeconds: options.CircuitBreakerOpenSeconds,
+            TreatNotImplementedAsCapabilityDeclined: false,
+            NonTransientResponseHandling: NonTransientResponseHandling.CallerDecides
+        ));
     }
 
     public async ValueTask<PresignedBlobUrl?> ResolvePutUrlAsync(
@@ -120,114 +132,71 @@ internal sealed class S3DelegatedBlobUrlResolverProvider : IBlobUrlResolverProvi
     )
     {
         var maxAttempts = _options.MaxRetries + 1;
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+
+        var outcome = await _retryPolicy.SendWithRetryAsync(
+            async (attempt, ct) =>
+            {
+                _logger.LogInformation(
+                    "S3 delegated resolver attempt {Attempt}/{MaxAttempts} to path {Path}",
+                    attempt,
+                    maxAttempts,
+                    path
+                );
+                return await client.PostAsJsonAsync(path, payload, ct);
+            },
+            cancellationToken
+        );
+
+        if (outcome.Kind == RetrySendOutcomeKind.Exhausted)
         {
-            _logger.LogInformation(
-                "S3 delegated resolver attempt {Attempt}/{MaxAttempts} to path {Path}",
-                attempt,
-                maxAttempts,
-                path
+            // Breaker failure already recorded by the policy.
+            _logger.LogWarning(
+                "S3 delegated resolver failed on attempt {Attempt} (transient={IsTransient}); returning fallback",
+                outcome.Attempts,
+                true
             );
+            return null;
+        }
 
-            var outcome = await TryPostOnceAsync(client, path, payload, cancellationToken);
-            if (outcome.Response is not null)
+        // CallerDecides mode: the policy recorded nothing for this
+        // non-transient response — the breaker verdict below depends on the
+        // status AND the parsed body, exactly as the pre-7.2 copy behaved.
+        var response = outcome.Response!;
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
             {
-                RecordSuccess();
-                _logger.LogInformation("S3 delegated resolver succeeded on attempt {Attempt}", attempt);
-                return outcome.Response;
-            }
-
-            if (!outcome.IsTransient || attempt == maxAttempts)
-            {
-                RecordFailure();
+                _retryPolicy.RecordFailure();
                 _logger.LogWarning(
                     "S3 delegated resolver failed on attempt {Attempt} (transient={IsTransient}); returning fallback",
-                    attempt,
-                    outcome.IsTransient
+                    outcome.Attempts,
+                    false
                 );
                 return null;
             }
-        }
 
-        RecordFailure();
-        return null;
-    }
-
-    private static async Task<DelegatedPostOutcome> TryPostOnceAsync(
-        HttpClient client,
-        string path,
-        object payload,
-        CancellationToken cancellationToken
-    )
-    {
-        HttpResponseMessage response;
-        try
-        {
-            response = await client.PostAsJsonAsync(path, payload, cancellationToken);
-        }
-        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            return new DelegatedPostOutcome(Response: null, IsTransient: true);
-        }
-        catch (HttpRequestException)
-        {
-            return new DelegatedPostOutcome(Response: null, IsTransient: true);
-        }
-
-        if (!response.IsSuccessStatusCode)
-        {
-            var statusCode = (int)response.StatusCode;
-            var isTransient = statusCode >= 500 || statusCode == 429;
-            return new DelegatedPostOutcome(Response: null, IsTransient: isTransient);
-        }
-
-        var parsed = await response.Content.ReadFromJsonAsync<DelegatedUrlResponse>(cancellationToken: cancellationToken);
-        return new DelegatedPostOutcome(Response: parsed, IsTransient: false);
-    }
-
-    private bool IsCircuitOpen()
-    {
-        lock (_circuitLock)
-        {
-            if (_circuitOpenedUntil is null)
+            var parsed = await response.Content.ReadFromJsonAsync<DelegatedUrlResponse>(cancellationToken: cancellationToken);
+            if (parsed is null)
             {
-                return false;
+                // A 200 whose JSON body is the literal `null`: counted as a
+                // breaker failure (pinned pre-extraction behavior).
+                _retryPolicy.RecordFailure();
+                _logger.LogWarning(
+                    "S3 delegated resolver failed on attempt {Attempt} (transient={IsTransient}); returning fallback",
+                    outcome.Attempts,
+                    false
+                );
+                return null;
             }
 
-            if (DateTimeOffset.UtcNow < _circuitOpenedUntil.Value)
-            {
-                return true;
-            }
-
-            _circuitOpenedUntil = null;
-            _consecutiveFailures = 0;
-            return false;
+            _retryPolicy.RecordSuccess();
+            _logger.LogInformation("S3 delegated resolver succeeded on attempt {Attempt}", outcome.Attempts);
+            return parsed;
         }
     }
 
-    private void RecordSuccess()
-    {
-        lock (_circuitLock)
-        {
-            _consecutiveFailures = 0;
-            _circuitOpenedUntil = null;
-        }
-    }
-
-    private void RecordFailure()
-    {
-        lock (_circuitLock)
-        {
-            _consecutiveFailures++;
-            if (_consecutiveFailures >= _options.CircuitBreakerFailureThreshold)
-            {
-                _circuitOpenedUntil = DateTimeOffset.UtcNow.AddSeconds(_options.CircuitBreakerOpenSeconds);
-            }
-        }
-    }
+    private bool IsCircuitOpen() => _retryPolicy.IsCircuitOpen();
 }
-
-internal sealed record DelegatedPostOutcome(DelegatedUrlResponse? Response, bool IsTransient);
 
 internal sealed class DelegatedUrlResponse
 {

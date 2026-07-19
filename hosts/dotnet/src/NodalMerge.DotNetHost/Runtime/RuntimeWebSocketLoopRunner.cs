@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using NodalMerge.Host.Abstractions.Providers;
 
 namespace NodalMerge.DotNetHost.Runtime;
 
@@ -24,6 +25,8 @@ public sealed class RuntimeWebSocketLoopRunner
     );
 
     private readonly ILogger<RuntimeWebSocketLoopRunner> _logger;
+    private readonly IReadOnlyList<IInboundPackObserver> _inboundPackObservers;
+    private readonly RuntimeInboundPackObserverDispatchOptions _inboundPackObserverDispatchOptions;
 
     public RuntimeWebSocketLoopRunner()
         : this(NullLogger<RuntimeWebSocketLoopRunner>.Instance)
@@ -31,8 +34,31 @@ public sealed class RuntimeWebSocketLoopRunner
     }
 
     public RuntimeWebSocketLoopRunner(ILogger<RuntimeWebSocketLoopRunner> logger)
+        : this(logger, Array.Empty<IInboundPackObserver>())
+    {
+    }
+
+    // S7.1: additive-only constructor overload. Resolved automatically by the DI container
+    // (services.AddSingleton<RuntimeWebSocketLoopRunner>() in ServiceCollectionExtensions picks
+    // the constructor with the most resolvable parameters) — IEnumerable<T> always resolves, to an
+    // empty sequence when no IInboundPackObserver is registered, so unregistered hosts and every
+    // existing direct `new RuntimeWebSocketLoopRunner(...)` call site (both existing ctors are
+    // untouched) get byte-identical behavior to before this slice.
+    //
+    // Slice 6.5 (nodalmerge-studio/plans/blob-cas-remediation.md): the trailing options parameter
+    // is additive again — optional with a default, so DI still selects this constructor whether or
+    // not a host registers RuntimeInboundPackObserverDispatchOptions (an unregistered optional
+    // parameter falls back to its default), and every pre-6.5 call site compiles unchanged.
+    public RuntimeWebSocketLoopRunner(
+        ILogger<RuntimeWebSocketLoopRunner> logger,
+        IEnumerable<IInboundPackObserver> inboundPackObservers,
+        RuntimeInboundPackObserverDispatchOptions? inboundPackObserverDispatchOptions = null)
     {
         _logger = logger;
+        _inboundPackObservers = inboundPackObservers as IReadOnlyList<IInboundPackObserver>
+            ?? inboundPackObservers.ToArray();
+        _inboundPackObserverDispatchOptions =
+            inboundPackObserverDispatchOptions ?? new RuntimeInboundPackObserverDispatchOptions();
     }
 
     public const int MaxInboundMessageBytes = 64 * 1024;
@@ -77,6 +103,10 @@ public sealed class RuntimeWebSocketLoopRunner
             KeyValuePair.Create<string, object?>("trace", connectionTraceId)
         );
         var registeredInRoom = false;
+        // Slice 6.5: per-connection observer dispatcher, created lazily on the first genuinely
+        // inbound pack (connections that never carry a pack, or hosts with zero observers, pay
+        // nothing). Torn down in the finally below.
+        RuntimeInboundPackObserverDispatcher? inboundPackObserverDispatcher = null;
         try
         {
             var frameBuffer = new byte[32 * 1024];
@@ -246,12 +276,39 @@ public sealed class RuntimeWebSocketLoopRunner
                                 );
                             }
 
-                            // Also persist the room's current server-pack snapshot.
-                            // In practice most client writes arrive as `pack` messages,
-                            // so relying only on non-pack mutation hooks can leave
-                            // persistence with delta-only history that doesn't always
-                            // hydrate deterministically on fresh reconnects.
-                            await dagPersistenceService.PersistRoomSnapshotAsync(state.RoomId!, cancellationToken);
+                            // S7.1: this is the genuinely peer-authored inbound-apply point on the
+                            // server-side WS path (the frame just received from state's socket, of
+                            // type "pack", after engine import + persistence above) — not the
+                            // broadcast fan-out further down (TryBuildPackRelay/roomBroker.BroadcastAsync),
+                            // which is this host's own echo to OTHER peers.
+                            //
+                            // Slice 6.5 (nodalmerge-studio/plans/blob-cas-remediation.md): observers
+                            // are no longer awaited inline here — the old per-observer try/catch
+                            // isolated exceptions but not latency, so a slow/hung observer stalled
+                            // every further frame on this connection. Post is a non-blocking enqueue
+                            // onto this connection's own FIFO worker (see
+                            // RuntimeInboundPackObserverDispatcher for the ordering/backpressure/
+                            // timeout contract); persistence above has already completed, so nothing
+                            // an observer does — or fails to do — can affect this frame or the next.
+                            if (_inboundPackObservers.Count > 0)
+                            {
+                                inboundPackObserverDispatcher ??= new RuntimeInboundPackObserverDispatcher(
+                                    _inboundPackObservers,
+                                    _inboundPackObserverDispatchOptions,
+                                    _logger
+                                );
+                                inboundPackObserverDispatcher.Post(state.RoomId!, nodesB64);
+                            }
+
+                            // No full-room snapshot here. The incremental pack was already
+                            // persisted just above (PersistInboundPackAsync) — that delta IS the
+                            // durability record; a full-room snapshot per pack only re-serialized
+                            // the entire growing room and was a primary source of the O(n^2) DB
+                            // bloat (see nodalmerge-studio/plans/room-snapshot-checkpoint-redesign.md).
+                            // Full-room snapshots are now minted only at integration checkpoints
+                            // (goal complete / merge to main, driven by the studio domain layer) and
+                            // on disconnect/shutdown (FlushRoomSnapshotAsync below), which bound the
+                            // delta chain replayed on the next hydrate.
                         }
                     }
 
@@ -409,6 +466,14 @@ public sealed class RuntimeWebSocketLoopRunner
             {
                 var roomBecameEmpty = roomBroker.Unregister(state);
 
+                // Flush any mutations that accumulated inside the current debounce window so a
+                // peer that trailed off mid-window still leaves a fresh hydrate checkpoint behind.
+                // No-op when nothing is pending; a redundant snapshot is suppressed downstream.
+                if (dagPersistenceService is not null && !string.IsNullOrWhiteSpace(state.RoomId))
+                {
+                    await dagPersistenceService.FlushRoomSnapshotAsync(state.RoomId, CancellationToken.None);
+                }
+
                 if (roomBecameEmpty && dagPersistenceService is not null && !string.IsNullOrWhiteSpace(state.RoomId))
                 {
                     dagPersistenceService.InvalidateHydration(state.RoomId);
@@ -437,6 +502,13 @@ public sealed class RuntimeWebSocketLoopRunner
                         cancellationToken: CancellationToken.None
                     );
                 }
+            }
+
+            // Slice 6.5: after the room bookkeeping above (peers should learn of the departure
+            // without waiting on observer drain). Bounded by DrainGrace; never throws.
+            if (inboundPackObserverDispatcher is not null)
+            {
+                await inboundPackObserverDispatcher.DisposeAsync();
             }
         }
     }

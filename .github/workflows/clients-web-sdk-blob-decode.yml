@@ -1,0 +1,132 @@
+name: clients-web-sdk-blob-decode
+
+# Slice 3.3 CI (blob-cas-remediation.md, finding #6): the web SDK's
+# presigned-GET reader must be able to decode a client-side zstd frame an
+# s3-direct uploader stored in the bucket, because Safari and Node/undici do
+# NOT transparently decode `Content-Encoding: zstd` the way Chrome 123+/
+# FF 126+ do.
+#
+# Why this exists as its own workflow:
+#
+# 1. Before this file, NO workflow ran any clients/ test at all — not the
+#    sdk-js node suite, not a single bridge-wasm build. (nuget-build-push.yml
+#    `npm pack`s sdk-js but runs no tests; docker.yml merely lists
+#    clients/bridge-wasm/** in its triggers.) This is the 8.0 stub-convention
+#    outcome for slice 3.3: a real, minimal workflow covering exactly the
+#    decode path the slice adds. Broader clients/ coverage (index.test.js,
+#    persistence tests, the playwright demo smoke) remains Phase 8 backlog —
+#    the node job below runs `npm test`, which happens to include the two
+#    pre-existing node suites too, but nothing here gates the browser demo.
+#
+# 2. Two halves, matching the two layers the slice touched:
+#      - bridge-native: `cargo test -p nodalmerge-bridge` — the ruzstd decode
+#        unit tests (round-trips real frames from BOTH production encoders:
+#        .NET ZstdSharp and Rust zstd::stream::encode_all, via the Phase 0
+#        zstd-interop goldens; rejects garbage/truncation).
+#      - node-sdk: wasm-pack build of the bridge (this is also the wasm32
+#        build gate for the ruzstd dependency), then the sdk-js node suite,
+#        whose blob-zstd-decode.test.js drives web/sdk.js's
+#        storeFetchedBlobBytes — the exact function fetchBlobViaUrl uses —
+#        against the REAL wasm bridge, raw-frame-in like Safari/Node.
+#
+# ── What the paths: filters below guard, and why each file is listed ───────
+#   clients/bridge-wasm/**                 the wasm bridge: zstd_decompress
+#                                          export + its native unit tests, and
+#                                          store_blob_bytes (the BLAKE3
+#                                          integrity oracle the SDK leans on)
+#   clients/web/sdk.js                     storeFetchedBlobBytes (verify-raw-
+#                                          first + zstd-magic fallback) and its
+#                                          caller fetchBlobViaUrl
+#   clients/web/sdk.d.ts                   staged into sdk-js as doc.d.ts at
+#                                          pack time; drifts silently if not
+#                                          rebuilt with sdk.js
+#   clients/sdk-js/**                      the node test suites `npm test` runs,
+#                                          incl. blob-zstd-decode.test.js
+#   engine/commands/zstd-interop-vectors.v1.json   the fixture manifest both
+#   engine/commands/fixtures/zstd-interop-v1/**    halves decode (frames from
+#                                          the real .NET and Rust encoders —
+#                                          never from ruzstd itself)
+#   core/crdt/src/**                       nodalmerge-core: Hash::of and
+#                                          MemoryBlobStore — the BLAKE3 oracle
+#                                          store_blob_bytes verifies with
+#   Cargo.toml / Cargo.lock                the pinned ruzstd version lives here
+#
+# ⚠ These filters enumerate implementation files BY HAND — same caveat as
+# every other workflow in this repo; the root cause is Phase 8 (deferred) in
+# blob-cas-remediation.md, not something this file fixes.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "clients/bridge-wasm/**"
+      - "clients/web/sdk.js"
+      - "clients/web/sdk.d.ts"
+      - "clients/sdk-js/**"
+      - "engine/commands/zstd-interop-vectors.v1.json"
+      - "engine/commands/fixtures/zstd-interop-v1/**"
+      - "core/crdt/src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/clients-web-sdk-blob-decode.yml"
+  pull_request:
+    paths:
+      - "clients/bridge-wasm/**"
+      - "clients/web/sdk.js"
+      - "clients/web/sdk.d.ts"
+      - "clients/sdk-js/**"
+      - "engine/commands/zstd-interop-vectors.v1.json"
+      - "engine/commands/fixtures/zstd-interop-v1/**"
+      - "core/crdt/src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/clients-web-sdk-blob-decode.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bridge-native:
+    name: bridge-wasm native unit tests (ruzstd decode)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run bridge unit tests natively (zstd decode round-trips both production encoders' frames; rejects garbage/truncation)
+        run: cargo test -p nodalmerge-bridge
+
+  node-sdk:
+    name: web SDK presigned-GET zstd decode (real wasm bridge, node)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      # Same command pack-local-artifacts.ps1 uses for clients/web/pkg — the
+      # module web/sdk.js imports. Doubles as the wasm32 build gate for the
+      # pure-Rust ruzstd dependency (no C toolchain involved).
+      - name: Build the wasm bridge for the web SDK
+        working-directory: clients/bridge-wasm
+        run: wasm-pack build --target web --out-dir ../web/pkg --out-name nodalmerge_bridge
+
+      - name: Run sdk-js node suites (incl. blob-zstd-decode.test.js against the real bridge)
+        working-directory: clients/sdk-js
+        run: npm test

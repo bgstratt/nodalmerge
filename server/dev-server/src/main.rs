@@ -1,4 +1,4 @@
-use nodalmerge_server::{keypair, metrics, room, store, ws_handler};
+use nodalmerge_server::{blob_http, keypair, metrics, room, store, ws_handler};
 use nodalmerge_mongo_store::{MongoNodeStore, MongoNodeStoreConfig};
 
 use axum::{Router, routing::get};
@@ -78,11 +78,35 @@ async fn main() {
         let _ = metrics::init(addr);
     }
 
+    // S2.1b: blob HTTP origin, same env-var config as the main server
+    // (`--blob-token`/`--blob-max-bytes` CLI flags aren't wired here since
+    // dev-server doesn't otherwise parse CLI args beyond `--metrics-addr`).
+    // Note: this dev-server's persistence composes MongoNodeStore (nodes)
+    // with `NoPersistence` (blobs) above, so the blob origin is reachable
+    // but non-durable here — PUT reports success without retaining bytes.
+    let blob_token = std::env::var("NODALMERGE_BLOB_TOKEN").ok().filter(|s| !s.is_empty());
+    let blob_max_bytes = std::env::var("NODALMERGE_BLOB_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(64 * 1024 * 1024);
+    let blob_cfg = blob_http::BlobHttpConfig {
+        auth_token: blob_token,
+        max_blob_bytes: blob_max_bytes,
+        // S5.3: this dev-server composes MongoNodeStore (nodes) with
+        // NoPersistence (blobs) above — no on-disk blob root to back a GC
+        // inventory ledger with, so this stays unwired here.
+        gc_inventory: None,
+    };
+
     let cors = CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any);
-    let app = Router::new().route("/ws/:room_id", get(ws_handler::handler)).layer(cors).with_state(rooms);
+    let app = Router::new()
+        .route("/ws/:room_id", get(ws_handler::handler))
+        .merge(blob_http::blob_routes(blob_cfg))
+        .layer(cors)
+        .with_state(rooms);
 
     let addr = std::env::var("NODALMERGE_BIND_ADDR").or_else(|_| std::env::var("AS_BIND_ADDR")).unwrap_or_else(|_| "127.0.0.1:7878".to_string());
-    tracing::info!(%addr, "Dev NodalMerge server listening on ws://{addr}/ws/<room>");
+    tracing::info!(%addr, "Dev NodalMerge server listening on ws://{addr}/ws/<room> and http://{addr}/blobs/<hash>");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }

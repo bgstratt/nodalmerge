@@ -1,6 +1,6 @@
 {
   "name": "nodalmerge-sdk-js",
-  "version": "0.2.0",
+  "version": "0.2.5",
   "description": "High-level JavaScript SDK wrapper for NodalMerge room/sync/replay/offline/CAS/topology flows",
   "type": "module",
   "main": "index.js",
@@ -38,6 +38,6 @@
     "replay"
   ],
   "dependencies": {
-    "nodalmerge-bridge": "^0.2.0"
+    "nodalmerge-bridge": "^0.2.5"
   }
 }

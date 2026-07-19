@@ -2979,7 +2979,7 @@ dependencies = [
 
 [[package]]
 name = "nodalmerge-bridge"
-version = "0.2.0"
+version = "0.2.5"
 dependencies = [
  "ed25519-dalek",
  "js-sys",

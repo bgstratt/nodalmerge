@@ -4,6 +4,33 @@ All notable changes to the NodalMerge .NET host packages (`NodalMerge.Host.Abstr
 `NodalMerge.Host.Composition`, `NodalMerge.DotNetHost`, `NodalMerge.DotNetHost.Native.win-x64`,
 `NodalMerge.DotNetHost.Native.linux-x64`) are documented here.
 
+## 0.2.5 — 2026-07-18
+
+- **Fixed (root cause): the replicated-room DB grew without bound — a 5 KB repo + one goal
+  produced a 205 MB store.** Measured as 191 retained full-room snapshots (0 → 5 MB each) in one
+  repo room; every studio entity write and every inbound pack re-serialized the whole growing room
+  to a full snapshot. 0.2.4's debounce reduced the *frequency* of one of these triggers but not the
+  fundamental shape. 0.2.5 makes a full-room snapshot an **integration checkpoint**, not a
+  per-write event. See `nodalmerge-studio/plans/room-snapshot-checkpoint-redesign.md`.
+- **Additive: `PersistPromotedNodeDeltaAsync`** — persists a single promoted local-write node as an
+  incremental delta (the same self-applying `MstDone{ids}` single-node pack the outbound replication
+  path already sends peers). This is the per-write durability primitive that replaces re-serializing
+  the whole room on every write; symmetric to `PersistInboundPackAsync` for inbound peer deltas.
+- **Changed: `RuntimeWebSocketLoopRunner` no longer takes a full-room snapshot per inbound pack.**
+  The incremental pack is already persisted one step earlier (`PersistInboundPackAsync`) — that
+  delta is the durability record. Full-room snapshots now come only from integration checkpoints
+  (minted by the studio domain layer on merge-to-main / goal completion) and the disconnect/shutdown
+  flush, which bound the delta chain replayed on the next hydrate. The non-pack mutation path
+  (JS-SDK direct-op apps, never Studio) still snapshots per mutation — it has no incremental persist.
+- **Changed: `RuntimeDagCompactionOptions.Default` now prunes** — `EnablePruning: true` and retention
+  `7 days → 30 min` (was: pruning off + a 7-day window, so compaction created a boundary checkpoint
+  but never deleted the superseded packs and nothing was even eligible for a week). Compaction folds
+  packs older than the window into one lossless boundary checkpoint and prunes the rest. Peer
+  catch-up is unaffected (it reads the live engine graph, not these persisted packs); prune-then-
+  restart durability is covered by `ProviderHostRestartDurabilityIntegrationTests`.
+- **Supersedes** 0.2.4's `PersistRoomSnapshotDebouncedAsync` per-pack call (the method remains but is
+  no longer invoked by the pack path).
+
 ## 0.2.4 — 2026-07-18
 
 - **Fixed: snapshot-on-mutation storm — the server-side WebSocket loop re-serialized the

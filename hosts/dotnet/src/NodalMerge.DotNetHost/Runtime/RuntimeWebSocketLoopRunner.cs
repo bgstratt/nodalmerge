@@ -300,19 +300,15 @@ public sealed class RuntimeWebSocketLoopRunner
                                 inboundPackObserverDispatcher.Post(state.RoomId!, nodesB64);
                             }
 
-                            // Also persist the room's current server-pack snapshot.
-                            // In practice most client writes arrive as `pack` messages,
-                            // so relying only on non-pack mutation hooks can leave
-                            // persistence with delta-only history that doesn't always
-                            // hydrate deterministically on fresh reconnects.
-                            //
-                            // Debounced: the incremental pack was already persisted just
-                            // above (PersistInboundPackAsync), so this full-room snapshot is
-                            // only a hydrate checkpoint. Taking it every mutation re-serializes
-                            // the entire (growing) room — the O(n^2) snapshot-on-mutation storm.
-                            // Coalesce to at-most-once per window; a longer delta replay on the
-                            // next hydrate is the only cost, and disconnect/shutdown flushes.
-                            await dagPersistenceService.PersistRoomSnapshotDebouncedAsync(state.RoomId!, cancellationToken);
+                            // No full-room snapshot here. The incremental pack was already
+                            // persisted just above (PersistInboundPackAsync) — that delta IS the
+                            // durability record; a full-room snapshot per pack only re-serialized
+                            // the entire growing room and was a primary source of the O(n^2) DB
+                            // bloat (see nodalmerge-studio/plans/room-snapshot-checkpoint-redesign.md).
+                            // Full-room snapshots are now minted only at integration checkpoints
+                            // (goal complete / merge to main, driven by the studio domain layer) and
+                            // on disconnect/shutdown (FlushRoomSnapshotAsync below), which bound the
+                            // delta chain replayed on the next hydrate.
                         }
                     }
 

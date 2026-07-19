@@ -153,6 +153,118 @@ public sealed class RuntimeDagPersistenceService
         }
     }
 
+    /// <summary>
+    /// Persists a single promoted local-write node as an incremental delta pack — the same
+    /// self-applying single-node pack (<c>HostCommand::MstDone{ids}</c>) the outbound replication
+    /// path already sends to peers — instead of re-serializing the entire room. This is the per-write
+    /// durability primitive under the integration-checkpoint model
+    /// (nodalmerge-studio/plans/room-snapshot-checkpoint-redesign.md): hydration replays these deltas
+    /// on top of the last full checkpoint, and a full-room snapshot is minted only at integration
+    /// points (goal complete / merge to main), never per write. Symmetric to
+    /// <see cref="PersistInboundPackAsync"/>, which persists the identical single-node pack a peer
+    /// receives for the same write.
+    /// </summary>
+    public async ValueTask PersistPromotedNodeDeltaAsync(
+        string roomId,
+        string nodeIdHex,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (string.IsNullOrWhiteSpace(roomId) || string.IsNullOrWhiteSpace(nodeIdHex))
+        {
+            return;
+        }
+
+        try
+        {
+            var nodesB64 = TryExportNodePackB64(roomId, nodeIdHex);
+            if (string.IsNullOrWhiteSpace(nodesB64))
+            {
+                _logger.LogWarning(
+                    "runtime dag delta persist skipped room={Room} node={Node} reason=empty-export",
+                    roomId,
+                    nodeIdHex
+                );
+                return;
+            }
+
+            var payload = Convert.FromBase64String(nodesB64);
+            if (payload.Length == 0)
+            {
+                return;
+            }
+
+            await PersistPackPayloadAsync(roomId, payload, "local-write-delta", cancellationToken);
+        }
+        catch (FormatException)
+        {
+            _logger.LogWarning(
+                "runtime dag delta persist skipped room={Room} node={Node} reason=invalid-base64",
+                roomId,
+                nodeIdHex
+            );
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "runtime dag delta persist failed room={Room} node={Node}", roomId, nodeIdHex);
+        }
+    }
+
+    // Exports exactly the requested node as a self-applying pack (HostCommand::MstDone{ids} =>
+    // graph.get_nodes(&requested)) — the same minimal-delta envelope the outbound replication path
+    // builds for a local write (see RoomPeerClient.BuildPackEnvelopeForIds). Returns the base64 node
+    // bytes, or null on any failure.
+    private string? TryExportNodePackB64(string roomId, string nodeIdHex)
+    {
+        var response = _bridge.ProcessJsonCommand(JsonSerializer.Serialize(new
+        {
+            room_id = roomId,
+            command = new
+            {
+                MstDone = new { ids = new[] { nodeIdHex } }
+            }
+        }));
+        if (response.Status != AsStatus.Ok)
+        {
+            return null;
+        }
+
+        return TryExtractServerPackNodesB64(response.EventsJson);
+    }
+
+    // Pulls the base64 node bytes out of a ServerPackPrepared event (emitted by both
+    // RequestServerPack and MstDone). Shared by the delta-export path above.
+    private static string? TryExtractServerPackNodesB64(string eventsJson)
+    {
+        using var eventsDoc = JsonDocument.Parse(eventsJson);
+        if (eventsDoc.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var eventElement in eventsDoc.RootElement.EnumerateArray())
+        {
+            if (eventElement.ValueKind != JsonValueKind.Object
+                || !eventElement.TryGetProperty("ServerPackPrepared", out var serverPack)
+                || serverPack.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            if (serverPack.TryGetProperty("nodes_b64", out var nodesB64Node)
+                && nodesB64Node.ValueKind == JsonValueKind.String)
+            {
+                var value = nodesB64Node.GetString();
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+        }
+
+        return null;
+    }
+
     public async ValueTask PersistRoomSnapshotAsync(
         string roomId,
         CancellationToken cancellationToken = default
@@ -986,11 +1098,20 @@ public sealed record RuntimeDagCompactionOptions(
     TimeSpan? RetentionWindow = null
 )
 {
+    // Pruning ON with a 30-minute retention (was: pruning OFF + 7-day window, which meant
+    // compaction created a boundary checkpoint but never deleted the superseded packs, and nothing
+    // was even eligible for a week — so a busy room accumulated every full-room snapshot forever;
+    // see nodalmerge-studio/plans/room-snapshot-checkpoint-redesign.md). Compaction folds packs
+    // older than the window into one boundary checkpoint (the full current server pack, lossless)
+    // and prunes the rest, bounding the persisted delta chain. Retention keeps the recent window so
+    // an in-flight local restart replays only recent deltas. Peer catch-up is unaffected — it reads
+    // the live engine graph, not these persisted packs. Restart-durability is covered by
+    // ProviderHostRestartDurabilityIntegrationTests' prune-then-restart cases.
     public static RuntimeDagCompactionOptions Default { get; } = new(
         Enabled: true,
         MinEligibleNodes: 32,
-        EnablePruning: false,
-        RetentionWindow: null
+        EnablePruning: true,
+        RetentionWindow: TimeSpan.FromMinutes(30)
     );
 }
 

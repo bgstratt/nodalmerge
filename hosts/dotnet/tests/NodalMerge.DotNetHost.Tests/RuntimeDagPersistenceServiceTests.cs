@@ -273,7 +273,13 @@ public class RuntimeDagPersistenceServiceTests
         var roomId = "room-c";
         var store = new TestNodeStoreProvider();
         var bridge = new RecordingRuntimeCommandBridge();
-        var service = new RuntimeDagPersistenceService(store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance);
+        // Pin pruning off to isolate this test on compaction-SNAPSHOT creation at the threshold —
+        // pruning-enabled behaviour is asserted separately by
+        // PersistInboundPackAsync_PrunesEligibleNodes_WhenPruningEnabled. (The shipped default now
+        // prunes; see RuntimeDagCompactionOptions.Default.)
+        var service = new RuntimeDagPersistenceService(
+            store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance,
+            RuntimeDagCompactionOptions.Default with { EnablePruning = false });
 
         for (var i = 0; i < 32; i += 1)
         {
@@ -287,7 +293,7 @@ public class RuntimeDagPersistenceServiceTests
         Assert.Equal(2, store.CompactionSnapshot.SchemaVersion);
         Assert.False(string.IsNullOrWhiteSpace(store.CompactionSnapshot.BoundaryNodeIdHex));
 
-        // Conservative Slice C default: prune disabled until full native snapshot materialization is in place.
+        // Pruning is pinned off above, so the eligible packs stay put.
         Assert.Empty(store.DeletedNodeIds);
     }
 
@@ -442,6 +448,53 @@ public class RuntimeDagPersistenceServiceTests
 
         Assert.Equal(1, store.PersistAcceptedCalls);
         Assert.Equal(1, metrics.GetTotal("room_duplicate_pack_replay_suppressed_total"));
+    }
+
+    [Fact]
+    public async Task PersistPromotedNodeDeltaAsync_PersistsSingleNodePackAsDelta()
+    {
+        var roomId = "room-delta";
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge
+        {
+            // The single-node export the MstDone path returns for the promoted node.
+            MstDonePayload = new byte[] { 9, 8, 7, 6 }
+        };
+        var service = new RuntimeDagPersistenceService(store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance);
+
+        await service.PersistPromotedNodeDeltaAsync(roomId, "node-abc", CancellationToken.None);
+
+        Assert.Equal(1, store.PersistAcceptedCalls);
+        var snapshot = await store.LoadRoomSnapshotAsync(roomId, CancellationToken.None);
+        Assert.NotNull(snapshot);
+        var node = Assert.Single(snapshot!.Nodes);
+        Assert.Equal(AcceptedNodeKinds.Pack, node.PayloadKind);
+        Assert.Equal(new byte[] { 9, 8, 7, 6 }, node.Payload);
+    }
+
+    [Fact]
+    public async Task PersistPromotedNodeDeltaAsync_IsNoOp_WhenNodeIdBlank()
+    {
+        var store = new TestNodeStoreProvider();
+        var bridge = new RecordingRuntimeCommandBridge { MstDonePayload = new byte[] { 1, 2 } };
+        var service = new RuntimeDagPersistenceService(store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance);
+
+        await service.PersistPromotedNodeDeltaAsync("room-x", "   ", CancellationToken.None);
+
+        Assert.Equal(0, store.PersistAcceptedCalls);
+    }
+
+    [Fact]
+    public async Task PersistPromotedNodeDeltaAsync_IsNoOp_WhenExportEmpty()
+    {
+        var store = new TestNodeStoreProvider();
+        // MstDonePayload unset → the export returns "[]" (no ServerPackPrepared) → nothing to persist.
+        var bridge = new RecordingRuntimeCommandBridge();
+        var service = new RuntimeDagPersistenceService(store, bridge, NullLogger<RuntimeDagPersistenceService>.Instance);
+
+        await service.PersistPromotedNodeDeltaAsync("room-y", "node-1", CancellationToken.None);
+
+        Assert.Equal(0, store.PersistAcceptedCalls);
     }
 
     [Fact]
@@ -752,6 +805,13 @@ public class RuntimeDagPersistenceServiceTests
         public Queue<byte[]>? ServerPackPayloadSequence { get; set; }
 
         /// <summary>
+        /// When set, <see cref="ProcessJsonCommand"/> answers <c>MstDone{ids}</c> (the single-node
+        /// export used by <see cref="RuntimeDagPersistenceService.PersistPromotedNodeDeltaAsync"/>)
+        /// with a synthetic <c>ServerPackPrepared</c> carrying these bytes.
+        /// </summary>
+        public byte[]? MstDonePayload { get; set; }
+
+        /// <summary>
         /// When set, <see cref="ProcessJsonCommand"/> will answer <c>InspectPack</c> commands
         /// with a synthetic <c>PackInspected</c> event using these values.
         /// </summary>
@@ -796,6 +856,21 @@ public class RuntimeDagPersistenceServiceTests
                     + nodesB64
                     + "\",\"root_hex\":\""
                     + (rootHex ?? ServerPackRootHex ?? "")
+                    + "\"}}]";
+                return FfiJsonBridgeResult.Success(eventsJson);
+            }
+
+            if (IsMstDone(doc.RootElement))
+            {
+                if (MstDonePayload is null)
+                {
+                    return FfiJsonBridgeResult.Success("[]");
+                }
+
+                var nodesB64 = Convert.ToBase64String(MstDonePayload);
+                var eventsJson =
+                    "[{\"ServerPackPrepared\":{\"room_id\":\"room-test\",\"nodes_b64\":\""
+                    + nodesB64
                     + "\"}}]";
                 return FfiJsonBridgeResult.Success(eventsJson);
             }
@@ -849,6 +924,14 @@ public class RuntimeDagPersistenceServiceTests
                 && command.ValueKind == JsonValueKind.Object
                 && command.TryGetProperty("InspectPack", out var inspect)
                 && inspect.ValueKind == JsonValueKind.Object;
+        }
+
+        private static bool IsMstDone(JsonElement root)
+        {
+            return root.TryGetProperty("command", out var command)
+                && command.ValueKind == JsonValueKind.Object
+                && command.TryGetProperty("MstDone", out var mstDone)
+                && mstDone.ValueKind == JsonValueKind.Object;
         }
 
         private static byte[]? ReadImportPayload(JsonElement root)

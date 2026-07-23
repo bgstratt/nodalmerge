@@ -1,0 +1,10 @@
+{
+  "apply_ms": 880.8145,
+  "avg_update_bytes": 179.16264271801307,
+  "cold_start_ms": 952.1929,
+  "converged": true,
+  "edit_count": 259778,
+  "ops_per_sec": 294929.29555542057,
+  "test": "b4_real_world_editing_dataset",
+  "total_update_bytes": 46542513
+}

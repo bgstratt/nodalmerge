@@ -108,5 +108,7 @@ async fn main() {
     let addr = std::env::var("NODALMERGE_BIND_ADDR").or_else(|_| std::env::var("AS_BIND_ADDR")).unwrap_or_else(|_| "127.0.0.1:7878".to_string());
     tracing::info!(%addr, "Dev NodalMerge server listening on ws://{addr}/ws/<room> and http://{addr}/blobs/<hash>");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    // TCP_NODELAY: match Kestrel's default and avoid Nagle's ~40 ms small-frame
+    // stall on the WS relay hot path.
+    axum::serve(listener, app).tcp_nodelay(true).await.unwrap();
 }

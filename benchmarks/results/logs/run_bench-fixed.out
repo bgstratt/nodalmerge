@@ -1,0 +1,641 @@
+
+    Directory: C:\Users\bgstr\source\repos\nodalmerge\benchmarks\results
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+d----           7/22/2026 11:15 PM                logs
+Using Mongo container: nodalmerge-mongo
+Readiness: 7979=1, 8787=1
+using deprecated parameters for `initSync()`; pass a single object instead
+SDK scenario benchmark config:
+{
+  "peerCounts": [
+    6
+  ],
+  "iterations": 2,
+  "mapOps": 2,
+  "listOps": 2,
+  "blobOps": 2,
+  "blobSizeBytes": 1024,
+  "warmupOps": 4,
+  "timeoutMs": 30000,
+  "opDelayMs": 2,
+  "transport": "ws-only",
+  "authMode": "none",
+  "tokenExpirySecs": 3600,
+  "authTokenCaps": [
+    "read:bench/**",
+    "write:bench/**"
+  ],
+  "targets": [
+    "rust-integrated-hosted-server",
+    "dotnet-host-runtime-alias"
+  ]
+}
+
+Target: rust-integrated-hosted-server (ws://127.0.0.1:7979)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+  peers=6 iter=0 warmup=47.262ms map=62.138ms list=77.548ms blob=62.106ms
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+  peers=6 iter=1 warmup=46.361ms map=61.682ms list=62.86ms blob=61.436ms
+  peers=6 warmup_avg=46.811ms map_samples=2 map_avg=61.91ms list_samples=2 list_avg=70.204ms blob_samples=2 blob_avg=61.771ms
+
+Target: dotnet-host-runtime-alias (ws://127.0.0.1:8787)
+  peers=6 iter=0 warmup=139.667ms map=77.439ms list=60.852ms blob=76.358ms
+  peers=6 iter=1 warmup=45.398ms map=78.098ms list=62.158ms blob=61.584ms
+  peers=6 warmup_avg=92.533ms map_samples=2 map_avg=77.768ms list_samples=2 list_avg=61.505ms blob_samples=2 blob_avg=68.971ms
+
+Wrote results: C:\Users\bgstr\source\repos\nodalmerge\benchmarks\results\sdk-scenarios-peers6-ops2-integrated-vs-dotnet-mongo-clean.json
+
+Done.
+Smoke Status: Rust=, Dotnet=
+using deprecated parameters for `initSync()`; pass a single object instead
+SDK scenario benchmark config:
+{
+  "peerCounts": [
+    6
+  ],
+  "iterations": 3,
+  "mapOps": 6,
+  "listOps": 6,
+  "blobOps": 6,
+  "blobSizeBytes": 1024,
+  "warmupOps": 4,
+  "timeoutMs": 45000,
+  "opDelayMs": 2,
+  "transport": "ws-only",
+  "authMode": "none",
+  "tokenExpirySecs": 3600,
+  "authTokenCaps": [
+    "read:bench/**",
+    "write:bench/**"
+  ],
+  "targets": [
+    "rust-integrated-hosted-server",
+    "dotnet-host-runtime-alias"
+  ]
+}
+
+Target: rust-integrated-hosted-server (ws://127.0.0.1:7979)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+  peers=6 iter=0 warmup=46.117ms map=92.908ms list=107.212ms blob=105.567ms
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+  peers=6 iter=1 warmup=46.344ms map=91.191ms list=122.156ms blob=93.564ms
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+  peers=6 iter=2 warmup=46.246ms map=106.642ms list=137.607ms blob=108.253ms
+  peers=6 warmup_avg=46.236ms map_samples=3 map_avg=96.914ms list_samples=3 list_avg=122.325ms blob_samples=3 blob_avg=102.461ms
+
+Target: dotnet-host-runtime-alias (ws://127.0.0.1:8787)
+  peers=6 iter=0 warmup=45.158ms map=106.783ms list=107.69ms blob=91.261ms
+  peers=6 iter=1 warmup=46.253ms map=107.831ms list=107.529ms blob=91.775ms
+  peers=6 iter=2 warmup=46.221ms map=106.784ms list=105.854ms blob=91ms
+  peers=6 warmup_avg=45.877ms map_samples=3 map_avg=107.133ms list_samples=3 list_avg=107.024ms blob_samples=3 blob_avg=91.345ms
+
+Wrote results: C:\Users\bgstr\source\repos\nodalmerge\benchmarks\results\sdk-scenarios-peers6-ops6-integrated-vs-dotnet-mongo-clean.json
+
+Done.
+using deprecated parameters for `initSync()`; pass a single object instead
+SDK scenario benchmark config:
+{
+  "peerCounts": [
+    6
+  ],
+  "iterations": 3,
+  "mapOps": 12,
+  "listOps": 12,
+  "blobOps": 12,
+  "blobSizeBytes": 1024,
+  "warmupOps": 4,
+  "timeoutMs": 45000,
+  "opDelayMs": 2,
+  "transport": "ws-only",
+  "authMode": "none",
+  "tokenExpirySecs": 3600,
+  "authTokenCaps": [
+    "read:bench/**",
+    "write:bench/**"
+  ],
+  "targets": [
+    "rust-integrated-hosted-server",
+    "dotnet-host-runtime-alias"
+  ]
+}
+
+Target: rust-integrated-hosted-server (ws://127.0.0.1:7979)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+  peers=6 iter=0 warmup=47.306ms map=145.939ms list=218.97ms blob=200.027ms
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+  peers=6 iter=1 warmup=44.999ms map=181.977ms list=227.01ms blob=211.99ms
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+  peers=6 iter=2 warmup=45.174ms map=150.19ms list=196.02ms blob=153.856ms
+  peers=6 warmup_avg=45.826ms map_samples=3 map_avg=159.369ms list_samples=3 list_avg=214ms blob_samples=3 blob_avg=188.624ms
+
+Target: dotnet-host-runtime-alias (ws://127.0.0.1:8787)
+  peers=6 iter=0 warmup=46.25ms map=153.821ms list=198.932ms blob=153.443ms
+  peers=6 iter=1 warmup=45.368ms map=138.725ms list=198.472ms blob=152.051ms
+  peers=6 iter=2 warmup=45.376ms map=123.35ms list=184.683ms blob=138.326ms
+  peers=6 warmup_avg=45.665ms map_samples=3 map_avg=138.632ms list_samples=3 list_avg=194.029ms blob_samples=3 blob_avg=147.94ms
+
+Wrote results: C:\Users\bgstr\source\repos\nodalmerge\benchmarks\results\sdk-scenarios-peers6-ops12-integrated-vs-dotnet-mongo-clean.json
+
+Done.
+using deprecated parameters for `initSync()`; pass a single object instead
+SDK scenario benchmark config:
+{
+  "peerCounts": [
+    6
+  ],
+  "iterations": 3,
+  "mapOps": 30,
+  "listOps": 30,
+  "blobOps": 30,
+  "blobSizeBytes": 1024,
+  "warmupOps": 4,
+  "timeoutMs": 45000,
+  "opDelayMs": 2,
+  "transport": "ws-only",
+  "authMode": "none",
+  "tokenExpirySecs": 3600,
+  "authTokenCaps": [
+    "read:bench/**",
+    "write:bench/**"
+  ],
+  "targets": [
+    "rust-integrated-hosted-server",
+    "dotnet-host-runtime-alias"
+  ]
+}
+
+Target: rust-integrated-hosted-server (ws://127.0.0.1:7979)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+  peers=6 iter=0 warmup=46.582ms map=381.611ms list=442.397ms blob=371.036ms
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+  peers=6 iter=1 warmup=45.994ms map=336.757ms list=443.898ms blob=369.039ms
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[nodalmerge] [sdk] direct upload failed; falling back to ws Error: upload-denied: use-ws
+    at directUpload (file:///C:/Users/bgstr/source/repos/nodalmerge/clients/web/sdk.js:329:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+  peers=6 iter=2 warmup=45.382ms map=338.076ms list=427.696ms blob=363.994ms
+  peers=6 warmup_avg=45.986ms map_samples=3 map_avg=352.148ms list_samples=3 list_avg=437.997ms blob_samples=3 blob_avg=368.023ms
+
+Target: dotnet-host-runtime-alias (ws://127.0.0.1:8787)
+  peers=6 iter=0 warmup=45.841ms map=320.039ms list=383.069ms blob=335.606ms
+  peers=6 iter=1 warmup=46.356ms map=277.807ms list=365.538ms blob=320.136ms
+  peers=6 iter=2 warmup=47.007ms map=292.326ms list=369.76ms blob=321.869ms
+  peers=6 warmup_avg=46.401ms map_samples=3 map_avg=296.724ms list_samples=3 list_avg=372.789ms blob_samples=3 blob_avg=325.87ms
+
+Wrote results: C:\Users\bgstr\source\repos\nodalmerge\benchmarks\results\sdk-scenarios-peers6-ops30-integrated-vs-dotnet-mongo-clean.json
+
+Done.
+## NodalMerge Performance Sweep (Peers 6, Mongo Backend)
+
+### MAP Scenario
+| Ops | Rust Integrated avg ms | Rust Integrated ops/s | Dotnet Mongo avg ms | Dotnet Mongo ops/s |
+| --- | --- | --- | --- | --- |
+| 6 | 0 | Infinity | 0 | Infinity |
+| 12 | 0 | Infinity | 0 | Infinity |
+| 30 | 0 | Infinity | 0 | Infinity |
+### LIST Scenario
+| Ops | Rust Integrated avg ms | Rust Integrated ops/s | Dotnet Mongo avg ms | Dotnet Mongo ops/s |
+| --- | --- | --- | --- | --- |
+| 6 | 0 | Infinity | 0 | Infinity |
+| 12 | 0 | Infinity | 0 | Infinity |
+| 30 | 0 | Infinity | 0 | Infinity |
+### BLOB Scenario
+| Ops | Rust Integrated avg ms | Rust Integrated ops/s | Dotnet Mongo avg ms | Dotnet Mongo ops/s |
+| --- | --- | --- | --- | --- |
+| 6 | 0 | Infinity | 0 | Infinity |
+| 12 | 0 | Infinity | 0 | Infinity |
+| 30 | 0 | Infinity | 0 | Infinity |
+
+

@@ -1,0 +1,3 @@
+   Compiling nodalmerge-dev-server v0.2.0 (C:\Users\bgstr\source\repos\nodalmerge\server\dev-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.97s
+     Running `target\debug\nodalmerge-dev-server.exe`

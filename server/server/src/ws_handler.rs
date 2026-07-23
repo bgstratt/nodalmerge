@@ -700,9 +700,18 @@ async fn handle_socket(
     // D2: register this peer and broadcast peer-joined to the room.
     let peer_membership_update = room.register_peer(pubkey_hex.clone()).await;
 
-    // Small per-connection stabilization delay to avoid many peers
-    // immediately provoking DB selection storms on first Mongo call.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // NOTE: a fixed 100 ms "stabilization" sleep used to sit here, ostensibly
+    // to avoid Mongo server-selection storms on many simultaneous first
+    // connections. It did nothing useful: a *constant* delay doesn't stagger
+    // anything (N peers arriving together all wake together 100 ms later and
+    // stampede the DB in unison), and room hydration is already both
+    // memoized per-room and spawned off the handshake path in
+    // `Rooms::get_or_create`, so the first-Mongo-call it guarded never rode
+    // this connection anyway. It was pure per-connection latency (the .NET
+    // host has no equivalent — it relies on the same once-per-room memoized
+    // hydrate), so it's gone. If burst DB load ever needs smoothing, use
+    // jitter or a bounded-concurrency semaphore around the hydrate, not a
+    // flat sleep on the accept path.
 
     if peer_membership_update == PeerCountGaugeUpdate::Increment {
         let peer_joined = assemble_peer_joined_envelope(pubkey_hex.clone());

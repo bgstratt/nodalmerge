@@ -271,7 +271,10 @@ async fn main() {
         .unwrap_or_else(|_| "127.0.0.1:7878".to_string());
     tracing::info!(%addr, "NodalMerge server listening on ws://{addr}/ws/<room> and http://{addr}/blobs/<hash>");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    // TCP_NODELAY on every accepted connection. Kestrel does this by default;
+    // without it Nagle + delayed-ACK adds ~40 ms to small-frame round-trips on
+    // the WS relay hot path (`pack`/`presence` broadcasts are sub-MSS).
+    axum::serve(listener, app).tcp_nodelay(true).await.unwrap();
 }
 
 /// D4: Replay a base64-encoded node pack and print resolved state + hash.

@@ -1,3 +1,8 @@
+param(
+    [int]$Iterations = 15,
+    [int]$SmokeIterations = 2
+)
+
 function Cleanup-Ports {
     foreach ($p in @(7979, 8787)) {
         $id = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -First 1
@@ -53,22 +58,23 @@ try {
     Write-Host "Readiness: 7979=$r79, 8787=$r87"
     if(!($r79 -and $r87)){ exit 1 }
 
-    node .\benchmarks\Run-SdkScenarioBenchmarks.mjs --targets rust-integrated-hosted-server,dotnet-host-runtime-alias --iterations 2 --peers 6 --mapOps 2 --listOps 2 --blobOps 2 --blobSizeBytes 1024 --warmupOps 4 --timeoutMs 30000 --opDelayMs 2 --transport ws-only --outputJsonPath ".\benchmarks\results\sdk-scenarios-peers6-ops2-integrated-vs-dotnet-mongo-clean.json"
+    node .\benchmarks\Run-SdkScenarioBenchmarks.mjs --targets rust-integrated-hosted-server,dotnet-host-runtime-alias --iterations $SmokeIterations --peers 6 --mapOps 2 --listOps 2 --blobOps 2 --blobSizeBytes 1024 --warmupOps 4 --timeoutMs 30000 --opDelayMs 2 --transport ws-only --outputJsonPath ".\benchmarks\results\sdk-scenarios-peers6-ops2-integrated-vs-dotnet-mongo-clean.json"
     $smoke = Get-Content ".\benchmarks\results\sdk-scenarios-peers6-ops2-integrated-vs-dotnet-mongo-clean.json" | ConvertFrom-Json
-    $rustS = $smoke | Where-Object { $_.target -eq 'rust-integrated-hosted-server' }; $dotnetS = $smoke | Where-Object { $_.target -eq 'dotnet-host-runtime-alias' }
+    # Result schema is { config, results: [ { target, status, <type>_avg_ms, ... } ] } — read through `.results`.
+    $rustS = $smoke.results | Where-Object { $_.target -eq 'rust-integrated-hosted-server' }; $dotnetS = $smoke.results | Where-Object { $_.target -eq 'dotnet-host-runtime-alias' }
     Write-Host "Smoke Status: Rust=$($rustS.status), Dotnet=$($dotnetS.status)"
 
     foreach ($ops in @(6, 12, 30)) {
-        node .\benchmarks\Run-SdkScenarioBenchmarks.mjs --targets rust-integrated-hosted-server,dotnet-host-runtime-alias --iterations 3 --peers 6 --mapOps $ops --listOps $ops --blobOps $ops --blobSizeBytes 1024 --warmupOps 4 --timeoutMs 45000 --opDelayMs 2 --transport ws-only --outputJsonPath ".\benchmarks\results\sdk-scenarios-peers6-ops$ops-integrated-vs-dotnet-mongo-clean.json"
+        node .\benchmarks\Run-SdkScenarioBenchmarks.mjs --targets rust-integrated-hosted-server,dotnet-host-runtime-alias --iterations $Iterations --peers 6 --mapOps $ops --listOps $ops --blobOps $ops --blobSizeBytes 1024 --warmupOps 4 --timeoutMs 45000 --opDelayMs 2 --transport ws-only --outputJsonPath ".\benchmarks\results\sdk-scenarios-peers6-ops$ops-integrated-vs-dotnet-mongo-clean.json"
     }
 
-    $md = "## NodalMerge Performance Sweep (Peers 6, Mongo Backend)`n`n"
+    $md = "## NodalMerge Performance Sweep (Peers 6, Mongo Backend, iterations=$Iterations)`n`n"
     foreach ($type in @('map', 'list', 'blob')) {
         $md += "### $($type.ToUpper()) Scenario`n| Ops | Rust Integrated avg ms | Rust Integrated ops/s | Dotnet Mongo avg ms | Dotnet Mongo ops/s |`n| --- | --- | --- | --- | --- |`n"
         foreach ($ops in @(6, 12, 30)) {
             $json = Get-Content ".\benchmarks\results\sdk-scenarios-peers6-ops$ops-integrated-vs-dotnet-mongo-clean.json" | ConvertFrom-Json
-            $r = $json | Where-Object { $_.target -eq 'rust-integrated-hosted-server' }; $d = $json | Where-Object { $_.target -eq 'dotnet-host-runtime-alias' }
-            $rA = [Math]::Round($r.scenarios.$type.avg, 2); $dA = [Math]::Round($d.scenarios.$type.avg, 2)
+            $r = $json.results | Where-Object { $_.target -eq 'rust-integrated-hosted-server' }; $d = $json.results | Where-Object { $_.target -eq 'dotnet-host-runtime-alias' }
+            $rA = [Math]::Round($r."${type}_avg_ms", 2); $dA = [Math]::Round($d."${type}_avg_ms", 2)
             $rO = [Math]::Round(($ops * 6) / ($rA / 1000), 2); $dO = [Math]::Round(($ops * 6) / ($dA / 1000), 2)
             $md += "| $ops | $rA | $rO | $dA | $dO |`n"
         }

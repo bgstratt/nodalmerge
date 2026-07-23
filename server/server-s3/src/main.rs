@@ -342,7 +342,9 @@ async fn main() {
         "NodalMerge server (S3-selectable) listening on ws://{addr}/ws/<room> and http://{addr}/blobs/<hash>"
     );
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    // TCP_NODELAY: match Kestrel's default and avoid Nagle's ~40 ms small-frame
+    // stall on the WS relay hot path.
+    axum::serve(listener, app).tcp_nodelay(true).await.unwrap();
 }
 
 /// S4.2 — build an [`S3BlobStoreConfig`] entirely from `NODALMERGE_S3_*` env

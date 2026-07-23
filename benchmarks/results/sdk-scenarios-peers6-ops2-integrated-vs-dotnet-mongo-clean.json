@@ -1,0 +1,106 @@
+{
+  "started_at_unix_ms": 1784780531832,
+  "completed_at_unix_ms": 1784780533967,
+  "config": {
+    "peerCounts": [
+      6
+    ],
+    "iterations": 2,
+    "mapOps": 2,
+    "listOps": 2,
+    "blobOps": 2,
+    "blobSizeBytes": 1024,
+    "warmupOps": 4,
+    "timeoutMs": 30000,
+    "opDelayMs": 2,
+    "transport": "ws-only",
+    "authMode": "none",
+    "tokenExpirySecs": 3600,
+    "authTokenCaps": [
+      "read:bench/**",
+      "write:bench/**"
+    ]
+  },
+  "results": [
+    {
+      "target": "rust-integrated-hosted-server",
+      "serverUrl": "ws://127.0.0.1:7979",
+      "peerCount": 6,
+      "status": "ok",
+      "warmup_samples": 2,
+      "warmup_avg_ms": 46.323,
+      "warmup_p95_ms": 47.384,
+      "map_samples": 2,
+      "map_avg_ms": 61.401,
+      "map_p95_ms": 61.467,
+      "list_samples": 2,
+      "list_avg_ms": 76.8,
+      "list_p95_ms": 77.47,
+      "blob_samples": 2,
+      "blob_avg_ms": 68.674,
+      "blob_p95_ms": 75.478,
+      "runs": [
+        {
+          "iteration": 0,
+          "warmup_ms": 45.262,
+          "map_ms": 61.467,
+          "map_error": null,
+          "list_ms": 76.129,
+          "list_error": null,
+          "blob_ms": 61.87,
+          "blob_error": null
+        },
+        {
+          "iteration": 1,
+          "warmup_ms": 47.384,
+          "map_ms": 61.335,
+          "map_error": null,
+          "list_ms": 77.47,
+          "list_error": null,
+          "blob_ms": 75.478,
+          "blob_error": null
+        }
+      ]
+    },
+    {
+      "target": "dotnet-host-runtime-alias",
+      "serverUrl": "ws://127.0.0.1:8787",
+      "peerCount": 6,
+      "status": "ok",
+      "warmup_samples": 2,
+      "warmup_avg_ms": 65.48,
+      "warmup_p95_ms": 85.458,
+      "map_samples": 2,
+      "map_avg_ms": 57.18,
+      "map_p95_ms": 61.539,
+      "list_samples": 2,
+      "list_avg_ms": 60.951,
+      "list_p95_ms": 61.718,
+      "blob_samples": 2,
+      "blob_avg_ms": 61.042,
+      "blob_p95_ms": 62.34,
+      "runs": [
+        {
+          "iteration": 0,
+          "warmup_ms": 85.458,
+          "map_ms": 52.82,
+          "map_error": null,
+          "list_ms": 60.184,
+          "list_error": null,
+          "blob_ms": 59.744,
+          "blob_error": null
+        },
+        {
+          "iteration": 1,
+          "warmup_ms": 45.502,
+          "map_ms": 61.539,
+          "map_error": null,
+          "list_ms": 61.718,
+          "list_error": null,
+          "blob_ms": 62.34,
+          "blob_error": null
+        }
+      ]
+    }
+  ]
+}
